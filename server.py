@@ -1,44 +1,96 @@
 """
-Vectorworks 2025 MCP Server — Connects Claude Code to Vectorworks via file bridge.
+Vectorworks 2025 MCP Server — Connects Claude Code to Vectorworks via TCP.
+
+Speaks a length-prefixed JSON protocol (4-byte BE length + UTF-8 JSON body)
+to vw_listener.py running inside Vectorworks.
+
 Usage: claude mcp add vectorworks -- python server.py
+
+Env vars (all optional):
+  VW_MCP_HOST      default 127.0.0.1
+  VW_MCP_PORT      default 9877
+  VW_MCP_TIMEOUT   per-request timeout in seconds, default 60
 """
 
-import json, os, time, uuid
+import json, os, socket, struct, threading, uuid
 from fastmcp import FastMCP
 
 mcp = FastMCP("Vectorworks 2025")
 
-BRIDGE_PATH = os.environ.get("VW_BRIDGE_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge"))
-REQ_DIR = os.path.join(BRIDGE_PATH, "requests")
-RES_DIR = os.path.join(BRIDGE_PATH, "responses")
+HOST = os.environ.get("VW_MCP_HOST", "127.0.0.1")
+PORT = int(os.environ.get("VW_MCP_PORT", "9877"))
+TIMEOUT = float(os.environ.get("VW_MCP_TIMEOUT", "60"))
+
+# Persistent connection, guarded by a lock so concurrent MCP tool calls
+# don't interleave frames on the same socket.
+_sock = None
+_lock = threading.Lock()
+
+
+def _connect():
+    global _sock
+    if _sock is not None:
+        return
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(TIMEOUT)
+    s.connect((HOST, PORT))
+    s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    _sock = s
+
+
+def _close():
+    global _sock
+    if _sock is not None:
+        try:
+            _sock.close()
+        except OSError:
+            pass
+        _sock = None
+
+
+def _recv_exact(n: int) -> bytes:
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = _sock.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError("Vectorworks closed the connection")
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+def _send_frame(payload: bytes):
+    _sock.sendall(struct.pack(">I", len(payload)) + payload)
+
+
+def _recv_frame() -> bytes:
+    header = _recv_exact(4)
+    (n,) = struct.unpack(">I", header)
+    return _recv_exact(n)
 
 
 def _send(action: str, params: dict = None) -> str:
-    os.makedirs(REQ_DIR, exist_ok=True)
-    os.makedirs(RES_DIR, exist_ok=True)
-    rid = uuid.uuid4().hex[:8]
-    req_path = os.path.join(REQ_DIR, f"req_{rid}.json")
-    res_path = os.path.join(RES_DIR, f"res_{rid}.json")
-    with open(req_path, "w") as f:
-        json.dump({"id": rid, "action": action, "params": params or {}}, f)
-    deadline = time.time() + 60
-    while time.time() < deadline:
-        if os.path.exists(res_path):
-            time.sleep(0.05)
+    with _lock:
+        # Retry once on connection error — common when listener restarts.
+        for attempt in (0, 1):
             try:
-                with open(res_path) as f:
-                    r = json.load(f)
-                os.remove(res_path)
-                if r.get("success"):
-                    v = r.get("result", "OK")
+                _connect()
+                rid = uuid.uuid4().hex[:8]
+                req = {"id": rid, "action": action, "params": params or {}}
+                _send_frame(json.dumps(req).encode("utf-8"))
+                resp = json.loads(_recv_frame().decode("utf-8"))
+                if resp.get("success"):
+                    v = resp.get("result", "OK")
                     return json.dumps(v, indent=2) if not isinstance(v, str) else v
-                return f"VW Error: {r.get('error', 'Unknown')}"
-            except (json.JSONDecodeError, OSError) as e:
-                return f"Error reading response: {e}"
-        time.sleep(0.3)
-    try: os.remove(req_path)
-    except OSError: pass
-    return "TIMEOUT: Vectorworks did not respond. Is vw_listener.py running in the Script Editor?"
+                return f"VW Error: {resp.get('error', 'Unknown')}"
+            except (ConnectionError, socket.timeout, OSError) as e:
+                _close()
+                if attempt == 0:
+                    continue
+                return (
+                    f"Connection error: {e}. "
+                    f"Is vw_listener.py running inside Vectorworks on {HOST}:{PORT}? "
+                    "Open Tools > Plug-ins > Script Editor, paste vw_listener.py, Run."
+                )
 
 
 @mcp.tool
@@ -114,8 +166,15 @@ def vw_get_document_info() -> str:
 
 @mcp.tool
 def vw_screenshot(file_path: str = "") -> str:
-    """Capture viewport screenshot as PNG. Use Read tool to view it after. Defaults to bridge/screenshot.png."""
-    return _send("screenshot", {"file_path": file_path or os.path.join(BRIDGE_PATH, "screenshot.png")})
+    """Capture viewport screenshot as PNG. Use Read tool to view it after.
+    If file_path is empty, listener defaults to ~/.vectorworks-mcp/screenshot.png."""
+    return _send("screenshot", {"file_path": file_path})
+
+
+@mcp.tool
+def vw_ping() -> str:
+    """Health check. Returns listener version and handler count if connected."""
+    return _send("ping")
 
 @mcp.tool
 def vw_selection(action: str, criteria: str = "") -> str:

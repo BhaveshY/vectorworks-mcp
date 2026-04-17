@@ -1,55 +1,67 @@
 # Vectorworks 2025 MCP Server
 
-Connect Claude Code to Vectorworks 2025 on the same Windows PC.
+Connect Claude Code to Vectorworks 2025 via a TCP socket on the same machine.
 
 ## Architecture
 
 ```
-Claude Code <--stdio--> server.py <--file bridge--> vw_listener.py (inside Vectorworks)
+Claude Code <--stdio--> server.py <--TCP/JSON--> vw_listener.py (inside Vectorworks)
+                                   127.0.0.1:9877
 ```
 
-The MCP server writes JSON request files to a bridge folder.
-The VW listener (running inside Vectorworks Script Editor) polls for
-those files, executes commands via the `vs` module, and writes responses.
+The listener runs inside Vectorworks's Python interpreter on the main
+thread (the only thread where the `vs` module is safe). It uses
+non-blocking I/O via `selectors` — no background threads — so every
+`vs.*` call is serialised on the thread VW expects.
+
+Wire format: 4-byte big-endian length prefix + UTF-8 JSON body.
 
 ## Setup
 
-### 1. Install dependencies
+### 1. Install dependencies (host side)
 
 ```cmd
 cd vectorworks-mcp
 pip install -r requirements.txt
 ```
 
-### 2. Register with Claude Code
+### 2. Register the MCP server with Claude Code
 
 ```cmd
 claude mcp add vectorworks -- python C:\path\to\vectorworks-mcp\server.py
 ```
 
-Or with environment variable for custom bridge path:
+With a custom port:
 
 ```cmd
-claude mcp add-json vectorworks "{\"type\":\"stdio\",\"command\":\"python\",\"args\":[\"C:\\\\path\\\\to\\\\vectorworks-mcp\\\\server.py\"],\"env\":{\"VW_BRIDGE_PATH\":\"C:\\\\path\\\\to\\\\vectorworks-mcp\\\\bridge\"}}"
+claude mcp add-json vectorworks "{\"type\":\"stdio\",\"command\":\"python\",\"args\":[\"C:\\\\path\\\\to\\\\vectorworks-mcp\\\\server.py\"],\"env\":{\"VW_MCP_PORT\":\"9877\"}}"
 ```
 
-### 3. Start the listener in Vectorworks
+### 3. Start the listener inside Vectorworks
 
+Two options:
+
+**A) Quick (one session):**
 1. Open Vectorworks 2025
-2. Go to **Tools > Plug-ins > Script Editor**
-3. Select **Python** as the language
-4. Open or paste the contents of `vw_listener.py`
-5. **Edit the `BRIDGE_PATH`** at the top to match your actual path:
-   ```python
-   BRIDGE_PATH = r"C:\Users\YourName\vectorworks-mcp\bridge"
-   ```
-6. Click **Run**
-7. You should see an alert: "VW MCP Listener STARTED"
+2. `Tools > Plug-ins > Script Editor`
+3. Language: **Python**
+4. Paste the contents of `vw_listener.py`
+5. Click **Run**
+6. Alert box confirms: `VW MCP Listener STARTED (socket) on 127.0.0.1:9877`
+
+**B) Persistent menu command (recommended):**
+1. `Tools > Plug-ins > Plug-in Manager` → **New** → **Menu Command**
+2. Name it `VW MCP Listener`, pick a category (e.g. `MCP`)
+3. Paste `vw_listener.py` as the script, save
+4. `Tools > Workspaces > Edit Current Workspace > Menus`, drag the new
+   command into a menu (e.g. under `Tools`)
+5. Click the menu command once per VW session to start the listener
 
 ### 4. Use it
 
-Open Claude Code. The Vectorworks tools are now available. Try:
+Open Claude Code. The Vectorworks tools are available. Try:
 
+- "Ping Vectorworks to check the connection"
 - "What layers are in my Vectorworks document?"
 - "Create a 500x300 rectangle at position 0,0"
 - "Create a 3m high wall from 0,0 to 5000,0"
@@ -58,64 +70,89 @@ Open Claude Code. The Vectorworks tools are now available. Try:
 - "Find all walls in the drawing"
 - "Create a floor slab for a 5x4m room"
 
-## Available Tools (20)
+## Available Tools (21)
 
-### Core Tools
+### Core
 | Tool | Description |
 |------|-------------|
+| `vw_ping` | Health check — returns listener version and handler count |
 | `vw_run_script` | Execute arbitrary Python inside VW (escape hatch) |
 | `vw_create_object` | Create geometry: rect, circle, oval, line, arc, polygon |
 | `vw_get_layers` | List all layers with visibility |
 | `vw_get_objects` | List objects filtered by layer/type |
 | `vw_set_object_property` | Change name, class, color, line weight, opacity |
-| `vw_find_objects` | Powerful criteria-based search (T=WALL, C='Furniture', etc.) |
+| `vw_find_objects` | Criteria-based search (`T=WALL`, `C='Furniture'`, etc.) |
 | `vw_manage_classes` | List, create, delete classes |
 | `vw_worksheet` | Read/write worksheet cells and ranges |
 | `vw_symbol` | List and insert symbols from resource library |
 | `vw_export` | Export to PDF, DXF, DWG, or image |
 | `vw_import_file` | Import DXF, DWG, or image files |
 | `vw_get_document_info` | Document metadata (layers, object count, etc.) |
-| `vw_screenshot` | Capture viewport screenshot (Claude can view it) |
+| `vw_screenshot` | Capture viewport screenshot |
 | `vw_selection` | Get/set/clear/delete/move/duplicate selected objects |
 
-### Architectural Tools
+### Architectural
 | Tool | Description |
 |------|-------------|
-| `vw_create_wall` | Create parametric walls with height and thickness |
-| `vw_insert_door` | Insert parametric door (place near wall for auto-insertion) |
-| `vw_insert_window` | Insert parametric window with sill height |
-| `vw_create_slab` | Create floor slab from polygon footprint (3D extrusion) |
-| `vw_create_roof` | Create roof from footprint with slope, overhang, bearing height |
-| `vw_inspect_object` | **Power tool** — discover ALL parameters of any VW object |
+| `vw_create_wall` | Parametric walls with height and thickness |
+| `vw_insert_door` | Parametric door (place near wall for auto-insertion) |
+| `vw_insert_window` | Parametric window with sill height |
+| `vw_create_slab` | Floor slab from polygon footprint (3D extrusion) |
+| `vw_create_roof` | Roof from footprint with slope, overhang, bearing height |
+| `vw_inspect_object` | Discover ALL parameters of any VW object |
+
+## Configuration
+
+All env vars are optional.
+
+| Var | Default | Side | Purpose |
+|---|---|---|---|
+| `VW_MCP_HOST` | `127.0.0.1` | both | Bind/connect address |
+| `VW_MCP_PORT` | `9877` | both | Port |
+| `VW_MCP_TIMEOUT` | `60` | server | Per-request timeout (seconds) |
+| `VW_MCP_STOP_DIR` | `~/.vectorworks-mcp` | listener | Where the STOP sentinel lives |
+
+The listener and server must agree on host+port.
 
 ## Stopping the Listener
 
-Either:
-- Create a file named `STOP` in the `bridge` folder
-- Or stop the script in VW Script Editor
+Any of:
+- Create an empty file named `STOP` in the stop-file folder shown at startup
+  (default `~/.vectorworks-mcp/STOP`)
+- Quit Vectorworks or close the document
 
 ## Troubleshooting
 
-**"TIMEOUT: Vectorworks did not respond"**
-- Is the listener running in VW Script Editor?
-- Does the BRIDGE_PATH in vw_listener.py match the one server.py uses?
-- Check that bridge/requests/ and bridge/responses/ folders exist
+**`Connection error: ... Is vw_listener.py running?`**
+- Confirm the listener is running inside VW (you should have seen the
+  "STARTED" alert). Click the menu command again or re-run the script.
+- Check the port matches on both sides (`VW_MCP_PORT`).
+- On Windows, confirm the Windows Firewall isn't blocking loopback —
+  localhost-only connections usually bypass it, but AV can interfere.
+
+**`VW MCP failed to bind 127.0.0.1:9877`**
+- A previous listener is still running. Close it via the STOP file or
+  restart Vectorworks. Alternatively set `VW_MCP_PORT` to a free port
+  on both sides.
 
 **"Handle not found"**
-- Handles are only valid for the current listener session
-- If you restart the listener, old handles are lost
-- Use vw_get_objects or vw_find_objects to get fresh handles
+- Handles are valid only for the current listener session. Restarting
+  the listener invalidates them — use `vw_get_objects` or
+  `vw_find_objects` to get fresh handles.
 
 **Listener stops unexpectedly**
-- VW Script Editor may have a timeout for long scripts
-- Check VW preferences for script execution settings
-- As a workaround, restart the listener when needed
+- VW may interrupt long-running scripts in some configurations. The
+  menu-command install (option B above) is more robust than pasting
+  into the Script Editor each session.
 
-## Bridge Path
+## Changelog
 
-Default: `./bridge` (relative to server.py location)
+**0.2.0** — Socket transport
+- Replaced file-bridge polling with persistent TCP + length-prefixed JSON
+- `selectors`-based non-blocking I/O on VW's main thread (no threads, no
+  polling on disk)
+- Automatic reconnect on the host side
+- `vw_ping` health check
+- Menu-command install documented
 
-Override with environment variable:
-```cmd
-set VW_BRIDGE_PATH=C:\your\custom\path
-```
+**0.1.0** — Initial file-bridge release.

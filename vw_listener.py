@@ -1,19 +1,38 @@
 """
-Vectorworks 2025 MCP Listener — Paste into VW Script Editor (Python) and Run.
-Tools > Plug-ins > Script Editor > Python > paste > Run
-To stop: create a file named STOP in the bridge folder.
-CONFIGURE BRIDGE_PATH BELOW before running.
+Vectorworks 2025 MCP Listener — runs inside Vectorworks on the main thread.
+
+Opens a TCP socket (default 127.0.0.1:9877) and serves MCP requests using
+non-blocking I/O via selectors. All vs.* calls execute on the main thread,
+which is the only thread where the vs module is safe.
+
+INSTALL OPTIONS
+  A) Quick — Tools > Plug-ins > Script Editor > Python > paste > Run
+  B) Persistent menu command — Tools > Plug-ins > Plug-in Manager >
+     New > Menu Command, paste this file as the script. Then
+     Tools > Workspaces > Edit Current Workspace > Menus and drag the
+     new command into a menu. Click it once per VW session to start.
+
+STOP: create a file named STOP in the stop-file folder printed at startup,
+or close the document / quit Vectorworks.
+
+CONFIG (env vars, all optional):
+  VW_MCP_HOST       default 127.0.0.1
+  VW_MCP_PORT       default 9877
+  VW_MCP_STOP_DIR   default ~/.vectorworks-mcp
 """
 import vs
-import io, json, os, sys, time, traceback
+import io, json, os, selectors, socket, struct, sys, traceback
+
+__VERSION__ = "0.2.0-socket"
 
 # === CONFIGURATION ===
-BRIDGE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge")
-# If the above doesn't work in VW, uncomment and set:
-# BRIDGE_PATH = r"C:\Users\YourName\vectorworks-mcp\bridge"
-REQ_DIR = os.path.join(BRIDGE_PATH, "requests")
-RES_DIR = os.path.join(BRIDGE_PATH, "responses")
-STOP_FILE = os.path.join(BRIDGE_PATH, "STOP")
+HOST = os.environ.get("VW_MCP_HOST", "127.0.0.1")
+PORT = int(os.environ.get("VW_MCP_PORT", "9877"))
+STOP_DIR = os.environ.get("VW_MCP_STOP_DIR") or os.path.join(
+    os.path.expanduser("~"), ".vectorworks-mcp"
+)
+STOP_FILE = os.path.join(STOP_DIR, "STOP")
+SCREENSHOT_DIR = STOP_DIR
 
 # === HANDLE REGISTRY ===
 _handles, _hcount = {}, [0]
@@ -248,7 +267,11 @@ def handle_get_document_info(p):
     except Exception: return _err(traceback.format_exc())
 
 def handle_screenshot(p):
-    fp = p.get("file_path", "") or os.path.join(BRIDGE_PATH, "screenshot.png")
+    fp = p.get("file_path", "") or os.path.join(SCREENSHOT_DIR, "screenshot.png")
+    try:
+        os.makedirs(os.path.dirname(fp), exist_ok=True)
+    except OSError:
+        pass
     try:
         if hasattr(vs, 'ExportImageFile'): vs.ExportImageFile(fp)
         else: vs.DoMenuTextByName("Export Image File", 0)
@@ -409,41 +432,169 @@ HANDLERS = {
     "insert_window": handle_insert_window, "create_slab": handle_create_slab,
     "create_roof": handle_create_roof, "inspect_object": handle_inspect_object,
 }
+HANDLERS["ping"] = lambda p: _ok({"pong": True, "handlers": len(HANDLERS), "version": __VERSION__})
 
 def dispatch(req):
     handler = HANDLERS.get(req.get("action", ""))
-    if not handler: return {"id": req.get("id", ""), "success": False, "error": f"Unknown action: {req.get('action')}"}
-    result = handler(req.get("params", {}))
+    if not handler:
+        return {"id": req.get("id", ""), "success": False, "error": f"Unknown action: {req.get('action')}"}
+    try:
+        result = handler(req.get("params", {}))
+    except Exception:
+        result = {"success": False, "error": traceback.format_exc()}
     result["id"] = req.get("id", "")
     return result
 
-# === MAIN LOOP ===
+
+# === NON-BLOCKING SOCKET LAYER ===
+# Single main-thread event loop (selectors). Each connection buffers bytes
+# until a full length-prefixed JSON frame is available; we decode, dispatch
+# on this thread (safe for vs.*), and queue the response.
+
+class _ClientState:
+    __slots__ = ("rbuf", "wbuf", "need")
+    def __init__(self):
+        self.rbuf = bytearray()
+        self.wbuf = bytearray()
+        self.need = None  # current frame body length, or None if waiting for header
+
+    def feed(self, chunk):
+        self.rbuf.extend(chunk)
+
+    def pop_frame(self):
+        if self.need is None:
+            if len(self.rbuf) < 4:
+                return None
+            self.need = struct.unpack(">I", bytes(self.rbuf[:4]))[0]
+            del self.rbuf[:4]
+        if len(self.rbuf) < self.need:
+            return None
+        body = bytes(self.rbuf[: self.need])
+        del self.rbuf[: self.need]
+        self.need = None
+        return body
+
+    def enqueue(self, payload: bytes):
+        self.wbuf.extend(struct.pack(">I", len(payload)))
+        self.wbuf.extend(payload)
+
+
+def _stop_requested():
+    try:
+        if os.path.exists(STOP_FILE):
+            try: os.remove(STOP_FILE)
+            except OSError: pass
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _drop(sel, fileobj):
+    try: sel.unregister(fileobj)
+    except (KeyError, ValueError): pass
+    try: fileobj.close()
+    except OSError: pass
+
+
 def main():
-    os.makedirs(REQ_DIR, exist_ok=True)
-    os.makedirs(RES_DIR, exist_ok=True)
-    if os.path.exists(STOP_FILE): os.remove(STOP_FILE)
-    vs.AlrtDialog(f"VW MCP Listener STARTED\nBridge: {BRIDGE_PATH}\nCreate STOP file to stop.")
-    while True:
-        if os.path.exists(STOP_FILE): os.remove(STOP_FILE); break
-        try: files = sorted(f for f in os.listdir(REQ_DIR) if f.startswith("req_") and f.endswith(".json"))
-        except OSError: files = []
-        for fname in files:
-            req_path = os.path.join(REQ_DIR, fname)
-            try:
-                with open(req_path, "r") as f: request = json.load(f)
-                os.remove(req_path)
-                rid = request.get("id", fname.replace("req_","").replace(".json",""))
-                with open(os.path.join(RES_DIR, f"res_{rid}.json"), "w") as f:
-                    json.dump(dispatch(request), f)
-            except Exception as e:
-                rid = fname.replace("req_","").replace(".json","")
-                try:
-                    with open(os.path.join(RES_DIR, f"res_{rid}.json"), "w") as f:
-                        json.dump({"id": rid, "success": False, "error": str(e)}, f)
-                except Exception: pass
-                try: os.remove(req_path)
-                except OSError: pass
-        time.sleep(0.3)
-    vs.AlrtDialog("VW MCP Listener STOPPED.")
+    os.makedirs(STOP_DIR, exist_ok=True)
+    _stop_requested()  # clear any stale STOP from a previous session
+
+    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        server_sock.bind((HOST, PORT))
+    except OSError as e:
+        vs.AlrtDialog(
+            "VW MCP failed to bind {h}:{p}\n{e}\n\n"
+            "Is another listener already running? Close it or set VW_MCP_PORT.".format(
+                h=HOST, p=PORT, e=e
+            )
+        )
+        server_sock.close()
+        return
+    server_sock.listen(8)
+    server_sock.setblocking(False)
+
+    sel = selectors.DefaultSelector()
+    sel.register(server_sock, selectors.EVENT_READ, data=None)
+
+    vs.AlrtDialog(
+        "VW MCP Listener STARTED (socket)\n"
+        "Listening on {h}:{p}\n"
+        "Version {v}\n"
+        "Stop: create STOP file in:\n{d}".format(h=HOST, p=PORT, v=__VERSION__, d=STOP_DIR)
+    )
+
+    try:
+        while not _stop_requested():
+            events = sel.select(timeout=0.1)
+            for key, mask in events:
+                fileobj = key.fileobj
+
+                # Server socket — accept new clients
+                if key.data is None:
+                    try:
+                        conn, _addr = fileobj.accept()
+                    except BlockingIOError:
+                        continue
+                    conn.setblocking(False)
+                    sel.register(
+                        conn,
+                        selectors.EVENT_READ | selectors.EVENT_WRITE,
+                        data=_ClientState(),
+                    )
+                    continue
+
+                state = key.data
+
+                # Readable: consume bytes, decode frames, dispatch, enqueue response
+                if mask & selectors.EVENT_READ:
+                    try:
+                        chunk = fileobj.recv(65536)
+                    except (BlockingIOError, InterruptedError):
+                        chunk = b""
+                    except (ConnectionError, OSError):
+                        _drop(sel, fileobj)
+                        continue
+                    if chunk == b"":
+                        _drop(sel, fileobj)
+                        continue
+                    state.feed(chunk)
+                    while True:
+                        frame = state.pop_frame()
+                        if frame is None:
+                            break
+                        rid = ""
+                        try:
+                            req = json.loads(frame.decode("utf-8"))
+                            rid = req.get("id", "")
+                            resp = dispatch(req)  # main thread — safe for vs.*
+                        except Exception as e:
+                            resp = {"id": rid, "success": False, "error": "bad JSON: {}".format(e)}
+                        try:
+                            state.enqueue(json.dumps(resp).encode("utf-8"))
+                        except Exception as e:
+                            state.enqueue(json.dumps(
+                                {"id": rid, "success": False, "error": "encode error: {}".format(e)}
+                            ).encode("utf-8"))
+
+                # Writable: flush pending bytes
+                if mask & selectors.EVENT_WRITE and state.wbuf:
+                    try:
+                        sent = fileobj.send(bytes(state.wbuf))
+                        del state.wbuf[:sent]
+                    except (BlockingIOError, InterruptedError):
+                        pass
+                    except (ConnectionError, OSError):
+                        _drop(sel, fileobj)
+    finally:
+        try: sel.close()
+        except Exception: pass
+        try: server_sock.close()
+        except OSError: pass
+        vs.AlrtDialog("VW MCP Listener STOPPED.")
+
 
 main()
