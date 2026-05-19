@@ -22,10 +22,18 @@ Wire format: 4-byte big-endian length prefix + UTF-8 JSON body.
 
 ```cmd
 cd vectorworks-mcp
-pip install -r requirements.txt
+py -3 -m pip install -r requirements.txt
 ```
 
 ### 2. Register the MCP server with Claude Code
+
+Recommended on Windows 11:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\register-claude-code.ps1
+```
+
+Manual registration:
 
 ```cmd
 claude mcp add vectorworks -- python C:\path\to\vectorworks-mcp\server.py
@@ -47,7 +55,7 @@ Two options:
 3. Language: **Python**
 4. Paste the contents of `vw_listener.py`
 5. Click **Run**
-6. Alert box confirms: `VW MCP Listener STARTED (socket) on 127.0.0.1:9877`
+6. Alert box confirms: `VW MCP Listener STARTED (socket)` and shows `127.0.0.1:9877`
 
 **B) Persistent menu command (recommended):**
 1. `Tools > Plug-ins > Plug-in Manager` → **New** → **Menu Command**
@@ -70,7 +78,7 @@ Open Claude Code. The Vectorworks tools are available. Try:
 - "Find all walls in the drawing"
 - "Create a floor slab for a 5x4m room"
 
-## Available Tools (21)
+## Available Tools (22)
 
 ### Core
 | Tool | Description |
@@ -89,6 +97,7 @@ Open Claude Code. The Vectorworks tools are available. Try:
 | `vw_import_file` | Import DXF, DWG, or image files |
 | `vw_get_document_info` | Document metadata (layers, object count, etc.) |
 | `vw_screenshot` | Capture viewport screenshot |
+| `vw_stop_listener` | Ask the Vectorworks listener to stop gracefully |
 | `vw_selection` | Get/set/clear/delete/move/duplicate selected objects |
 
 ### Architectural
@@ -110,6 +119,7 @@ All env vars are optional.
 | `VW_MCP_HOST` | `127.0.0.1` | both | Bind/connect address |
 | `VW_MCP_PORT` | `9877` | both | Port |
 | `VW_MCP_TIMEOUT` | `60` | server | Per-request timeout (seconds) |
+| `VW_MCP_MAX_FRAME_BYTES` | `16777216` | both | Maximum TCP JSON frame size |
 | `VW_MCP_STOP_DIR` | `~/.vectorworks-mcp` | listener | Where the STOP sentinel lives |
 
 The listener and server must agree on host+port.
@@ -117,9 +127,29 @@ The listener and server must agree on host+port.
 ## Stopping the Listener
 
 Any of:
+- In Claude Code, call `vw_stop_listener`
 - Create an empty file named `STOP` in the stop-file folder shown at startup
   (default `~/.vectorworks-mcp/STOP`)
 - Quit Vectorworks or close the document
+
+On Windows PowerShell, the default STOP file can be created with:
+
+```powershell
+New-Item -ItemType File -Force "$env:USERPROFILE\.vectorworks-mcp\STOP"
+```
+
+## Development and Tests
+
+Tests do not require Vectorworks. They mock the `vs` module and use local
+loopback sockets to verify the length-prefixed JSON protocol.
+
+```cmd
+py -3 -m pip install -r requirements-dev.txt
+py -3 -m py_compile server.py vw_listener.py
+py -3 -m unittest discover -v
+# or, if pytest is installed:
+py -3 -m pytest
+```
 
 ## Troubleshooting
 
@@ -129,6 +159,10 @@ Any of:
 - Check the port matches on both sides (`VW_MCP_PORT`).
 - On Windows, confirm the Windows Firewall isn't blocking loopback —
   localhost-only connections usually bypass it, but AV can interfere.
+
+**`Vectorworks MCP startup error: The 'fastmcp' package is not installed`**
+- Install host dependencies from this repo:
+  `py -3 -m pip install -r requirements.txt`
 
 **`VW MCP failed to bind 127.0.0.1:9877`**
 - A previous listener is still running. Close it via the STOP file or
@@ -146,6 +180,16 @@ Any of:
   into the Script Editor each session.
 
 ## Changelog
+
+**0.3.0** — Windows/Claude Code hardening
+- Added bounded protocol frames, malformed-response diagnostics, safe response
+  serialization, and clearer startup/configuration errors
+- Fixed listener socket interest handling so idle clients do not create a busy
+  writable loop
+- Added graceful `vw_stop_listener`/`stop` action
+- Added Windows Claude Code registration script
+- Added unit test coverage with fake listener/socket and fake Vectorworks `vs`
+  module; no Vectorworks instance is required
 
 **0.2.0** — Socket transport
 - Replaced file-bridge polling with persistent TCP + length-prefixed JSON

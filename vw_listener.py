@@ -1,13 +1,13 @@
 """
-Vectorworks 2025 MCP Listener — runs inside Vectorworks on the main thread.
+Vectorworks 2025 MCP Listener - runs inside Vectorworks on the main thread.
 
 Opens a TCP socket (default 127.0.0.1:9877) and serves MCP requests using
 non-blocking I/O via selectors. All vs.* calls execute on the main thread,
 which is the only thread where the vs module is safe.
 
 INSTALL OPTIONS
-  A) Quick — Tools > Plug-ins > Script Editor > Python > paste > Run
-  B) Persistent menu command — Tools > Plug-ins > Plug-in Manager >
+  A) Quick - Tools > Plug-ins > Script Editor > Python > paste > Run
+  B) Persistent menu command - Tools > Plug-ins > Plug-in Manager >
      New > Menu Command, paste this file as the script. Then
      Tools > Workspaces > Edit Current Workspace > Menus and drag the
      new command into a menu. Click it once per VW session to start.
@@ -19,20 +19,55 @@ CONFIG (env vars, all optional):
   VW_MCP_HOST       default 127.0.0.1
   VW_MCP_PORT       default 9877
   VW_MCP_STOP_DIR   default ~/.vectorworks-mcp
+  VW_MCP_MAX_FRAME_BYTES default 16777216
 """
-import vs
-import io, json, os, selectors, socket, struct, sys, traceback
+try:
+    import vs
+except ModuleNotFoundError:
+    vs = None
 
-__VERSION__ = "0.2.0-socket"
+import io, json, math, os, selectors, socket, struct, sys, traceback
+
+__VERSION__ = "0.3.0-socket"
 
 # === CONFIGURATION ===
-HOST = os.environ.get("VW_MCP_HOST", "127.0.0.1")
-PORT = int(os.environ.get("VW_MCP_PORT", "9877"))
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 9877
+DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024
+
+
+def _env_int(name, default, min_value=None, max_value=None):
+    raw = os.environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ValueError("{name} must be an integer, got {value!r}".format(name=name, value=raw))
+    if min_value is not None and value < min_value:
+        raise ValueError("{name} must be >= {min}, got {value}".format(name=name, min=min_value, value=value))
+    if max_value is not None and value > max_value:
+        raise ValueError("{name} must be <= {max}, got {value}".format(name=name, max=max_value, value=value))
+    return value
+
+
+_CONFIG_ERROR = None
+try:
+    HOST = os.environ.get("VW_MCP_HOST", DEFAULT_HOST).strip() or DEFAULT_HOST
+    PORT = _env_int("VW_MCP_PORT", DEFAULT_PORT, 1, 65535)
+    MAX_FRAME_BYTES = _env_int("VW_MCP_MAX_FRAME_BYTES", DEFAULT_MAX_FRAME_BYTES, 1024, 128 * 1024 * 1024)
+except ValueError as e:
+    _CONFIG_ERROR = str(e)
+    HOST = DEFAULT_HOST
+    PORT = DEFAULT_PORT
+    MAX_FRAME_BYTES = DEFAULT_MAX_FRAME_BYTES
+
 STOP_DIR = os.environ.get("VW_MCP_STOP_DIR") or os.path.join(
     os.path.expanduser("~"), ".vectorworks-mcp"
 )
 STOP_FILE = os.path.join(STOP_DIR, "STOP")
 SCREENSHOT_DIR = STOP_DIR
+_SHOULD_STOP = False
 
 # === HANDLE REGISTRY ===
 _handles, _hcount = {}, [0]
@@ -67,6 +102,45 @@ def _obj_info(h):
 
 def _ok(result): return {"success": True, "result": result}
 def _err(msg): return {"success": False, "error": msg}
+
+
+class ProtocolError(Exception):
+    pass
+
+
+def _alert(message):
+    if vs is not None and hasattr(vs, "AlrtDialog"):
+        try:
+            vs.AlrtDialog(message)
+            return
+        except Exception:
+            pass
+    try:
+        print(message, file=sys.stderr)
+    except Exception:
+        pass
+
+
+def _json_safe(value, depth=0):
+    if depth > 25:
+        return str(value)
+    if value is None or isinstance(value, (bool, int, str)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v, depth + 1) for v in value]
+    return str(value)
+
+
+def _response_bytes(response):
+    try:
+        return json.dumps(response, ensure_ascii=False, allow_nan=False, default=str).encode("utf-8")
+    except Exception:
+        safe = _json_safe(response)
+        return json.dumps(safe, ensure_ascii=False, allow_nan=False).encode("utf-8")
 
 def _set_rfield(h, rec, field, val):
     """Safely try SetRField, silently skip on failure."""
@@ -278,6 +352,12 @@ def handle_screenshot(p):
         return _ok(fp)
     except Exception: return _err(traceback.format_exc())
 
+
+def handle_stop(p):
+    global _SHOULD_STOP
+    _SHOULD_STOP = True
+    return _ok("Listener stop requested")
+
 def _iter_selected():
     """Iterate selected objects using FSObject/NextSObj."""
     h = vs.FSObject() if hasattr(vs, 'FSObject') else vs.FSActLayer()
@@ -427,7 +507,7 @@ HANDLERS = {
     "manage_classes": handle_manage_classes, "worksheet": handle_worksheet,
     "symbol": handle_symbol, "export": handle_export,
     "import_file": handle_import_file, "get_document_info": handle_get_document_info,
-    "screenshot": handle_screenshot, "selection": handle_selection,
+    "screenshot": handle_screenshot, "stop": handle_stop, "selection": handle_selection,
     "create_wall": handle_create_wall, "insert_door": handle_insert_door,
     "insert_window": handle_insert_window, "create_slab": handle_create_slab,
     "create_roof": handle_create_roof, "inspect_object": handle_inspect_object,
@@ -435,6 +515,8 @@ HANDLERS = {
 HANDLERS["ping"] = lambda p: _ok({"pong": True, "handlers": len(HANDLERS), "version": __VERSION__})
 
 def dispatch(req):
+    if not isinstance(req, dict):
+        return {"id": "", "success": False, "error": "Request must be a JSON object"}
     handler = HANDLERS.get(req.get("action", ""))
     if not handler:
         return {"id": req.get("id", ""), "success": False, "error": f"Unknown action: {req.get('action')}"}
@@ -452,11 +534,12 @@ def dispatch(req):
 # on this thread (safe for vs.*), and queue the response.
 
 class _ClientState:
-    __slots__ = ("rbuf", "wbuf", "need")
-    def __init__(self):
+    __slots__ = ("rbuf", "wbuf", "need", "max_frame_bytes")
+    def __init__(self, max_frame_bytes=None):
         self.rbuf = bytearray()
         self.wbuf = bytearray()
         self.need = None  # current frame body length, or None if waiting for header
+        self.max_frame_bytes = max_frame_bytes or MAX_FRAME_BYTES
 
     def feed(self, chunk):
         self.rbuf.extend(chunk)
@@ -467,6 +550,14 @@ class _ClientState:
                 return None
             self.need = struct.unpack(">I", bytes(self.rbuf[:4]))[0]
             del self.rbuf[:4]
+            if self.need <= 0:
+                raise ProtocolError("invalid frame length {n}".format(n=self.need))
+            if self.need > self.max_frame_bytes:
+                raise ProtocolError(
+                    "frame length {n} exceeds VW_MCP_MAX_FRAME_BYTES={m}".format(
+                        n=self.need, m=self.max_frame_bytes
+                    )
+                )
         if len(self.rbuf) < self.need:
             return None
         body = bytes(self.rbuf[: self.need])
@@ -475,11 +566,15 @@ class _ClientState:
         return body
 
     def enqueue(self, payload: bytes):
+        if len(payload) > self.max_frame_bytes:
+            payload = _response_bytes(_err("response exceeded max frame size"))
         self.wbuf.extend(struct.pack(">I", len(payload)))
         self.wbuf.extend(payload)
 
 
 def _stop_requested():
+    if _SHOULD_STOP:
+        return True
     try:
         if os.path.exists(STOP_FILE):
             try: os.remove(STOP_FILE)
@@ -497,8 +592,47 @@ def _drop(sel, fileobj):
     except OSError: pass
 
 
+def _client_events(state):
+    events = selectors.EVENT_READ
+    if state.wbuf:
+        events |= selectors.EVENT_WRITE
+    return events
+
+
+def _set_client_events(sel, fileobj, state):
+    try:
+        sel.modify(fileobj, _client_events(state), data=state)
+    except (KeyError, ValueError, OSError):
+        pass
+
+
+def _has_pending_writes(sel):
+    try:
+        for key in sel.get_map().values():
+            state = key.data
+            if state is not None and state.wbuf:
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def main():
-    os.makedirs(STOP_DIR, exist_ok=True)
+    global _SHOULD_STOP
+    _SHOULD_STOP = False
+
+    if vs is None:
+        _alert("VW MCP Listener must be run inside Vectorworks, where the 'vs' module is available.")
+        return
+    if _CONFIG_ERROR:
+        _alert("VW MCP configuration error: {e}".format(e=_CONFIG_ERROR))
+        return
+
+    try:
+        os.makedirs(STOP_DIR, exist_ok=True)
+    except OSError as e:
+        _alert("VW MCP could not create stop directory:\n{d}\n{e}".format(d=STOP_DIR, e=e))
+        return
     _stop_requested()  # clear any stale STOP from a previous session
 
     server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -506,7 +640,7 @@ def main():
     try:
         server_sock.bind((HOST, PORT))
     except OSError as e:
-        vs.AlrtDialog(
+        _alert(
             "VW MCP failed to bind {h}:{p}\n{e}\n\n"
             "Is another listener already running? Close it or set VW_MCP_PORT.".format(
                 h=HOST, p=PORT, e=e
@@ -520,7 +654,7 @@ def main():
     sel = selectors.DefaultSelector()
     sel.register(server_sock, selectors.EVENT_READ, data=None)
 
-    vs.AlrtDialog(
+    _alert(
         "VW MCP Listener STARTED (socket)\n"
         "Listening on {h}:{p}\n"
         "Version {v}\n"
@@ -528,23 +662,21 @@ def main():
     )
 
     try:
-        while not _stop_requested():
+        while True:
+            if _stop_requested() and not _has_pending_writes(sel):
+                break
             events = sel.select(timeout=0.1)
             for key, mask in events:
                 fileobj = key.fileobj
 
-                # Server socket — accept new clients
+                # Server socket - accept new clients
                 if key.data is None:
                     try:
                         conn, _addr = fileobj.accept()
                     except BlockingIOError:
                         continue
                     conn.setblocking(False)
-                    sel.register(
-                        conn,
-                        selectors.EVENT_READ | selectors.EVENT_WRITE,
-                        data=_ClientState(),
-                    )
+                    sel.register(conn, selectors.EVENT_READ, data=_ClientState())
                     continue
 
                 state = key.data
@@ -554,7 +686,7 @@ def main():
                     try:
                         chunk = fileobj.recv(65536)
                     except (BlockingIOError, InterruptedError):
-                        chunk = b""
+                        continue
                     except (ConnectionError, OSError):
                         _drop(sel, fileobj)
                         continue
@@ -563,38 +695,49 @@ def main():
                         continue
                     state.feed(chunk)
                     while True:
-                        frame = state.pop_frame()
+                        try:
+                            frame = state.pop_frame()
+                        except ProtocolError:
+                            _drop(sel, fileobj)
+                            break
                         if frame is None:
                             break
                         rid = ""
                         try:
                             req = json.loads(frame.decode("utf-8"))
                             rid = req.get("id", "")
-                            resp = dispatch(req)  # main thread — safe for vs.*
+                            resp = dispatch(req)  # main thread - safe for vs.*
                         except Exception as e:
                             resp = {"id": rid, "success": False, "error": "bad JSON: {}".format(e)}
-                        try:
-                            state.enqueue(json.dumps(resp).encode("utf-8"))
-                        except Exception as e:
-                            state.enqueue(json.dumps(
-                                {"id": rid, "success": False, "error": "encode error: {}".format(e)}
-                            ).encode("utf-8"))
+                        state.enqueue(_response_bytes(resp))
+                        _set_client_events(sel, fileobj, state)
 
                 # Writable: flush pending bytes
                 if mask & selectors.EVENT_WRITE and state.wbuf:
                     try:
-                        sent = fileobj.send(bytes(state.wbuf))
+                        sent = fileobj.send(state.wbuf)
+                        if sent == 0:
+                            _drop(sel, fileobj)
+                            continue
                         del state.wbuf[:sent]
+                        _set_client_events(sel, fileobj, state)
                     except (BlockingIOError, InterruptedError):
                         pass
                     except (ConnectionError, OSError):
                         _drop(sel, fileobj)
     finally:
+        try:
+            for key in list(sel.get_map().values()):
+                try: key.fileobj.close()
+                except OSError: pass
+        except Exception:
+            pass
         try: sel.close()
         except Exception: pass
         try: server_sock.close()
         except OSError: pass
-        vs.AlrtDialog("VW MCP Listener STOPPED.")
+        _alert("VW MCP Listener STOPPED.")
 
 
-main()
+if os.environ.get("VW_MCP_NO_AUTOSTART", "").lower() not in ("1", "true", "yes"):
+    main()
