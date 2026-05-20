@@ -1,6 +1,6 @@
-# Vectorworks 2025 MCP Server
+# Vectorworks 2024/2025 MCP Server
 
-Connect Claude Code to Vectorworks 2025 via a TCP socket on the same machine.
+Connect Claude Code to Vectorworks 2024 or 2025 via a TCP socket on the same machine.
 
 ## Architecture
 
@@ -50,7 +50,7 @@ claude mcp add-json vectorworks "{\"type\":\"stdio\",\"command\":\"python\",\"ar
 Two options:
 
 **A) Quick (one session):**
-1. Open Vectorworks 2025
+1. Open Vectorworks 2024 or 2025
 2. `Tools > Plug-ins > Script Editor`
 3. Language: **Python**
 4. Paste the contents of `vw_listener.py`

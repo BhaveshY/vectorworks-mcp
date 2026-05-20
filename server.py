@@ -1,5 +1,5 @@
 """
-Vectorworks 2025 MCP Server - connects Claude Code to Vectorworks via TCP.
+Vectorworks 2024/2025 MCP Server - connects Claude Code to Vectorworks via TCP.
 
 Speaks a length-prefixed JSON protocol (4-byte big-endian length followed by
 UTF-8 JSON) to vw_listener.py running inside Vectorworks.
@@ -122,7 +122,7 @@ except ConfigError as exc:
     MAX_FRAME_BYTES = DEFAULT_MAX_FRAME_BYTES
 
 
-mcp = FastMCP("Vectorworks 2025") if FastMCP is not None else _MissingFastMCP("Vectorworks 2025")
+mcp = FastMCP("Vectorworks 2024/2025") if FastMCP is not None else _MissingFastMCP("Vectorworks 2024/2025")
 
 # Persistent connection, guarded by a lock so concurrent MCP tool calls do not
 # interleave frames on the same socket.

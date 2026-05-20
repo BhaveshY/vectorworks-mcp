@@ -1,5 +1,5 @@
 """
-Vectorworks 2025 MCP Listener - runs inside Vectorworks on the main thread.
+Vectorworks 2024/2025 MCP Listener - runs inside Vectorworks on the main thread.
 
 Opens a TCP socket (default 127.0.0.1:9877) and serves MCP requests using
 non-blocking I/O via selectors. All vs.* calls execute on the main thread,
