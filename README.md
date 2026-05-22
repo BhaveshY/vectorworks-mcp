@@ -16,6 +16,21 @@ non-blocking I/O via `selectors` — no background threads — so every
 
 Wire format: 4-byte big-endian length prefix + UTF-8 JSON body.
 
+## MCP 2026-07-28 release-candidate impact
+
+This repository exposes a stdio FastMCP server (`server.py`) and does not serve
+MCP over Streamable HTTP, so the release candidate's HTTP-specific
+`Mcp-Method`/`Mcp-Name` header validation does not apply here. The host server
+does not rely on MCP protocol-managed sessions or `Mcp-Session-Id`; its
+persistent TCP socket to `vw_listener.py` is explicit implementation state for
+serializing requests to the Vectorworks application and is guarded by a lock.
+Vectorworks object handles returned by the listener are application-level
+handles and can become stale when the listener session restarts.
+
+Host dependencies now require `fastmcp>=3.3.1,<4` so the server runs on the
+current FastMCP 3.x line while keeping future 4.x compatibility changes
+opt-in. Source: <https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate/>.
+
 ## Setup
 
 ### 1. Install dependencies (host side)
@@ -78,12 +93,13 @@ Open Claude Code. The Vectorworks tools are available. Try:
 - "Find all walls in the drawing"
 - "Create a floor slab for a 5x4m room"
 
-## Available Tools (22)
+## Available Tools (23)
 
 ### Core
 | Tool | Description |
 |------|-------------|
 | `vw_ping` | Health check — returns listener version and handler count |
+| `vw_server_info` | Host-side readiness/configuration info without connecting to VW |
 | `vw_run_script` | Execute arbitrary Python inside VW (escape hatch) |
 | `vw_create_object` | Create geometry: rect, circle, oval, line, arc, polygon |
 | `vw_get_layers` | List all layers with visibility |
@@ -180,6 +196,12 @@ py -3 -m pytest
   into the Script Editor each session.
 
 ## Changelog
+
+**0.3.1** — MCP 2026-07-28 release-candidate review
+- Updated FastMCP dependency range for the MCP 2026-07-28 release-candidate
+  review and documented stdio-only/session-state impact
+- Added `vw_server_info` for host-side readiness/configuration details without
+  requiring Vectorworks to be running
 
 **0.3.0** — Windows/Claude Code hardening
 - Added bounded protocol frames, malformed-response diagnostics, safe response

@@ -134,6 +134,18 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertIn(f"127.0.0.1:{port}", result)
         self.assertIn("run vw_listener.py", result)
 
+    def test_server_info_does_not_connect_to_vectorworks(self):
+        _configure_server(1)
+        result = json.loads(server.vw_server_info())
+
+        self.assertEqual(result["server"], "Vectorworks 2024/2025 MCP Server")
+        self.assertEqual(result["version"], server.SERVER_VERSION)
+        self.assertTrue(result["ready"])
+        self.assertEqual(result["transport"], "stdio MCP via FastMCP")
+        self.assertEqual(result["vectorworks_listener"]["host"], "127.0.0.1")
+        self.assertEqual(result["vectorworks_listener"]["port"], 1)
+        self.assertTrue(result["vectorworks_listener"]["requires_connection_for_vectorworks_tools"])
+
 
 if __name__ == "__main__":
     unittest.main()

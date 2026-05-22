@@ -15,6 +15,7 @@ Environment variables, all optional:
 """
 
 import atexit
+from importlib import metadata
 import json
 import os
 import socket
@@ -39,6 +40,7 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9877
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024
+SERVER_VERSION = "0.3.1"
 
 
 class ConfigError(ValueError):
@@ -226,6 +228,13 @@ def _format_result(value: Any) -> str:
         return str(value)
 
 
+def _fastmcp_version() -> str:
+    try:
+        return metadata.version("fastmcp")
+    except metadata.PackageNotFoundError:
+        return "not installed"
+
+
 def _connection_help(error: BaseException) -> str:
     return (
         f"Connection error: {error}. Could not reach the Vectorworks MCP listener on {HOST}:{PORT}. "
@@ -398,6 +407,27 @@ def vw_get_document_info() -> str:
 def vw_screenshot(file_path: str = "") -> str:
     """Capture viewport screenshot as PNG. Empty file_path defaults to ~/.vectorworks-mcp/screenshot.png."""
     return _send("screenshot", {"file_path": file_path})
+
+
+@mcp.tool
+def vw_server_info() -> str:
+    """Report host-side server readiness and configuration without connecting to Vectorworks."""
+    return _format_result(
+        {
+            "server": "Vectorworks 2024/2025 MCP Server",
+            "version": SERVER_VERSION,
+            "transport": "stdio MCP via FastMCP",
+            "fastmcp_version": _fastmcp_version(),
+            "ready": _CONFIG_ERROR is None and _FASTMCP_IMPORT_ERROR is None,
+            "configuration_error": _CONFIG_ERROR,
+            "fastmcp_import_error": str(_FASTMCP_IMPORT_ERROR) if _FASTMCP_IMPORT_ERROR else None,
+            "vectorworks_listener": {
+                "host": HOST,
+                "port": PORT,
+                "requires_connection_for_vectorworks_tools": True,
+            },
+        }
+    )
 
 
 @mcp.tool
