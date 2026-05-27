@@ -19,7 +19,8 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN
 3. Confirm the generated launcher contains:
 
 ```python
-os.environ["VW_MCP_BACKGROUND"] = "1"
+os.environ["VW_MCP_MODE"] = "dialog"
+os.environ["VW_MCP_DIALOG_TIMER_MS"] = "50"
 ```
 
 4. Tell the user to replace any old Vectorworks Resource Manager or Plug-in Manager script with the generated `vw_start_listener_2024.py`.
@@ -35,4 +36,4 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN
 
 - `/mcp` is only an interactive Claude Code command. Do not rely on it in Codex, Cursor, or non-interactive shells.
 - The tool name is `vw_ping`, not `vw-ping`.
-- If Vectorworks hangs, the user is probably running a stale foreground launcher. Create `~\.vectorworks-mcp\STOP`, regenerate the launcher, and have them paste the new launcher into Vectorworks.
+- If Vectorworks hangs or the raw ping times out while Vectorworks owns the port, the user is probably running a stale foreground/background launcher. Create `~\.vectorworks-mcp\STOP`, regenerate the launcher, and have them paste the new dialog-pump launcher into Vectorworks.

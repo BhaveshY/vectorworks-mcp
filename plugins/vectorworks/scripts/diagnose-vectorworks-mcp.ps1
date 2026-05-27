@@ -74,10 +74,10 @@ try {
 
 if ($RepoRoot) {
     $Launcher = Join-Path $RepoRoot "vw_start_listener_2024.py"
-    $LauncherOk = (Test-Path -LiteralPath $Launcher) -and ((Get-Content -Raw -Path $Launcher) -match 'os\.environ\["VW_MCP_BACKGROUND"\]\s*=\s*["'']1["'']')
+    $LauncherOk = (Test-Path -LiteralPath $Launcher) -and ((Get-Content -Raw -Path $Launcher) -match 'os\.environ\["VW_MCP_MODE"\]\s*=\s*["'']dialog["'']')
     Write-Host "Repo: $RepoRoot"
     Write-Host "Generated launcher: $Launcher"
-    Write-Host "Launcher background mode: $LauncherOk"
+    Write-Host "Launcher dialog-pump mode: $LauncherOk"
 }
 
 $Claude = Get-Command claude -ErrorAction SilentlyContinue

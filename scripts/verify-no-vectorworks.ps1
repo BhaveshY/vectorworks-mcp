@@ -52,8 +52,11 @@ Assert-Path $VenvPython "Virtualenv Python"
 Assert-Path $LauncherPath "Generated Vectorworks launcher"
 
 $LauncherText = Get-Content -Raw -Path $LauncherPath
-if ($LauncherText -notmatch 'os\.environ\["VW_MCP_BACKGROUND"\]\s*=\s*["'']1["'']') {
-    throw "Generated Vectorworks launcher does not set VW_MCP_BACKGROUND=1; regenerate it with scripts\register-claude-code.ps1."
+if ($LauncherText -notmatch 'os\.environ\["VW_MCP_MODE"\]\s*=\s*["'']dialog["'']') {
+    throw "Generated Vectorworks launcher does not set VW_MCP_MODE=dialog; regenerate it with scripts\register-claude-code.ps1."
+}
+if ($LauncherText -notmatch 'os\.environ\["VW_MCP_DIALOG_TIMER_MS"\]\s*=\s*["'']50["'']') {
+    throw "Generated Vectorworks launcher does not set VW_MCP_DIALOG_TIMER_MS=50; regenerate it with scripts\register-claude-code.ps1."
 }
 
 Invoke-Checked "fastmcp import" {

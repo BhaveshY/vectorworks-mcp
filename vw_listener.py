@@ -3,8 +3,9 @@ Vectorworks 2024/2025 MCP Listener - runs inside Vectorworks.
 
 Opens a TCP socket (default 127.0.0.1:9877) and serves MCP requests using
 non-blocking I/O via selectors. The generated launcher starts the listener in
-a background Python thread so Vectorworks does not stay stuck in a foreground
-script execution loop.
+dialog-pump mode, where a small Vectorworks dialog timer pumps the socket from
+the Vectorworks main thread. This avoids the Vectorworks 2024 embedded-Python
+background-thread pause that can leave the port open but unresponsive.
 
 INSTALL OPTIONS
   A) Quick in Vectorworks 2024 - Resource Manager > New Resource > Script,
@@ -22,7 +23,8 @@ CONFIG (env vars, all optional):
   VW_MCP_PORT       default 9877
   VW_MCP_STOP_DIR   default ~/.vectorworks-mcp
   VW_MCP_MAX_FRAME_BYTES default 16777216
-  VW_MCP_BACKGROUND default 1 when run by generated launcher
+  VW_MCP_MODE       dialog | foreground | background
+  VW_MCP_DIALOG_TIMER_MS default 50
 """
 try:
     import vs
@@ -37,6 +39,7 @@ __VERSION__ = "0.3.0-socket"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9877
 DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024
+DEFAULT_DIALOG_TIMER_MS = 50
 
 
 def _env_int(name, default, min_value=None, max_value=None):
@@ -59,11 +62,13 @@ try:
     HOST = os.environ.get("VW_MCP_HOST", DEFAULT_HOST).strip() or DEFAULT_HOST
     PORT = _env_int("VW_MCP_PORT", DEFAULT_PORT, 1, 65535)
     MAX_FRAME_BYTES = _env_int("VW_MCP_MAX_FRAME_BYTES", DEFAULT_MAX_FRAME_BYTES, 1024, 128 * 1024 * 1024)
+    DIALOG_TIMER_MS = _env_int("VW_MCP_DIALOG_TIMER_MS", DEFAULT_DIALOG_TIMER_MS, 20, 5000)
 except ValueError as e:
     _CONFIG_ERROR = str(e)
     HOST = DEFAULT_HOST
     PORT = DEFAULT_PORT
     MAX_FRAME_BYTES = DEFAULT_MAX_FRAME_BYTES
+    DIALOG_TIMER_MS = DEFAULT_DIALOG_TIMER_MS
 
 STOP_DIR = os.environ.get("VW_MCP_STOP_DIR") or os.path.join(
     os.path.expanduser("~"), ".vectorworks-mcp"
@@ -74,8 +79,15 @@ _SHOULD_STOP = False
 _STATE_MODULE = "_vw_mcp_listener_state"
 _STATE = sys.modules.get(_STATE_MODULE)
 if _STATE is None:
-    _STATE = types.SimpleNamespace(listener_thread=None)
+    _STATE = types.SimpleNamespace(listener_thread=None, listener_server=None, dialog_running=False)
     sys.modules[_STATE_MODULE] = _STATE
+else:
+    if not hasattr(_STATE, "listener_thread"):
+        _STATE.listener_thread = None
+    if not hasattr(_STATE, "listener_server"):
+        _STATE.listener_server = None
+    if not hasattr(_STATE, "dialog_running"):
+        _STATE.dialog_running = False
 
 # === HANDLE REGISTRY ===
 _handles, _hcount = {}, [0]
@@ -635,132 +647,192 @@ def _has_pending_writes(sel):
     return False
 
 
-def main(show_alerts=True):
-    global _SHOULD_STOP
-    _SHOULD_STOP = False
+class _ListenerServer:
+    def __init__(self, show_alerts=True):
+        self.show_alerts = show_alerts
+        self.server_sock = None
+        self.sel = None
+        self.closed = False
 
-    if vs is None:
-        if show_alerts:
-            _alert("VW MCP Listener must be run inside Vectorworks, where the 'vs' module is available.")
-        return
-    if _CONFIG_ERROR:
-        if show_alerts:
-            _alert("VW MCP configuration error: {e}".format(e=_CONFIG_ERROR))
-        return
+    def start(self):
+        global _SHOULD_STOP
+        _SHOULD_STOP = False
 
-    try:
-        os.makedirs(STOP_DIR, exist_ok=True)
-    except OSError as e:
-        if show_alerts:
-            _alert("VW MCP could not create stop directory:\n{d}\n{e}".format(d=STOP_DIR, e=e))
-        return
-    _stop_requested()  # clear any stale STOP from a previous session
+        if vs is None:
+            if self.show_alerts:
+                _alert("VW MCP Listener must be run inside Vectorworks, where the 'vs' module is available.")
+            return False
+        if _CONFIG_ERROR:
+            if self.show_alerts:
+                _alert("VW MCP configuration error: {e}".format(e=_CONFIG_ERROR))
+            return False
 
-    server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        server_sock.bind((HOST, PORT))
-    except OSError as e:
-        if show_alerts:
-            _alert(
-                "VW MCP failed to bind {h}:{p}\n{e}\n\n"
-                "Is another listener already running? Close it or set VW_MCP_PORT.".format(
-                    h=HOST, p=PORT, e=e
-                )
-            )
-        server_sock.close()
-        return
-    server_sock.listen(8)
-    server_sock.setblocking(False)
-
-    sel = selectors.DefaultSelector()
-    sel.register(server_sock, selectors.EVENT_READ, data=None)
-
-    if show_alerts:
-        _alert(
-            "VW MCP Listener STARTED (socket)\n"
-            "Listening on {h}:{p}\n"
-            "Version {v}\n"
-            "Stop: create STOP file in:\n{d}".format(h=HOST, p=PORT, v=__VERSION__, d=STOP_DIR)
-        )
-
-    try:
-        while True:
-            if _stop_requested() and not _has_pending_writes(sel):
-                break
-            events = sel.select(timeout=0.1)
-            for key, mask in events:
-                fileobj = key.fileobj
-
-                # Server socket - accept new clients
-                if key.data is None:
-                    try:
-                        conn, _addr = fileobj.accept()
-                    except BlockingIOError:
-                        continue
-                    conn.setblocking(False)
-                    sel.register(conn, selectors.EVENT_READ, data=_ClientState())
-                    continue
-
-                state = key.data
-
-                # Readable: consume bytes, decode frames, dispatch, enqueue response
-                if mask & selectors.EVENT_READ:
-                    try:
-                        chunk = fileobj.recv(65536)
-                    except (BlockingIOError, InterruptedError):
-                        continue
-                    except (ConnectionError, OSError):
-                        _drop(sel, fileobj)
-                        continue
-                    if chunk == b"":
-                        _drop(sel, fileobj)
-                        continue
-                    state.feed(chunk)
-                    while True:
-                        try:
-                            frame = state.pop_frame()
-                        except ProtocolError:
-                            _drop(sel, fileobj)
-                            break
-                        if frame is None:
-                            break
-                        rid = ""
-                        try:
-                            req = json.loads(frame.decode("utf-8"))
-                            rid = req.get("id", "")
-                            resp = dispatch(req)
-                        except Exception as e:
-                            resp = {"id": rid, "success": False, "error": "bad JSON: {}".format(e)}
-                        state.enqueue(_response_bytes(resp))
-                        _set_client_events(sel, fileobj, state)
-
-                # Writable: flush pending bytes
-                if mask & selectors.EVENT_WRITE and state.wbuf:
-                    try:
-                        sent = fileobj.send(state.wbuf)
-                        if sent == 0:
-                            _drop(sel, fileobj)
-                            continue
-                        del state.wbuf[:sent]
-                        _set_client_events(sel, fileobj, state)
-                    except (BlockingIOError, InterruptedError):
-                        pass
-                    except (ConnectionError, OSError):
-                        _drop(sel, fileobj)
-    finally:
         try:
-            for key in list(sel.get_map().values()):
-                try: key.fileobj.close()
-                except OSError: pass
+            os.makedirs(STOP_DIR, exist_ok=True)
+        except OSError as e:
+            if self.show_alerts:
+                _alert("VW MCP could not create stop directory:\n{d}\n{e}".format(d=STOP_DIR, e=e))
+            return False
+        _stop_requested()  # clear any stale STOP from a previous session
+
+        server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            server_sock.bind((HOST, PORT))
+        except OSError as e:
+            if self.show_alerts:
+                _alert(
+                    "VW MCP failed to bind {h}:{p}\n{e}\n\n"
+                    "Is another listener already running? Close it or set VW_MCP_PORT.".format(
+                        h=HOST, p=PORT, e=e
+                    )
+                )
+            server_sock.close()
+            return False
+        server_sock.listen(8)
+        server_sock.setblocking(False)
+
+        sel = selectors.DefaultSelector()
+        sel.register(server_sock, selectors.EVENT_READ, data=None)
+
+        self.server_sock = server_sock
+        self.sel = sel
+        self.closed = False
+        _STATE.listener_server = self
+
+        if self.show_alerts:
+            _alert(
+                "VW MCP Listener STARTED (socket)\n"
+                "Listening on {h}:{p}\n"
+                "Version {v}\n"
+                "Stop: create STOP file in:\n{d}".format(h=HOST, p=PORT, v=__VERSION__, d=STOP_DIR)
+            )
+        return True
+
+    def _handle_key(self, key, mask):
+        fileobj = key.fileobj
+
+        if key.data is None:
+            try:
+                conn, _addr = fileobj.accept()
+            except BlockingIOError:
+                return
+            conn.setblocking(False)
+            self.sel.register(conn, selectors.EVENT_READ, data=_ClientState())
+            return
+
+        state = key.data
+
+        if mask & selectors.EVENT_READ:
+            try:
+                chunk = fileobj.recv(65536)
+            except (BlockingIOError, InterruptedError):
+                pass
+            except (ConnectionError, OSError):
+                _drop(self.sel, fileobj)
+                return
+            else:
+                if chunk == b"":
+                    _drop(self.sel, fileobj)
+                    return
+                state.feed(chunk)
+                while True:
+                    try:
+                        frame = state.pop_frame()
+                    except ProtocolError:
+                        _drop(self.sel, fileobj)
+                        return
+                    if frame is None:
+                        break
+                    rid = ""
+                    try:
+                        req = json.loads(frame.decode("utf-8"))
+                        rid = req.get("id", "")
+                        resp = dispatch(req)
+                    except Exception as e:
+                        resp = {"id": rid, "success": False, "error": "bad JSON: {}".format(e)}
+                    state.enqueue(_response_bytes(resp))
+                    _set_client_events(self.sel, fileobj, state)
+
+        if mask & selectors.EVENT_WRITE and state.wbuf:
+            try:
+                sent = fileobj.send(state.wbuf)
+                if sent == 0:
+                    _drop(self.sel, fileobj)
+                    return
+                del state.wbuf[:sent]
+                _set_client_events(self.sel, fileobj, state)
+            except (BlockingIOError, InterruptedError):
+                pass
+            except (ConnectionError, OSError):
+                _drop(self.sel, fileobj)
+
+    def pump_once(self, timeout=0.0):
+        if self.closed or self.sel is None:
+            return False
+        if _stop_requested() and not _has_pending_writes(self.sel):
+            self.close()
+            return False
+        try:
+            events = self.sel.select(timeout=timeout)
+        except (OSError, ValueError):
+            self.close()
+            return False
+        for key, mask in events:
+            self._handle_key(key, mask)
+        if _stop_requested() and not _has_pending_writes(self.sel):
+            self.close()
+            return False
+        return not self.closed
+
+    def pump(self, iterations=8, timeout=0.0):
+        for index in range(max(1, iterations)):
+            if not self.pump_once(timeout if index == 0 else 0.0):
+                return False
+        return True
+
+    def serve_forever(self):
+        try:
+            while self.pump_once(timeout=0.1):
+                pass
+        finally:
+            self.close()
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        sel = self.sel
+        server_sock = self.server_sock
+        self.sel = None
+        self.server_sock = None
+        try:
+            if sel is not None:
+                for key in list(sel.get_map().values()):
+                    try: key.fileobj.close()
+                    except OSError: pass
         except Exception:
             pass
-        try: sel.close()
-        except Exception: pass
-        try: server_sock.close()
-        except OSError: pass
-        if show_alerts:
+        try:
+            if sel is not None:
+                sel.close()
+        except Exception:
+            pass
+        try:
+            if server_sock is not None:
+                server_sock.close()
+        except OSError:
+            pass
+        if getattr(_STATE, "listener_server", None) is self:
+            _STATE.listener_server = None
+        if self.show_alerts:
             _alert("VW MCP Listener STOPPED.")
+
+
+def main(show_alerts=True):
+    server = _ListenerServer(show_alerts=show_alerts)
+    if server.start():
+        server.serve_forever()
 
 
 def _listener_port_open():
@@ -816,29 +888,35 @@ def _write_stop_file():
         return False
 
 
+def _report_existing_or_stale_listener():
+    if not _listener_port_open():
+        return False
+    if _existing_listener_healthy():
+        _message("VW MCP Listener is already healthy on {h}:{p}".format(h=HOST, p=PORT))
+        return True
+    if _write_stop_file():
+        _message(
+            "VW MCP port {h}:{p} is open but not answering. "
+            "A STOP file was written; wait a few seconds, then restart Vectorworks "
+            "if the port still times out.".format(h=HOST, p=PORT)
+        )
+    else:
+        _message(
+            "VW MCP port {h}:{p} is open but not answering, and the STOP file "
+            "could not be written. Restart Vectorworks, then run this launcher again.".format(
+                h=HOST, p=PORT
+            )
+        )
+    return True
+
+
 def start_background():
     thread = getattr(_STATE, "listener_thread", None)
     if thread is not None and thread.is_alive():
         _message("VW MCP Listener is already running on {h}:{p}".format(h=HOST, p=PORT))
         return
 
-    if _listener_port_open():
-        if _existing_listener_healthy():
-            _message("VW MCP Listener is already healthy on {h}:{p}".format(h=HOST, p=PORT))
-            return
-        if _write_stop_file():
-            _message(
-                "VW MCP port {h}:{p} is open but not answering. "
-                "A STOP file was written; wait a few seconds, then restart Vectorworks "
-                "if the port still times out.".format(h=HOST, p=PORT)
-            )
-        else:
-            _message(
-                "VW MCP port {h}:{p} is open but not answering, and the STOP file "
-                "could not be written. Restart Vectorworks, then run this launcher again.".format(
-                    h=HOST, p=PORT
-                )
-            )
+    if _report_existing_or_stale_listener():
         return
 
     thread = threading.Thread(
@@ -855,8 +933,121 @@ def start_background():
     )
 
 
-if os.environ.get("VW_MCP_NO_AUTOSTART", "").lower() not in ("1", "true", "yes"):
+def _set_dialog_text(dialog_id, item_id, text):
+    try:
+        if hasattr(vs, "SetControlText"):
+            vs.SetControlText(dialog_id, item_id, text)
+        elif hasattr(vs, "SetItemText"):
+            vs.SetItemText(dialog_id, item_id, text)
+    except Exception:
+        pass
+
+
+def start_dialog():
+    if getattr(_STATE, "dialog_running", False):
+        _message("VW MCP Listener dialog is already running.")
+        return
+    if _report_existing_or_stale_listener():
+        return
+
+    required = (
+        "CreateLayout",
+        "CreateStaticText",
+        "SetFirstLayoutItem",
+        "SetBelowItem",
+        "RunLayoutDialog",
+        "RegisterDialogForTimerEvents",
+        "DeregisterDialogFromTimerEvents",
+    )
+    missing = [name for name in required if vs is None or not hasattr(vs, name)]
+    if missing:
+        _alert(
+            "VW MCP dialog-pump mode needs Vectorworks dialog APIs that are not available:\n{m}".format(
+                m=", ".join(missing)
+            )
+        )
+        return
+
+    server = _ListenerServer(show_alerts=False)
+    if not server.start():
+        _alert("VW MCP Listener could not start on {h}:{p}.".format(h=HOST, p=PORT))
+        return
+
+    dialog_id = None
+    timer_registered = [False]
+    status_item = 4
+    hint_item = 5
+    setup_event = getattr(vs, "SetupDialogC", 12255)
+
+    try:
+        dialog_id = vs.CreateLayout("VW MCP Listener", False, "Stop", "")
+        vs.CreateStaticText(
+            dialog_id,
+            status_item,
+            "Listening on {h}:{p} - version {v}".format(h=HOST, p=PORT, v=__VERSION__),
+            48,
+        )
+        vs.CreateStaticText(
+            dialog_id,
+            hint_item,
+            "Keep this dialog open while Claude Code controls Vectorworks.",
+            56,
+        )
+        vs.SetFirstLayoutItem(dialog_id, status_item)
+        vs.SetBelowItem(dialog_id, status_item, hint_item, 0, 0)
+
+        def dialog_handler(item, data):
+            if item == setup_event:
+                try:
+                    vs.RegisterDialogForTimerEvents(dialog_id, DIALOG_TIMER_MS)
+                    timer_registered[0] = True
+                except Exception as e:
+                    _set_dialog_text(dialog_id, status_item, "Timer registration failed: {e}".format(e=e))
+                server.pump(iterations=4, timeout=0.0)
+                return
+
+            if item in (1, 2):
+                global _SHOULD_STOP
+                _SHOULD_STOP = True
+                return
+
+            if not server.pump(iterations=8, timeout=0.0):
+                if timer_registered[0]:
+                    try:
+                        vs.DeregisterDialogFromTimerEvents(dialog_id)
+                    except Exception:
+                        pass
+                    timer_registered[0] = False
+                _set_dialog_text(dialog_id, status_item, "Stopped. Close this dialog to finish.")
+
+        _STATE.dialog_running = True
+        _message("VW MCP Listener dialog running on {h}:{p}".format(h=HOST, p=PORT))
+        vs.RunLayoutDialog(dialog_id, dialog_handler)
+    finally:
+        if dialog_id is not None and timer_registered[0]:
+            try:
+                vs.DeregisterDialogFromTimerEvents(dialog_id)
+            except Exception:
+                pass
+        server.close()
+        _STATE.dialog_running = False
+        _message("VW MCP Listener stopped.")
+
+
+def _autostart_mode():
+    mode = os.environ.get("VW_MCP_MODE", "").strip().lower()
+    if mode:
+        return mode
     if os.environ.get("VW_MCP_BACKGROUND", "").lower() in ("1", "true", "yes"):
+        return "dialog"
+    return "foreground"
+
+
+if os.environ.get("VW_MCP_NO_AUTOSTART", "").lower() not in ("1", "true", "yes"):
+    _mode = _autostart_mode()
+    if _mode in ("dialog", "timer", "mainthread", "main-thread"):
+        start_dialog()
+    elif _mode in ("background", "thread"):
         start_background()
     else:
         main()
