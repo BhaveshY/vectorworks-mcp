@@ -57,7 +57,10 @@ class FakeListener:
         try:
             self.sock.settimeout(1)
             while len(self.requests) < self.max_requests:
-                conn, _addr = self.sock.accept()
+                try:
+                    conn, _addr = self.sock.accept()
+                except (OSError, TimeoutError, socket.timeout):
+                    break
                 with conn:
                     conn.settimeout(1)
                     while len(self.requests) < self.max_requests:
@@ -132,6 +135,71 @@ class ServerProtocolTests(unittest.TestCase):
 
         self.assertIn("Protocol error: listener frame is 2048 bytes", result)
 
+    def test_send_reports_pre_send_frame_errors_without_unknown_commit_state(self):
+        with FakeListener(lambda _request: self.fail("oversized request should not reach listener")) as listener:
+            _configure_server(listener.port, max_frame_bytes=64)
+            result = server._send("create_object", {"payload": "x" * 1024})
+            listener.done.wait(1)
+
+        self.assertEqual(listener.requests, [])
+        self.assertIn("Request was not sent to Vectorworks for action 'create_object'", result)
+        self.assertIn("No CAD changes were started", result)
+        self.assertNotIn("Unknown commit state", result)
+
+    def test_send_rejects_missing_or_mismatched_response_id(self):
+        for response in (
+            {"success": True, "result": "pong"},
+            {"id": "", "success": True, "result": "pong"},
+            {"id": "wrong", "success": True, "result": "pong"},
+        ):
+            with self.subTest(response=response):
+                with FakeListener(lambda _request, response=response: response) as listener:
+                    _configure_server(listener.port)
+                    result = server._send("ping")
+
+                self.assertIn("Protocol error: response id mismatch for ping", result)
+
+    def test_send_rejects_non_boolean_success_envelope(self):
+        def handler(request):
+            return {"id": request["id"], "success": "true", "result": "pong"}
+
+        with FakeListener(handler) as listener:
+            _configure_server(listener.port)
+            result = server._send("ping")
+
+        self.assertIn("Protocol error: listener response success for ping was not boolean true/false", result)
+
+    def test_send_rejects_success_without_result(self):
+        def handler(request):
+            return {"id": request["id"], "success": True}
+
+        with FakeListener(handler) as listener:
+            _configure_server(listener.port)
+            result = server._send("ping")
+
+        self.assertIn("Protocol error: listener success response for ping did not include result", result)
+
+    def test_send_rejects_failure_without_error(self):
+        for response in (
+            {"success": False},
+            {"success": False, "error": ""},
+            {"success": False, "error": 42},
+        ):
+            with self.subTest(response=response):
+                def handler(request, response=response):
+                    payload = {"id": request["id"]}
+                    payload.update(response)
+                    return payload
+
+                with FakeListener(handler) as listener:
+                    _configure_server(listener.port)
+                    result = server._send("ping")
+
+                self.assertIn(
+                    "Protocol error: listener failure response for ping did not include a non-empty error string",
+                    result,
+                )
+
     def test_send_reports_connection_help_when_listener_is_missing(self):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.bind(("127.0.0.1", 0))
@@ -144,6 +212,8 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertTrue(result.startswith("Connection error:"))
         self.assertIn(f"127.0.0.1:{port}", result)
         self.assertIn("run the generated vw_load_listener_2024.py", result)
+        self.assertIn("scripts\\test-vectorworks-listener.ps1", result)
+        self.assertIn("C:\\Users\\<you>\\.vectorworks-mcp\\STOP", result)
 
     def test_bridge_status_tool_uses_ping_action(self):
         calls = []

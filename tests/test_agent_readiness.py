@@ -214,7 +214,12 @@ class AgentReadinessTests(unittest.TestCase):
         native_readme = (ROOT / "native_bridge/README.md").read_text(encoding="utf-8")
         self.assertIn("native Vectorworks SDK plug-in bridge", native_readme)
         self.assertIn("marshaled back onto the Vectorworks main/plugin event context", native_readme)
-        self.assertIn("not compiled or installed by default", (ROOT / "README.md").read_text(encoding="utf-8"))
+        self.assertIn("Revit-style connector", native_readme)
+        root_readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("not compiled or installed by default", root_readme)
+        self.assertIn("Why this is not as simple as a Revit-style setup yet", root_readme)
+        self.assertIn("bridge_kind=python_dialog_agent_session", root_readme)
+        self.assertIn("Raw socket reachability is not enough", root_readme)
 
         protocol = (ROOT / "native_bridge/PROTOCOL.md").read_text(encoding="utf-8")
         self.assertIn("4-byte big-endian", protocol)
@@ -261,6 +266,12 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("kCadRequestTimeout", combined)
         self.assertIn("CancelAll", combined)
         self.assertIn("ResetCancellation", combined)
+        self.assertIn("kDefaultMaxPendingCadRequests", combined)
+        self.assertIn("maxPendingRequests_", combined)
+        self.assertIn("duplicate native bridge request id", combined)
+        self.assertIn("native bridge CAD request queue is full", combined)
+        self.assertIn("PendingCountForDiagnostics", combined)
+        self.assertIn("InFlightCountForDiagnostics", combined)
         self.assertIn("native bridge timed out waiting for Vectorworks main/plugin context", combined)
         self.assertIn('"cad_api_safe":false', combined)
         self.assertIn('"transport_only":true', combined)
@@ -374,6 +385,7 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertTrue((destination / "VectorworksMCPBridge.cpp").exists())
             self.assertIn("native_sdk_bridge_scaffold", (destination / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8"))
             self.assertIn("CancelAll", (destination / "CadRequestQueue.hpp").read_text(encoding="utf-8"))
+            self.assertIn("duplicate native bridge request id", (destination / "CadRequestQueue.hpp").read_text(encoding="utf-8"))
 
             refusal = subprocess.run(
                 [
@@ -541,6 +553,7 @@ class AgentReadinessTests(unittest.TestCase):
 
     def test_doctor_script_reports_next_actions_and_cad_safety(self):
         doctor = (ROOT / "scripts/doctor-vectorworks-mcp.ps1").read_text(encoding="utf-8")
+        raw_ping = (ROOT / "scripts/test-vectorworks-listener.ps1").read_text(encoding="utf-8")
 
         self.assertIn("overall", doctor)
         self.assertIn("nextActions", doctor)
@@ -552,6 +565,9 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("stable loader", doctor)
         self.assertIn("connector contract", doctor)
         self.assertIn("VW_MCP_LOADER_METADATA", doctor)
+        self.assertIn("Write-RecoverySteps", raw_ping)
+        self.assertIn("vw_load_listener_2024.py", raw_ping)
+        self.assertIn("foreground/background/win_timer", raw_ping)
 
     def test_native_smoke_script_is_documented(self):
         smoke_script = (ROOT / "scripts/smoke-native-bridge.ps1").read_text(encoding="utf-8")
@@ -580,6 +596,7 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("implemented_actions", native_readme)
         self.assertIn("selection.get", native_readme)
         self.assertIn("native_phase >= 1", native_readme)
+        self.assertIn("bounded backpressure", native_readme)
         self.assertIn("get_document_info", protocol)
         self.assertIn("get_objects", protocol)
         self.assertIn("implemented_actions", protocol)

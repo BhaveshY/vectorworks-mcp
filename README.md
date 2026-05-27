@@ -38,6 +38,22 @@ Vectorworks SDK plug-in bridge. The SDK bridge is scaffolded in
 `native_bridge/`, but it is not compiled or installed by default. Until that
 bridge exists, use the generated dialog launcher for real CAD work.
 
+Why this is not as simple as a Revit-style setup yet:
+
+- Revit has a mature add-in loading model and documented mechanisms such as
+  external commands/events for getting work back onto Revit's valid API context.
+- Vectorworks 2024 can run Python scripts, but a long-lived Python socket loop
+  either blocks the UI or loses the safe document/API context after the script
+  returns.
+- The safe pure-Python fallback is therefore a modal dialog agent session. It is
+  stable for CAD operations, but you close it when you want manual Vectorworks
+  control back.
+- A Revit-like always-on Vectorworks experience needs the native SDK plug-in
+  bridge: worker-thread networking plus strict marshaling back to the
+  Vectorworks main/plugin event context.
+- The repo cannot silently build that bridge on a fresh Windows machine until
+  the official Vectorworks SDK and Visual Studio C++ build tools are installed.
+
 Native bridge planning aids:
 
 - `native_bridge/HANDLER_MATRIX.md` maps every current listener action to native
@@ -206,6 +222,15 @@ replace the Vectorworks Resource Manager or menu-command script again. If you
 previously pasted an old full foreground/background launcher, replace it with
 this loader once.
 
+Do not paste `vw_listener.py`, `vw_start_listener_2024.py`, or any old
+foreground/background/timer launcher into Vectorworks. Paste only the generated
+`vw_load_listener_2024.py` stable loader. For CAD-safe work, a healthy Python
+listener reports `dispatch_mode=dialog`,
+`bridge_kind=python_dialog_agent_session`, `cad_api_safe=true`, and
+`transport_only=false`. Raw socket reachability is not enough: a listener that
+can answer `ping` but reports `transport_only=true` is not safe for CAD
+handlers.
+
 ### One-Session Script
 
 1. Open Vectorworks 2024 or 2025.
@@ -340,6 +365,9 @@ Vectorworks hangs after running the listener script:
 - Regenerate `vw_start_listener_2024.py` with `.\scripts\bootstrap-claude-code.ps1 -Verify`.
 - Run `.\scripts\copy-vectorworks-loader.ps1`, then replace any old pasted Vectorworks script with the clipboard contents from `vw_load_listener_2024.py`; it loads the current launcher from disk and prevents stale pasted listener code from lingering in a menu command.
 - Confirm the generated launcher contains `os.environ["VW_MCP_MODE"] = "dialog"`.
+- Confirm `vw_ping` reports `dispatch_mode=dialog`,
+  `bridge_kind=python_dialog_agent_session`, `cad_api_safe=true`, and
+  `transport_only=false` before CAD work.
 - If Vectorworks is already stuck from an older foreground launcher, create
   `C:\Users\<you>\.vectorworks-mcp\STOP`, wait a few seconds, then restart
   Vectorworks if it does not recover.

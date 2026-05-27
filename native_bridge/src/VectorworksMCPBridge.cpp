@@ -72,7 +72,9 @@ Protocol::ResponseEnvelope DispatchFromSocketWorker(const Protocol::RequestEnvel
         if (gStopRequested.load()) {
             return {request.id, false, "", "native bridge is stopping"};
         }
-        gCadQueue.EnqueueFromSocketThread(request);
+        if (auto enqueueFailure = gCadQueue.EnqueueFromSocketThread(request)) {
+            return *enqueueFailure;
+        }
         return gCadQueue.WaitForResponseOnSocketThread(request.id, kCadRequestTimeout);
     }
     return {request.id, false, "", "unknown native bridge action: " + request.action};

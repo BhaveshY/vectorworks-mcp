@@ -4,6 +4,12 @@ Historical note: this is an archived install log from an early setup attempt,
 not the current setup guide. Prefer `README.md`, `AGENTS.md`, and
 `scripts\doctor-vectorworks-mcp.ps1` for current agent instructions.
 
+Archived warning: do not follow the old checklist below for listener startup.
+Do not paste or run `vw_listener.py` directly in Vectorworks. Current setup
+uses the generated stable loader `vw_load_listener_2024.py`, which loads the
+current dialog-mode launcher from disk and avoids stale foreground/background
+listener code that can freeze Vectorworks.
+
 Install attempt on 2026-05-20 — Windows 11 Pro 10.0.26200, Python 3.12.10, PowerShell + Git Bash.
 Repo head at install time: `b81e24e` (after `git pull` from origin/main).
 
@@ -118,10 +124,12 @@ matching the script.
   fastmcp banner stays quiet on stdio (good — it would corrupt the JSON-RPC
   stream otherwise).
 
-## Verification still owed
+## Verification still owed at the time of this archived log
 
-- [ ] Launch Vectorworks 2025, run `vw_listener.py` from the Script Editor,
-      confirm the alert box shows `127.0.0.1:9877`.
+- [ ] Launch Vectorworks, paste/run the generated `vw_load_listener_2024.py`
+      stable loader, and confirm `vw_ping` reports
+      `dispatch_mode=dialog`, `bridge_kind=python_dialog_agent_session`,
+      `cad_api_safe=true`, and `transport_only=false`.
 - [ ] Restart Claude Code Desktop so it picks up the new `mcpServers` entry,
       then call `vw_ping` and confirm it returns the listener version.
 - [ ] Try one geometry call (e.g. `vw_create_object` rectangle) end-to-end.

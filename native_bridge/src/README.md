@@ -13,7 +13,9 @@ Files:
   split.
 - `CadRequestQueue.hpp`: worker-to-main-context queue abstraction. Socket
   worker code must enqueue CAD/API work and wait for completion; it must not
-  call Vectorworks document APIs directly.
+  call Vectorworks document APIs directly. The queue rejects duplicate request
+  ids and applies bounded backpressure before work reaches the Vectorworks
+  main/plugin event context.
 - `VectorworksMCPBridge.cpp`: SDK hook placeholders for plugin load/unload,
   socket dispatch, stop, and main/plugin event pumping.
 

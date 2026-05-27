@@ -186,6 +186,9 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("unknown commit state", diagnose)
         self.assertIn("vw_load_listener_2024.py", setup)
         self.assertIn("vw_load_listener_2024.py", ping)
+        self.assertIn("bridge_kind=python_dialog_agent_session", setup)
+        self.assertIn("bridge_kind=python_dialog_agent_session", ping)
+        self.assertIn("transport-only ping is not enough", work)
 
     def test_plugin_tool_map_documents_safety_metadata_and_mixed_actions(self):
         tool_map = (PLUGIN / "references" / "tool-map.md").read_text(encoding="utf-8")

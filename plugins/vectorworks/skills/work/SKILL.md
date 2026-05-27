@@ -9,7 +9,7 @@ Before changing the drawing, confirm the connection:
 
 1. Call `vw_preflight_for_cad` when available; otherwise call `vw_ping`.
 2. If `vw_ping` is unavailable, use `/vectorworks:ping` or the raw listener ping script.
-3. Confirm the ping/status payload does not report `cad_api_safe: false` or `transport_only: true`.
+3. Confirm the ping/status payload reports `dispatch_mode=dialog`, `bridge_kind=python_dialog_agent_session`, `cad_api_safe=true`, and `transport_only=false` for the Python listener. A transport-only ping is not enough for CAD work.
 4. Call `vw_tool_safety` as a normal planning step and prefer read-only tools before write/destructive tools.
 5. Get context with `vw_get_document_info` and `vw_get_layers` for non-trivial work.
 

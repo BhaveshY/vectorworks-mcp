@@ -63,6 +63,15 @@ class ProtocolError(RuntimeError):
     """Raised when the listener sends an invalid protocol frame."""
 
 
+class RequestNotSentError(ProtocolError):
+    """Raised when a request cannot be encoded/framed before any bytes are sent."""
+
+    def __init__(self, action: str, original: BaseException):
+        self.action = action
+        self.original = original
+        super().__init__(str(original))
+
+
 class RequestTransportError(ConnectionError):
     """Raised after a request frame may have reached the listener."""
 
@@ -663,6 +672,24 @@ def _decode_response(payload: bytes) -> dict[str, Any]:
     return value
 
 
+def _validate_response_envelope(response: dict[str, Any], request_id: str, action: str) -> None:
+    response_id = response.get("id")
+    if response_id != request_id:
+        raise ProtocolError(f"response id mismatch for {action}: expected {request_id}, got {response_id!r}")
+
+    success = response.get("success")
+    if success is True:
+        if "result" not in response:
+            raise ProtocolError(f"listener success response for {action} did not include result")
+        return
+    if success is False:
+        error = response.get("error")
+        if not isinstance(error, str) or not error.strip():
+            raise ProtocolError(f"listener failure response for {action} did not include a non-empty error string")
+        return
+    raise ProtocolError(f"listener response success for {action} was not boolean true/false")
+
+
 def _format_result(value: Any) -> str:
     if isinstance(value, str):
         return value
@@ -677,7 +704,10 @@ def _connection_help(error: BaseException) -> str:
         f"Connection error: {error}. Could not reach the Vectorworks MCP listener on {HOST}:{PORT}. "
         "Start Vectorworks, run the generated vw_load_listener_2024.py from Resource Manager "
         "or the installed VW MCP Listener menu command, and verify VW_MCP_HOST/VW_MCP_PORT "
-        "match on both sides."
+        "match on both sides. If the port is open but requests time out, run "
+        "scripts\\test-vectorworks-listener.ps1 or scripts\\doctor-vectorworks-mcp.ps1, create "
+        "C:\\Users\\<you>\\.vectorworks-mcp\\STOP, and restart Vectorworks if the stale listener "
+        "does not recover."
     )
 
 
@@ -701,6 +731,15 @@ def _unknown_commit_state_help(action: str, error: BaseException) -> str:
         "host did not retry it, because retrying could duplicate or compound CAD "
         "changes. Check the Vectorworks document state, then rerun only the exact "
         "follow-up action you still need."
+    ).format(action=action, err=original)
+
+
+def _request_not_sent_help(action: str, error: BaseException) -> str:
+    original = getattr(error, "original", error)
+    return (
+        "Request was not sent to Vectorworks for action '{action}': {err}\n\n"
+        "No CAD changes were started by this failed request. Fix the request "
+        "payload or VW_MCP_MAX_FRAME_BYTES, then retry when ready."
     ).format(action=action, err=original)
 
 
@@ -883,13 +922,18 @@ def _request_once(action: str, params: Optional[dict[str, Any]]) -> dict[str, An
     request_id = uuid.uuid4().hex[:8]
     request = {"id": request_id, "action": action, "params": params or {}}
     try:
-        _send_frame(_json_bytes(request))
+        payload = _json_bytes(request)
+        _send_frame(payload)
+    except ProtocolError as exc:
+        raise RequestNotSentError(action, exc) from exc
+    except (ConnectionError, TimeoutError, socket.timeout, OSError) as exc:
+        raise RequestTransportError(action, "send", exc) from exc
+
+    try:
         response = _decode_response(_recv_frame())
     except (ConnectionError, TimeoutError, socket.timeout, OSError) as exc:
         raise RequestTransportError(action, "response", exc) from exc
-    response_id = response.get("id")
-    if response_id not in (None, "", request_id):
-        raise ProtocolError(f"response id mismatch: expected {request_id}, got {response_id!r}")
+    _validate_response_envelope(response, request_id, action)
     return response
 
 
@@ -912,6 +956,9 @@ def _send(action: str, params: Optional[dict[str, Any]] = None, require_cad_safe
                 if response.get("success") is True:
                     return _format_result(response.get("result", "OK"))
                 return f"VW Error ({action}): {response.get('error', 'Unknown listener error')}"
+            except RequestNotSentError as exc:
+                _close()
+                return _request_not_sent_help(action, exc)
             except ProtocolError as exc:
                 _close()
                 if not _action_safe_to_retry(action, params):

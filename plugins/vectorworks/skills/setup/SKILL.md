@@ -28,7 +28,7 @@ os.environ["VW_MCP_MODE"] = "dialog"
 os.environ["VW_MCP_DIALOG_TIMER_MS"] = "50"
 ```
 
-4. Tell the user to paste the clipboard contents into any old Vectorworks Resource Manager or Plug-in Manager script. That stable loader runs the current `vw_start_listener_2024.py` from disk, so future setup repairs do not leave stale pasted listener code inside Vectorworks.
+4. Tell the user to paste the clipboard contents into any old Vectorworks Resource Manager or Plug-in Manager script. Paste only `vw_load_listener_2024.py`, never `vw_listener.py`, `vw_start_listener_2024.py`, or old foreground/background/timer launcher code. The stable loader runs the current `vw_start_listener_2024.py` from disk, so future setup repairs do not leave stale pasted listener code inside Vectorworks.
 
 To re-copy the stable loader later without running the full bootstrap:
 
@@ -42,12 +42,13 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}\scripts\test-vectorworks-listener.ps1"
 ```
 
-6. If MCP tools are available, call `vw_ping`. If not, explain that the raw listener ping proves Vectorworks is reachable, but Claude Code still needs the plugin/MCP server loaded.
+6. If MCP tools are available, call `vw_ping`. For CAD-safe work, the Python listener must report `dispatch_mode=dialog`, `bridge_kind=python_dialog_agent_session`, `cad_api_safe=true`, and `transport_only=false`. If MCP tools are not available, explain that the raw listener ping proves Vectorworks is reachable, but Claude Code still needs the plugin/MCP server loaded.
 
 ## Notes
 
 - `/mcp` is only an interactive Claude Code command. Do not rely on it in Codex, Cursor, or non-interactive shells.
 - The tool name is `vw_ping`, not `vw-ping`.
-- If Vectorworks hangs or the raw ping times out while Vectorworks owns the port, the user is probably running a stale foreground/background/timer launcher. Create `~\.vectorworks-mcp\STOP`, regenerate the launcher, and have them re-copy/paste the stable loader with `scripts\copy-vectorworks-loader.ps1`.
+- Raw socket reachability is not enough. A listener that answers ping but reports `transport_only=true` is not safe for CAD handlers.
+- If Vectorworks hangs or the raw ping times out while Vectorworks owns the port, the user is probably running a stale foreground/background/timer launcher. Create `~\.vectorworks-mcp\STOP`, wait a few seconds, save/restart Vectorworks if needed, regenerate the launcher, and have them re-copy/paste the stable loader with `scripts\copy-vectorworks-loader.ps1`.
 - Background and Windows timer modes are transport-only diagnostics. They may answer `vw_ping`, but real CAD handlers can deadlock outside a normal Vectorworks script or plug-in event context.
 - The long-term non-modal fix is the native Vectorworks SDK bridge scaffold in the companion `vectorworks-mcp` repo. For native bridge development, copy the reviewed scaffold into the SDK worktree with `${CLAUDE_PLUGIN_ROOT}\scripts\copy-native-bridge-scaffold.ps1` after the unmodified SDK example builds. Do not describe it as installed or production-ready until the SDK prerequisites pass and a compiled bridge has been smoke-tested in Vectorworks.

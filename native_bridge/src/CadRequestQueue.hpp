@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <deque>
 #include <mutex>
 #include <optional>
@@ -12,6 +13,8 @@
 #include <unordered_map>
 
 namespace VectorworksMCP {
+
+constexpr std::size_t kDefaultMaxPendingCadRequests = 128u;
 
 struct QueuedCadRequest {
     Protocol::RequestEnvelope request;
@@ -21,21 +24,31 @@ struct QueuedCadRequest {
 
 class CadRequestQueue {
 public:
+    explicit CadRequestQueue(std::size_t maxPendingRequests = kDefaultMaxPendingCadRequests)
+        : maxPendingRequests_(maxPendingRequests == 0u ? kDefaultMaxPendingCadRequests : maxPendingRequests) {}
+
     // Socket worker thread must not call Vectorworks document APIs directly.
     // It only hands work to the main/plugin event context.
-    void EnqueueFromSocketThread(const Protocol::RequestEnvelope& request) {
+    std::optional<Protocol::ResponseEnvelope> EnqueueFromSocketThread(const Protocol::RequestEnvelope& request) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            auto& record = requests_[request.id];
-            record.request = request;
             if (cancelled_) {
-                record.response = {request.id, false, "", cancellationReason_};
-                record.completed = true;
-            } else {
-                pending_.push_back(request.id);
+                return Protocol::ResponseEnvelope{request.id, false, "", cancellationReason_};
             }
+            if (request.id.empty()) {
+                return Protocol::ResponseEnvelope{"", false, "", "native bridge request id is required"};
+            }
+            if (requests_.find(request.id) != requests_.end()) {
+                return Protocol::ResponseEnvelope{request.id, false, "", "duplicate native bridge request id: " + request.id};
+            }
+            if (requests_.size() >= maxPendingRequests_) {
+                return Protocol::ResponseEnvelope{request.id, false, "", "native bridge CAD request queue is full"};
+            }
+            requests_.emplace(request.id, QueuedCadRequest{request, false, {}});
+            pending_.push_back(request.id);
         }
         cv_.notify_all();
+        return std::nullopt;
     }
 
     // Called from the Vectorworks SDK main/plugin event context.
@@ -44,23 +57,30 @@ public:
         if (cancelled_) {
             return std::nullopt;
         }
-        if (pending_.empty()) {
-            return std::nullopt;
+        while (!pending_.empty()) {
+            const auto id = pending_.front();
+            pending_.pop_front();
+            const auto found = requests_.find(id);
+            if (found != requests_.end()) {
+                return found->second.request;
+            }
         }
-        const auto id = pending_.front();
-        pending_.pop_front();
-        return requests_[id].request;
+        return std::nullopt;
     }
 
     // Called from the Vectorworks SDK main/plugin event context after CAD/API work.
-    void CompleteFromVectorworksMainContext(const Protocol::ResponseEnvelope& response) {
+    bool CompleteFromVectorworksMainContext(const Protocol::ResponseEnvelope& response) {
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            auto& record = requests_[response.id];
-            record.response = response;
-            record.completed = true;
+            auto found = requests_.find(response.id);
+            if (found == requests_.end()) {
+                return false;
+            }
+            found->second.response = response;
+            found->second.completed = true;
         }
         cv_.notify_all();
+        return true;
     }
 
     // Called by the socket worker thread while waiting for main-context CAD/API work.
@@ -115,11 +135,22 @@ public:
         cancellationReason_.clear();
     }
 
+    std::size_t PendingCountForDiagnostics() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return pending_.size();
+    }
+
+    std::size_t InFlightCountForDiagnostics() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return requests_.size();
+    }
+
 private:
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::deque<std::string> pending_;
     std::unordered_map<std::string, QueuedCadRequest> requests_;
+    std::size_t maxPendingRequests_;
     bool cancelled_ = false;
     std::string cancellationReason_;
 };

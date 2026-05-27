@@ -42,6 +42,19 @@ function Write-PortDiagnostics {
         }
 }
 
+function Write-RecoverySteps {
+    param(
+        [string]$Address,
+        [int]$PortNumber
+    )
+    Write-Host ""
+    Write-Host "Recovery:"
+    Write-Host "1. If Vectorworks is hung or $Address`:$PortNumber is open but ping timed out, create $env:USERPROFILE\.vectorworks-mcp\STOP and wait a few seconds."
+    Write-Host "2. If it stays stuck, save work if possible and restart Vectorworks."
+    Write-Host "3. Regenerate/copy the stable loader with scripts\copy-vectorworks-loader.ps1, then paste/run only vw_load_listener_2024.py inside Vectorworks."
+    Write-Host "4. Do not switch foreground/background/win_timer launchers on for CAD work; only dialog mode or a smoke-tested native SDK bridge is CAD-safe."
+}
+
 if (Test-Path $VenvPython) {
     $PythonCommand = $VenvPython
     $PythonArgs = @()
@@ -98,6 +111,7 @@ try {
     $ExitCode = $LASTEXITCODE
     if ($ExitCode -ne 0) {
         Write-PortDiagnostics -Address $HostName -PortNumber $Port
+        Write-RecoverySteps -Address $HostName -PortNumber $Port
     }
     exit $ExitCode
 } finally {

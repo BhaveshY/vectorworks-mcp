@@ -24,6 +24,14 @@ The durable fix is a native Vectorworks SDK plug-in bridge. Network I/O may run
 on a worker thread, but every Vectorworks document/API operation must be
 marshaled back onto the Vectorworks main/plugin event context.
 
+This is the main difference from a Revit-style connector. Revit add-ins have a
+well-established loading and API-dispatch model, so a connector can lean on the
+host application's external command/event pattern. Vectorworks Python is easier
+to paste and test, but it is not an always-on integration surface: foreground
+loops freeze the UI, background/timer loops are transport diagnostics, and real
+document work must happen inside a valid script/dialog/plugin callback. The
+native bridge exists to provide that non-modal plug-in callback path.
+
 ## Target Architecture
 
 ```text
@@ -156,6 +164,8 @@ scaffold's honest `cad_api_safe: false` / `transport_only: true` ping, but the
 default phase-1 smoke still requires a real CAD-safe bridge.
 The host-side `vw_preflight_for_cad` also blocks native bridges that claim
 `cad_api_safe: true` before reporting phase-1 capabilities.
+The SDK scaffold queue applies bounded backpressure and rejects duplicate
+request ids before work is handed to the Vectorworks main/plugin event context.
 
 Before installing a compiled bridge artifact, use the native doctor to inspect
 the current stage and plan the user Plug-ins deployment:
