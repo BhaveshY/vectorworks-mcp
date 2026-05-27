@@ -4,6 +4,17 @@ import struct
 import threading
 
 
+IMPLEMENTED_ACTIONS = {
+    "ping",
+    "stop",
+    "get_document_info",
+    "get_layers",
+    "get_objects",
+    "selection",
+    "create_object",
+}
+
+
 def _read_exact(sock, size):
     data = bytearray()
     while len(data) < size:
@@ -33,7 +44,7 @@ class MockNativeBridge:
     def __init__(self, status=None):
         self.status = status or {
             "pong": True,
-            "handlers": 7,
+            "handlers": len(IMPLEMENTED_ACTIONS),
             "version": "mock-native-bridge",
             "bridge_kind": "native_sdk_bridge_mock",
             "dispatch_mode": "native_sdk",
@@ -57,12 +68,15 @@ class MockNativeBridge:
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        self.stop()
+        self.thread.join(2)
+
+    def stop(self):
         self.stop_event.set()
         try:
             self.sock.close()
         except OSError:
             pass
-        self.thread.join(2)
 
     def _serve(self):
         self.ready.set()
@@ -90,6 +104,21 @@ class MockNativeBridge:
                 request_id = request.get("id", "")
                 if action == "ping":
                     _write_json_frame(conn, {"id": request_id, "success": True, "result": self.status})
+                elif action == "get_document_info":
+                    _write_json_frame(
+                        conn,
+                        {
+                            "id": request_id,
+                            "success": True,
+                            "result": {
+                                "filename": "Mock.vwx",
+                                "filepath": "",
+                                "layers": ["Design Layer-1"],
+                                "layer_count": 1,
+                                "total_objects": 1,
+                            },
+                        },
+                    )
                 elif action == "get_layers":
                     _write_json_frame(
                         conn,
@@ -99,9 +128,51 @@ class MockNativeBridge:
                             "result": [{"name": "Design Layer-1", "visible": True}],
                         },
                     )
+                elif action == "get_objects":
+                    _write_json_frame(
+                        conn,
+                        {
+                            "id": request_id,
+                            "success": True,
+                            "result": [
+                                {
+                                    "handle": "mock-rect-1",
+                                    "type": "rect",
+                                    "name": "Mock Rect",
+                                    "bounds": {
+                                        "top_left": [0, 0],
+                                        "bottom_right": [100, 100],
+                                    },
+                                }
+                            ],
+                        },
+                    )
+                elif action == "selection":
+                    selection_action = request.get("params", {}).get("action", "get")
+                    if selection_action in ("get", "clear"):
+                        result = [] if selection_action == "get" else "Selection cleared"
+                        _write_json_frame(conn, {"id": request_id, "success": True, "result": result})
+                    else:
+                        _write_json_frame(
+                            conn,
+                            {
+                                "id": request_id,
+                                "success": False,
+                                "error": "Mock bridge only implements selection get/clear",
+                            },
+                        )
+                elif action == "create_object":
+                    _write_json_frame(
+                        conn,
+                        {
+                            "id": request_id,
+                            "success": True,
+                            "result": "Created mock object, handle: mock-created-1",
+                        },
+                    )
                 elif action == "stop":
-                    self.stop_event.set()
                     _write_json_frame(conn, {"id": request_id, "success": True, "result": "Mock bridge stop requested"})
+                    self.stop()
                     return
                 else:
                     _write_json_frame(
