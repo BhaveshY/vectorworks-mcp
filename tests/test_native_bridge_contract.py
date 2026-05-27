@@ -214,6 +214,34 @@ class NativeBridgeContractTests(unittest.TestCase):
         self.assertEqual(report["last_ping"]["transport_only"], True)
         self.assertEqual([request["action"] for request in bridge.requests], ["ping"])
 
+    def test_native_smoke_harness_rejects_ping_count_below_one(self):
+        report = run_smoke(port=1, ping_count=0, read_count=1, timeout=0.01)
+
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["checks"], [])
+        self.assertIn("ping_count must be at least 1", report["failures"])
+
+    def test_native_smoke_harness_rejects_phase_one_read_count_below_one(self):
+        report = run_smoke(port=1, ping_count=1, read_count=0, timeout=0.01, phase=1)
+
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["checks"], [])
+        self.assertIn("read_count must be at least 1 for phase >= 1", report["failures"])
+
+    def test_native_smoke_harness_rejects_phase_zero_write_fixture(self):
+        report = run_smoke(
+            port=1,
+            ping_count=1,
+            read_count=0,
+            timeout=0.01,
+            phase=0,
+            allow_write_fixture=True,
+        )
+
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["checks"], [])
+        self.assertIn("allow_write_fixture requires phase >= 1", report["failures"])
+
     def test_native_smoke_harness_rejects_transport_scaffold_in_phase_one(self):
         status = {
             "pong": True,
@@ -227,7 +255,7 @@ class NativeBridgeContractTests(unittest.TestCase):
             "cad_handlers_implemented": False,
         }
         with MockNativeBridge(status=status) as bridge:
-            report = run_smoke(port=bridge.port, ping_count=1, read_count=0, timeout=1, phase=1)
+            report = run_smoke(port=bridge.port, ping_count=1, read_count=1, timeout=1, phase=1)
 
         self.assertFalse(report["ok"])
         self.assertIn("ping handlers was not an integer >= 7", report["failures"])

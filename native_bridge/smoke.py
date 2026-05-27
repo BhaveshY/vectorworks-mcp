@@ -167,6 +167,10 @@ def _is_non_negative_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
+def _is_positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+
 def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
@@ -517,6 +521,15 @@ def run_smoke(
         "checks": [],
         "failures": [],
     }
+
+    if not _is_positive_int(ping_count):
+        report["failures"].append("ping_count must be at least 1")
+    if phase >= 1 and not _is_positive_int(read_count):
+        report["failures"].append("read_count must be at least 1 for phase >= 1")
+    if phase < 1 and allow_write_fixture:
+        report["failures"].append("allow_write_fixture requires phase >= 1")
+    if report["failures"]:
+        return report
 
     stop_acknowledged = False
     phase_one_snapshots: dict[str, Any] = {}

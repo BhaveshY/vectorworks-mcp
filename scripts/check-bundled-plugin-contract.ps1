@@ -40,6 +40,7 @@ $RequiredFiles = @(
     "scripts\diagnose-vectorworks-mcp.ps1",
     "scripts\doctor-vectorworks-mcp.ps1",
     "scripts\doctor-native-bridge.ps1",
+    "scripts\resolve-companion-repo.ps1",
     "scripts\resolve-vectorworks-mcp-repo.ps1",
     "scripts\run-vectorworks-mcp.ps1",
     "scripts\test-vectorworks-listener.ps1",
@@ -87,6 +88,24 @@ if ($Resolver -notmatch "InstallIfMissing" -or $Resolver -notmatch "RequireContr
     throw "Bundled resolver must support auto-clone and current connector contract validation."
 }
 
+$Claude = Get-Command claude -ErrorAction SilentlyContinue
+if (-not $Claude) {
+    $Claude = Get-Command claude.exe -ErrorAction SilentlyContinue
+}
+if ($Claude) {
+    Push-Location $BundledPlugin
+    try {
+        & $Claude.Source plugin validate .
+        if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+        }
+    } finally {
+        Pop-Location
+    }
+} else {
+    Write-Warning "claude CLI not found; skipping official Claude bundled-plugin validation."
+}
+
 foreach ($RelativePath in @(
     "scripts\run-vectorworks-mcp.ps1",
     "scripts\bootstrap-vectorworks-mcp.ps1",
@@ -104,6 +123,9 @@ foreach ($RelativePath in @(
     $Text = Get-Content -Raw -LiteralPath (Join-Path $BundledPlugin $RelativePath)
     if ($Text -notmatch "RequireContract") {
         throw "Bundled wrapper $RelativePath must require the current connector contract."
+    }
+    if ($Text -notmatch "Resolve-VectorworksMcpCompanionRepo") {
+        throw "Bundled wrapper $RelativePath must use the shared companion repo resolver helper."
     }
 }
 
@@ -143,6 +165,7 @@ if ($StandalonePluginPath) {
         "scripts\diagnose-vectorworks-mcp.ps1",
         "scripts\doctor-vectorworks-mcp.ps1",
         "scripts\doctor-native-bridge.ps1",
+        "scripts\resolve-companion-repo.ps1",
         "scripts\resolve-vectorworks-mcp-repo.ps1",
         "scripts\run-vectorworks-mcp.ps1",
         "scripts\test-vectorworks-listener.ps1",

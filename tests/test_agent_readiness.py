@@ -346,7 +346,7 @@ class AgentReadinessTests(unittest.TestCase):
             source_dir = worktree / "Examples2024" / "VectorworksMCPBridge" / "Source"
             source_dir.mkdir(parents=True)
 
-            subprocess.run(
+            copy_result = subprocess.run(
                 [
                     powershell,
                     "-NoLogo",
@@ -366,6 +366,7 @@ class AgentReadinessTests(unittest.TestCase):
             )
 
             destination = source_dir / "VectorworksMCPBridge"
+            self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", copy_result.stdout)
             self.assertTrue((destination / "BridgeProtocol.hpp").exists())
             self.assertTrue((destination / "CadRequestQueue.hpp").exists())
             self.assertTrue((destination / "VectorworksMCPBridge.cpp").exists())
@@ -555,6 +556,7 @@ class AgentReadinessTests(unittest.TestCase):
         acceptance = (ROOT / "native_bridge/ACCEPTANCE.md").read_text(encoding="utf-8")
         native_readme = (ROOT / "native_bridge/README.md").read_text(encoding="utf-8")
         protocol = (ROOT / "native_bridge/PROTOCOL.md").read_text(encoding="utf-8")
+        root_readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
         self.assertIn("native_bridge\\smoke.py", smoke_script)
         self.assertIn("--ping-count", smoke_script)
@@ -574,6 +576,16 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("cross-checks", native_readme)
         self.assertIn("get_document_info", protocol)
         self.assertIn("get_objects", protocol)
+        self.assertIn(
+            "powershell -ExecutionPolicy Bypass -File .\\scripts\\doctor-native-bridge.ps1 -BuiltArtifact C:\\path\\to\\VectorworksMCPBridge.vwlibrary -Install -WhatIf",
+            root_readme,
+        )
+        self.assertIn(
+            "powershell -ExecutionPolicy Bypass -File .\\scripts\\doctor-native-bridge.ps1 -BuiltArtifact C:\\path\\to\\VectorworksMCPBridge.vwlibrary -Install\n# Restart Vectorworks",
+            root_readme,
+        )
+        self.assertIn("enable/load the native VectorworksMCPBridge plug-in", root_readme)
+        self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", root_readme)
 
     def test_native_doctor_can_plan_and_install_explicit_artifact(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
@@ -617,7 +629,7 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertEqual(report["installDestination"], str(install_dir / artifact.name))
             self.assertTrue(report["installPerformed"])
             self.assertFalse(report["installWhatIf"])
-            self.assertIn("smoke-native-bridge.ps1 -Json", "\n".join(report["nextActions"]))
+            self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", "\n".join(report["nextActions"]))
 
     def test_native_doctor_whatif_install_is_non_mutating(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
@@ -665,6 +677,75 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertEqual(report["installedPath"], "")
             self.assertNotIn("Restart Vectorworks", "\n".join(report["nextActions"]))
             self.assertIn("without -WhatIf", "\n".join(report["nextActions"]))
+
+    def test_native_doctor_reports_auto_discovered_artifact_as_candidate_only(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise the native doctor")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            worktree = temp_root / "SDKExamples"
+            bridge_source = worktree / "Examples2024" / "VectorworksMCPBridge"
+            artifact = bridge_source / "Build" / "VectorworksMCPBridge.vwlibrary"
+            install_dir = temp_root / "Plug-ins"
+            artifact.parent.mkdir(parents=True)
+            artifact.write_text("fake native bridge artifact\n", encoding="utf-8")
+
+            plan_result = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/doctor-native-bridge.ps1"),
+                    "-WorktreeRoot",
+                    str(worktree),
+                    "-InstallDir",
+                    str(install_dir),
+                    "-Json",
+                ],
+                cwd=str(ROOT),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            report = json.loads(plan_result.stdout)
+            self.assertEqual(report["builtArtifact"], "")
+            self.assertFalse(report["builtArtifactWasExplicit"])
+            self.assertEqual(report["builtArtifactCandidate"], str(artifact))
+            self.assertIn(str(artifact), "\n".join(report["nextActions"]))
+
+            install_result = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/doctor-native-bridge.ps1"),
+                    "-WorktreeRoot",
+                    str(worktree),
+                    "-InstallDir",
+                    str(install_dir),
+                    "-Install",
+                    "-Json",
+                ],
+                cwd=str(ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertNotEqual(install_result.returncode, 0)
+            self.assertIn("explicit -BuiltArtifact", install_result.stderr + install_result.stdout)
+            self.assertFalse((install_dir / artifact.name).exists())
+            self.assertFalse(install_dir.exists())
 
     def test_native_doctor_detects_partial_scaffold_copy(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")

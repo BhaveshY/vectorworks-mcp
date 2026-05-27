@@ -6,6 +6,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "resolve-companion-repo.ps1")
+
 $Resolver = Join-Path $PSScriptRoot "resolve-vectorworks-mcp-repo.ps1"
 $ResolverArgs = @()
 if ($RepoPath) {
@@ -15,7 +17,7 @@ if ($RepoPath) {
 }
 
 try {
-    $RepoRoot = (& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $Resolver @ResolverArgs | Select-Object -Last 1).Trim()
+    $RepoRoot = Resolve-VectorworksMcpCompanionRepo -ResolverArgs $ResolverArgs
 } catch {
     if ($Advisory) {
         Write-Warning $_.Exception.Message

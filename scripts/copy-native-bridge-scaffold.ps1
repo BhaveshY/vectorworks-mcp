@@ -50,4 +50,4 @@ foreach ($FileName in $Files) {
 Write-Host "Copied native bridge scaffold to:"
 Write-Host $DestinationDir
 Write-Host ""
-Write-Host "Next: add these files to the SDK project, wire SDK entry points, build, then run scripts\smoke-native-bridge.ps1 -Json."
+Write-Host "Next: add these files to the SDK project, wire SDK entry points, build, then run scripts\smoke-native-bridge.ps1 -Phase 0 -Stop -Json first."

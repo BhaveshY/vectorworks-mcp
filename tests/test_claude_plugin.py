@@ -56,6 +56,7 @@ class ClaudePluginTests(unittest.TestCase):
 
     def test_plugin_scripts_exist(self):
         for relative_path in (
+            "scripts/resolve-companion-repo.ps1",
             "scripts/resolve-vectorworks-mcp-repo.ps1",
             "scripts/run-vectorworks-mcp.ps1",
             "scripts/bootstrap-vectorworks-mcp.ps1",
@@ -225,6 +226,7 @@ class ClaudePluginTests(unittest.TestCase):
         ):
             text = (PLUGIN / relative_path).read_text(encoding="utf-8")
             self.assertIn("-RequireContract", text, relative_path)
+            self.assertIn("Resolve-VectorworksMcpCompanionRepo", text, relative_path)
 
         bootstrap = (PLUGIN / "scripts" / "bootstrap-vectorworks-mcp.ps1").read_text(encoding="utf-8")
         resolver = (PLUGIN / "scripts" / "resolve-vectorworks-mcp-repo.ps1").read_text(encoding="utf-8")
@@ -244,9 +246,20 @@ class ClaudePluginTests(unittest.TestCase):
 
     def test_connector_ci_checks_bundled_plugin_contract(self):
         workflow = (ROOT / ".github" / "workflows" / "verify.yml").read_text(encoding="utf-8")
+        bundled_contract = (ROOT / "scripts" / "check-bundled-plugin-contract.ps1").read_text(encoding="utf-8")
 
         self.assertIn("check-bundled-plugin-contract.ps1", workflow)
         self.assertIn("Bundled plugin contract", workflow)
+        self.assertIn("Get-Command claude", bundled_contract)
+        self.assertIn("plugin validate", bundled_contract)
+        self.assertIn("skipping official Claude bundled-plugin validation", bundled_contract)
+
+    def test_readme_uses_canonical_repo_override_env_var(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn("$env:VW_MCP_REPO", readme)
+        self.assertIn("VECTORWORKS_MCP_REPO` remains supported as a backward-compatible alias", readme)
+        self.assertNotIn("$env:VECTORWORKS_MCP_REPO", readme)
 
 
 if __name__ == "__main__":

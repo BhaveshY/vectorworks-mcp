@@ -7,6 +7,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "resolve-companion-repo.ps1")
+
 $PluginRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $PluginManifestPath = Join-Path $PluginRoot ".claude-plugin\plugin.json"
 $PluginMarketplacePath = Join-Path $PluginRoot ".claude-plugin\marketplace.json"
@@ -247,7 +249,7 @@ $RepoRoot = $null
 try {
     $ResolverArgs = @()
     if ($env:VW_MCP_REPO) { $ResolverArgs += @("-RepoPath", $env:VW_MCP_REPO) }
-    $RepoRoot = (& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $Resolver @ResolverArgs | Select-Object -Last 1).Trim()
+    $RepoRoot = Resolve-VectorworksMcpCompanionRepo -ResolverArgs $ResolverArgs
 } catch {
     Write-Host "Repo: NOT FOUND"
     Write-Host $_.Exception.Message

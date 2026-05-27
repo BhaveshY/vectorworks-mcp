@@ -27,6 +27,7 @@ $RequiredScaffoldFiles = @(
     "CadRequestQueue.hpp",
     "VectorworksMCPBridge.cpp"
 )
+$BuiltArtifactWasExplicit = -not [string]::IsNullOrWhiteSpace($BuiltArtifact)
 
 if (-not $InstallDir) {
     if (-not $env:APPDATA) {
@@ -76,27 +77,30 @@ $MissingScaffoldFiles = @($RequiredScaffoldFiles | Where-Object {
 })
 $ScaffoldCopied = $MissingScaffoldFiles.Count -eq 0
 
-if ($BuiltArtifact) {
+if ($BuiltArtifactWasExplicit) {
     if (-not (Test-Path -LiteralPath $BuiltArtifact -PathType Leaf)) {
         throw "Built artifact was not found at $BuiltArtifact"
     }
     $BuiltArtifact = (Resolve-Path -LiteralPath $BuiltArtifact).Path
 } else {
-    $BuiltArtifact = Get-FirstFile -Root $BridgeSourceDir -Patterns @("*.vwlibrary", "*.vsm", "*.vst", "*.vso", "*.dll")
+    $BuiltArtifact = ""
 }
+$BuiltArtifactCandidate = Get-FirstFile -Root $BridgeSourceDir -Patterns @("*.vwlibrary", "*.vsm", "*.vst", "*.vso", "*.dll")
+$InstallArtifact = if ($BuiltArtifactWasExplicit) { $BuiltArtifact } else { "" }
 
 $InstallDestination = ""
 $InstallPerformed = $false
 $InstallWhatIf = [bool]$WhatIfPreference
 $InstalledPath = ""
 if ($Install) {
-    if (-not $BuiltArtifact) {
-        throw "Pass -BuiltArtifact before using -Install, or build the native bridge first."
+    if (-not $BuiltArtifactWasExplicit) {
+        $CandidateHint = if ($BuiltArtifactCandidate) { " Candidate found: $BuiltArtifactCandidate" } else { "" }
+        throw "Pass an explicit -BuiltArtifact before using -Install; auto-discovered artifacts are reported as candidates only and are not installed implicitly.$CandidateHint"
     }
-    $InstallDestination = Join-Path $InstallDir (Split-Path -Leaf $BuiltArtifact)
+    $InstallDestination = Join-Path $InstallDir (Split-Path -Leaf $InstallArtifact)
     if (-not $WhatIfPreference -and $PSCmdlet.ShouldProcess($InstallDestination, "Install native Vectorworks bridge artifact")) {
         New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-        Copy-Item -LiteralPath $BuiltArtifact -Destination $InstallDestination -Force
+        Copy-Item -LiteralPath $InstallArtifact -Destination $InstallDestination -Force
         $InstalledPath = (Resolve-Path -LiteralPath $InstallDestination).Path
         $InstallPerformed = $true
     }
@@ -112,22 +116,23 @@ if (-not $SourcePrepared) {
 if ($SourcePrepared -and -not $SolutionPath) {
     Add-NextAction $NextActions "Recreate native_bridge\worktree with scripts\prepare-native-bridge-source.ps1 -CloneSdkExamples -Force"
 }
-if ($SourcePrepared -and $SolutionPath -and -not $BuiltArtifact) {
+if ($SourcePrepared -and $SolutionPath -and -not $BuiltArtifact -and -not $BuiltArtifactCandidate) {
     Add-NextAction $NextActions "Run scripts\build-native-bridge.ps1 -VectorworksVersion $VectorworksVersion"
 }
 if ($SourcePrepared -and $SolutionPath -and -not $ScaffoldCopied) {
     $ForceHint = if ($MissingScaffoldFiles.Count -lt $RequiredScaffoldFiles.Count) { " -Force" } else { "" }
     Add-NextAction $NextActions "After the unmodified SDK example builds, run scripts\copy-native-bridge-scaffold.ps1 -VectorworksVersion $VectorworksVersion$ForceHint"
 }
-if ($BuiltArtifact -and -not $Install) {
-    Add-NextAction $NextActions "Dry-run install: scripts\doctor-native-bridge.ps1 -BuiltArtifact `"$BuiltArtifact`" -Install -WhatIf"
-    Add-NextAction $NextActions "Install when ready: scripts\doctor-native-bridge.ps1 -BuiltArtifact `"$BuiltArtifact`" -Install"
+$InstallCandidate = if ($BuiltArtifact) { $BuiltArtifact } else { $BuiltArtifactCandidate }
+if ($InstallCandidate -and -not $Install) {
+    Add-NextAction $NextActions "Dry-run install: scripts\doctor-native-bridge.ps1 -BuiltArtifact `"$InstallCandidate`" -Install -WhatIf"
+    Add-NextAction $NextActions "Install when ready: scripts\doctor-native-bridge.ps1 -BuiltArtifact `"$InstallCandidate`" -Install"
 }
-if ($Install -and $BuiltArtifact -and -not $InstallPerformed) {
-    Add-NextAction $NextActions "Dry-run only: rerun scripts\doctor-native-bridge.ps1 -BuiltArtifact `"$BuiltArtifact`" -Install without -WhatIf to copy the bridge artifact."
+if ($Install -and $InstallArtifact -and -not $InstallPerformed) {
+    Add-NextAction $NextActions "Dry-run only: rerun scripts\doctor-native-bridge.ps1 -BuiltArtifact `"$InstallArtifact`" -Install without -WhatIf to copy the bridge artifact."
 }
 if ($InstallPerformed) {
-    Add-NextAction $NextActions "Restart Vectorworks $VectorworksVersion, enable/load the native bridge plug-in, then run scripts\smoke-native-bridge.ps1 -Json"
+    Add-NextAction $NextActions "Restart Vectorworks $VectorworksVersion, enable/load the native bridge plug-in, then run scripts\smoke-native-bridge.ps1 -Phase 0 -Stop -Json first."
 }
 if ($NextActions.Count -eq 0) {
     Add-NextAction $NextActions "Complete native bridge source, build it, then rerun this doctor with -BuiltArtifact."
@@ -147,6 +152,8 @@ $Report = [pscustomobject]@{
     sourcePrepared = [bool]$SourcePrepared
     solutionPath = $SolutionPath
     builtArtifact = $BuiltArtifact
+    builtArtifactWasExplicit = [bool]$BuiltArtifactWasExplicit
+    builtArtifactCandidate = $BuiltArtifactCandidate
     installDir = $InstallDir
     installRequested = [bool]$Install
     installDestination = $InstallDestination
@@ -173,7 +180,10 @@ if ($Json) {
         Write-Host "Missing scaffold files: $($MissingScaffoldFiles -join ', ')"
     }
     Write-Host "Solution: $(if ($SolutionPath) { $SolutionPath } else { 'not found' })"
-    Write-Host "Built artifact: $(if ($BuiltArtifact) { $BuiltArtifact } else { 'not found' })"
+    Write-Host "Built artifact: $(if ($BuiltArtifact) { $BuiltArtifact } else { 'not provided explicitly' })"
+    if ($BuiltArtifactCandidate) {
+        Write-Host "Auto-discovered candidate: $BuiltArtifactCandidate"
+    }
     Write-Host "Install dir: $InstallDir"
     if ($InstallDestination) {
         Write-Host "Install destination: $InstallDestination"

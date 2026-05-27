@@ -92,12 +92,15 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\copy-native-bridge-scaffold.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\VectorworksMCPBridge.vwlibrary -Install -WhatIf
-powershell -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Json
+powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\VectorworksMCPBridge.vwlibrary -Install
+# Restart Vectorworks, enable/load the native VectorworksMCPBridge plug-in, then run the phase-0 stop smoke first.
+powershell -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Phase 0 -Stop -Json
 ```
 
-The default native smoke is the phase-1 read gate. In a disposable test
-document, add `-AllowWriteFixture` to prove create/select/delete cleanup; the
-delete runs only after the fixture identity and exact selection are verified.
+After the phase-0 stop smoke passes, load the native bridge plug-in again before
+running the default phase-1 read gate. In a disposable test document, add
+`-AllowWriteFixture` to prove create/select/delete cleanup; the delete runs only
+after the fixture identity and exact selection are verified.
 
 The Python listener also applies conservative resource guards for long agent
 sessions: `VW_MCP_MAX_CLIENTS`, `VW_MCP_CLIENT_IDLE_SECONDS`,
@@ -164,9 +167,12 @@ If you launch Claude Code outside this repo, configure the plugin option
 `vectorworks_repo` to this repo path, or set:
 
 ```powershell
-$env:VECTORWORKS_MCP_REPO = "C:\Users\Bhavesh\repos\vectorworks-mcp"
+$env:VW_MCP_REPO = "C:\Users\Bhavesh\repos\vectorworks-mcp"
 claude --plugin-dir C:\Users\Bhavesh\repos\vectorworks-mcp\plugins\vectorworks
 ```
+
+`VECTORWORKS_MCP_REPO` remains supported as a backward-compatible alias, but
+`VW_MCP_REPO` is the canonical override used by the plugin docs and skills.
 
 The plugin adds namespaced skills:
 

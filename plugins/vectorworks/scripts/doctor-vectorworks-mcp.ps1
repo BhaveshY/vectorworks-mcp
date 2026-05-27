@@ -10,6 +10,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "resolve-companion-repo.ps1")
+
 $PluginRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $PluginManifestPath = Join-Path $PluginRoot ".claude-plugin\plugin.json"
 $PluginMarketplacePath = Join-Path $PluginRoot ".claude-plugin\marketplace.json"
@@ -89,7 +91,7 @@ if (-not $Json) {
     try {
         $SoftResolverArgs = @()
         if ($env:VW_MCP_REPO) { $SoftResolverArgs += @("-RepoPath", $env:VW_MCP_REPO) }
-        $SoftRepoRoot = (& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $Resolver @SoftResolverArgs | Select-Object -Last 1).Trim()
+        $SoftRepoRoot = Resolve-VectorworksMcpCompanionRepo -ResolverArgs $SoftResolverArgs
         if ($SoftRepoRoot) {
             Write-Host "Repo: $SoftRepoRoot"
             Write-Host "Connector contract: $(Get-ConnectorContractDiagnostics -RepoPath $SoftRepoRoot)"
@@ -103,7 +105,7 @@ if (-not $Json) {
 
 $ResolverArgs = @("-RequireContract")
 if ($env:VW_MCP_REPO) { $ResolverArgs += @("-RepoPath", $env:VW_MCP_REPO) }
-$RepoRoot = (& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $Resolver @ResolverArgs | Select-Object -Last 1).Trim()
+$RepoRoot = Resolve-VectorworksMcpCompanionRepo -ResolverArgs $ResolverArgs
 $Doctor = Join-Path $RepoRoot "scripts\doctor-vectorworks-mcp.ps1"
 
 if (-not (Test-Path -LiteralPath $Doctor)) {
