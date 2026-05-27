@@ -13,6 +13,7 @@ namespace {
 CadRequestQueue gCadQueue;
 std::atomic_bool gStopRequested{false};
 constexpr auto kCadRequestTimeout = std::chrono::seconds(30);
+constexpr bool kCadHandlersImplemented = false;
 
 Protocol::ResponseEnvelope HandlePingOnTransportThread(const Protocol::RequestEnvelope& request) {
     return {
@@ -69,6 +70,9 @@ Protocol::ResponseEnvelope DispatchFromSocketWorker(const Protocol::RequestEnvel
         return {request.id, true, R"("Native bridge stop requested")", ""};
     }
     if (RequiresCadMainContext(request.action)) {
+        if (!kCadHandlersImplemented) {
+            return {request.id, false, "", "native bridge phase 0 CAD handlers are not implemented: " + request.action};
+        }
         if (gStopRequested.load()) {
             return {request.id, false, "", "native bridge is stopping"};
         }

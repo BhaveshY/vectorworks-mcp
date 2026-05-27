@@ -57,6 +57,8 @@ def _record_call(
     action: str,
     iteration: int | str,
     params: dict[str, Any] | None = None,
+    latency_budget_ms: float | None = None,
+    latency_budget_label: str = "latency",
 ) -> dict[str, Any] | None:
     started = time.perf_counter()
     request_id = "{0}-{1}".format(action, iteration)
@@ -77,6 +79,12 @@ def _record_call(
                 report["checks"].append(check)
                 return None
             check["ok"] = True
+            if latency_budget_ms is not None and elapsed_ms > latency_budget_ms:
+                check["ok"] = False
+                check["error"] = (
+                    "{0} iteration {1} latency {2:.2f}ms exceeded {3} budget {4:g}ms"
+                ).format(action, iteration, elapsed_ms, latency_budget_label, latency_budget_ms)
+                report["failures"].append(check["error"])
             report["checks"].append(check)
             return response
         if success is False:
@@ -526,6 +534,8 @@ def run_smoke(
     phase: int = 1,
     allow_write_fixture: bool = False,
     stop: bool = False,
+    max_ping_ms: float | None = None,
+    max_read_ms: float | None = None,
 ) -> dict[str, Any]:
     report: dict[str, Any] = {
         "ok": False,
@@ -539,6 +549,8 @@ def run_smoke(
         "phase": phase,
         "allow_write_fixture": allow_write_fixture,
         "stop_requested": stop,
+        "max_ping_ms": max_ping_ms,
+        "max_read_ms": max_read_ms,
         "stop_port_released": None,
         "checks": [],
         "failures": [],
@@ -550,6 +562,10 @@ def run_smoke(
         report["failures"].append("read_count must be at least 1 for phase >= 1")
     if phase < 1 and allow_write_fixture:
         report["failures"].append("allow_write_fixture requires phase >= 1")
+    if max_ping_ms is not None and max_ping_ms <= 0:
+        report["failures"].append("max_ping_ms must be greater than 0")
+    if max_read_ms is not None and max_read_ms <= 0:
+        report["failures"].append("max_read_ms must be greater than 0")
     if report["failures"]:
         return report
 
@@ -559,7 +575,14 @@ def run_smoke(
         with socket.create_connection((host, port), timeout=timeout) as sock:
             sock.settimeout(timeout)
             for index in range(1, ping_count + 1):
-                response = _record_call(sock, report, "ping", index)
+                response = _record_call(
+                    sock,
+                    report,
+                    "ping",
+                    index,
+                    latency_budget_ms=max_ping_ms,
+                    latency_budget_label="ping latency",
+                )
                 if response is not None:
                     _validate_ping(report, response.get("result"), require_native=require_native, phase=phase)
 
@@ -577,7 +600,15 @@ def run_smoke(
                         params = {"action": "get"}
                     else:
                         params = None
-                    response = _record_call(sock, report, action, index, params=params)
+                    response = _record_call(
+                        sock,
+                        report,
+                        action,
+                        index,
+                        params=params,
+                        latency_budget_ms=max_read_ms,
+                        latency_budget_label="read latency",
+                    )
                     if response is not None:
                         result = response.get("result")
                         _validate_read_result(report, action, result, params=params)
@@ -623,6 +654,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--phase", type=int, choices=(0, 1), default=1)
     parser.add_argument("--allow-write-fixture", action="store_true")
     parser.add_argument("--stop", action="store_true")
+    parser.add_argument("--max-ping-ms", type=float, default=None)
+    parser.add_argument("--max-read-ms", type=float, default=None)
     parser.add_argument("--json", action="store_true")
     return parser.parse_args(argv)
 
@@ -640,6 +673,8 @@ def main(argv: list[str] | None = None) -> int:
         phase=args.phase,
         allow_write_fixture=args.allow_write_fixture,
         stop=args.stop,
+        max_ping_ms=args.max_ping_ms,
+        max_read_ms=args.max_read_ms,
     )
 
     if args.json:

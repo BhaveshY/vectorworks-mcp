@@ -133,10 +133,19 @@ class NativeBridgeContractTests(unittest.TestCase):
 
     def test_native_smoke_harness_accepts_mock_bridge(self):
         with MockNativeBridge() as bridge:
-            report = run_smoke(port=bridge.port, ping_count=3, read_count=2, timeout=1)
+            report = run_smoke(
+                port=bridge.port,
+                ping_count=3,
+                read_count=2,
+                timeout=1,
+                max_ping_ms=1000,
+                max_read_ms=1000,
+            )
 
         self.assertTrue(report["ok"], report["failures"])
         self.assertEqual(report["phase"], 1)
+        self.assertEqual(report["max_ping_ms"], 1000)
+        self.assertEqual(report["max_read_ms"], 1000)
         self.assertEqual(len(report["checks"]), 11)
         self.assertEqual(
             [request["action"] for request in bridge.requests],
@@ -154,6 +163,58 @@ class NativeBridgeContractTests(unittest.TestCase):
                 "selection",
             ],
         )
+
+    def test_native_smoke_harness_rejects_ping_latency_over_budget(self):
+        status = {
+            "pong": True,
+            "handlers": 2,
+            "version": "mock-native-bridge",
+            "bridge_kind": "native_sdk_bridge_mock",
+            "dispatch_mode": "native_sdk",
+            "cad_api_safe": False,
+            "transport_only": True,
+            "native_bridge": True,
+            "native_phase": 0,
+            "implemented_actions": ["ping", "stop"],
+        }
+
+        def delayed_ping(_request):
+            time.sleep(0.03)
+            return {"success": True, "result": status}
+
+        with MockNativeBridge(status=status, response_overrides={"ping": delayed_ping}) as bridge:
+            report = run_smoke(
+                port=bridge.port,
+                ping_count=1,
+                read_count=0,
+                timeout=1,
+                phase=0,
+                max_ping_ms=1,
+            )
+
+        self.assertFalse(report["ok"])
+        self.assertTrue(any("ping iteration 1 latency" in failure for failure in report["failures"]))
+        self.assertTrue(any("ping latency budget 1ms" in failure for failure in report["failures"]))
+
+    def test_native_smoke_harness_rejects_read_latency_over_budget(self):
+        layers = [{"name": "Design Layer-1", "visible": True}]
+
+        def delayed_layers(_request):
+            time.sleep(0.03)
+            return {"success": True, "result": layers}
+
+        with MockNativeBridge(layers=layers, response_overrides={"get_layers": delayed_layers}) as bridge:
+            report = run_smoke(
+                port=bridge.port,
+                ping_count=1,
+                read_count=1,
+                timeout=1,
+                max_read_ms=1,
+            )
+
+        self.assertFalse(report["ok"])
+        self.assertTrue(any("get_layers iteration 1 latency" in failure for failure in report["failures"]))
+        self.assertTrue(any("read latency budget 1ms" in failure for failure in report["failures"]))
 
     def test_native_smoke_harness_accepts_phase_one_write_fixture(self):
         with MockNativeBridge() as bridge:

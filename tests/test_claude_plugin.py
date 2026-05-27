@@ -234,6 +234,7 @@ class ClaudePluginTests(unittest.TestCase):
         bootstrap = (PLUGIN / "scripts" / "bootstrap-vectorworks-mcp.ps1").read_text(encoding="utf-8")
         resolver = (PLUGIN / "scripts" / "resolve-vectorworks-mcp-repo.ps1").read_text(encoding="utf-8")
         contract = (PLUGIN / "scripts" / "check-companion-contract.ps1").read_text(encoding="utf-8")
+        smoke = (PLUGIN / "scripts" / "smoke-native-bridge.ps1").read_text(encoding="utf-8")
         self.assertIn("check-companion-contract.ps1", bootstrap)
         self.assertIn("-RepoPath", bootstrap)
         self.assertIn("vw_load_listener_2024.py", bootstrap)
@@ -246,6 +247,8 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("native-bridge-scaffold-copy", contract)
         self.assertIn("LoaderPath", contract)
         self.assertIn("CopyLoaderToClipboard", contract)
+        self.assertIn("MaxPingMilliseconds", smoke)
+        self.assertIn("MaxReadMilliseconds", smoke)
 
     def test_connector_ci_checks_bundled_plugin_contract(self):
         workflow = (ROOT / ".github" / "workflows" / "verify.yml").read_text(encoding="utf-8")

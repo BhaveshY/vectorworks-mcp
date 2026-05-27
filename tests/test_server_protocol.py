@@ -3,6 +3,7 @@ import inspect
 import socket
 import struct
 import threading
+import time
 import unittest
 
 import server
@@ -80,11 +81,61 @@ class FakeListener:
             self.done.set()
 
 
+class ConcurrentFakeListener(FakeListener):
+    def __init__(self, handler, max_requests=2):
+        super().__init__(handler, max_requests=max_requests)
+        self.client_threads = []
+        self.sock.listen(4)
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+        self.thread.join(2)
+        for thread in self.client_threads:
+            thread.join(2)
+        server._close()
+
+    def _serve(self):
+        self.ready.set()
+        try:
+            self.sock.settimeout(1)
+            while len(self.requests) < self.max_requests:
+                try:
+                    conn, _addr = self.sock.accept()
+                except (OSError, TimeoutError, socket.timeout):
+                    break
+                thread = threading.Thread(target=self._handle_client, args=(conn,), daemon=True)
+                self.client_threads.append(thread)
+                thread.start()
+        finally:
+            self.done.set()
+
+    def _handle_client(self, conn):
+        with conn:
+            conn.settimeout(1)
+            while len(self.requests) < self.max_requests:
+                try:
+                    request = json.loads(_read_frame(conn).decode("utf-8"))
+                except (AssertionError, ConnectionError, OSError, socket.timeout):
+                    break
+                self.requests.append(request)
+                response = self.handler(request)
+                if response is None:
+                    break
+                if isinstance(response, bytes):
+                    conn.sendall(response)
+                else:
+                    _write_frame(conn, json.dumps(response).encode("utf-8"))
+
+
 def _configure_server(port, max_frame_bytes=1024 * 1024):
     server._close()
     server.HOST = "127.0.0.1"
     server.PORT = port
     server.TIMEOUT = 1
+    server.HEALTH_TIMEOUT = 0.25
     server.MAX_FRAME_BYTES = max_frame_bytes
     server.PREFLIGHT_CACHE_SECONDS = 0.75
     server._CONFIG_ERROR = None
@@ -217,17 +268,71 @@ class ServerProtocolTests(unittest.TestCase):
 
     def test_bridge_status_tool_uses_ping_action(self):
         calls = []
-        original_send = server._send
+        original_send = server._send_health
         try:
-            server._send = (
+            server._send_health = (
                 lambda action, params=None, require_cad_safe=False:
                 calls.append((action, params, require_cad_safe)) or '{"pong": true}'
             )
             self.assertEqual(server.vw_bridge_status(), '{"pong": true}')
         finally:
-            server._send = original_send
+            server._send_health = original_send
 
         self.assertEqual(calls, [("ping", None, False)])
+
+    def test_health_ping_uses_dedicated_connection_while_cad_call_is_blocked(self):
+        cad_started = threading.Event()
+        release_cad = threading.Event()
+        status = {
+            "pong": True,
+            "version": "fake",
+            "bridge_kind": "python_dialog_agent_session",
+            "dispatch_mode": "dialog",
+            "handlers": 1,
+            "cad_api_safe": True,
+            "transport_only": False,
+        }
+
+        def handler(request):
+            if request["action"] == "get_layers":
+                cad_started.set()
+                release_cad.wait(1)
+                return {"id": request["id"], "success": True, "result": []}
+            return {"id": request["id"], "success": True, "result": status}
+
+        with ConcurrentFakeListener(handler, max_requests=2) as listener:
+            _configure_server(listener.port)
+            worker = threading.Thread(target=lambda: server._send("get_layers"), daemon=True)
+            worker.start()
+            self.assertTrue(cad_started.wait(1))
+
+            started = time.perf_counter()
+            result = server.vw_ping()
+            elapsed = time.perf_counter() - started
+
+            release_cad.set()
+            worker.join(2)
+
+        self.assertLess(elapsed, 0.2)
+        self.assertEqual(json.loads(result)["pong"], True)
+        self.assertEqual([request["action"] for request in listener.requests], ["get_layers", "ping"])
+
+    def test_health_ping_uses_health_timeout_without_retry_loop(self):
+        def handler(_request):
+            time.sleep(0.6)
+            return None
+
+        with ConcurrentFakeListener(handler, max_requests=1) as listener:
+            _configure_server(listener.port)
+            server.TIMEOUT = 1.5
+            server.HEALTH_TIMEOUT = 0.1
+
+            started = time.perf_counter()
+            result = server.vw_ping()
+            elapsed = time.perf_counter() - started
+
+        self.assertLess(elapsed, 0.5)
+        self.assertTrue(result.startswith("Connection error:"))
 
     def test_send_tool_blocks_transport_only_cad_handler_before_action(self):
         def handler(request):
@@ -336,7 +441,7 @@ class ServerProtocolTests(unittest.TestCase):
 
         try:
             server.time.monotonic = lambda: now[0]
-            with FakeListener(handler, max_requests=3) as listener:
+            with ConcurrentFakeListener(handler, max_requests=3) as listener:
                 _configure_server(listener.port)
                 layers = server.vw_get_layers()
                 now[0] += 1.0
@@ -370,7 +475,7 @@ class ServerProtocolTests(unittest.TestCase):
                 return {"id": request["id"], "success": True, "result": {"filename": "Test.vwx"}}
             self.fail(f"Unexpected action: {request['action']}")
 
-        with FakeListener(handler, max_requests=4) as listener:
+        with ConcurrentFakeListener(handler, max_requests=4) as listener:
             _configure_server(listener.port)
             server.PREFLIGHT_CACHE_SECONDS = 0
             layers = server.vw_get_layers()
@@ -552,15 +657,15 @@ class ServerProtocolTests(unittest.TestCase):
 
     def test_send_tool_leaves_health_tools_unguarded(self):
         calls = []
-        original_send = server._send
+        original_send = server._send_health
         try:
-            server._send = (
+            server._send_health = (
                 lambda action, params=None, require_cad_safe=False:
                 calls.append((action, params, require_cad_safe)) or '{"pong": true}'
             )
             self.assertEqual(server.vw_ping(), '{"pong": true}')
         finally:
-            server._send = original_send
+            server._send_health = original_send
 
         self.assertEqual(calls, [("ping", None, False)])
 
@@ -639,9 +744,9 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertFalse(annotations["destructiveHint"])
 
     def test_cad_preflight_allows_cad_safe_bridge(self):
-        original_send = server._send
+        original_send = server._send_health
         try:
-            server._send = lambda action, params=None: json.dumps(
+            server._send_health = lambda action, params=None: json.dumps(
                 {
                     "pong": True,
                     "cad_api_safe": True,
@@ -654,7 +759,7 @@ class ServerProtocolTests(unittest.TestCase):
             )
             result = server.vw_preflight_for_cad()
         finally:
-            server._send = original_send
+            server._send_health = original_send
 
         preflight = json.loads(result)
         self.assertTrue(preflight["ok"])
@@ -664,9 +769,9 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertIn("vw_get_document_info", preflight["next_action"])
 
     def test_cad_preflight_blocks_transport_only_bridge(self):
-        original_send = server._send
+        original_send = server._send_health
         try:
-            server._send = lambda action, params=None: json.dumps(
+            server._send_health = lambda action, params=None: json.dumps(
                 {
                     "pong": True,
                     "cad_api_safe": False,
@@ -677,7 +782,7 @@ class ServerProtocolTests(unittest.TestCase):
             )
             result = server.vw_preflight_for_cad()
         finally:
-            server._send = original_send
+            server._send_health = original_send
 
         preflight = json.loads(result)
         self.assertFalse(preflight["ok"])
@@ -686,9 +791,9 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertEqual(preflight["reason"], "transport_only_bridge")
 
     def test_cad_preflight_blocks_native_bridge_missing_capabilities(self):
-        original_send = server._send
+        original_send = server._send_health
         try:
-            server._send = lambda action, params=None: json.dumps(
+            server._send_health = lambda action, params=None: json.dumps(
                 {
                     "pong": True,
                     "cad_api_safe": True,
@@ -704,7 +809,7 @@ class ServerProtocolTests(unittest.TestCase):
             )
             result = server.vw_preflight_for_cad()
         finally:
-            server._send = original_send
+            server._send_health = original_send
 
         preflight = json.loads(result)
         self.assertFalse(preflight["ok"])
@@ -715,9 +820,9 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertIn("implemented_actions missing", "\n".join(preflight["native_readiness_errors"]))
 
     def test_cad_preflight_blocks_legacy_foreground_bridge(self):
-        original_send = server._send
+        original_send = server._send_health
         try:
-            server._send = lambda action, params=None: json.dumps(
+            server._send_health = lambda action, params=None: json.dumps(
                 {
                     "pong": True,
                     "cad_api_safe": True,
@@ -728,7 +833,7 @@ class ServerProtocolTests(unittest.TestCase):
             )
             result = server.vw_preflight_for_cad()
         finally:
-            server._send = original_send
+            server._send_health = original_send
 
         preflight = json.loads(result)
         self.assertFalse(preflight["ok"])
@@ -737,24 +842,24 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertIn("vw_load_listener_2024.py", preflight["next_action"])
 
     def test_cad_preflight_blocks_legacy_status_without_safety_field(self):
-        original_send = server._send
+        original_send = server._send_health
         try:
-            server._send = lambda action, params=None: json.dumps({"pong": True, "version": "legacy"})
+            server._send_health = lambda action, params=None: json.dumps({"pong": True, "version": "legacy"})
             result = server.vw_preflight_for_cad()
         finally:
-            server._send = original_send
+            server._send_health = original_send
 
         preflight = json.loads(result)
         self.assertFalse(preflight["ok"])
         self.assertEqual(preflight["reason"], "legacy_status_without_cad_api_safe")
 
     def test_cad_preflight_blocks_connection_error_text(self):
-        original_send = server._send
+        original_send = server._send_health
         try:
-            server._send = lambda action, params=None: "Connection error: listener missing"
+            server._send_health = lambda action, params=None: "Connection error: listener missing"
             result = server.vw_preflight_for_cad()
         finally:
-            server._send = original_send
+            server._send_health = original_send
 
         preflight = json.loads(result)
         self.assertFalse(preflight["ok"])

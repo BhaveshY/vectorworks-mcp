@@ -6,8 +6,9 @@ includes so this repo still verifies on machines that do not have the SDK.
 
 Files:
 
-- `BridgeProtocol.hpp` / `BridgeProtocol.cpp`: length-prefixed frame constants
-  and strict request/response envelope names from `..\PROTOCOL.md`.
+- `BridgeProtocol.hpp` / `BridgeProtocol.cpp`: length-prefixed frame constants,
+  strict request envelope parsing, and strict response envelope serialization
+  from `..\PROTOCOL.md`.
 - `BridgeDispatcher.hpp`: phase-0 and phase-1 action map from
   `..\HANDLER_MATRIX.md`, including the worker-thread vs main/plugin-context
   split.

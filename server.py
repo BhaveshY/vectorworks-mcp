@@ -11,6 +11,7 @@ Environment variables, all optional:
   VW_MCP_HOST             default 127.0.0.1
   VW_MCP_PORT             default 9877
   VW_MCP_TIMEOUT          per-request timeout in seconds, default 60
+  VW_MCP_HEALTH_TIMEOUT   ping/preflight timeout in seconds, default min(2, VW_MCP_TIMEOUT)
   VW_MCP_MAX_FRAME_BYTES  max protocol frame size, default 16777216
   VW_MCP_PREFLIGHT_CACHE_MS
                           safe-CAD preflight success cache in ms, default 750
@@ -41,6 +42,7 @@ else:
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9877
 DEFAULT_TIMEOUT = 60.0
+DEFAULT_HEALTH_TIMEOUT = 2.0
 DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024
 DEFAULT_PREFLIGHT_CACHE_MS = 750
 MAX_PREFLIGHT_CACHE_MS = 5_000
@@ -131,10 +133,11 @@ def _parse_float_env(name: str, default: float, min_value: float) -> float:
     return value
 
 
-def _load_config() -> tuple[str, int, float, int, int]:
+def _load_config() -> tuple[str, int, float, float, int, int]:
     host = os.environ.get("VW_MCP_HOST", DEFAULT_HOST).strip() or DEFAULT_HOST
     port = _parse_int_env("VW_MCP_PORT", DEFAULT_PORT, 1, 65535)
     timeout = _parse_float_env("VW_MCP_TIMEOUT", DEFAULT_TIMEOUT, 0.1)
+    health_timeout = _parse_float_env("VW_MCP_HEALTH_TIMEOUT", min(DEFAULT_HEALTH_TIMEOUT, timeout), 0.1)
     max_frame = _parse_int_env(
         "VW_MCP_MAX_FRAME_BYTES",
         DEFAULT_MAX_FRAME_BYTES,
@@ -147,17 +150,18 @@ def _load_config() -> tuple[str, int, float, int, int]:
         0,
         MAX_PREFLIGHT_CACHE_MS,
     )
-    return host, port, timeout, max_frame, preflight_cache_ms
+    return host, port, timeout, health_timeout, max_frame, preflight_cache_ms
 
 
 _CONFIG_ERROR: Optional[str] = None
 try:
-    HOST, PORT, TIMEOUT, MAX_FRAME_BYTES, PREFLIGHT_CACHE_MS = _load_config()
+    HOST, PORT, TIMEOUT, HEALTH_TIMEOUT, MAX_FRAME_BYTES, PREFLIGHT_CACHE_MS = _load_config()
 except ConfigError as exc:
     _CONFIG_ERROR = str(exc)
     HOST = DEFAULT_HOST
     PORT = DEFAULT_PORT
     TIMEOUT = DEFAULT_TIMEOUT
+    HEALTH_TIMEOUT = DEFAULT_HEALTH_TIMEOUT
     MAX_FRAME_BYTES = DEFAULT_MAX_FRAME_BYTES
     PREFLIGHT_CACHE_MS = DEFAULT_PREFLIGHT_CACHE_MS
 
@@ -170,6 +174,7 @@ mcp = FastMCP("Vectorworks 2024/2025") if FastMCP is not None else _MissingFastM
 # interleave frames on the same socket.
 _sock: Optional[socket.socket] = None
 _lock = threading.Lock()
+_cad_safe_cache_lock = threading.Lock()
 _cad_safe_cache: Optional[tuple[float, dict[str, Any]]] = None
 
 
@@ -592,7 +597,8 @@ def _tool(tool_name: str):
 
 def _clear_cad_safe_cache():
     global _cad_safe_cache
-    _cad_safe_cache = None
+    with _cad_safe_cache_lock:
+        _cad_safe_cache = None
 
 
 def _close():
@@ -619,16 +625,20 @@ def _connect():
     _sock = sock
 
 
-def _recv_exact(n: int) -> bytes:
-    if _sock is None:
-        raise ConnectionError("not connected")
+def _recv_exact_from(sock: socket.socket, n: int) -> bytes:
     buf = bytearray()
     while len(buf) < n:
-        chunk = _sock.recv(n - len(buf))
+        chunk = sock.recv(n - len(buf))
         if not chunk:
             raise ConnectionError("Vectorworks closed the connection")
         buf.extend(chunk)
     return bytes(buf)
+
+
+def _recv_exact(n: int) -> bytes:
+    if _sock is None:
+        raise ConnectionError("not connected")
+    return _recv_exact_from(_sock, n)
 
 
 def _json_bytes(value: Any) -> bytes:
@@ -638,18 +648,22 @@ def _json_bytes(value: Any) -> bytes:
         raise ProtocolError(f"request is not JSON serializable: {exc}") from exc
 
 
-def _send_frame(payload: bytes):
+def _send_frame_to(sock: socket.socket, payload: bytes):
     if len(payload) > MAX_FRAME_BYTES:
         raise ProtocolError(
             f"request frame is {len(payload)} bytes, larger than VW_MCP_MAX_FRAME_BYTES={MAX_FRAME_BYTES}"
         )
+    sock.sendall(struct.pack(">I", len(payload)) + payload)
+
+
+def _send_frame(payload: bytes):
     if _sock is None:
         raise ConnectionError("not connected")
-    _sock.sendall(struct.pack(">I", len(payload)) + payload)
+    _send_frame_to(_sock, payload)
 
 
-def _recv_frame() -> bytes:
-    header = _recv_exact(4)
+def _recv_frame_from(sock: socket.socket) -> bytes:
+    header = _recv_exact_from(sock, 4)
     (size,) = struct.unpack(">I", header)
     if size <= 0:
         raise ProtocolError(f"listener sent invalid frame length {size}")
@@ -657,7 +671,13 @@ def _recv_frame() -> bytes:
         raise ProtocolError(
             f"listener frame is {size} bytes, larger than VW_MCP_MAX_FRAME_BYTES={MAX_FRAME_BYTES}"
         )
-    return _recv_exact(size)
+    return _recv_exact_from(sock, size)
+
+
+def _recv_frame() -> bytes:
+    if _sock is None:
+        raise ConnectionError("not connected")
+    return _recv_frame_from(_sock)
 
 
 def _decode_response(payload: bytes) -> dict[str, Any]:
@@ -887,15 +907,19 @@ def _remember_cad_safe_status(status: dict[str, Any]):
     global _cad_safe_cache
     if PREFLIGHT_CACHE_SECONDS <= 0:
         return
-    _cad_safe_cache = (time.monotonic(), dict(status))
+    with _cad_safe_cache_lock:
+        _cad_safe_cache = (time.monotonic(), dict(status))
 
 
 def _cached_cad_safe_status() -> Optional[dict[str, Any]]:
-    if PREFLIGHT_CACHE_SECONDS <= 0 or _cad_safe_cache is None:
+    if PREFLIGHT_CACHE_SECONDS <= 0:
         return None
-    timestamp, status = _cad_safe_cache
-    if time.monotonic() - timestamp <= PREFLIGHT_CACHE_SECONDS:
-        return dict(status)
+    with _cad_safe_cache_lock:
+        if _cad_safe_cache is None:
+            return None
+        timestamp, status = _cad_safe_cache
+        if time.monotonic() - timestamp <= PREFLIGHT_CACHE_SECONDS:
+            return dict(status)
     _clear_cad_safe_cache()
     return None
 
@@ -904,7 +928,7 @@ def _cad_preflight_block(action: str) -> Optional[str]:
     if _cached_cad_safe_status() is not None:
         return None
 
-    response = _request_once("ping", None)
+    response = _request_once_health("ping", None)
     if response.get("success") is not True:
         payload = _cad_preflight_ping_error_payload(response, blocked_action=action)
         return json.dumps(payload, indent=2, sort_keys=True)
@@ -935,6 +959,50 @@ def _request_once(action: str, params: Optional[dict[str, Any]]) -> dict[str, An
         raise RequestTransportError(action, "response", exc) from exc
     _validate_response_envelope(response, request_id, action)
     return response
+
+
+def _request_once_health(action: str, params: Optional[dict[str, Any]]) -> dict[str, Any]:
+    request_id = uuid.uuid4().hex[:8]
+    request = {"id": request_id, "action": action, "params": params or {}}
+    try:
+        payload = _json_bytes(request)
+    except ProtocolError as exc:
+        raise RequestNotSentError(action, exc) from exc
+
+    try:
+        with socket.create_connection((HOST, PORT), timeout=HEALTH_TIMEOUT) as sock:
+            sock.settimeout(HEALTH_TIMEOUT)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            try:
+                _send_frame_to(sock, payload)
+            except ProtocolError as exc:
+                raise RequestNotSentError(action, exc) from exc
+            response = _decode_response(_recv_frame_from(sock))
+    except (ConnectionError, TimeoutError, socket.timeout, OSError) as exc:
+        raise RequestTransportError(action, "health", exc) from exc
+    _validate_response_envelope(response, request_id, action)
+    return response
+
+
+def _send_health(action: str = "ping", params: Optional[dict[str, Any]] = None) -> str:
+    if _CONFIG_ERROR:
+        return f"Configuration error: {_CONFIG_ERROR}"
+    try:
+        response = _request_once_health(action, params)
+        if response.get("success") is True:
+            return _format_result(response.get("result", "OK"))
+        return f"VW Error ({action}): {response.get('error', 'Unknown listener error')}"
+    except RequestNotSentError as exc:
+        return _request_not_sent_help(action, exc)
+    except ProtocolError as exc:
+        _close()
+        return f"Protocol error: {exc}. Restart the Vectorworks listener if this persists."
+    except RequestTransportError as exc:
+        return _connection_help(exc.original)
+    except (ConnectionError, TimeoutError, socket.timeout, OSError) as exc:
+        return _connection_help(exc)
+    except Exception as exc:
+        return f"Unexpected error while talking to Vectorworks: {exc}"
 
 
 def _send(action: str, params: Optional[dict[str, Any]] = None, require_cad_safe: bool = False) -> str:
@@ -1132,19 +1200,19 @@ def vw_screenshot(file_path: str = "") -> str:
 @_tool("vw_ping")
 def vw_ping() -> str:
     """Health check. Returns listener version, handler count, and CAD safety status if connected."""
-    return _send_tool("vw_ping")
+    return _send_health("ping")
 
 
 @_tool("vw_bridge_status")
 def vw_bridge_status() -> str:
     """Return bridge status from the listener, including whether real CAD/API handlers are safe."""
-    return _send_tool("vw_bridge_status")
+    return _send_health("ping")
 
 
 @_tool("vw_preflight_for_cad")
 def vw_preflight_for_cad() -> str:
     """Return structured go/no-go status before real CAD/API handlers."""
-    raw = _send("ping")
+    raw = _send_health("ping")
     try:
         status = json.loads(raw)
     except json.JSONDecodeError:

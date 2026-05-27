@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <string_view>
 
 namespace VectorworksMCP {
 namespace Protocol {
@@ -35,6 +36,8 @@ struct ResponseEnvelope {
 
 std::array<std::uint8_t, kFrameHeaderBytes> EncodeFrameHeader(std::uint32_t payloadSize);
 std::uint32_t DecodeFrameHeader(const std::array<std::uint8_t, kFrameHeaderBytes>& header);
+RequestEnvelope ParseRequestEnvelope(std::string_view payload);
+std::string SerializeResponseEnvelope(const ResponseEnvelope& response);
 
 }  // namespace Protocol
 }  // namespace VectorworksMCP

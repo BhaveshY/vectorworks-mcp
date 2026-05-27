@@ -39,4 +39,18 @@ inline bool RequiresCadMainContext(std::string_view action) {
     return false;
 }
 
+inline const ActionSpec* FindActionSpec(std::string_view action) {
+    for (const auto& spec : kPhaseZeroActions) {
+        if (spec.action == action) {
+            return &spec;
+        }
+    }
+    for (const auto& spec : kPhaseOneActions) {
+        if (spec.action == action) {
+            return &spec;
+        }
+    }
+    return nullptr;
+}
+
 }  // namespace VectorworksMCP

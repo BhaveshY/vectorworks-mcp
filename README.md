@@ -121,6 +121,9 @@ after the fixture identity and exact selection are verified.
 The Python listener also applies conservative resource guards for long agent
 sessions: `VW_MCP_MAX_CLIENTS`, `VW_MCP_CLIENT_IDLE_SECONDS`,
 `VW_MCP_MAX_PENDING_READ_BYTES`, and `VW_MCP_MAX_PENDING_WRITE_BYTES`.
+The host MCP server uses `VW_MCP_HEALTH_TIMEOUT` for short-lived ping and
+preflight probes so diagnostics do not wait behind a slower CAD request on the
+persistent command socket.
 
 If an agent or user has already extracted the Vectorworks SDK somewhere else,
 pass the same `-SdkDir C:\path\to\sdk` to bootstrap, prepare, and build; the

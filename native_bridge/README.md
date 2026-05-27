@@ -136,11 +136,12 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\copy-n
 ```
 
 The scaffold lives in `native_bridge/src/`. It encodes the protocol constants,
-phase-0/phase-1 dispatcher map, and the worker-thread to Vectorworks main/plugin
-event-context queue. It intentionally has no Vectorworks SDK includes and no
-standalone project files. A copied scaffold should only advertise phase-0
-transport readiness; it must not report `cad_api_safe: true` until real SDK CAD
-handlers are implemented and smoke-tested.
+strict request/response envelope handling, phase-0/phase-1 dispatcher map, and
+the worker-thread to Vectorworks main/plugin event-context queue. It
+intentionally has no Vectorworks SDK includes and no standalone project files. A
+copied scaffold should only advertise phase-0 transport readiness; it must not
+report `cad_api_safe: true` until real SDK CAD handlers are implemented and
+smoke-tested.
 
 After a compiled native bridge is loaded in Vectorworks, run the native smoke
 harness:
@@ -156,6 +157,8 @@ validates the minimum response schemas documented in `PROTOCOL.md`, including
 ping safety fields, `native_phase >= 1`, `implemented_actions`, document counts,
 layer names, object handle/type fields, bounded object query semantics, and
 cross-checks between document/layer/object snapshots. Add
+`-MaxPingMilliseconds` and `-MaxReadMilliseconds` when you want the smoke gate
+to fail bridges that are functionally correct but too slow for agent loops. Add
 `-AllowWriteFixture` only in a disposable test document; it creates a uniquely
 named rectangle and deletes it only after the fixture identity, object schema,
 and exact selection are verified. Use `-Phase 0 -Stop` for transport-only
@@ -166,6 +169,9 @@ The host-side `vw_preflight_for_cad` also blocks native bridges that claim
 `cad_api_safe: true` before reporting phase-1 capabilities.
 The SDK scaffold queue applies bounded backpressure and rejects duplicate
 request ids before work is handed to the Vectorworks main/plugin event context.
+While the copied scaffold is still phase 0, CAD actions fail immediately with
+`native bridge phase 0 CAD handlers are not implemented` instead of waiting on
+the main-context queue.
 
 Before installing a compiled bridge artifact, use the native doctor to inspect
 the current stage and plan the user Plug-ins deployment:

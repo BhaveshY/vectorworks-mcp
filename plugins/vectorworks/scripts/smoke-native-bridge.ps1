@@ -9,6 +9,10 @@ param(
     [int]$PingCount = 10,
     [ValidateRange(1, 100)]
     [int]$ReadCount = 10,
+    [ValidateRange(0, 600000)]
+    [double]$MaxPingMilliseconds = 0,
+    [ValidateRange(0, 600000)]
+    [double]$MaxReadMilliseconds = 0,
     [ValidateRange(0, 1)]
     [int]$Phase = 1,
     [switch]$AllowNonNative,
@@ -36,6 +40,8 @@ $Args = @()
 if ($HostName) { $Args += @("-HostName", $HostName) }
 if ($Port -ne 0) { $Args += @("-Port", $Port) }
 $Args += @("-TimeoutSeconds", $TimeoutSeconds, "-PingCount", $PingCount, "-ReadCount", $ReadCount)
+if ($MaxPingMilliseconds -gt 0) { $Args += @("-MaxPingMilliseconds", $MaxPingMilliseconds) }
+if ($MaxReadMilliseconds -gt 0) { $Args += @("-MaxReadMilliseconds", $MaxReadMilliseconds) }
 $Args += @("-Phase", $Phase)
 if ($AllowNonNative) { $Args += "-AllowNonNative" }
 if ($IncludeObjects) { $Args += "-IncludeObjects" }
