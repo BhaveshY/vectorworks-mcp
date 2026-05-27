@@ -475,6 +475,71 @@ def _connection_help(error: BaseException) -> str:
     )
 
 
+def _cad_preflight_block(action: str) -> Optional[str]:
+    response = _request_once("ping", None)
+    if response.get("success") is not True:
+        return json.dumps(
+            {
+                "ok": False,
+                "blocked": True,
+                "blocked_action": action,
+                "cad_api_safe": False,
+                "reason": "preflight_ping_error",
+                "next_action": "Fix listener connectivity before CAD work.",
+                "raw_status": response,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+
+    status = response.get("result")
+    if not isinstance(status, dict):
+        return json.dumps(
+            {
+                "ok": False,
+                "blocked": True,
+                "blocked_action": action,
+                "cad_api_safe": False,
+                "reason": "preflight_ping_non_object",
+                "next_action": "Update/regenerate the Vectorworks listener before real CAD work.",
+                "raw_status": status,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+
+    if status.get("cad_api_safe") is True and status.get("transport_only") is not True:
+        return None
+
+    if status.get("transport_only") is True:
+        reason = "transport_only_bridge"
+        next_action = "Do not call CAD handlers. Regenerate/run the dialog launcher or use a compiled native SDK bridge."
+    elif "cad_api_safe" not in status:
+        reason = "legacy_status_without_cad_api_safe"
+        next_action = "Update/regenerate the Vectorworks listener before real CAD work."
+    else:
+        reason = "listener_reports_cad_api_unsafe"
+        next_action = "Do not call CAD handlers until the dialog launcher or native SDK bridge is active."
+
+    return json.dumps(
+        {
+            "ok": False,
+            "blocked": True,
+            "blocked_action": action,
+            "cad_api_safe": False,
+            "bridge_kind": status.get("bridge_kind", "unknown"),
+            "dispatch_mode": status.get("dispatch_mode", "unknown"),
+            "transport_only": bool(status.get("transport_only")),
+            "native_bridge": bool(status.get("native_bridge")),
+            "reason": reason,
+            "next_action": next_action,
+            "raw_status": status,
+        },
+        indent=2,
+        sort_keys=True,
+    )
+
+
 def _request_once(action: str, params: Optional[dict[str, Any]]) -> dict[str, Any]:
     _connect()
     request_id = uuid.uuid4().hex[:8]
@@ -487,13 +552,17 @@ def _request_once(action: str, params: Optional[dict[str, Any]]) -> dict[str, An
     return response
 
 
-def _send(action: str, params: Optional[dict[str, Any]] = None) -> str:
+def _send(action: str, params: Optional[dict[str, Any]] = None, require_cad_safe: bool = False) -> str:
     if _CONFIG_ERROR:
         return f"Configuration error: {_CONFIG_ERROR}"
 
     with _lock:
         for attempt in (0, 1):
             try:
+                if require_cad_safe:
+                    blocked = _cad_preflight_block(action)
+                    if blocked:
+                        return blocked
                 response = _request_once(action, params)
                 if response.get("success") is True:
                     return _format_result(response.get("result", "OK"))
@@ -513,6 +582,14 @@ def _send(action: str, params: Optional[dict[str, Any]] = None) -> str:
     return "Unexpected error while talking to Vectorworks: request loop exited"
 
 
+def _send_tool(tool_name: str, params: Optional[dict[str, Any]] = None) -> str:
+    safety = TOOL_SAFETY[tool_name]
+    action = safety.get("wire_action")
+    if not isinstance(action, str) or not action:
+        return f"Configuration error: {tool_name} does not declare a wire_action"
+    return _send(action, params, require_cad_safe=bool(safety["requires_cad_preflight"]))
+
+
 @_tool("vw_tool_safety")
 def vw_tool_safety() -> str:
     """Return structured safety metadata for every Vectorworks MCP tool."""
@@ -524,7 +601,7 @@ def vw_run_script(code: str) -> str:
     """Execute Python inside Vectorworks. The 'vs' module is available.
     Use print() to return output. Escape hatch for anything other tools do not cover.
     Example: vw_run_script("h = vs.FSActLayer()\\nprint(vs.GetName(h))")"""
-    return _send("run_script", {"code": code})
+    return _send_tool("vw_run_script", {"code": code})
 
 
 @_tool("vw_create_object")
@@ -545,8 +622,8 @@ def vw_create_object(
     """Create geometry: rect, circle, oval, line, arc, or polygon.
     x1/y1/x2/y2 are corners or start/end. radius is for circle/arc.
     points is [[x, y], ...] for polygon."""
-    return _send(
-        "create_object",
+    return _send_tool(
+        "vw_create_object",
         {
             "object_type": object_type,
             "x1": x1,
@@ -567,31 +644,31 @@ def vw_create_object(
 @_tool("vw_get_layers")
 def vw_get_layers() -> str:
     """List all layers with name and visibility."""
-    return _send("get_layers")
+    return _send_tool("vw_get_layers")
 
 
 @_tool("vw_get_objects")
 def vw_get_objects(layer: str = "", object_type: str = "", limit: int = 100) -> str:
     """List objects. Filter by layer name and type such as rect, line, or wall."""
-    return _send("get_objects", {"layer": layer, "object_type": object_type, "limit": limit})
+    return _send_tool("vw_get_objects", {"layer": layer, "object_type": object_type, "limit": limit})
 
 
 @_tool("vw_set_object_property")
 def vw_set_object_property(handle: str, property_name: PropertyName, value: str) -> str:
     """Set an object property. Colors use 'r,g,b' values in Vectorworks 0-65535 color range."""
-    return _send("set_property", {"handle": handle, "property_name": property_name, "value": value})
+    return _send_tool("vw_set_object_property", {"handle": handle, "property_name": property_name, "value": value})
 
 
 @_tool("vw_find_objects")
 def vw_find_objects(criteria: str, limit: int = 100) -> str:
     """Find objects using VW criteria such as 'T=RECT', 'T=WALL', 'C=Furniture', or 'ALL'."""
-    return _send("find_objects", {"criteria": criteria, "limit": limit})
+    return _send_tool("vw_find_objects", {"criteria": criteria, "limit": limit})
 
 
 @_tool("vw_manage_classes")
 def vw_manage_classes(action: ClassAction, class_name: str = "") -> str:
     """List, create, or delete classes. class_name is ignored for list."""
-    return _send("manage_classes", {"action": action, "class_name": class_name})
+    return _send_tool("vw_manage_classes", {"action": action, "class_name": class_name})
 
 
 @_tool("vw_worksheet")
@@ -604,8 +681,8 @@ def vw_worksheet(
     num_rows: int = 10,
 ) -> str:
     """Worksheet operations: list, read, write, or read_range."""
-    return _send(
-        "worksheet",
+    return _send_tool(
+        "vw_worksheet",
         {
             "action": action,
             "worksheet_name": worksheet_name,
@@ -620,43 +697,43 @@ def vw_worksheet(
 @_tool("vw_symbol")
 def vw_symbol(action: SymbolAction, symbol_name: str = "", x: float = 0, y: float = 0, rotation: float = 0) -> str:
     """List symbols or insert a symbol at x/y with rotation."""
-    return _send("symbol", {"action": action, "symbol_name": symbol_name, "x": x, "y": y, "rotation": rotation})
+    return _send_tool("vw_symbol", {"action": action, "symbol_name": symbol_name, "x": x, "y": y, "rotation": rotation})
 
 
 @_tool("vw_export")
 def vw_export(format: ExportFormat, file_path: str) -> str:
     """Export document. format is pdf, dxf, dwg, or image. file_path is the full output path."""
-    return _send("export", {"format": format, "file_path": file_path})
+    return _send_tool("vw_export", {"format": format, "file_path": file_path})
 
 
 @_tool("vw_import_file")
 def vw_import_file(file_path: str, format: ImportFormat = "auto") -> str:
     """Import a DXF, DWG, or image file. Use auto to detect from the extension."""
-    return _send("import_file", {"file_path": file_path, "format": format})
+    return _send_tool("vw_import_file", {"file_path": file_path, "format": format})
 
 
 @_tool("vw_get_document_info")
 def vw_get_document_info() -> str:
     """Get document metadata: filename, filepath, layer count, object count, and layer names."""
-    return _send("get_document_info")
+    return _send_tool("vw_get_document_info")
 
 
 @_tool("vw_screenshot")
 def vw_screenshot(file_path: str = "") -> str:
     """Capture viewport screenshot as PNG. Empty file_path defaults to ~/.vectorworks-mcp/screenshot.png."""
-    return _send("screenshot", {"file_path": file_path})
+    return _send_tool("vw_screenshot", {"file_path": file_path})
 
 
 @_tool("vw_ping")
 def vw_ping() -> str:
     """Health check. Returns listener version, handler count, and CAD safety status if connected."""
-    return _send("ping")
+    return _send_tool("vw_ping")
 
 
 @_tool("vw_bridge_status")
 def vw_bridge_status() -> str:
     """Return bridge status from the listener, including whether real CAD/API handlers are safe."""
-    return _send("ping")
+    return _send_tool("vw_bridge_status")
 
 
 @_tool("vw_preflight_for_cad")
@@ -741,13 +818,13 @@ def vw_preflight_for_cad() -> str:
 @_tool("vw_stop_listener")
 def vw_stop_listener() -> str:
     """Ask the Vectorworks listener to stop gracefully after replying."""
-    return _send("stop")
+    return _send_tool("vw_stop_listener")
 
 
 @_tool("vw_selection")
 def vw_selection(action: SelectionAction, criteria: str = "") -> str:
     """Selection ops. For select, criteria is a VW criteria string. For move, criteria is 'dx,dy'."""
-    return _send("selection", {"action": action, "criteria": criteria})
+    return _send_tool("vw_selection", {"action": action, "criteria": criteria})
 
 
 @_tool("vw_create_wall")
@@ -761,8 +838,8 @@ def vw_create_wall(
     style_name: str = "",
 ) -> str:
     """Create parametric wall. Coordinates are in mm. Defaults to 3m height and 200mm thickness."""
-    return _send(
-        "create_wall",
+    return _send_tool(
+        "vw_create_wall",
         {
             "start_x": start_x,
             "start_y": start_y,
@@ -778,7 +855,7 @@ def vw_create_wall(
 @_tool("vw_insert_door")
 def vw_insert_door(x: float, y: float, width: float = 900, height: float = 2100, rotation: float = 0) -> str:
     """Insert parametric door. Place on or near a wall for auto-insertion."""
-    return _send("insert_door", {"x": x, "y": y, "width": width, "height": height, "rotation": rotation})
+    return _send_tool("vw_insert_door", {"x": x, "y": y, "width": width, "height": height, "rotation": rotation})
 
 
 @_tool("vw_insert_window")
@@ -791,8 +868,8 @@ def vw_insert_window(
     rotation: float = 0,
 ) -> str:
     """Insert parametric window. sill_height is floor to window bottom in mm."""
-    return _send(
-        "insert_window",
+    return _send_tool(
+        "vw_insert_window",
         {"x": x, "y": y, "width": width, "height": height, "sill_height": sill_height, "rotation": rotation},
     )
 
@@ -800,7 +877,7 @@ def vw_insert_window(
 @_tool("vw_create_slab")
 def vw_create_slab(points: PointList, thickness: float = 200, elevation: float = 0) -> str:
     """Create 3D floor slab from polygon. points is [[x, y], ...] in mm and needs at least 3 points."""
-    return _send("create_slab", {"points": points, "thickness": thickness, "elevation": elevation})
+    return _send_tool("vw_create_slab", {"points": points, "thickness": thickness, "elevation": elevation})
 
 
 @_tool("vw_create_roof")
@@ -812,8 +889,8 @@ def vw_create_roof(
     thickness: float = 200,
 ) -> str:
     """Create roof from footprint. bearing_height is where roof starts. slope is in degrees."""
-    return _send(
-        "create_roof",
+    return _send_tool(
+        "vw_create_roof",
         {
             "points": points,
             "bearing_height": bearing_height,
@@ -827,7 +904,7 @@ def vw_create_roof(
 @_tool("vw_inspect_object")
 def vw_inspect_object(handle: str = "", plugin_name: str = "") -> str:
     """Discover configurable parameters of a VW object. Provide handle or plugin_name such as Door or Wall."""
-    return _send("inspect_object", {"handle": handle, "plugin_name": plugin_name})
+    return _send_tool("vw_inspect_object", {"handle": handle, "plugin_name": plugin_name})
 
 
 def main() -> int:

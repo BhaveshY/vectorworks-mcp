@@ -88,6 +88,14 @@ class ClaudePluginTests(unittest.TestCase):
     def test_plugin_tool_map_covers_server_tools(self):
         self.assertEqual(_tool_map_names(), _server_tool_names())
 
+    def test_plugin_skills_mention_host_side_blocked_guard(self):
+        work = (PLUGIN / "skills" / "work" / "SKILL.md").read_text(encoding="utf-8")
+        diagnose = (PLUGIN / "skills" / "diagnose" / "SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("blocked: true", work)
+        self.assertIn("blocked: true", diagnose)
+        self.assertIn("host-side safety guard", diagnose)
+
 
 if __name__ == "__main__":
     unittest.main()

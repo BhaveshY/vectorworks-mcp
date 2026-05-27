@@ -43,23 +43,7 @@ def _listener_handlers():
 
 
 def _server_actions():
-    tree = ast.parse((ROOT / "server.py").read_text(encoding="utf-8"))
-    actions = set()
-
-    class Visitor(ast.NodeVisitor):
-        def visit_Call(self, node):
-            if (
-                isinstance(node.func, ast.Name)
-                and node.func.id == "_send"
-                and node.args
-                and isinstance(node.args[0], ast.Constant)
-                and isinstance(node.args[0].value, str)
-            ):
-                actions.add(node.args[0].value)
-            self.generic_visit(node)
-
-    Visitor().visit(tree)
-    return actions
+    return {value["wire_action"] for value in server.TOOL_SAFETY.values() if value.get("wire_action")}
 
 
 def _matrix_rows():
@@ -106,7 +90,7 @@ class NativeBridgeContractTests(unittest.TestCase):
         self.assertTrue(preflight["native_bridge"])
         self.assertEqual(preflight["bridge_kind"], "native_sdk_bridge_mock")
         self.assertEqual(layers, [{"name": "Design Layer-1", "visible": True}])
-        self.assertEqual([request["action"] for request in bridge.requests], ["ping", "get_layers"])
+        self.assertEqual([request["action"] for request in bridge.requests], ["ping", "ping", "get_layers"])
 
     def test_mock_native_bridge_covers_phase_one_actions(self):
         with MockNativeBridge() as bridge:
@@ -125,7 +109,18 @@ class NativeBridgeContractTests(unittest.TestCase):
         self.assertIn("mock-created-1", created)
         self.assertEqual(
             [request["action"] for request in bridge.requests],
-            ["get_document_info", "get_layers", "get_objects", "selection", "create_object"],
+            [
+                "ping",
+                "get_document_info",
+                "ping",
+                "get_layers",
+                "ping",
+                "get_objects",
+                "ping",
+                "selection",
+                "ping",
+                "create_object",
+            ],
         )
 
     def test_mock_native_bridge_stop_releases_listener_port(self):

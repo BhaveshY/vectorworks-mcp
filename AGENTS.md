@@ -61,6 +61,10 @@ If the generated launcher does not set `VW_MCP_MODE=dialog`, rerun
 | Native SDK bridge | Long-term non-modal target | Not available until compiled and installed |
 
 Do not route users to `background` or `win_timer` for real Vectorworks work.
+Host tools whose `TOOL_SAFETY` entry has `requires_cad_preflight: true`
+auto-block when bridge status is missing or reports `cad_api_safe: false` /
+`transport_only: true`; treat that block as authoritative and fix the listener
+before retrying CAD work.
 Do not claim native non-modal support is installed unless a compiled bridge has
 been built from the Vectorworks SDK and smoke-tested in Vectorworks.
 Keep the native handler matrix in sync whenever `vw_listener.py` adds, removes,

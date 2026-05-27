@@ -23,6 +23,7 @@ Use the MCP tools deliberately:
 
 Safety habits:
 
+- If a tool returns `blocked: true`, stop and fix the listener/bridge status before retrying CAD work.
 - Ask before destructive edits such as delete, class-wide changes, overwrites, or exports over existing files.
 - State the assumed units when the user gives dimensions. Default to the document/user context; if unknown, use millimeters for architectural dimensions.
 - Verify after changes with object queries, document info, or screenshot/export tools when available.

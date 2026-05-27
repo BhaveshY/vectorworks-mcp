@@ -27,8 +27,9 @@ def _write_frame(sock, payload):
 
 
 class FakeListener:
-    def __init__(self, handler):
+    def __init__(self, handler, max_requests=1):
         self.handler = handler
+        self.max_requests = max_requests
         self.ready = threading.Event()
         self.done = threading.Event()
         self.requests = []
@@ -56,14 +57,16 @@ class FakeListener:
         try:
             conn, _addr = self.sock.accept()
             with conn:
-                request = json.loads(_read_frame(conn).decode("utf-8"))
-                self.requests.append(request)
-                response = self.handler(request)
-                if response is not None:
-                    if isinstance(response, bytes):
-                        conn.sendall(response)
-                    else:
-                        _write_frame(conn, json.dumps(response).encode("utf-8"))
+                conn.settimeout(1)
+                for _ in range(self.max_requests):
+                    request = json.loads(_read_frame(conn).decode("utf-8"))
+                    self.requests.append(request)
+                    response = self.handler(request)
+                    if response is not None:
+                        if isinstance(response, bytes):
+                            conn.sendall(response)
+                        else:
+                            _write_frame(conn, json.dumps(response).encode("utf-8"))
         finally:
             self.done.set()
 
@@ -139,12 +142,80 @@ class ServerProtocolTests(unittest.TestCase):
         calls = []
         original_send = server._send
         try:
-            server._send = lambda action, params=None: calls.append((action, params)) or '{"pong": true}'
+            server._send = (
+                lambda action, params=None, require_cad_safe=False:
+                calls.append((action, params, require_cad_safe)) or '{"pong": true}'
+            )
             self.assertEqual(server.vw_bridge_status(), '{"pong": true}')
         finally:
             server._send = original_send
 
-        self.assertEqual(calls, [("ping", None)])
+        self.assertEqual(calls, [("ping", None, False)])
+
+    def test_send_tool_blocks_transport_only_cad_handler_before_action(self):
+        def handler(request):
+            self.assertEqual(request["action"], "ping")
+            return {
+                "id": request["id"],
+                "success": True,
+                "result": {
+                    "pong": True,
+                    "cad_api_safe": False,
+                    "transport_only": True,
+                    "bridge_kind": "python_transport_only",
+                    "dispatch_mode": "win_timer",
+                },
+            }
+
+        with FakeListener(handler, max_requests=1) as listener:
+            _configure_server(listener.port)
+            result = server.vw_get_layers()
+
+        blocked = json.loads(result)
+        self.assertFalse(blocked["ok"])
+        self.assertTrue(blocked["blocked"])
+        self.assertEqual(blocked["blocked_action"], "get_layers")
+        self.assertEqual(blocked["reason"], "transport_only_bridge")
+        self.assertEqual([request["action"] for request in listener.requests], ["ping"])
+
+    def test_send_tool_allows_cad_handler_after_safe_preflight(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {
+                        "pong": True,
+                        "cad_api_safe": True,
+                        "transport_only": False,
+                        "bridge_kind": "native_sdk_bridge",
+                        "dispatch_mode": "native_sdk",
+                    },
+                }
+            if request["action"] == "get_layers":
+                return {"id": request["id"], "success": True, "result": [{"name": "Layer 1"}]}
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=2) as listener:
+            _configure_server(listener.port)
+            result = server.vw_get_layers()
+
+        self.assertEqual(json.loads(result), [{"name": "Layer 1"}])
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_layers"])
+
+    def test_send_tool_leaves_health_tools_unguarded(self):
+        calls = []
+        original_send = server._send
+        try:
+            server._send = (
+                lambda action, params=None, require_cad_safe=False:
+                calls.append((action, params, require_cad_safe)) or '{"pong": true}'
+            )
+            self.assertEqual(server.vw_ping(), '{"pong": true}')
+        finally:
+            server._send = original_send
+
+        self.assertEqual(calls, [("ping", None, False)])
 
     def test_tool_safety_covers_all_server_tools(self):
         tool_functions = {

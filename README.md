@@ -18,6 +18,11 @@ generated Vectorworks launcher sets `VW_MCP_MODE=dialog`, the only pure-Python
 mode currently safe for real `vs.*` API calls. It opens a modal agent-control
 dialog; close or stop it when you want to use Vectorworks manually.
 
+The host MCP server also enforces CAD safety metadata. Tools that touch the
+document automatically ping the bridge first and return a structured
+`blocked: true` response instead of forwarding CAD work to transport-only or
+legacy listeners.
+
 ## Bridge Status
 
 | Bridge path | Status | Real CAD/API handlers | Manual Vectorworks UI |
