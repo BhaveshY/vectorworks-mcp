@@ -32,6 +32,7 @@ class AgentReadinessTests(unittest.TestCase):
             "scripts/bootstrap-claude-code.ps1",
             "scripts/bootstrap-native-bridge.ps1",
             "scripts/check-native-bridge-prereqs.ps1",
+            "scripts/doctor-vectorworks-mcp.ps1",
             "scripts/register-claude-code.ps1",
             "scripts/run-mcp-server.ps1",
             "scripts/verify-no-vectorworks.ps1",
@@ -113,11 +114,23 @@ class AgentReadinessTests(unittest.TestCase):
         gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
 
         self.assertIn("https://www.vectorworks.net/en-US/support/custom/sdk/sdkdown", checker)
+        self.assertIn("https://github.com/VectorworksDeveloper/SDKExamples", checker)
         self.assertIn("2024-NNA-eng-win-SDK", checker)
+        self.assertIn("17.6.3", checker)
+        self.assertIn("v143", checker)
         self.assertIn("Invoke-WebRequest", bootstrap)
         self.assertIn("-DownloadSdk", bootstrap)
         self.assertIn(".cache/", gitignore)
         self.assertIn("third_party/", gitignore)
+
+    def test_doctor_script_reports_next_actions_and_cad_safety(self):
+        doctor = (ROOT / "scripts/doctor-vectorworks-mcp.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("overall", doctor)
+        self.assertIn("nextActions", doctor)
+        self.assertIn("cad_api_safe", doctor)
+        self.assertIn("transport_only", doctor)
+        self.assertIn("check-native-bridge-prereqs.ps1", doctor)
 
 
 if __name__ == "__main__":

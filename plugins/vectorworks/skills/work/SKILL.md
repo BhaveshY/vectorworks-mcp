@@ -7,7 +7,7 @@ description: Work with Vectorworks through MCP tools for CAD/BIM tasks. Use when
 
 Before changing the drawing, confirm the connection:
 
-1. Call `vw_ping` when available.
+1. Call `vw_preflight_for_cad` when available; otherwise call `vw_ping`.
 2. If `vw_ping` is unavailable, use `/vectorworks:ping` or the raw listener ping script.
 3. Confirm the ping/status payload does not report `cad_api_safe: false` or `transport_only: true`.
 4. Get context with `vw_get_document_info` and `vw_get_layers` for non-trivial work.

@@ -72,6 +72,12 @@ Run these before handing work back:
 powershell -ExecutionPolicy Bypass -File .\scripts\verify-no-vectorworks.ps1
 ```
 
+For fast diagnosis during setup or while Vectorworks is open, prefer:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\doctor-vectorworks-mcp.ps1
+```
+
 Native SDK bridge readiness is separate and advisory unless the user is
 specifically working on the native bridge:
 
@@ -94,6 +100,7 @@ End-to-end tests require the user to open Vectorworks. Do not claim full end-to-
 - Claude Code has been restarted after MCP registration.
 - `/mcp` shows `vectorworks`.
 - First tool call is `vw_ping`; do not treat listener startup as fully proven until this works.
+- Before real CAD work, prefer `vw_preflight_for_cad` when available. If it blocks, do not call CAD handlers.
 
 If port `9877` is busy:
 

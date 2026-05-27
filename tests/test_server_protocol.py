@@ -145,6 +145,77 @@ class ServerProtocolTests(unittest.TestCase):
 
         self.assertEqual(calls, [("ping", None)])
 
+    def test_cad_preflight_allows_cad_safe_bridge(self):
+        original_send = server._send
+        try:
+            server._send = lambda action, params=None: json.dumps(
+                {
+                    "pong": True,
+                    "cad_api_safe": True,
+                    "transport_only": False,
+                    "bridge_kind": "python_dialog_agent_session",
+                    "dispatch_mode": "dialog",
+                    "handlers": 23,
+                    "version": "test",
+                }
+            )
+            result = server.vw_preflight_for_cad()
+        finally:
+            server._send = original_send
+
+        preflight = json.loads(result)
+        self.assertTrue(preflight["ok"])
+        self.assertTrue(preflight["cad_api_safe"])
+        self.assertEqual(preflight["bridge_kind"], "python_dialog_agent_session")
+        self.assertEqual(preflight["reason"], "cad_api_safe")
+        self.assertIn("vw_get_document_info", preflight["next_action"])
+
+    def test_cad_preflight_blocks_transport_only_bridge(self):
+        original_send = server._send
+        try:
+            server._send = lambda action, params=None: json.dumps(
+                {
+                    "pong": True,
+                    "cad_api_safe": False,
+                    "transport_only": True,
+                    "bridge_kind": "python_transport_only",
+                    "dispatch_mode": "win_timer",
+                }
+            )
+            result = server.vw_preflight_for_cad()
+        finally:
+            server._send = original_send
+
+        preflight = json.loads(result)
+        self.assertFalse(preflight["ok"])
+        self.assertFalse(preflight["cad_api_safe"])
+        self.assertTrue(preflight["transport_only"])
+        self.assertEqual(preflight["reason"], "transport_only_bridge")
+
+    def test_cad_preflight_blocks_legacy_status_without_safety_field(self):
+        original_send = server._send
+        try:
+            server._send = lambda action, params=None: json.dumps({"pong": True, "version": "legacy"})
+            result = server.vw_preflight_for_cad()
+        finally:
+            server._send = original_send
+
+        preflight = json.loads(result)
+        self.assertFalse(preflight["ok"])
+        self.assertEqual(preflight["reason"], "legacy_status_without_cad_api_safe")
+
+    def test_cad_preflight_blocks_connection_error_text(self):
+        original_send = server._send
+        try:
+            server._send = lambda action, params=None: "Connection error: listener missing"
+            result = server.vw_preflight_for_cad()
+        finally:
+            server._send = original_send
+
+        preflight = json.loads(result)
+        self.assertFalse(preflight["ok"])
+        self.assertEqual(preflight["reason"], "ping_failed_or_non_json")
+
 
 if __name__ == "__main__":
     unittest.main()

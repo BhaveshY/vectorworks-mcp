@@ -14,6 +14,7 @@ class ClaudePluginTests(unittest.TestCase):
         manifest = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
 
         self.assertEqual(manifest["name"], "vectorworks")
+        self.assertEqual(manifest["version"], "0.2.0")
         self.assertEqual(manifest["mcpServers"], "./.mcp.json")
         self.assertIn("vectorworks_repo", manifest["userConfig"])
 
@@ -44,6 +45,7 @@ class ClaudePluginTests(unittest.TestCase):
             "scripts/bootstrap-vectorworks-mcp.ps1",
             "scripts/test-vectorworks-listener.ps1",
             "scripts/diagnose-vectorworks-mcp.ps1",
+            "scripts/doctor-vectorworks-mcp.ps1",
         ):
             self.assertTrue((PLUGIN / relative_path).exists(), relative_path)
 

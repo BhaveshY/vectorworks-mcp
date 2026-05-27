@@ -55,6 +55,9 @@ Required for Vectorworks 2024 on Windows:
 - Vectorworks 2024 SDK for Windows from the official SDK page:
   https://www.vectorworks.net/en-US/support/custom/sdk/sdkdown
 - Visual Studio 2022 Build Tools with the Desktop development with C++ workload.
+  Vectorworks' SDK examples list Vectorworks 2024 on Windows as requiring
+  Visual Studio 2022 version 17.6.3 with toolset v143:
+  https://github.com/VectorworksDeveloper/SDKExamples
 
 The local machine may not have these installed. In that case the checker should
 fail clearly and tell the next agent exactly what is missing.

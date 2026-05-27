@@ -11,10 +11,16 @@ $ErrorActionPreference = "Stop"
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $OfficialSdkPage = "https://www.vectorworks.net/en-US/support/custom/sdk/sdkdown"
+$OfficialSdkExamples = "https://github.com/VectorworksDeveloper/SDKExamples"
 $SdkDownloadUrls = @{
     "2024" = "https://release.vectorworks.net/latest/Vectorworks/2024-NNA-eng-win-SDK"
     "2025" = "https://release.vectorworks.net/latest/Vectorworks/2025-NNA-eng-win-SDK.zip"
     "2026" = "https://release.vectorworks.net/latest/Vectorworks/2026-NNA-eng-win-SDK.zip"
+}
+$VisualStudioRequirements = @{
+    "2024" = @{ MinimumVersion = "17.6.3"; Toolset = "v143" }
+    "2025" = @{ MinimumVersion = "17.8"; Toolset = "v143" }
+    "2026" = @{ MinimumVersion = "17.12"; Toolset = "v143" }
 }
 
 function New-CheckResult {
@@ -42,6 +48,21 @@ function Get-FirstExistingPath {
         }
     }
     return ""
+}
+
+function Test-VersionAtLeast {
+    param(
+        [string]$Actual,
+        [string]$Minimum
+    )
+    if (-not $Actual -or -not $Minimum) {
+        return $false
+    }
+    try {
+        return ([version]$Actual -ge [version]$Minimum)
+    } catch {
+        return $false
+    }
 }
 
 function Find-VectorworksInstall {
@@ -146,18 +167,40 @@ function Find-VisualStudioCpp {
 
     $VsWhere = Get-FirstExistingPath -Paths $VsWhereCandidates
     if ($VsWhere) {
-        $InstallPath = (& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null | Select-Object -First 1)
-        if ($InstallPath) {
-            return ($InstallPath.Trim())
+        $Json = (& $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -format json 2>$null)
+        if ($Json) {
+            try {
+                $Install = $Json | ConvertFrom-Json | Select-Object -First 1
+                if ($Install) {
+                    return [pscustomobject]@{
+                        path = [string]$Install.installationPath
+                        version = [string]$Install.installationVersion
+                        source = $VsWhere
+                        detail = ("{0} ({1})" -f $Install.installationPath, $Install.installationVersion)
+                    }
+                }
+            } catch {
+                # Fall through to cl.exe detection.
+            }
         }
     }
 
     $Cl = Get-Command cl.exe -ErrorAction SilentlyContinue
     if ($Cl) {
-        return $Cl.Source
+        return [pscustomobject]@{
+            path = $Cl.Source
+            version = ""
+            source = "PATH"
+            detail = "$($Cl.Source) (Visual Studio version not verifiable without vswhere)"
+        }
     }
 
-    return ""
+    return [pscustomobject]@{
+        path = ""
+        version = ""
+        source = ""
+        detail = "not found via vswhere or cl.exe"
+    }
 }
 
 function Find-MSBuild {
@@ -178,7 +221,11 @@ function Find-MSBuild {
 
 $VectorworksPath = Find-VectorworksInstall -Version $VectorworksVersion
 $SdkPath = Find-SdkInstall -Version $VectorworksVersion -RequestedPath $SdkDir
-$VisualStudioPath = Find-VisualStudioCpp
+$VisualStudio = Find-VisualStudioCpp
+$VisualStudioPath = $VisualStudio.path
+$RequiredVs = $VisualStudioRequirements[$VectorworksVersion]
+$VisualStudioVersionOk = Test-VersionAtLeast -Actual $VisualStudio.version -Minimum $RequiredVs.MinimumVersion
+$VisualStudioOk = [bool]$VisualStudioPath -and $VisualStudioVersionOk
 $MSBuildPath = Find-MSBuild -VisualStudioPath $VisualStudioPath
 $CMake = Get-Command cmake.exe -ErrorAction SilentlyContinue
 
@@ -198,11 +245,11 @@ $Checks += New-CheckResult `
     -Fix "Download the SDK from $OfficialSdkPage, extract it, then rerun with -SdkDir or set VECTORWORKS_SDK_DIR."
 
 $Checks += New-CheckResult `
-    -Name "Visual Studio C++ tools" `
+    -Name "Visual Studio C++ tools for Vectorworks $VectorworksVersion" `
     -Required $true `
-    -Ok ([bool]$VisualStudioPath) `
-    -Detail $(if ($VisualStudioPath) { $VisualStudioPath } else { "not found via vswhere or cl.exe" }) `
-    -Fix "Install Visual Studio 2022 Build Tools with the Desktop development with C++ workload."
+    -Ok $VisualStudioOk `
+    -Detail $(if ($VisualStudioPath) { "$($VisualStudio.detail); required >= $($RequiredVs.MinimumVersion) ($($RequiredVs.Toolset))" } else { $VisualStudio.detail }) `
+    -Fix "Install Visual Studio 2022 Build Tools with Desktop development with C++; Vectorworks $VectorworksVersion SDK examples require VS >= $($RequiredVs.MinimumVersion) and toolset $($RequiredVs.Toolset)."
 
 $Checks += New-CheckResult `
     -Name "MSBuild" `
@@ -224,7 +271,10 @@ if ($Json) {
     [pscustomobject]@{
         vectorworksVersion = $VectorworksVersion
         officialSdkPage = $OfficialSdkPage
+        officialSdkExamples = $OfficialSdkExamples
         officialWinSdkDownload = $SdkDownloadUrls[$VectorworksVersion]
+        requiredVisualStudioVersion = $RequiredVs.MinimumVersion
+        requiredToolset = $RequiredVs.Toolset
         repoRoot = $RepoRoot
         checks = $Checks
         ready = ($RequiredFailures.Count -eq 0)
@@ -232,7 +282,9 @@ if ($Json) {
 } else {
     Write-Host "Vectorworks native bridge prerequisite check ($VectorworksVersion)"
     Write-Host "SDK page: $OfficialSdkPage"
+    Write-Host "SDK examples/build requirements: $OfficialSdkExamples"
     Write-Host "Win SDK:  $($SdkDownloadUrls[$VectorworksVersion])"
+    Write-Host "VS tools: >= $($RequiredVs.MinimumVersion) ($($RequiredVs.Toolset))"
     Write-Host ""
     foreach ($Check in $Checks) {
         $Status = if ($Check.ok) { "OK" } elseif ($Check.required) { "MISSING" } else { "OPTIONAL" }

@@ -414,6 +414,85 @@ def vw_bridge_status() -> str:
 
 
 @mcp.tool
+def vw_preflight_for_cad() -> str:
+    """Return structured go/no-go status before real CAD/API handlers."""
+    raw = _send("ping")
+    try:
+        status = json.loads(raw)
+    except json.JSONDecodeError:
+        return json.dumps(
+            {
+                "ok": False,
+                "cad_api_safe": False,
+                "reason": "ping_failed_or_non_json",
+                "next_action": "Fix listener connectivity before CAD work.",
+                "raw_status": raw,
+            }
+        )
+
+    if status.get("cad_api_safe") is True:
+        return json.dumps(
+            {
+                "ok": True,
+                "cad_api_safe": True,
+                "bridge_kind": status.get("bridge_kind", "unknown"),
+                "dispatch_mode": status.get("dispatch_mode", "unknown"),
+                "transport_only": bool(status.get("transport_only")),
+                "native_bridge": bool(status.get("native_bridge")),
+                "handlers": status.get("handlers"),
+                "version": status.get("version"),
+                "reason": "cad_api_safe",
+                "next_action": "Call vw_get_document_info before non-trivial CAD work.",
+                "raw_status": status,
+            }
+        )
+
+    if status.get("transport_only") is True:
+        return json.dumps(
+            {
+                "ok": False,
+                "cad_api_safe": False,
+                "bridge_kind": status.get("bridge_kind", "unknown"),
+                "dispatch_mode": status.get("dispatch_mode", "unknown"),
+                "transport_only": True,
+                "native_bridge": bool(status.get("native_bridge")),
+                "reason": "transport_only_bridge",
+                "next_action": "Do not call CAD handlers. Regenerate/run the dialog launcher or use a compiled native SDK bridge.",
+                "raw_status": status,
+            }
+        )
+
+    if "cad_api_safe" not in status:
+        return json.dumps(
+            {
+                "ok": False,
+                "cad_api_safe": False,
+                "bridge_kind": status.get("bridge_kind", "legacy_or_unknown"),
+                "dispatch_mode": status.get("dispatch_mode", "unknown"),
+                "transport_only": bool(status.get("transport_only")),
+                "native_bridge": bool(status.get("native_bridge")),
+                "reason": "legacy_status_without_cad_api_safe",
+                "next_action": "Update/regenerate the Vectorworks listener before real CAD work.",
+                "raw_status": status,
+            }
+        )
+
+    return json.dumps(
+        {
+            "ok": False,
+            "cad_api_safe": False,
+            "bridge_kind": status.get("bridge_kind", "unknown"),
+            "dispatch_mode": status.get("dispatch_mode", "unknown"),
+            "transport_only": bool(status.get("transport_only")),
+            "native_bridge": bool(status.get("native_bridge")),
+            "reason": "listener_reports_cad_api_unsafe",
+            "next_action": "Do not call CAD handlers until the dialog launcher or native SDK bridge is active.",
+            "raw_status": status,
+        }
+    )
+
+
+@mcp.tool
 def vw_stop_listener() -> str:
     """Ask the Vectorworks listener to stop gracefully after replying."""
     return _send("stop")

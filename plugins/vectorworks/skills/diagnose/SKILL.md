@@ -11,6 +11,9 @@ Start with the deterministic diagnosis script:
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}\scripts\diagnose-vectorworks-mcp.ps1"
 ```
 
+If the companion repo has `scripts\doctor-vectorworks-mcp.ps1`, use that output
+as the fastest source of the next action.
+
 Then map the result:
 
 - `Repo: NOT FOUND`: configure plugin `vectorworks_repo`, set `VW_MCP_REPO`, or start Claude Code from the `vectorworks-mcp` repo.

@@ -4,6 +4,7 @@ Core health and escape hatch:
 
 - `vw_ping`: confirm the listener and MCP server are connected; check bridge mode and CAD safety before real work.
 - `vw_bridge_status`: same listener status payload as `vw_ping`, named for agent preflight checks.
+- `vw_preflight_for_cad`: human-readable go/no-go check before real CAD/API handlers.
 - `vw_run_script`: run trusted Python inside Vectorworks.
 - `vw_stop_listener`: ask the Vectorworks listener to stop gracefully.
 
