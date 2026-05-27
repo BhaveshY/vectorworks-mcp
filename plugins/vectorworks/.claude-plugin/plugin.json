@@ -4,6 +4,7 @@
   "displayName": "Vectorworks MCP",
   "version": "0.2.0",
   "description": "Claude Code plugin for connecting to Vectorworks 2024/2025 through the local Vectorworks MCP connector. Bundles setup, diagnosis, listener ping, CAD workflow skills, and an MCP server definition.",
+  "repository": "https://github.com/BhaveshY/vectorworks-claude-plugin",
   "author": {
     "name": "Bhavesh"
   },

@@ -64,7 +64,7 @@ function Write-PortDiagnostics {
 $Resolver = Join-Path $PSScriptRoot "resolve-vectorworks-mcp-repo.ps1"
 $RepoRoot = $null
 try {
-    $ResolverArgs = @()
+    $ResolverArgs = @("-RequireContract")
     if ($env:VW_MCP_REPO) { $ResolverArgs += @("-RepoPath", $env:VW_MCP_REPO) }
     $RepoRoot = (& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $Resolver @ResolverArgs | Select-Object -Last 1).Trim()
 } catch {

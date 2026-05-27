@@ -133,8 +133,10 @@ For the longer-term Claude Code workflow, use the standalone marketplace plugin:
 /reload-plugins
 ```
 
-For local development of this connector repo, a bundled plugin snapshot is also
-available:
+For local development of this connector repo, a bundled plugin mirror is also
+available. It is checked against the standalone marketplace plugin in CI, and
+its setup/runtime wrappers are contract-gated so agents do not silently bind to
+stale connector checkouts:
 
 ```powershell
 claude --plugin-dir C:\Users\Bhavesh\repos\vectorworks-mcp\plugins\vectorworks

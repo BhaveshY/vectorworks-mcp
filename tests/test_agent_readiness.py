@@ -40,6 +40,7 @@ class AgentReadinessTests(unittest.TestCase):
             "scripts/bootstrap-claude-code.ps1",
             "scripts/bootstrap-native-bridge.ps1",
             "scripts/build-native-bridge.ps1",
+            "scripts/check-bundled-plugin-contract.ps1",
             "scripts/check-native-bridge-prereqs.ps1",
             "scripts/doctor-vectorworks-mcp.ps1",
             "scripts/prepare-native-bridge-source.ps1",

@@ -31,3 +31,6 @@ jobs:
       - name: Standalone plugin companion contract
         shell: powershell
         run: powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\vectorworks-claude-plugin\scripts\check-companion-contract.ps1 -RepoPath "${{ github.workspace }}"
+      - name: Bundled plugin contract
+        shell: powershell
+        run: powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-bundled-plugin-contract.ps1 -StandalonePluginPath .\vectorworks-claude-plugin
