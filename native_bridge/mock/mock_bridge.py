@@ -41,7 +41,7 @@ def _write_json_frame(sock, payload):
 class MockNativeBridge:
     """Small TCP bridge used by tests to exercise the native protocol contract."""
 
-    def __init__(self, status=None):
+    def __init__(self, status=None, release_on_stop=True):
         self.status = status or {
             "pong": True,
             "handlers": len(IMPLEMENTED_ACTIONS),
@@ -65,6 +65,7 @@ class MockNativeBridge:
         ]
         self.selection = []
         self.created_count = 0
+        self.release_on_stop = release_on_stop
         self.requests = []
         self.ready = threading.Event()
         self.stop_event = threading.Event()
@@ -219,7 +220,8 @@ class MockNativeBridge:
                     )
                 elif action == "stop":
                     _write_json_frame(conn, {"id": request_id, "success": True, "result": "Mock bridge stop requested"})
-                    self.stop()
+                    if self.release_on_stop:
+                        self.stop()
                     return
                 else:
                     _write_json_frame(

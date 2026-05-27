@@ -340,6 +340,40 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertEqual(json.loads(layers), [{"name": "Layer 1"}])
         self.assertEqual([request["action"] for request in listener.requests], ["ping", "ping", "get_layers"])
 
+    def test_send_tool_does_not_retry_non_idempotent_after_response_loss(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {
+                        "pong": True,
+                        "cad_api_safe": True,
+                        "transport_only": False,
+                        "bridge_kind": "native_sdk_bridge",
+                        "dispatch_mode": "native_sdk",
+                    },
+                }
+            if request["action"] == "create_object":
+                return None
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=2) as listener:
+            _configure_server(listener.port)
+            server.TIMEOUT = 0.2
+            result = server.vw_create_object("rect")
+
+        self.assertIn("Unknown commit state", result)
+        self.assertIn("did not retry", result)
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "create_object"])
+
+    def test_action_retry_policy_uses_tool_safety_metadata(self):
+        self.assertTrue(server._action_safe_to_retry("get_layers"))
+        self.assertTrue(server._action_safe_to_retry("ping"))
+        self.assertFalse(server._action_safe_to_retry("create_object"))
+        self.assertFalse(server._action_safe_to_retry("selection"))
+        self.assertFalse(server._action_safe_to_retry("run_script"))
+
     def test_send_tool_leaves_health_tools_unguarded(self):
         calls = []
         original_send = server._send

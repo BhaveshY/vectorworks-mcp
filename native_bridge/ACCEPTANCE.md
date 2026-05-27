@@ -34,7 +34,8 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke-
 ```
 
 Expected result: the bridge creates a uniquely named rectangle, finds it,
-selects it, deletes it, and verifies cleanup.
+proves the selection contains exactly that fixture, deletes it, and verifies
+cleanup. If any identity check fails, the smoke harness must skip deletion.
 
 6. For phase-0 transport shutdown, run:
 
@@ -42,7 +43,7 @@ selects it, deletes it, and verifies cleanup.
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Phase 0 -Stop -Json
 ```
 
-7. Confirm port `9877` is released.
+7. Confirm the JSON report includes `"stop_port_released": true`.
 
 Record:
 

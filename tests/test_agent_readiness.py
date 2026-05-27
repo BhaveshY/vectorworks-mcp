@@ -21,6 +21,7 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertEqual(server["env"]["VW_MCP_HOST"], "127.0.0.1")
         self.assertEqual(server["env"]["VW_MCP_PORT"], "9877")
         self.assertEqual(server["env"]["VW_MCP_PREFLIGHT_CACHE_MS"], "750")
+        self.assertNotIn(":-", (ROOT / ".mcp.json").read_text(encoding="utf-8"))
 
     def test_agent_instruction_files_exist(self):
         self.assertTrue((ROOT / "AGENTS.md").exists())
@@ -43,6 +44,13 @@ class AgentReadinessTests(unittest.TestCase):
             ".github/workflows/verify.yml",
         ):
             self.assertTrue((ROOT / relative_path).exists(), relative_path)
+
+    def test_connector_ci_checks_standalone_plugin_contract(self):
+        workflow = (ROOT / ".github" / "workflows" / "verify.yml").read_text(encoding="utf-8")
+
+        self.assertIn("repository: BhaveshY/vectorworks-claude-plugin", workflow)
+        self.assertIn("check-companion-contract.ps1", workflow)
+        self.assertIn("Standalone plugin companion contract", workflow)
 
     def test_generated_launcher_uses_dialog_agent_session_listener(self):
         register_script = (ROOT / "scripts/register-claude-code.ps1").read_text(encoding="utf-8")

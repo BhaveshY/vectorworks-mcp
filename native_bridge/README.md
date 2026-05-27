@@ -128,9 +128,9 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke-
 It speaks the raw bridge protocol directly, requires a native CAD-safe bridge by
 default, and runs the phase-1 read gate: `ping`, `get_document_info`,
 `get_layers`, and `get_objects`. Add `-AllowWriteFixture` only in a disposable
-test document; it creates, selects, deletes, and verifies cleanup for a uniquely
-named rectangle. Use `-Phase 0 -Stop` for transport-only shutdown/port-release
-verification.
+test document; it creates a uniquely named rectangle and deletes it only after
+the fixture identity and exact selection are verified. Use `-Phase 0 -Stop` for
+transport-only shutdown/port-release verification.
 
 The generated worktree lives under `native_bridge/worktree/SDKExamples/` and is
 ignored by git. It preserves the official examples' relative layout so the

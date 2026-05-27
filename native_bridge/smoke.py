@@ -113,12 +113,14 @@ def _validate_fixture_present(
     result: Any,
     fixture_name: str,
     fixture_handle: str | None = None,
-) -> None:
+) -> bool:
     if not isinstance(result, list):
         report["failures"].append("fixture object check did not return a list")
-        return
+        return False
     if not any(_object_matches_fixture(obj, fixture_name, fixture_handle) for obj in result):
         report["failures"].append("created fixture object was not visible in get_objects")
+        return False
+    return True
 
 
 def _validate_fixture_absent(
@@ -126,12 +128,14 @@ def _validate_fixture_absent(
     result: Any,
     fixture_name: str,
     fixture_handle: str | None = None,
-) -> None:
+) -> bool:
     if not isinstance(result, list):
         report["failures"].append("fixture cleanup check did not return a list")
-        return
+        return False
     if any(_object_matches_fixture(obj, fixture_name, fixture_handle) for obj in result):
         report["failures"].append("created fixture object remained after cleanup")
+        return False
+    return True
 
 
 def _validate_fixture_selected(
@@ -139,12 +143,25 @@ def _validate_fixture_selected(
     result: Any,
     fixture_name: str,
     fixture_handle: str | None = None,
-) -> None:
+) -> bool:
     if not isinstance(result, list):
         report["failures"].append("selection get did not return a list")
-        return
-    if not any(_object_matches_fixture(obj, fixture_name, fixture_handle) for obj in result):
+        return False
+    if not result:
         report["failures"].append("fixture object was not selected")
+        return False
+    fixture_matches = [obj for obj in result if _object_matches_fixture(obj, fixture_name, fixture_handle)]
+    if not fixture_matches:
+        report["failures"].append("fixture object was not selected")
+        return False
+    unexpected = [obj for obj in result if not _object_matches_fixture(obj, fixture_name, fixture_handle)]
+    if unexpected:
+        report["failures"].append("selection included non-fixture objects; refusing cleanup delete")
+        return False
+    if len(fixture_matches) != 1:
+        report["failures"].append("selection did not resolve to exactly one fixture object; refusing cleanup delete")
+        return False
+    return True
 
 
 def _extract_created_handle(result: Any) -> str | None:
@@ -175,6 +192,10 @@ def _run_phase_one_write_fixture(sock: socket.socket, report: dict[str, Any]) ->
         },
     )
     fixture_handle = _extract_created_handle(create_response.get("result")) if create_response else None
+    fixture_present = False
+    fixture_selected = False
+    selection_cleared = False
+    selection_select_sent = False
 
     objects_response = _record_call(
         sock,
@@ -184,10 +205,10 @@ def _run_phase_one_write_fixture(sock: socket.socket, report: dict[str, Any]) ->
         params={"limit": 200, "object_type": "rect"},
     )
     if objects_response is not None:
-        _validate_fixture_present(report, objects_response.get("result"), fixture_name, fixture_handle)
+        fixture_present = _validate_fixture_present(report, objects_response.get("result"), fixture_name, fixture_handle)
 
-    _record_call(sock, report, "selection", "fixture-clear", params={"action": "clear"})
-    _record_call(
+    selection_cleared = _record_call(sock, report, "selection", "fixture-clear", params={"action": "clear"}) is not None
+    selection_select_sent = _record_call(
         sock,
         report,
         "selection",
@@ -196,8 +217,16 @@ def _run_phase_one_write_fixture(sock: socket.socket, report: dict[str, Any]) ->
     )
     selection_response = _record_call(sock, report, "selection", "fixture-get", params={"action": "get"})
     if selection_response is not None:
-        _validate_fixture_selected(report, selection_response.get("result"), fixture_name, fixture_handle)
-    _record_call(sock, report, "selection", "fixture-delete", params={"action": "delete"})
+        fixture_selected = _validate_fixture_selected(report, selection_response.get("result"), fixture_name, fixture_handle)
+
+    if not (create_response is not None and fixture_present and selection_cleared and selection_select_sent and fixture_selected):
+        report["failures"].append("skipped fixture delete because fixture selection was not proven safe")
+        _record_call(sock, report, "selection", "fixture-clear-after-skip", params={"action": "clear"})
+        return
+
+    delete_response = _record_call(sock, report, "selection", "fixture-delete", params={"action": "delete"})
+    if delete_response is None:
+        return
 
     cleanup_response = _record_call(
         sock,
@@ -208,6 +237,33 @@ def _run_phase_one_write_fixture(sock: socket.socket, report: dict[str, Any]) ->
     )
     if cleanup_response is not None:
         _validate_fixture_absent(report, cleanup_response.get("result"), fixture_name, fixture_handle)
+
+
+def _wait_for_port_closed(host: str, port: int, timeout: float) -> bool:
+    deadline = time.time() + max(timeout, 0.1)
+    while time.time() < deadline:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            probe.settimeout(min(0.2, max(deadline - time.time(), 0.01)))
+            if probe.connect_ex((host, port)) != 0:
+                return True
+        finally:
+            probe.close()
+        time.sleep(0.05)
+    return False
+
+
+def _record_stop_port_release(report: dict[str, Any], released: bool, elapsed_ms: float) -> None:
+    check = {
+        "action": "stop",
+        "iteration": "port-release",
+        "ok": released,
+        "elapsed_ms": round(elapsed_ms, 2),
+    }
+    if not released:
+        check["error"] = "bridge port did not close after stop"
+        report["failures"].append(check["error"])
+    report["checks"].append(check)
 
 
 def run_smoke(
@@ -234,10 +290,12 @@ def run_smoke(
         "phase": phase,
         "allow_write_fixture": allow_write_fixture,
         "stop_requested": stop,
+        "stop_port_released": None,
         "checks": [],
         "failures": [],
     }
 
+    stop_acknowledged = False
     try:
         with socket.create_connection((host, port), timeout=timeout) as sock:
             sock.settimeout(timeout)
@@ -263,9 +321,21 @@ def run_smoke(
                 _run_phase_one_write_fixture(sock, report)
 
             if stop:
-                _record_call(sock, report, "stop", 1)
+                stop_acknowledged = _record_call(sock, report, "stop", 1) is not None
     except Exception as exc:
         report["failures"].append(str(exc))
+
+    if stop:
+        if stop_acknowledged:
+            started = time.perf_counter()
+            report["stop_port_released"] = _wait_for_port_closed(host, port, timeout)
+            _record_stop_port_release(
+                report,
+                bool(report["stop_port_released"]),
+                (time.perf_counter() - started) * 1000,
+            )
+        else:
+            report["stop_port_released"] = False
 
     report["ok"] = len(report["failures"]) == 0
     return report
@@ -320,6 +390,8 @@ def main(argv: list[str] | None = None) -> int:
                     ping.get("transport_only"),
                 )
             )
+        if report["stop_requested"]:
+            print("Stop port released: {0}".format(report["stop_port_released"]))
         for failure in report["failures"]:
             print("ERROR: {0}".format(failure), file=sys.stderr)
 

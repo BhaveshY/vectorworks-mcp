@@ -24,3 +24,10 @@ jobs:
       - name: No-Vectorworks verification
         shell: powershell
         run: powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-no-vectorworks.ps1
+      - uses: actions/checkout@v4
+        with:
+          repository: BhaveshY/vectorworks-claude-plugin
+          path: vectorworks-claude-plugin
+      - name: Standalone plugin companion contract
+        shell: powershell
+        run: powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\vectorworks-claude-plugin\scripts\check-companion-contract.ps1 -RepoPath "${{ github.workspace }}"

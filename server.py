@@ -54,6 +54,16 @@ class ProtocolError(RuntimeError):
     """Raised when the listener sends an invalid protocol frame."""
 
 
+class RequestTransportError(ConnectionError):
+    """Raised after a request frame may have reached the listener."""
+
+    def __init__(self, action: str, stage: str, original: BaseException):
+        self.action = action
+        self.stage = stage
+        self.original = original
+        super().__init__(str(original))
+
+
 class _MissingFastMCP:
     def __init__(self, name: str):
         self.name = name
@@ -387,6 +397,13 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
 }
 
 
+_ACTION_SAFETY = {
+    safety["wire_action"]: safety
+    for safety in TOOL_SAFETY.values()
+    if isinstance(safety.get("wire_action"), str) and safety.get("wire_action")
+}
+
+
 def _annotations_for(tool_name: str) -> dict[str, bool]:
     safety = TOOL_SAFETY[tool_name]
     return {key: bool(safety[key]) for key in _ANNOTATION_KEYS}
@@ -494,6 +511,28 @@ def _connection_help(error: BaseException) -> str:
         "or the installed VW MCP Listener menu command, and verify VW_MCP_HOST/VW_MCP_PORT "
         "match on both sides."
     )
+
+
+def _action_safe_to_retry(action: str) -> bool:
+    safety = _ACTION_SAFETY.get(action)
+    if not safety:
+        return False
+    return (
+        bool(safety.get("readOnlyHint"))
+        and bool(safety.get("idempotentHint"))
+        and not bool(safety.get("destructiveHint"))
+    )
+
+
+def _unknown_commit_state_help(action: str, error: RequestTransportError) -> str:
+    return (
+        "Unknown commit state after sending non-idempotent Vectorworks action "
+        "'{action}': {err}\n\n"
+        "The request may or may not have completed inside Vectorworks. The MCP "
+        "host did not retry it, because retrying could duplicate or compound CAD "
+        "changes. Check the Vectorworks document state, then rerun only the exact "
+        "follow-up action you still need."
+    ).format(action=action, err=error.original)
 
 
 def _with_block_context(payload: dict[str, Any], blocked_action: Optional[str]) -> dict[str, Any]:
@@ -609,8 +648,11 @@ def _request_once(action: str, params: Optional[dict[str, Any]]) -> dict[str, An
     _connect()
     request_id = uuid.uuid4().hex[:8]
     request = {"id": request_id, "action": action, "params": params or {}}
-    _send_frame(_json_bytes(request))
-    response = _decode_response(_recv_frame())
+    try:
+        _send_frame(_json_bytes(request))
+        response = _decode_response(_recv_frame())
+    except (ConnectionError, TimeoutError, socket.timeout, OSError) as exc:
+        raise RequestTransportError(action, "response", exc) from exc
     response_id = response.get("id")
     if response_id not in (None, "", request_id):
         raise ProtocolError(f"response id mismatch: expected {request_id}, got {response_id!r}")
@@ -635,6 +677,17 @@ def _send(action: str, params: Optional[dict[str, Any]] = None, require_cad_safe
             except ProtocolError as exc:
                 _close()
                 return f"Protocol error: {exc}. Restart the Vectorworks listener if this persists."
+            except RequestTransportError as exc:
+                _close()
+                if exc.action != action:
+                    if attempt == 0:
+                        continue
+                    return _connection_help(exc.original)
+                if attempt == 0 and _action_safe_to_retry(action):
+                    continue
+                if not _action_safe_to_retry(action):
+                    return _unknown_commit_state_help(action, exc)
+                return _connection_help(exc.original)
             except (ConnectionError, TimeoutError, socket.timeout, OSError) as exc:
                 _close()
                 if attempt == 0:

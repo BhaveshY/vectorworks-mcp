@@ -6,6 +6,7 @@ import time
 import unittest
 
 import server
+from native_bridge import smoke as smoke_module
 from native_bridge.mock.mock_bridge import MockNativeBridge
 from native_bridge.smoke import run_smoke
 
@@ -182,8 +183,56 @@ class NativeBridgeContractTests(unittest.TestCase):
 
         self.assertTrue(report["ok"], report["failures"])
         self.assertEqual(report["phase"], 0)
+        self.assertTrue(report["stop_port_released"])
+        self.assertEqual(report["checks"][-1]["iteration"], "port-release")
         self.assertEqual([request["action"] for request in bridge.requests], ["ping", "stop"])
         self.assertTrue(_wait_for_port_released(port))
+
+    def test_native_smoke_harness_fails_if_stop_does_not_release_port(self):
+        with MockNativeBridge(release_on_stop=False) as bridge:
+            port = bridge.port
+            report = run_smoke(port=port, ping_count=1, read_count=1, timeout=0.2, phase=0, stop=True)
+
+        self.assertFalse(report["ok"])
+        self.assertFalse(report["stop_port_released"])
+        self.assertIn("bridge port did not close after stop", report["failures"])
+
+    def test_native_smoke_write_fixture_refuses_unsafe_selection_delete(self):
+        calls = []
+        state = {"fixture_name": ""}
+        original_record_call = smoke_module._record_call
+
+        def fake_record_call(_sock, _report, action, iteration, params=None):
+            calls.append((action, iteration, params or {}))
+            if action == "create_object":
+                state["fixture_name"] = str((params or {}).get("name", ""))
+                return {"success": True, "result": "Created rect, handle: fixture-1"}
+            if action == "get_objects" and iteration == "fixture-present":
+                return {
+                    "success": True,
+                    "result": [{"handle": "fixture-1", "type": "rect", "name": state["fixture_name"]}],
+                }
+            if action == "selection" and iteration == "fixture-get":
+                return {
+                    "success": True,
+                    "result": [
+                        {"handle": "fixture-1", "type": "rect", "name": state["fixture_name"]},
+                        {"handle": "other-1", "type": "rect", "name": "Do Not Delete"},
+                    ],
+                }
+            return {"success": True, "result": "OK"}
+
+        try:
+            smoke_module._record_call = fake_record_call
+            report = {"checks": [], "failures": []}
+            smoke_module._run_phase_one_write_fixture(object(), report)
+        finally:
+            smoke_module._record_call = original_record_call
+
+        self.assertIn("selection included non-fixture objects; refusing cleanup delete", report["failures"])
+        self.assertIn("skipped fixture delete because fixture selection was not proven safe", report["failures"])
+        self.assertNotIn(("selection", "fixture-delete", {"action": "delete"}), calls)
+        self.assertIn(("selection", "fixture-clear-after-skip", {"action": "clear"}), calls)
 
     def test_native_smoke_harness_requires_write_fixture_flag_for_writes(self):
         with MockNativeBridge() as bridge:

@@ -32,7 +32,7 @@ try:
 except ModuleNotFoundError:
     vs = None
 
-import io, json, math, os, selectors, socket, struct, sys, threading, traceback, types
+import io, json, math, os, selectors, socket, struct, sys, threading, time, traceback, types
 
 __VERSION__ = "0.3.0-socket"
 
@@ -913,7 +913,7 @@ def _listener_port_open():
     return True
 
 
-def _existing_listener_healthy():
+def _existing_listener_status():
     request = {"id": "startup-ping", "action": "ping", "params": {}}
     payload = json.dumps(request).encode("utf-8")
     try:
@@ -925,23 +925,47 @@ def _existing_listener_healthy():
             while len(header) < 4:
                 chunk = sock.recv(4 - len(header))
                 if not chunk:
-                    return False
+                    return None
                 header += chunk
             size = struct.unpack(">I", header)[0]
             if size <= 0 or size > MAX_FRAME_BYTES:
-                return False
+                return None
             body = b""
             while len(body) < size:
                 chunk = sock.recv(size - len(body))
                 if not chunk:
-                    return False
+                    return None
                 body += chunk
             response = json.loads(body.decode("utf-8"))
-            return bool(response.get("success") and response.get("result", {}).get("pong"))
+            result = response.get("result", {})
+            if response.get("success") and isinstance(result, dict) and result.get("pong"):
+                return result
+            return None
         finally:
             sock.close()
     except Exception:
-        return False
+        return None
+
+
+def _existing_listener_healthy():
+    return _existing_listener_status() is not None
+
+
+def _existing_listener_cad_safe(status):
+    return (
+        isinstance(status, dict)
+        and status.get("cad_api_safe") is True
+        and status.get("transport_only") is not True
+    )
+
+
+def _wait_for_listener_port_release(timeout=3.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not _listener_port_open():
+            return True
+        time.sleep(0.1)
+    return False
 
 
 def _write_stop_file():
@@ -957,8 +981,31 @@ def _write_stop_file():
 def _report_existing_or_stale_listener():
     if not _listener_port_open():
         return False
-    if _existing_listener_healthy():
+    status = _existing_listener_status()
+    if _existing_listener_cad_safe(status):
         _message("VW MCP Listener is already healthy on {h}:{p}".format(h=HOST, p=PORT))
+        return True
+    if status:
+        if _write_stop_file():
+            _message(
+                "VW MCP port {h}:{p} is owned by a transport-only or CAD-unsafe listener. "
+                "A STOP file was written so the dialog agent-session launcher can replace it.".format(
+                    h=HOST, p=PORT
+                )
+            )
+            if _wait_for_listener_port_release():
+                return False
+            _message(
+                "VW MCP port {h}:{p} is still busy after STOP. Restart Vectorworks, "
+                "then run this launcher again.".format(h=HOST, p=PORT)
+            )
+        else:
+            _message(
+                "VW MCP port {h}:{p} is owned by a CAD-unsafe listener, and the STOP file "
+                "could not be written. Restart Vectorworks, then run this launcher again.".format(
+                    h=HOST, p=PORT
+                )
+            )
         return True
     if _write_stop_file():
         _message(

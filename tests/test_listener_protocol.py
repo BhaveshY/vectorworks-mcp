@@ -202,6 +202,70 @@ class ListenerProtocolTests(unittest.TestCase):
         self.assertTrue(any("STARTED" in message for message in alerts))
         self.assertTrue(any("STOPPED" in message for message in alerts))
 
+    def test_dialog_startup_replaces_transport_only_listener(self):
+        listener, _alerts = self.load_listener()
+        port = _free_port()
+        listener.HOST = "127.0.0.1"
+        listener.PORT = port
+        listener.STOP_DIR = str(self.tmp_path())
+        listener.STOP_FILE = str(Path(listener.STOP_DIR) / "STOP")
+        listener.SCREENSHOT_DIR = listener.STOP_DIR
+        listener.MAX_FRAME_BYTES = 1024 * 1024
+        listener._DISPATCH_MODE = "background"
+
+        thread = threading.Thread(target=listener.main, kwargs={"show_alerts": False}, daemon=True)
+        thread.start()
+
+        with _connect_with_retry(port) as sock:
+            _write_json_frame(sock, {"id": "ping-1", "action": "ping", "params": {}})
+            ping = _read_json_frame(sock)
+            self.assertTrue(ping["success"])
+            self.assertTrue(ping["result"]["transport_only"])
+            self.assertFalse(ping["result"]["cad_api_safe"])
+
+        should_return_without_starting = listener._report_existing_or_stale_listener()
+        thread.join(3)
+
+        self.assertFalse(should_return_without_starting)
+        self.assertFalse(thread.is_alive())
+
+    def test_malformed_startup_ping_is_not_healthy(self):
+        listener, _alerts = self.load_listener()
+        port = _free_port()
+        listener.HOST = "127.0.0.1"
+        listener.PORT = port
+
+        ready = threading.Event()
+        stop = threading.Event()
+
+        def serve_malformed_ping():
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+                server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                server.bind(("127.0.0.1", port))
+                server.listen(1)
+                server.settimeout(0.2)
+                ready.set()
+                while not stop.is_set():
+                    try:
+                        conn, _addr = server.accept()
+                    except socket.timeout:
+                        continue
+                    with conn:
+                        conn.recv(1024)
+                        conn.sendall(struct.pack(">I", 0))
+                    return
+
+        thread = threading.Thread(target=serve_malformed_ping, daemon=True)
+        thread.start()
+        self.assertTrue(ready.wait(2))
+
+        try:
+            self.assertIsNone(listener._existing_listener_status())
+            self.assertFalse(listener._existing_listener_healthy())
+        finally:
+            stop.set()
+            thread.join(2)
+
     def tmp_path(self):
         base = Path(os.environ.get("TMPDIR", "/tmp"))
         path = base / "vectorworks_mcp_tests" / uuid.uuid4().hex

@@ -84,7 +84,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Json
 ```
 
 The default native smoke is the phase-1 read gate. In a disposable test
-document, add `-AllowWriteFixture` to prove create/select/delete cleanup too.
+document, add `-AllowWriteFixture` to prove create/select/delete cleanup; the
+delete runs only after the fixture identity and exact selection are verified.
 
 If an agent or user has already extracted the Vectorworks SDK somewhere else,
 pass the same `-SdkDir C:\path\to\sdk` to bootstrap, prepare, and build; the
@@ -120,7 +121,16 @@ the first time it sees that file.
 
 ## Claude Code Plugin
 
-For the longer-term Claude Code workflow, use the bundled plugin:
+For the longer-term Claude Code workflow, use the standalone marketplace plugin:
+
+```text
+/plugin marketplace add BhaveshY/vectorworks-claude-plugin
+/plugin install vectorworks@vectorworks-mcp
+/reload-plugins
+```
+
+For local development of this connector repo, a bundled plugin snapshot is also
+available:
 
 ```powershell
 claude --plugin-dir C:\Users\Bhavesh\repos\vectorworks-mcp\plugins\vectorworks
