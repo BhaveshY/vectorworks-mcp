@@ -775,6 +775,47 @@ def _listener_port_open():
     return True
 
 
+def _existing_listener_healthy():
+    request = {"id": "startup-ping", "action": "ping", "params": {}}
+    payload = json.dumps(request).encode("utf-8")
+    try:
+        sock = socket.create_connection((HOST, PORT), timeout=0.6)
+        sock.settimeout(0.6)
+        try:
+            sock.sendall(struct.pack(">I", len(payload)) + payload)
+            header = b""
+            while len(header) < 4:
+                chunk = sock.recv(4 - len(header))
+                if not chunk:
+                    return False
+                header += chunk
+            size = struct.unpack(">I", header)[0]
+            if size <= 0 or size > MAX_FRAME_BYTES:
+                return False
+            body = b""
+            while len(body) < size:
+                chunk = sock.recv(size - len(body))
+                if not chunk:
+                    return False
+                body += chunk
+            response = json.loads(body.decode("utf-8"))
+            return bool(response.get("success") and response.get("result", {}).get("pong"))
+        finally:
+            sock.close()
+    except Exception:
+        return False
+
+
+def _write_stop_file():
+    try:
+        os.makedirs(STOP_DIR, exist_ok=True)
+        with open(STOP_FILE, "w") as f:
+            f.write("stop\n")
+        return True
+    except Exception:
+        return False
+
+
 def start_background():
     thread = getattr(_STATE, "listener_thread", None)
     if thread is not None and thread.is_alive():
@@ -782,7 +823,22 @@ def start_background():
         return
 
     if _listener_port_open():
-        _message("VW MCP Listener is already reachable on {h}:{p}".format(h=HOST, p=PORT))
+        if _existing_listener_healthy():
+            _message("VW MCP Listener is already healthy on {h}:{p}".format(h=HOST, p=PORT))
+            return
+        if _write_stop_file():
+            _message(
+                "VW MCP port {h}:{p} is open but not answering. "
+                "A STOP file was written; wait a few seconds, then restart Vectorworks "
+                "if the port still times out.".format(h=HOST, p=PORT)
+            )
+        else:
+            _message(
+                "VW MCP port {h}:{p} is open but not answering, and the STOP file "
+                "could not be written. Restart Vectorworks, then run this launcher again.".format(
+                    h=HOST, p=PORT
+                )
+            )
         return
 
     thread = threading.Thread(

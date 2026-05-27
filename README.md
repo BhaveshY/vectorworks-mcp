@@ -211,6 +211,18 @@ Vectorworks hangs after running the listener script:
   `C:\Users\<you>\.vectorworks-mcp\STOP`, wait a few seconds, then restart
   Vectorworks if it does not recover.
 
+`vw_ping` times out, but port `9877` is open:
+
+- This means Vectorworks owns the TCP socket but the Python listener loop is not
+  servicing requests. Run `.\scripts\test-vectorworks-listener.ps1` to see the
+  owning process and socket state.
+- Create `C:\Users\<you>\.vectorworks-mcp\STOP` and wait a few seconds.
+- If the port still times out, save your work and restart Vectorworks. Then run
+  the generated launcher again.
+- If every background launch repeats this timeout, your Vectorworks Python host
+  is pausing background threads after script return. Use the timeout as a signal
+  to move the connector to an event-based Vectorworks plug-in or SDK bridge.
+
 `VW MCP failed to bind 127.0.0.1:9877`:
 
 - A previous listener is still running. Call `vw_stop_listener`, create

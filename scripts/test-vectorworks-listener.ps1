@@ -19,6 +19,29 @@ if ($Port -eq 0) {
     $Port = if ($env:VW_MCP_PORT) { [int]$env:VW_MCP_PORT } else { 9877 }
 }
 
+function Write-PortDiagnostics {
+    param(
+        [string]$Address,
+        [int]$PortNumber
+    )
+    $Connections = @(Get-NetTCPConnection -LocalPort $PortNumber -ErrorAction SilentlyContinue)
+    if (-not $Connections) {
+        Write-Host "No process is listening on $Address`:$PortNumber."
+        return
+    }
+    Write-Host "TCP state for local port ${PortNumber}:"
+    $Connections |
+        Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,State,OwningProcess |
+        Format-Table -AutoSize | Out-String | Write-Host
+    $Connections |
+        Select-Object -ExpandProperty OwningProcess -Unique |
+        ForEach-Object {
+            Get-Process -Id $_ -ErrorAction SilentlyContinue |
+                Select-Object Id,ProcessName,Path |
+                Format-List | Out-String | Write-Host
+        }
+}
+
 if (Test-Path $VenvPython) {
     $PythonCommand = $VenvPython
     $PythonArgs = @()
@@ -72,7 +95,11 @@ $TempScript = Join-Path ([System.IO.Path]::GetTempPath()) "vw_listener_ping_$PID
 try {
     Set-Content -LiteralPath $TempScript -Value $Code -Encoding UTF8
     & $PythonCommand @PythonArgs $TempScript $HostName $Port $TimeoutSeconds
-    exit $LASTEXITCODE
+    $ExitCode = $LASTEXITCODE
+    if ($ExitCode -ne 0) {
+        Write-PortDiagnostics -Address $HostName -PortNumber $Port
+    }
+    exit $ExitCode
 } finally {
     Remove-Item -LiteralPath $TempScript -Force -ErrorAction SilentlyContinue
 }

@@ -35,6 +35,32 @@ function Test-TcpPort {
     }
 }
 
+function Write-PortDiagnostics {
+    param(
+        [string]$Address,
+        [int]$PortNumber
+    )
+    $Connections = @(Get-NetTCPConnection -LocalPort $PortNumber -ErrorAction SilentlyContinue)
+    if (-not $Connections) {
+        Write-Host "Port owner: none found for $Address`:$PortNumber"
+        return
+    }
+
+    Write-Host "TCP state for local port ${PortNumber}:"
+    $Connections |
+        Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,State,OwningProcess |
+        Format-Table -AutoSize | Out-String | Write-Host
+
+    Write-Host "Owning process(es):"
+    $Connections |
+        Select-Object -ExpandProperty OwningProcess -Unique |
+        ForEach-Object {
+            Get-Process -Id $_ -ErrorAction SilentlyContinue |
+                Select-Object Id,ProcessName,Path |
+                Format-List | Out-String | Write-Host
+        }
+}
+
 $Resolver = Join-Path $PSScriptRoot "resolve-vectorworks-mcp-repo.ps1"
 $RepoRoot = $null
 try {
@@ -57,8 +83,10 @@ if ($RepoRoot) {
 $Claude = Get-Command claude -ErrorAction SilentlyContinue
 Write-Host "claude on PATH: $([bool]$Claude)"
 if ($Claude) { Write-Host "claude path: $($Claude.Source)" }
-Write-Host "Listener TCP $HostName`:$Port reachable: $(Test-TcpPort -ComputerName $HostName -PortNumber $Port)"
+$TcpReachable = Test-TcpPort -ComputerName $HostName -PortNumber $Port
+Write-Host "Listener TCP $HostName`:$Port reachable: $TcpReachable"
+Write-PortDiagnostics -Address $HostName -PortNumber $Port
 
-if ($RepoRoot -and (Test-TcpPort -ComputerName $HostName -PortNumber $Port)) {
+if ($RepoRoot -and $TcpReachable) {
     & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "test-vectorworks-listener.ps1") -HostName $HostName -Port $Port
 }
