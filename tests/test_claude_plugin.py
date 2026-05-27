@@ -245,6 +245,7 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("requiredFeatures", resolver)
         self.assertIn("contractVersion >= 5", contract)
         self.assertIn("native-bridge-scaffold-copy", contract)
+        self.assertIn("test-native-bridge-scaffold.ps1", contract)
         self.assertIn("LoaderPath", contract)
         self.assertIn("CopyLoaderToClipboard", contract)
         self.assertIn("MaxPingMilliseconds", smoke)

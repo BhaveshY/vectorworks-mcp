@@ -57,6 +57,7 @@ class AgentReadinessTests(unittest.TestCase):
             "scripts/register-claude-code.ps1",
             "scripts/run-mcp-server.ps1",
             "scripts/smoke-native-bridge.ps1",
+            "scripts/test-native-bridge-scaffold.ps1",
             "scripts/verify-no-vectorworks.ps1",
             ".github/workflows/verify.yml",
         ):
@@ -143,6 +144,35 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("Remove-Item -LiteralPath $LauncherPath", verifier)
         self.assertIn("Remove-Item -LiteralPath $LoaderPath", verifier)
         self.assertIn("Generated Vectorworks loader", verifier)
+        self.assertIn("test-native-bridge-scaffold.ps1", verifier)
+        self.assertIn("native bridge scaffold compile smoke", verifier)
+
+    def test_native_bridge_scaffold_compile_smoke_script_exercises_protocol(self):
+        smoke = (ROOT / "scripts/test-native-bridge-scaffold.ps1").read_text(encoding="utf-8")
+        harness = (ROOT / "native_bridge/tests/native_scaffold_smoke.cpp").read_text(encoding="utf-8")
+
+        self.assertIn("cl.exe", smoke)
+        self.assertIn("clang++.exe", smoke)
+        self.assertIn("g++.exe", smoke)
+        self.assertIn("c++.exe", smoke)
+        self.assertIn("BridgeProtocol.cpp", smoke)
+        self.assertIn("VectorworksMCPBridge.cpp", smoke)
+        self.assertIn("BridgeDispatcher.hpp", smoke)
+        self.assertIn("CadRequestQueue.hpp", smoke)
+        self.assertIn("native_scaffold_smoke.cpp", smoke)
+        self.assertIn("RequireCompiler", smoke)
+        self.assertIn("No C++ compiler found", smoke)
+        self.assertIn("ParseRequestEnvelope", harness)
+        self.assertIn("SerializeResponseEnvelope", harness)
+        self.assertIn("FindActionSpec", harness)
+        self.assertIn("RequiresCadMainContext", harness)
+        self.assertIn("CadRequestQueue", harness)
+        self.assertIn("DispatchFromSocketWorker", harness)
+        self.assertIn("missing params should default to object", harness)
+        self.assertIn("array params should fail", harness)
+        self.assertIn("success without result should fail", harness)
+        self.assertIn("failure without error should fail", harness)
+        self.assertIn("phase-0 CAD request should fail immediately", harness)
 
     def test_register_script_generates_dialog_agent_session_launcher(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
@@ -207,6 +237,7 @@ class AgentReadinessTests(unittest.TestCase):
             "native_bridge/src/BridgeDispatcher.hpp",
             "native_bridge/src/CadRequestQueue.hpp",
             "native_bridge/src/VectorworksMCPBridge.cpp",
+            "native_bridge/tests/native_scaffold_smoke.cpp",
         )
         for relative_path in expected_files:
             self.assertTrue((ROOT / relative_path).exists(), relative_path)
@@ -638,6 +669,62 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", agents)
         self.assertIn("Do not run the default native smoke against the copied", agents)
 
+    def test_native_doctor_exposes_stage_aware_next_command(self):
+        doctor = (ROOT / "scripts/doctor-native-bridge.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("nextCommand", doctor)
+        self.assertIn("nextCommandReason", doctor)
+        self.assertIn("nextActions", doctor)
+        self.assertIn("bootstrap-native-bridge.ps1", doctor)
+        self.assertIn("-InstallVisualStudioBuildTools", doctor)
+        self.assertIn("-DownloadSdk", doctor)
+        self.assertIn("-PrepareSource", doctor)
+        self.assertIn("prepare-native-bridge-source.ps1", doctor)
+        self.assertIn("build-native-bridge.ps1", doctor)
+        self.assertIn("copy-native-bridge-scaffold.ps1", doctor)
+        self.assertIn("without -WhatIf", doctor)
+        self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", doctor)
+
+    def test_native_doctor_reports_one_primary_next_command_for_empty_worktree(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise the native doctor")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            result = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/doctor-native-bridge.ps1"),
+                    "-WorktreeRoot",
+                    str(temp_root / "SDKExamples"),
+                    "-InstallDir",
+                    str(temp_root / "Plug-ins"),
+                    "-Json",
+                ],
+                cwd=str(ROOT),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            report = json.loads(result.stdout)
+            self.assertIsInstance(report["nextActions"], list)
+            self.assertTrue(report["nextCommand"])
+            self.assertTrue(report["nextCommandReason"])
+            if report["prereqsReady"]:
+                self.assertIn("prepare-native-bridge-source.ps1", report["nextCommand"])
+            else:
+                self.assertIn("bootstrap-native-bridge.ps1", report["nextCommand"])
+                self.assertIn("-InstallVisualStudioBuildTools", report["nextCommand"])
+                self.assertIn("-DownloadSdk", report["nextCommand"])
+
     def test_native_doctor_can_plan_and_install_explicit_artifact(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
         if not powershell:
@@ -681,6 +768,10 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertTrue(report["installPerformed"])
             self.assertFalse(report["installWhatIf"])
             self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", "\n".join(report["nextActions"]))
+            self.assertIn("nextCommand", report)
+            self.assertIn("nextCommandReason", report)
+            self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", report["nextCommand"])
+            self.assertIn("Restart Vectorworks", report["nextCommandReason"])
 
     def test_native_doctor_whatif_install_is_non_mutating(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
@@ -728,6 +819,11 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertEqual(report["installedPath"], "")
             self.assertNotIn("Restart Vectorworks", "\n".join(report["nextActions"]))
             self.assertIn("without -WhatIf", "\n".join(report["nextActions"]))
+            self.assertIn("doctor-native-bridge.ps1", report["nextCommand"])
+            self.assertIn(str(artifact), report["nextCommand"])
+            self.assertIn("-Install", report["nextCommand"])
+            self.assertNotIn("-WhatIf", report["nextCommand"])
+            self.assertIn("without -WhatIf", report["nextCommandReason"])
 
     def test_native_doctor_reports_auto_discovered_artifact_as_candidate_only(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
@@ -770,6 +866,9 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertFalse(report["builtArtifactWasExplicit"])
             self.assertEqual(report["builtArtifactCandidate"], str(artifact))
             self.assertIn(str(artifact), "\n".join(report["nextActions"]))
+            self.assertIn(str(artifact), report["nextCommand"])
+            self.assertIn("-Install -WhatIf", report["nextCommand"])
+            self.assertIn("Dry-run", report["nextCommandReason"])
 
             install_result = subprocess.run(
                 [
@@ -840,6 +939,8 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIn("CadRequestQueue.hpp", report["missingScaffoldFiles"])
             self.assertIn("VectorworksMCPBridge.cpp", report["missingScaffoldFiles"])
             self.assertIn("copy-native-bridge-scaffold.ps1 -VectorworksVersion 2024 -Force", "\n".join(report["nextActions"]))
+            self.assertIn("copy-native-bridge-scaffold.ps1 -VectorworksVersion 2024 -Force", report["nextCommand"])
+            self.assertIn("partially copied", report["nextCommandReason"])
 
     def test_native_prereq_checker_reports_supported_versions_for_unknown_version(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")

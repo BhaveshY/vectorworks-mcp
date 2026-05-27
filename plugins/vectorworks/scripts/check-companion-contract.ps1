@@ -39,7 +39,8 @@ $RequiredScripts = @(
     "scripts\prepare-native-bridge-source.ps1",
     "scripts\build-native-bridge.ps1",
     "scripts\smoke-native-bridge.ps1",
-    "scripts\copy-native-bridge-scaffold.ps1"
+    "scripts\copy-native-bridge-scaffold.ps1",
+    "scripts\test-native-bridge-scaffold.ps1"
 )
 
 $RequiredFeatures = @("stable-loader", "loader-clipboard-copy", "native-bridge-scaffold", "native-bridge-scaffold-copy")

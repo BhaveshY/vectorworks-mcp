@@ -15,6 +15,7 @@ $ListenerPath = Join-Path $RepoRoot "vw_listener.py"
 $VenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 $ProjectMcpPath = Join-Path $RepoRoot ".mcp.json"
 $NativePrereqPath = Join-Path $RepoRoot "scripts\check-native-bridge-prereqs.ps1"
+$NativeScaffoldTestPath = Join-Path $RepoRoot "scripts\test-native-bridge-scaffold.ps1"
 $FreshLauncher = $false
 $FreshLoader = $false
 
@@ -55,6 +56,7 @@ Assert-Path $ServerPath "MCP server"
 Assert-Path $ListenerPath "Vectorworks listener"
 Assert-Path $ProjectMcpPath "Project MCP config"
 Assert-Path $NativePrereqPath "Native bridge prerequisite checker"
+Assert-Path $NativeScaffoldTestPath "Native bridge scaffold smoke test"
 
 Invoke-Checked "bootstrap venv/dependencies" {
     & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $RunnerPath -SetupOnly
@@ -101,6 +103,10 @@ Invoke-Checked "Python compilation" {
 
 Invoke-Checked "unit tests" {
     & $VenvPython -m unittest discover -v
+}
+
+Invoke-Checked "native bridge scaffold compile smoke" {
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $NativeScaffoldTestPath
 }
 
 Invoke-Checked "native bridge prereq advisory" {
