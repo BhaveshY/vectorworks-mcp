@@ -2,8 +2,12 @@
 param(
     [string]$VectorworksVersion = "2024",
     [string]$BuiltArtifact = "",
+    [string]$SdkDir = "",
+    [string]$SdkExamplesDir = "",
     [string]$WorktreeRoot = "",
     [string]$InstallDir = "",
+    [ValidateSet("Debug", "Release")]
+    [string]$Configuration = "Debug",
     [switch]$Install,
     [switch]$Json
 )
@@ -22,8 +26,11 @@ if (-not (Test-Path -LiteralPath $Doctor)) {
 
 $Args = @("-VectorworksVersion", $VectorworksVersion)
 if ($BuiltArtifact) { $Args += @("-BuiltArtifact", $BuiltArtifact) }
+if ($SdkDir) { $Args += @("-SdkDir", $SdkDir) }
+if ($SdkExamplesDir) { $Args += @("-SdkExamplesDir", $SdkExamplesDir) }
 if ($WorktreeRoot) { $Args += @("-WorktreeRoot", $WorktreeRoot) }
 if ($InstallDir) { $Args += @("-InstallDir", $InstallDir) }
+if ($PSBoundParameters.ContainsKey("Configuration")) { $Args += @("-Configuration", $Configuration) }
 if ($Install) { $Args += "-Install" }
 if ($Json) { $Args += "-Json" }
 if ($WhatIfPreference) { $Args += "-WhatIf" }

@@ -6,8 +6,8 @@ param(
     [string]$InstallRepoUrl = "https://github.com/BhaveshY/vectorworks-mcp.git",
     [switch]$RequireContract,
     [ValidateRange(1, 100)]
-    [int]$MinimumContractVersion = 6,
-    [string[]]$RequiredFeatures = @("stable-loader", "loader-clipboard-copy", "native-bridge-scaffold", "native-bridge-scaffold-copy", "native-doctor-next-command")
+    [int]$MinimumContractVersion = 7,
+    [string[]]$RequiredFeatures = @("stable-loader", "loader-clipboard-copy", "native-bridge-scaffold", "native-bridge-scaffold-copy", "native-doctor-next-command", "native-doctor-command-spec")
 )
 
 $ErrorActionPreference = "Stop"

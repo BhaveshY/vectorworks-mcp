@@ -100,9 +100,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -Jso
 ```
 
 For native bridge implementation work, prefer the native doctor's JSON
-`nextCommand` and report its `nextCommandReason`; it is the agent-ready staged
-path and preserves custom version, worktree, and install paths. The manual
-sequence below is only a fallback/reference:
+`nextCommand` and report its `nextCommandReason`; when executing it
+programmatically, use `nextCommandSpec.executable` and
+`nextCommandSpec.arguments` rather than parsing the shell string. This is the
+agent-ready staged path and preserves custom version, worktree, and install
+paths. Inspect `nextCommandSpec` safety flags before execution, run the
+executable with the arguments as an array, and rerun the native doctor whenever
+`rerunDoctorAfter` is true. The manual sequence below is only a
+fallback/reference:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-native-bridge.ps1 -InstallVisualStudioBuildTools -DownloadSdk -CloneSdkExamples -PrepareSource

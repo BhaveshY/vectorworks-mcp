@@ -121,8 +121,14 @@ Invoke-Checked "native bridge doctor next command" {
     $DoctorReport = $DoctorJson | ConvertFrom-Json
     if ([string]::IsNullOrWhiteSpace([string]$DoctorReport.nextCommand) -or
         [string]::IsNullOrWhiteSpace([string]$DoctorReport.nextCommandReason) -or
+        [string]::IsNullOrWhiteSpace([string]$DoctorReport.nextCommandSpec.command) -or
+        [string]::IsNullOrWhiteSpace([string]$DoctorReport.nextCommandSpec.stage) -or
         @($DoctorReport.nextActions).Count -eq 0) {
-        throw "Native bridge doctor JSON did not include nextCommand, nextCommandReason, and nextActions."
+        throw "Native bridge doctor JSON did not include nextCommand, nextCommandReason, nextCommandSpec, and nextActions."
+    }
+    if ([string]$DoctorReport.nextCommandSpec.command -ne [string]$DoctorReport.nextCommand -or
+        @($DoctorReport.nextCommandSpec.arguments).Count -lt 6) {
+        throw "Native bridge doctor nextCommandSpec does not match nextCommand."
     }
 }
 

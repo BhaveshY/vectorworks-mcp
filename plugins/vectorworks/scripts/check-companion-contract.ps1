@@ -43,7 +43,7 @@ $RequiredScripts = @(
     "scripts\test-native-bridge-scaffold.ps1"
 )
 
-$RequiredFeatures = @("stable-loader", "loader-clipboard-copy", "native-bridge-scaffold", "native-bridge-scaffold-copy", "native-doctor-next-command")
+$RequiredFeatures = @("stable-loader", "loader-clipboard-copy", "native-bridge-scaffold", "native-bridge-scaffold-copy", "native-doctor-next-command", "native-doctor-command-spec")
 
 $ContractMarker = Join-Path $RepoRoot ".vectorworks-mcp-contract.json"
 if (-not (Test-Path -LiteralPath $ContractMarker)) {
@@ -57,10 +57,10 @@ try {
 try {
     $ContractVersion = [int]$Contract.contractVersion
 } catch {
-    throw "Companion repo contract marker is incompatible. Expected numeric contractVersion >= 6."
+    throw "Companion repo contract marker is incompatible. Expected numeric contractVersion >= 7."
 }
-if ($Contract.name -ne "vectorworks-mcp" -or $ContractVersion -lt 6) {
-    throw "Companion repo contract marker is incompatible. Expected vectorworks-mcp contractVersion >= 6."
+if ($Contract.name -ne "vectorworks-mcp" -or $ContractVersion -lt 7) {
+    throw "Companion repo contract marker is incompatible. Expected vectorworks-mcp contractVersion >= 7."
 }
 $ContractFeatures = @($Contract.requiredFeatures | ForEach-Object { [string]$_ })
 foreach ($RequiredFeature in $RequiredFeatures) {
@@ -141,7 +141,11 @@ foreach ($RequiredParam in @("LauncherPath", "LoaderPath")) {
 }
 $NativeDoctorPath = Join-Path $RepoRoot "scripts\doctor-native-bridge.ps1"
 $NativeDoctorProbeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("vectorworks-mcp-contract-native-doctor-{0}" -f $PID)
-$NativeDoctorJson = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $NativeDoctorPath -WorktreeRoot (Join-Path $NativeDoctorProbeRoot "SDKExamples") -InstallDir (Join-Path $NativeDoctorProbeRoot "Plug-ins") -Json
+$NativeDoctorProbeSdkDir = Join-Path $NativeDoctorProbeRoot "Vectorworks SDK With Spaces"
+$NativeDoctorProbeSdkExamplesDir = Join-Path $NativeDoctorProbeRoot "SDK Examples With Spaces"
+$NativeDoctorProbeWorktree = Join-Path $NativeDoctorProbeRoot "SDK Worktree With Spaces"
+$NativeDoctorProbeInstallDir = Join-Path $NativeDoctorProbeRoot "Plug-ins With Spaces"
+$NativeDoctorJson = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $NativeDoctorPath -SdkDir $NativeDoctorProbeSdkDir -SdkExamplesDir $NativeDoctorProbeSdkExamplesDir -WorktreeRoot $NativeDoctorProbeWorktree -InstallDir $NativeDoctorProbeInstallDir -Configuration Release -Json
 if ($LASTEXITCODE -ne 0) {
     throw "Companion native doctor JSON probe failed with exit code $LASTEXITCODE."
 }
@@ -150,7 +154,7 @@ try {
 } catch {
     throw "Companion native doctor did not emit valid JSON."
 }
-foreach ($RequiredNativeDoctorField in @("nextCommand", "nextCommandReason", "nextActions")) {
+foreach ($RequiredNativeDoctorField in @("nextCommand", "nextCommandReason", "nextCommandSpec", "nextActions")) {
     if ($NativeDoctorReport.PSObject.Properties.Name -notcontains $RequiredNativeDoctorField) {
         throw "Companion native doctor JSON is missing required field: $RequiredNativeDoctorField"
     }
@@ -159,6 +163,68 @@ if ([string]::IsNullOrWhiteSpace([string]$NativeDoctorReport.nextCommand) -or
     [string]::IsNullOrWhiteSpace([string]$NativeDoctorReport.nextCommandReason) -or
     @($NativeDoctorReport.nextActions).Count -eq 0) {
     throw "Companion native doctor JSON did not include an actionable nextCommand, nextCommandReason, and nextActions."
+}
+$NativeDoctorCommandSpec = $NativeDoctorReport.nextCommandSpec
+foreach ($RequiredCommandSpecField in @("stage", "executable", "arguments", "workingDirectory", "scriptPath", "command")) {
+    if ($NativeDoctorCommandSpec.PSObject.Properties.Name -notcontains $RequiredCommandSpecField) {
+        throw "Companion native doctor nextCommandSpec is missing required field: $RequiredCommandSpecField"
+    }
+}
+if ([string]$NativeDoctorCommandSpec.command -ne [string]$NativeDoctorReport.nextCommand -or
+    [string]$NativeDoctorCommandSpec.executable -ne "powershell.exe" -or
+    @($NativeDoctorCommandSpec.arguments).Count -lt 6) {
+    throw "Companion native doctor nextCommandSpec does not match the actionable PowerShell command."
+}
+$CommandSpecArgs = @($NativeDoctorCommandSpec.arguments | ForEach-Object { [string]$_ })
+$ResolvedCommandScript = [System.IO.Path]::GetFullPath([string]$NativeDoctorCommandSpec.scriptPath)
+$ResolvedScriptsRoot = [System.IO.Path]::GetFullPath((Join-Path $RepoRoot "scripts"))
+$ResolvedScriptsRootWithSeparator = $ResolvedScriptsRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+if ([string]$NativeDoctorCommandSpec.workingDirectory -ne $RepoRoot) {
+    throw "Companion native doctor nextCommandSpec workingDirectory must be the companion repo root."
+}
+if ($ResolvedCommandScript -ne $ResolvedScriptsRoot -and
+    -not $ResolvedCommandScript.StartsWith($ResolvedScriptsRootWithSeparator, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "Companion native doctor nextCommandSpec scriptPath must be under the companion scripts folder."
+}
+if (("-File" -notin $CommandSpecArgs) -or ($ResolvedCommandScript -notin $CommandSpecArgs)) {
+    throw "Companion native doctor nextCommandSpec arguments must include -File and the same scriptPath."
+}
+if (("-WorktreeRoot" -notin $CommandSpecArgs) -or ($NativeDoctorProbeWorktree -notin $CommandSpecArgs)) {
+    throw "Companion native doctor nextCommandSpec arguments must preserve the probe -WorktreeRoot."
+}
+foreach ($RequiredNativeDoctorArgument in @(
+    "-SdkDir",
+    $NativeDoctorProbeSdkDir,
+    "-SdkExamplesDir",
+    $NativeDoctorProbeSdkExamplesDir,
+    "-Configuration",
+    "Release"
+)) {
+    if ($RequiredNativeDoctorArgument -notin $CommandSpecArgs) {
+        throw "Companion native doctor nextCommandSpec arguments must preserve probe SDK/config argument: $RequiredNativeDoctorArgument"
+    }
+}
+$KnownNativeDoctorStages = @(
+    "bootstrap-native-prereqs",
+    "prepare-native-source",
+    "repair-native-source",
+    "build-unmodified-sdk-example",
+    "copy-native-scaffold",
+    "build-native-bridge",
+    "dry-run-install-native-artifact",
+    "install-native-artifact",
+    "smoke-phase-0",
+    "rerun-native-doctor"
+)
+if ([string]::IsNullOrWhiteSpace([string]$NativeDoctorCommandSpec.stage) -or
+    [string]$NativeDoctorCommandSpec.stage -notin $KnownNativeDoctorStages) {
+    throw "Companion native doctor nextCommandSpec stage is not recognized: $($NativeDoctorCommandSpec.stage)"
+}
+foreach ($BooleanCommandSpecField in @("requiresNetwork", "mayInstallSoftware", "mayDownloadLargeFiles", "mayModifyVectorworksUserPlugins", "requiresVectorworksRestartBeforeRun", "mayRequireReboot", "isDryRun", "rerunDoctorAfter")) {
+    if ($NativeDoctorCommandSpec.PSObject.Properties.Name -notcontains $BooleanCommandSpecField -or
+        -not ($NativeDoctorCommandSpec.$BooleanCommandSpecField -is [bool])) {
+        throw "Companion native doctor nextCommandSpec.$BooleanCommandSpecField must be boolean."
+    }
 }
 
 $Python = Get-FirstPythonCommand

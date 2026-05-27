@@ -88,9 +88,16 @@ powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -Jso
 ```
 
 For agent-driven native setup, treat the JSON `nextCommand` as the single
-primary next step and show `nextCommandReason` before running it. The older
-manual sequence below is reference material; the doctor preserves custom
-version, worktree, and install paths in its generated command.
+primary next step and show `nextCommandReason` before running it. Prefer
+`nextCommandSpec.executable` plus `nextCommandSpec.arguments` when executing
+programmatically instead of parsing the shell string. The older manual sequence
+below is reference material; the doctor preserves custom version, worktree, and
+install paths in its generated command.
+Before executing, inspect the `nextCommandSpec` safety flags such as
+`requiresNetwork`, `mayInstallSoftware`, `mayDownloadLargeFiles`,
+`mayModifyVectorworksUserPlugins`, and `mayRequireReboot`. Run the executable
+with the arguments as an array, then rerun the native doctor whenever
+`rerunDoctorAfter` is true.
 
 Optional SDK bootstrap helper:
 
@@ -131,8 +138,8 @@ preflight probes so diagnostics do not wait behind a slower CAD request on the
 persistent command socket.
 
 If an agent or user has already extracted the Vectorworks SDK somewhere else,
-pass the same `-SdkDir C:\path\to\sdk` to bootstrap, prepare, and build; the
-scripts preserve that custom SDK path end-to-end.
+pass the same `-SdkDir C:\path\to\sdk` to the native doctor, bootstrap,
+prepare, and build; the scripts preserve that custom SDK path end-to-end.
 
 ## Agent-Ready Setup
 

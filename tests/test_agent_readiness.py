@@ -32,13 +32,14 @@ class AgentReadinessTests(unittest.TestCase):
         marker = json.loads((ROOT / ".vectorworks-mcp-contract.json").read_text(encoding="utf-8"))
 
         self.assertEqual(marker["name"], "vectorworks-mcp")
-        self.assertGreaterEqual(marker["contractVersion"], 5)
+        self.assertGreaterEqual(marker["contractVersion"], 7)
         for feature in (
             "stable-loader",
             "loader-clipboard-copy",
             "native-bridge-scaffold",
             "native-bridge-scaffold-copy",
             "native-doctor-next-command",
+            "native-doctor-command-spec",
         ):
             self.assertIn(feature, marker["requiredFeatures"])
 
@@ -150,6 +151,7 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("doctor-native-bridge.ps1", verifier)
         self.assertIn("native bridge doctor next command", verifier)
         self.assertIn("nextCommandReason", verifier)
+        self.assertIn("nextCommandSpec", verifier)
 
     def test_native_bridge_scaffold_compile_smoke_script_exercises_protocol(self):
         smoke = (ROOT / "scripts/test-native-bridge-scaffold.ps1").read_text(encoding="utf-8")
@@ -223,9 +225,10 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIn("runpy.run_path", loader_text)
             self.assertIn(str(launcher_path).replace("\\", "\\\\"), loader_text)
             self.assertIn("VW_MCP_LOADER_METADATA", loader_text)
-            self.assertIn('"contractVersion": 6', loader_text)
+            self.assertIn('"contractVersion": 7', loader_text)
             self.assertIn('"native-bridge-scaffold-copy"', loader_text)
             self.assertIn('"native-doctor-next-command"', loader_text)
+            self.assertIn('"native-doctor-command-spec"', loader_text)
 
     def test_native_bridge_scaffold_is_explicitly_not_default(self):
         expected_files = (
@@ -713,6 +716,10 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", root_readme)
         self.assertIn("nextCommand", root_readme)
         self.assertIn("nextCommandReason", root_readme)
+        self.assertIn("nextCommandSpec", root_readme)
+        self.assertIn("requiresNetwork", root_readme)
+        self.assertIn("mayInstallSoftware", root_readme)
+        self.assertIn("rerunDoctorAfter", root_readme)
         self.assertIn(
             "doctor-native-bridge.ps1 -BuiltArtifact C:\\path\\to\\VectorworksMCPBridge.vwlibrary -Install -WhatIf",
             agents,
@@ -724,6 +731,9 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", agents)
         self.assertIn("nextCommand", agents)
         self.assertIn("nextCommandReason", agents)
+        self.assertIn("nextCommandSpec", agents)
+        self.assertIn("safety flags", agents)
+        self.assertIn("rerunDoctorAfter", agents)
         self.assertIn("Do not run the default native smoke against the copied", agents)
 
     def test_native_doctor_exposes_stage_aware_next_command(self):
@@ -731,7 +741,11 @@ class AgentReadinessTests(unittest.TestCase):
 
         self.assertIn("nextCommand", doctor)
         self.assertIn("nextCommandReason", doctor)
+        self.assertIn("nextCommandSpec", doctor)
         self.assertIn("nextActions", doctor)
+        self.assertIn("requiresNetwork", doctor)
+        self.assertIn("mayInstallSoftware", doctor)
+        self.assertIn("mayModifyVectorworksUserPlugins", doctor)
         self.assertIn("bootstrap-native-bridge.ps1", doctor)
         self.assertIn("-InstallVisualStudioBuildTools", doctor)
         self.assertIn("-DownloadSdk", doctor)
@@ -750,6 +764,8 @@ class AgentReadinessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             worktree = temp_root / "SDKExamples With Spaces"
+            sdk_dir = temp_root / "SDK With Spaces"
+            sdk_examples = temp_root / "SDKExamples Source"
             result = subprocess.run(
                 [
                     powershell,
@@ -759,10 +775,16 @@ class AgentReadinessTests(unittest.TestCase):
                     "Bypass",
                     "-File",
                     str(ROOT / "scripts/doctor-native-bridge.ps1"),
+                    "-SdkDir",
+                    str(sdk_dir),
+                    "-SdkExamplesDir",
+                    str(sdk_examples),
                     "-WorktreeRoot",
                     str(worktree),
                     "-InstallDir",
                     str(temp_root / "Plug-ins"),
+                    "-Configuration",
+                    "Release",
                     "-Json",
                 ],
                 cwd=str(ROOT),
@@ -776,6 +798,17 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIsInstance(report["nextActions"], list)
             self.assertTrue(report["nextCommand"])
             self.assertTrue(report["nextCommandReason"])
+            spec = report["nextCommandSpec"]
+            self.assertEqual(spec["command"], report["nextCommand"])
+            self.assertEqual(spec["executable"], "powershell.exe")
+            self.assertEqual(spec["workingDirectory"], str(ROOT))
+            self.assertEqual(report["sdkDir"], str(sdk_dir))
+            self.assertEqual(report["sdkExamplesDir"], str(sdk_examples))
+            self.assertEqual(report["configuration"], "Release")
+            self.assertIn(str(worktree), spec["arguments"])
+            self.assertIn(str(sdk_dir), spec["arguments"])
+            self.assertIn(str(sdk_examples), spec["arguments"])
+            self.assertIn("Release", spec["arguments"])
             self.assertIn(str(worktree), report["nextCommand"])
             self.assertIn("-WorktreeRoot", report["nextCommand"])
             self.assertIn(str(ROOT / "scripts"), report["nextCommand"])
@@ -783,6 +816,11 @@ class AgentReadinessTests(unittest.TestCase):
             if report["prereqsReady"]:
                 self.assertIn("prepare-native-bridge-source.ps1", report["nextCommand"])
             else:
+                self.assertEqual(spec["stage"], "bootstrap-native-prereqs")
+                self.assertTrue(spec["requiresNetwork"])
+                self.assertTrue(spec["mayInstallSoftware"])
+                self.assertTrue(spec["mayDownloadLargeFiles"])
+                self.assertTrue(spec["mayRequireReboot"])
                 self.assertIn("bootstrap-native-bridge.ps1", report["nextCommand"])
                 self.assertIn("-InstallVisualStudioBuildTools", report["nextCommand"])
                 self.assertIn("-DownloadSdk", report["nextCommand"])
@@ -836,6 +874,8 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIn("nextCommandReason", report)
             self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", report["nextCommand"])
             self.assertIn("Restart Vectorworks", report["nextCommandReason"])
+            self.assertEqual(report["nextCommandSpec"]["stage"], "smoke-phase-0")
+            self.assertTrue(report["nextCommandSpec"]["requiresVectorworksRestartBeforeRun"])
 
     def test_native_doctor_whatif_install_is_non_mutating(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
@@ -892,6 +932,9 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIn("-Install", report["nextCommand"])
             self.assertNotIn("-WhatIf", report["nextCommand"])
             self.assertIn("without -WhatIf", report["nextCommandReason"])
+            self.assertEqual(report["nextCommandSpec"]["stage"], "install-native-artifact")
+            self.assertTrue(report["nextCommandSpec"]["mayModifyVectorworksUserPlugins"])
+            self.assertIn(str(install_dir), report["nextCommandSpec"]["arguments"])
 
     def test_native_doctor_reports_auto_discovered_artifact_as_candidate_only(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
@@ -938,6 +981,8 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIn(str(install_dir), report["nextCommand"])
             self.assertIn("-Install -WhatIf", report["nextCommand"])
             self.assertIn("Dry-run", report["nextCommandReason"])
+            self.assertEqual(report["nextCommandSpec"]["stage"], "dry-run-install-native-artifact")
+            self.assertTrue(report["nextCommandSpec"]["isDryRun"])
 
             install_result = subprocess.run(
                 [
@@ -1012,6 +1057,8 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIn(str(worktree), report["nextCommand"])
             self.assertIn("-WorktreeRoot", report["nextCommand"])
             self.assertIn("partially copied", report["nextCommandReason"])
+            self.assertEqual(report["nextCommandSpec"]["stage"], "copy-native-scaffold")
+            self.assertIn(str(worktree), report["nextCommandSpec"]["arguments"])
 
     def test_native_prereq_checker_reports_supported_versions_for_unknown_version(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
