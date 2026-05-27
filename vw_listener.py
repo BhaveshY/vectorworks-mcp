@@ -2,10 +2,11 @@
 Vectorworks 2024/2025 MCP Listener - runs inside Vectorworks.
 
 Opens a TCP socket (default 127.0.0.1:9877) and serves MCP requests using
-non-blocking I/O via selectors. The generated launcher starts the listener in
-dialog-pump mode, where a small Vectorworks dialog timer pumps the socket from
-the Vectorworks main thread. This avoids the Vectorworks 2024 embedded-Python
-background-thread pause that can leave the port open but unresponsive.
+non-blocking I/O via selectors. On Windows, the generated launcher starts the
+listener in win_timer mode so Vectorworks pumps the socket from its normal UI
+message loop without a modal dialog. This avoids the Vectorworks 2024
+embedded-Python background-thread pause that can leave the port open but
+unresponsive.
 
 INSTALL OPTIONS
   A) Quick in Vectorworks 2024 - Resource Manager > New Resource > Script,
@@ -23,7 +24,7 @@ CONFIG (env vars, all optional):
   VW_MCP_PORT       default 9877
   VW_MCP_STOP_DIR   default ~/.vectorworks-mcp
   VW_MCP_MAX_FRAME_BYTES default 16777216
-  VW_MCP_MODE       dialog | foreground | background
+  VW_MCP_MODE       win_timer | dialog | foreground | background
   VW_MCP_DIALOG_TIMER_MS default 50
 """
 try:
@@ -79,7 +80,16 @@ _SHOULD_STOP = False
 _STATE_MODULE = "_vw_mcp_listener_state"
 _STATE = sys.modules.get(_STATE_MODULE)
 if _STATE is None:
-    _STATE = types.SimpleNamespace(listener_thread=None, listener_server=None, dialog_running=False)
+    _STATE = types.SimpleNamespace(
+        listener_thread=None,
+        listener_server=None,
+        dialog_running=False,
+        win_timer_id=None,
+        win_timer_callback=None,
+        win_timer_server=None,
+        win_timer_user32=None,
+        win_timer_busy=False,
+    )
     sys.modules[_STATE_MODULE] = _STATE
 else:
     if not hasattr(_STATE, "listener_thread"):
@@ -88,6 +98,16 @@ else:
         _STATE.listener_server = None
     if not hasattr(_STATE, "dialog_running"):
         _STATE.dialog_running = False
+    if not hasattr(_STATE, "win_timer_id"):
+        _STATE.win_timer_id = None
+    if not hasattr(_STATE, "win_timer_callback"):
+        _STATE.win_timer_callback = None
+    if not hasattr(_STATE, "win_timer_server"):
+        _STATE.win_timer_server = None
+    if not hasattr(_STATE, "win_timer_user32"):
+        _STATE.win_timer_user32 = None
+    if not hasattr(_STATE, "win_timer_busy"):
+        _STATE.win_timer_busy = False
 
 # === HANDLE REGISTRY ===
 _handles, _hcount = {}, [0]
@@ -933,6 +953,108 @@ def start_background():
     )
 
 
+def _stop_win_timer(show_message=True):
+    timer_id = getattr(_STATE, "win_timer_id", None)
+    user32 = getattr(_STATE, "win_timer_user32", None)
+    server = getattr(_STATE, "win_timer_server", None)
+
+    if timer_id and user32 is not None:
+        try:
+            user32.KillTimer(None, timer_id)
+        except Exception:
+            pass
+    if server is not None:
+        try:
+            server.close()
+        except Exception:
+            pass
+
+    _STATE.win_timer_id = None
+    _STATE.win_timer_callback = None
+    _STATE.win_timer_server = None
+    _STATE.win_timer_user32 = None
+    _STATE.win_timer_busy = False
+
+    if show_message:
+        _message("VW MCP Listener stopped.")
+
+
+def start_win_timer():
+    if getattr(_STATE, "win_timer_id", None):
+        if _existing_listener_healthy():
+            _message("VW MCP Listener is already running on {h}:{p}".format(h=HOST, p=PORT))
+            return
+        _stop_win_timer(show_message=False)
+
+    if _report_existing_or_stale_listener():
+        return
+
+    if os.name != "nt":
+        _message("VW MCP win_timer mode is only available on Windows; starting background mode instead.")
+        start_background()
+        return
+
+    try:
+        import ctypes
+    except Exception as e:
+        _alert("VW MCP could not import ctypes for Windows timer mode:\n{e}".format(e=e))
+        return
+
+    server = _ListenerServer(show_alerts=False)
+    if not server.start():
+        _alert("VW MCP Listener could not start on {h}:{p}.".format(h=HOST, p=PORT))
+        return
+
+    timer_proc_type = ctypes.WINFUNCTYPE(
+        None,
+        ctypes.c_void_p,
+        ctypes.c_uint,
+        ctypes.c_size_t,
+        ctypes.c_uint,
+    )
+    user32 = ctypes.windll.user32
+    user32.SetTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint, timer_proc_type]
+    user32.SetTimer.restype = ctypes.c_size_t
+    user32.KillTimer.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    user32.KillTimer.restype = ctypes.c_int
+
+    def timer_callback(hwnd, msg, event_id, time_ms):
+        if getattr(_STATE, "win_timer_busy", False):
+            return
+        _STATE.win_timer_busy = True
+        try:
+            current = getattr(_STATE, "win_timer_server", None)
+            if current is None or not current.pump(iterations=8, timeout=0.0):
+                _stop_win_timer(show_message=False)
+        except Exception as e:
+            try:
+                _message("VW MCP Listener timer stopped after error: {e}".format(e=e))
+            except Exception:
+                pass
+            _stop_win_timer(show_message=False)
+        finally:
+            if getattr(_STATE, "win_timer_id", None):
+                _STATE.win_timer_busy = False
+
+    callback = timer_proc_type(timer_callback)
+    timer_id = user32.SetTimer(None, 0, DIALOG_TIMER_MS, callback)
+    if not timer_id:
+        server.close()
+        _alert("VW MCP could not create a Windows timer for listener pumping.")
+        return
+
+    _STATE.win_timer_id = timer_id
+    _STATE.win_timer_callback = callback
+    _STATE.win_timer_server = server
+    _STATE.win_timer_user32 = user32
+    _STATE.win_timer_busy = False
+    _message(
+        "VW MCP Listener running on {h}:{p}. Vectorworks remains usable; use vw_ping to confirm.".format(
+            h=HOST, p=PORT
+        )
+    )
+
+
 def _set_dialog_text(dialog_id, item_id, text):
     try:
         if hasattr(vs, "SetControlText"):
@@ -1039,13 +1161,15 @@ def _autostart_mode():
     if mode:
         return mode
     if os.environ.get("VW_MCP_BACKGROUND", "").lower() in ("1", "true", "yes"):
-        return "dialog"
-    return "foreground"
+        return "win_timer"
+    return "win_timer" if os.name == "nt" else "foreground"
 
 
 if os.environ.get("VW_MCP_NO_AUTOSTART", "").lower() not in ("1", "true", "yes"):
     _mode = _autostart_mode()
-    if _mode in ("dialog", "timer", "mainthread", "main-thread"):
+    if _mode in ("win_timer", "wintimer", "windows_timer", "windows-timer"):
+        start_win_timer()
+    elif _mode in ("dialog", "dialog_timer", "timer", "mainthread", "main-thread"):
         start_dialog()
     elif _mode in ("background", "thread"):
         start_background()

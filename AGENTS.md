@@ -3,7 +3,7 @@
 ## Project Shape
 
 - `server.py` is the host-side stdio MCP server used by Claude Code.
-- `vw_listener.py` runs inside Vectorworks 2024/2025 and listens on TCP `127.0.0.1:9877` by default. Generated launchers normally run it with `VW_MCP_MODE=dialog` so Vectorworks pumps socket work from its own dialog timer.
+- `vw_listener.py` runs inside Vectorworks 2024/2025 and listens on TCP `127.0.0.1:9877` by default. Generated launchers normally run it with `VW_MCP_MODE=win_timer` so Vectorworks pumps socket work from its normal Windows message loop.
 - `scripts/run-mcp-server.ps1` is the self-bootstrapping MCP entrypoint. It creates `.venv`, installs `requirements.txt`, then launches `server.py`.
 - `scripts/register-claude-code.ps1` is the primary Windows setup command. It is idempotent: it refreshes dependencies, generates `vw_start_listener_2024.py`, and updates the `vectorworks` MCP server entry.
 - `plugins/vectorworks/` is the Claude Code plugin. Keep its manifest, skills, scripts, and `.mcp.json` aligned with the repo scripts.
@@ -32,7 +32,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-claude-code.ps1 -Ve
 This does not require Vectorworks. It should create/update:
 
 - `.venv\`
-- `vw_start_listener_2024.py` with `os.environ["VW_MCP_MODE"] = "dialog"`
+- `vw_start_listener_2024.py` with `os.environ["VW_MCP_MODE"] = "win_timer"`
 - project `.mcp.json`
 - user `~\.claude.json` when the `claude` CLI is not available
 
@@ -45,7 +45,7 @@ claude --plugin-dir C:\path\to\vectorworks-mcp\plugins\vectorworks
 Plugin skills are namespaced as `/vectorworks:setup`, `/vectorworks:ping`,
 `/vectorworks:diagnose`, and `/vectorworks:work`.
 
-If the generated launcher does not set `VW_MCP_MODE=dialog`, rerun
+If the generated launcher does not set `VW_MCP_MODE=win_timer`, rerun
 `scripts\register-claude-code.ps1` or `scripts\bootstrap-claude-code.ps1`.
 
 ## Safe Verification
@@ -69,7 +69,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run-mcp-server.ps1 -SetupOnly
 End-to-end tests require the user to open Vectorworks. Do not claim full end-to-end success unless these have happened:
 
 - Vectorworks 2024/2025 is open.
-- The generated `vw_start_listener_2024.py` has been run from Resource Manager or installed as a Plug-in Manager menu command. It should open a small `VW MCP Listener` dialog that remains open while Claude Code controls Vectorworks.
+- The generated `vw_start_listener_2024.py` has been run from Resource Manager or installed as a Plug-in Manager menu command. It should return immediately and leave Vectorworks usable.
 - Claude Code has been restarted after MCP registration.
 - `/mcp` shows `vectorworks`.
 - First tool call is `vw_ping`; do not treat listener startup as fully proven until this works.

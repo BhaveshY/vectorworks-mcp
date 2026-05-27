@@ -36,18 +36,18 @@ class AgentReadinessTests(unittest.TestCase):
         ):
             self.assertTrue((ROOT / relative_path).exists(), relative_path)
 
-    def test_generated_launcher_uses_dialog_pump_listener(self):
+    def test_generated_launcher_uses_windows_timer_listener(self):
         register_script = (ROOT / "scripts/register-claude-code.ps1").read_text(encoding="utf-8")
-        self.assertIn('os.environ["VW_MCP_MODE"] = "dialog"', register_script)
+        self.assertIn('os.environ["VW_MCP_MODE"] = "win_timer"', register_script)
         self.assertIn('os.environ["VW_MCP_DIALOG_TIMER_MS"] = "50"', register_script)
 
         launcher_path = ROOT / "vw_start_listener_2024.py"
         if launcher_path.exists():
             launcher_text = launcher_path.read_text(encoding="utf-8")
-            self.assertIn('os.environ["VW_MCP_MODE"] = "dialog"', launcher_text)
+            self.assertIn('os.environ["VW_MCP_MODE"] = "win_timer"', launcher_text)
             self.assertIn('os.environ["VW_MCP_DIALOG_TIMER_MS"] = "50"', launcher_text)
 
-    def test_register_script_generates_dialog_pump_launcher(self):
+    def test_register_script_generates_windows_timer_launcher(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
         if not powershell:
             self.skipTest("PowerShell is required to exercise the Windows launcher generator")
@@ -82,7 +82,7 @@ class AgentReadinessTests(unittest.TestCase):
             launcher_text = launcher_path.read_text(encoding="utf-8")
             self.assertIn('os.environ["VW_MCP_HOST"] = "127.0.0.1"', launcher_text)
             self.assertIn('os.environ["VW_MCP_PORT"] = "19877"', launcher_text)
-            self.assertIn('os.environ["VW_MCP_MODE"] = "dialog"', launcher_text)
+            self.assertIn('os.environ["VW_MCP_MODE"] = "win_timer"', launcher_text)
             self.assertIn('os.environ["VW_MCP_DIALOG_TIMER_MS"] = "50"', launcher_text)
 
 
