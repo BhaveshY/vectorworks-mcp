@@ -132,7 +132,7 @@ class ServerProtocolTests(unittest.TestCase):
 
         self.assertTrue(result.startswith("Connection error:"))
         self.assertIn(f"127.0.0.1:{port}", result)
-        self.assertIn("run vw_listener.py", result)
+        self.assertIn("run the generated vw_start_listener_2024.py", result)
 
 
 if __name__ == "__main__":

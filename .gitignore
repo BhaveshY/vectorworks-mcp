@@ -57,3 +57,7 @@ bridge/STOP
 
 # Logs
 *.log
+
+# Machine-generated setup artifacts
+vw_start_listener_2024.py
+*.bak.*

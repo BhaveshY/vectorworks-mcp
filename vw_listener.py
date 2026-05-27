@@ -1,14 +1,16 @@
 """
-Vectorworks 2024/2025 MCP Listener - runs inside Vectorworks on the main thread.
+Vectorworks 2024/2025 MCP Listener - runs inside Vectorworks.
 
 Opens a TCP socket (default 127.0.0.1:9877) and serves MCP requests using
-non-blocking I/O via selectors. All vs.* calls execute on the main thread,
-which is the only thread where the vs module is safe.
+non-blocking I/O via selectors. The generated launcher starts the listener in
+a background Python thread so Vectorworks does not stay stuck in a foreground
+script execution loop.
 
 INSTALL OPTIONS
-  A) Quick - Tools > Plug-ins > Script Editor > Python > paste > Run
+  A) Quick in Vectorworks 2024 - Resource Manager > New Resource > Script,
+     choose Python Script, paste the generated vw_start_listener_2024.py, run it.
   B) Persistent menu command - Tools > Plug-ins > Plug-in Manager >
-     New > Menu Command, paste this file as the script. Then
+     New > Menu Command, paste the generated vw_start_listener_2024.py. Then
      Tools > Workspaces > Edit Current Workspace > Menus and drag the
      new command into a menu. Click it once per VW session to start.
 
@@ -20,13 +22,14 @@ CONFIG (env vars, all optional):
   VW_MCP_PORT       default 9877
   VW_MCP_STOP_DIR   default ~/.vectorworks-mcp
   VW_MCP_MAX_FRAME_BYTES default 16777216
+  VW_MCP_BACKGROUND default 1 when run by generated launcher
 """
 try:
     import vs
 except ModuleNotFoundError:
     vs = None
 
-import io, json, math, os, selectors, socket, struct, sys, traceback
+import io, json, math, os, selectors, socket, struct, sys, threading, traceback, types
 
 __VERSION__ = "0.3.0-socket"
 
@@ -68,6 +71,11 @@ STOP_DIR = os.environ.get("VW_MCP_STOP_DIR") or os.path.join(
 STOP_FILE = os.path.join(STOP_DIR, "STOP")
 SCREENSHOT_DIR = STOP_DIR
 _SHOULD_STOP = False
+_STATE_MODULE = "_vw_mcp_listener_state"
+_STATE = sys.modules.get(_STATE_MODULE)
+if _STATE is None:
+    _STATE = types.SimpleNamespace(listener_thread=None)
+    sys.modules[_STATE_MODULE] = _STATE
 
 # === HANDLE REGISTRY ===
 _handles, _hcount = {}, [0]
@@ -119,6 +127,16 @@ def _alert(message):
         print(message, file=sys.stderr)
     except Exception:
         pass
+
+
+def _message(message):
+    if vs is not None and hasattr(vs, "Message"):
+        try:
+            vs.Message(message)
+            return
+        except Exception:
+            pass
+    _alert(message)
 
 
 def _json_safe(value, depth=0):
@@ -529,9 +547,9 @@ def dispatch(req):
 
 
 # === NON-BLOCKING SOCKET LAYER ===
-# Single main-thread event loop (selectors). Each connection buffers bytes
-# until a full length-prefixed JSON frame is available; we decode, dispatch
-# on this thread (safe for vs.*), and queue the response.
+# Single event loop (selectors). Each connection buffers bytes until a full
+# length-prefixed JSON frame is available; we decode and dispatch on this
+# listener thread, then queue the response.
 
 class _ClientState:
     __slots__ = ("rbuf", "wbuf", "need", "max_frame_bytes")
@@ -617,21 +635,24 @@ def _has_pending_writes(sel):
     return False
 
 
-def main():
+def main(show_alerts=True):
     global _SHOULD_STOP
     _SHOULD_STOP = False
 
     if vs is None:
-        _alert("VW MCP Listener must be run inside Vectorworks, where the 'vs' module is available.")
+        if show_alerts:
+            _alert("VW MCP Listener must be run inside Vectorworks, where the 'vs' module is available.")
         return
     if _CONFIG_ERROR:
-        _alert("VW MCP configuration error: {e}".format(e=_CONFIG_ERROR))
+        if show_alerts:
+            _alert("VW MCP configuration error: {e}".format(e=_CONFIG_ERROR))
         return
 
     try:
         os.makedirs(STOP_DIR, exist_ok=True)
     except OSError as e:
-        _alert("VW MCP could not create stop directory:\n{d}\n{e}".format(d=STOP_DIR, e=e))
+        if show_alerts:
+            _alert("VW MCP could not create stop directory:\n{d}\n{e}".format(d=STOP_DIR, e=e))
         return
     _stop_requested()  # clear any stale STOP from a previous session
 
@@ -640,12 +661,13 @@ def main():
     try:
         server_sock.bind((HOST, PORT))
     except OSError as e:
-        _alert(
-            "VW MCP failed to bind {h}:{p}\n{e}\n\n"
-            "Is another listener already running? Close it or set VW_MCP_PORT.".format(
-                h=HOST, p=PORT, e=e
+        if show_alerts:
+            _alert(
+                "VW MCP failed to bind {h}:{p}\n{e}\n\n"
+                "Is another listener already running? Close it or set VW_MCP_PORT.".format(
+                    h=HOST, p=PORT, e=e
+                )
             )
-        )
         server_sock.close()
         return
     server_sock.listen(8)
@@ -654,12 +676,13 @@ def main():
     sel = selectors.DefaultSelector()
     sel.register(server_sock, selectors.EVENT_READ, data=None)
 
-    _alert(
-        "VW MCP Listener STARTED (socket)\n"
-        "Listening on {h}:{p}\n"
-        "Version {v}\n"
-        "Stop: create STOP file in:\n{d}".format(h=HOST, p=PORT, v=__VERSION__, d=STOP_DIR)
-    )
+    if show_alerts:
+        _alert(
+            "VW MCP Listener STARTED (socket)\n"
+            "Listening on {h}:{p}\n"
+            "Version {v}\n"
+            "Stop: create STOP file in:\n{d}".format(h=HOST, p=PORT, v=__VERSION__, d=STOP_DIR)
+        )
 
     try:
         while True:
@@ -706,7 +729,7 @@ def main():
                         try:
                             req = json.loads(frame.decode("utf-8"))
                             rid = req.get("id", "")
-                            resp = dispatch(req)  # main thread - safe for vs.*
+                            resp = dispatch(req)
                         except Exception as e:
                             resp = {"id": rid, "success": False, "error": "bad JSON: {}".format(e)}
                         state.enqueue(_response_bytes(resp))
@@ -736,8 +759,48 @@ def main():
         except Exception: pass
         try: server_sock.close()
         except OSError: pass
-        _alert("VW MCP Listener STOPPED.")
+        if show_alerts:
+            _alert("VW MCP Listener STOPPED.")
+
+
+def _listener_port_open():
+    try:
+        sock = socket.create_connection((HOST, PORT), timeout=0.2)
+    except OSError:
+        return False
+    try:
+        sock.close()
+    except OSError:
+        pass
+    return True
+
+
+def start_background():
+    thread = getattr(_STATE, "listener_thread", None)
+    if thread is not None and thread.is_alive():
+        _message("VW MCP Listener is already running on {h}:{p}".format(h=HOST, p=PORT))
+        return
+
+    if _listener_port_open():
+        _message("VW MCP Listener is already reachable on {h}:{p}".format(h=HOST, p=PORT))
+        return
+
+    thread = threading.Thread(
+        target=main,
+        kwargs={"show_alerts": False},
+        name="VW MCP Listener",
+        daemon=True,
+    )
+    _STATE.listener_thread = thread
+    thread.start()
+    _message(
+        "VW MCP Listener starting in background on {h}:{p}. "
+        "Use vw_ping from Claude Code to confirm.".format(h=HOST, p=PORT)
+    )
 
 
 if os.environ.get("VW_MCP_NO_AUTOSTART", "").lower() not in ("1", "true", "yes"):
-    main()
+    if os.environ.get("VW_MCP_BACKGROUND", "").lower() in ("1", "true", "yes"):
+        start_background()
+    else:
+        main()

@@ -4,8 +4,8 @@ Vectorworks 2024/2025 MCP Server - connects Claude Code to Vectorworks via TCP.
 Speaks a length-prefixed JSON protocol (4-byte big-endian length followed by
 UTF-8 JSON) to vw_listener.py running inside Vectorworks.
 
-Usage:
-  claude mcp add vectorworks -- python C:\\path\\to\\vectorworks-mcp\\server.py
+Recommended setup:
+  powershell -ExecutionPolicy Bypass -File .\\scripts\\bootstrap-claude-code.ps1 -Verify
 
 Environment variables, all optional:
   VW_MCP_HOST             default 127.0.0.1
@@ -229,8 +229,9 @@ def _format_result(value: Any) -> str:
 def _connection_help(error: BaseException) -> str:
     return (
         f"Connection error: {error}. Could not reach the Vectorworks MCP listener on {HOST}:{PORT}. "
-        "Start Vectorworks, run vw_listener.py from Tools > Plug-ins > Script Editor or the installed "
-        "VW MCP Listener menu command, and verify VW_MCP_HOST/VW_MCP_PORT match on both sides."
+        "Start Vectorworks, run the generated vw_start_listener_2024.py from Resource Manager "
+        "or the installed VW MCP Listener menu command, and verify VW_MCP_HOST/VW_MCP_PORT "
+        "match on both sides."
     )
 
 

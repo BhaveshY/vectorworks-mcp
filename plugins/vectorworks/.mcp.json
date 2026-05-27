@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "vectorworks": {
+      "type": "stdio",
+      "command": "powershell.exe",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${CLAUDE_PLUGIN_ROOT}/scripts/run-vectorworks-mcp.ps1"
+      ],
+      "env": {
+        "VW_MCP_REPO": "${user_config.vectorworks_repo}",
+        "VW_MCP_HOST": "127.0.0.1",
+        "VW_MCP_PORT": "9877",
+        "VW_MCP_TIMEOUT": "60"
+      },
+      "timeout": 120000
+    }
+  }
+}

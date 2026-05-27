@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "vectorworks",
+  "displayName": "Vectorworks MCP",
+  "version": "0.1.0",
+  "description": "Claude Code plugin for connecting to Vectorworks 2024/2025 through the local Vectorworks MCP connector. Bundles setup, diagnosis, listener ping, CAD workflow skills, and an MCP server definition.",
+  "author": {
+    "name": "Bhavesh"
+  },
+  "keywords": [
+    "vectorworks",
+    "mcp",
+    "cad",
+    "bim",
+    "windows"
+  ],
+  "mcpServers": "./.mcp.json",
+  "userConfig": {
+    "vectorworks_repo": {
+      "type": "directory",
+      "title": "Vectorworks MCP repo",
+      "description": "Folder containing server.py, vw_listener.py, and scripts/run-mcp-server.ps1. Leave blank when launching Claude Code from the vectorworks-mcp repo.",
+      "required": false
+    }
+  }
+}

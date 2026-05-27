@@ -1,202 +1,228 @@
-# Vectorworks 2024/2025 MCP Server
+# Vectorworks 2024/2025 MCP Connector
 
-Connect Claude Code to Vectorworks 2024 or 2025 via a TCP socket on the same machine.
+Connect Claude Code to Vectorworks on the same Windows PC.
 
 ## Architecture
 
-```
-Claude Code <--stdio--> server.py <--TCP/JSON--> vw_listener.py (inside Vectorworks)
-                                   127.0.0.1:9877
-```
-
-The listener runs inside Vectorworks's Python interpreter on the main
-thread (the only thread where the `vs` module is safe). It uses
-non-blocking I/O via `selectors` — no background threads — so every
-`vs.*` call is serialised on the thread VW expects.
-
-Wire format: 4-byte big-endian length prefix + UTF-8 JSON body.
-
-## Setup
-
-### 1. Install dependencies (host side)
-
-```cmd
-cd vectorworks-mcp
-py -3 -m pip install -r requirements.txt
+```text
+Claude Code <--stdio--> scripts/run-mcp-server.ps1
+                         |
+                         v
+                       server.py <--TCP/JSON--> vw_listener.py (background inside Vectorworks)
+                                             127.0.0.1:9877
 ```
 
-### 2. Register the MCP server with Claude Code
+`scripts/run-mcp-server.ps1` is the self-bootstrapping entrypoint. It creates a
+repo-local `.venv`, installs `requirements.txt`, then starts `server.py`. The
+generated Vectorworks launcher sets `VW_MCP_BACKGROUND=1` so the socket listener
+starts in a background thread and Vectorworks gets control back immediately.
 
-Recommended on Windows 11:
+## Agent-Ready Setup
+
+Fresh Windows 11 checkout:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\register-claude-code.ps1
+cd C:\path\to\vectorworks-mcp
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-agent.ps1 -Verify
 ```
 
-Manual registration:
+Claude Code-specific setup:
 
-```cmd
-claude mcp add vectorworks -- python C:\path\to\vectorworks-mcp\server.py
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-claude-code.ps1 -Verify
 ```
 
-With a custom port:
+The setup is idempotent and safe to rerun. It:
 
-```cmd
-claude mcp add-json vectorworks "{\"type\":\"stdio\",\"command\":\"python\",\"args\":[\"C:\\\\path\\\\to\\\\vectorworks-mcp\\\\server.py\"],\"env\":{\"VW_MCP_PORT\":\"9877\"}}"
+- creates or refreshes `.venv`
+- installs pinned host dependencies
+- generates `vw_start_listener_2024.py` with machine-specific absolute paths and `VW_MCP_BACKGROUND=1`
+- registers the `vectorworks` MCP server with Claude Code
+- falls back to updating `C:\Users\<you>\.claude.json` if `claude` is not on PATH
+- runs no-Vectorworks host verification when `-Verify` is passed
+
+This repo also includes a project `.mcp.json` that points Claude Code at the
+self-bootstrapping runner. Claude Code may ask you to trust project MCP servers
+the first time it sees that file.
+
+## Claude Code Plugin
+
+For the longer-term Claude Code workflow, use the bundled plugin:
+
+```powershell
+claude --plugin-dir C:\Users\Bhavesh\repos\vectorworks-mcp\plugins\vectorworks
 ```
 
-### 3. Start the listener inside Vectorworks
+If you launch Claude Code outside this repo, configure the plugin option
+`vectorworks_repo` to this repo path, or set:
 
-Two options:
+```powershell
+$env:VECTORWORKS_MCP_REPO = "C:\Users\Bhavesh\repos\vectorworks-mcp"
+claude --plugin-dir C:\Users\Bhavesh\repos\vectorworks-mcp\plugins\vectorworks
+```
 
-**A) Quick (one session):**
-1. Open Vectorworks 2024 or 2025
-2. `Tools > Plug-ins > Script Editor`
-3. Language: **Python**
-4. Paste the contents of `vw_listener.py`
-5. Click **Run**
-6. Alert box confirms: `VW MCP Listener STARTED (socket)` and shows `127.0.0.1:9877`
+The plugin adds namespaced skills:
 
-**B) Persistent menu command (recommended):**
-1. `Tools > Plug-ins > Plug-in Manager` → **New** → **Menu Command**
-2. Name it `VW MCP Listener`, pick a category (e.g. `MCP`)
-3. Paste `vw_listener.py` as the script, save
-4. `Tools > Workspaces > Edit Current Workspace > Menus`, drag the new
-   command into a menu (e.g. under `Tools`)
-5. Click the menu command once per VW session to start the listener
+- `/vectorworks:setup` bootstraps dependencies and regenerates the Vectorworks launcher.
+- `/vectorworks:ping` checks the raw listener and then `vw_ping` when MCP tools are loaded.
+- `/vectorworks:diagnose` checks repo resolution, launcher background mode, Claude availability, and listener reachability.
+- `/vectorworks:work` guides CAD/BIM operations with the `vw_*` MCP tools.
 
-### 4. Use it
+The plugin also declares the `vectorworks` MCP server, so `vw_ping` and the
+other `vw_*` tools become available when the plugin is enabled.
 
-Open Claude Code. The Vectorworks tools are available. Try:
+## Start Vectorworks Listener
 
-- "Ping Vectorworks to check the connection"
-- "What layers are in my Vectorworks document?"
-- "Create a 500x300 rectangle at position 0,0"
-- "Create a 3m high wall from 0,0 to 5000,0"
-- "Insert a 900mm door at position 2000,0"
-- "Inspect the door and show me all its parameters"
-- "Find all walls in the drawing"
-- "Create a floor slab for a 5x4m room"
+After setup, open the generated file:
 
-## Available Tools (22)
+```text
+vw_start_listener_2024.py
+```
 
-### Core
+### One-Session Script
+
+1. Open Vectorworks 2024 or 2025.
+2. Open Resource Manager with `Ctrl+R`.
+3. Create `New Resource > Script`.
+4. Choose Python Script.
+5. Paste the generated `vw_start_listener_2024.py`.
+6. Run the script resource.
+7. The script should return immediately, and the Vectorworks message bar should report that the listener is starting on `127.0.0.1:9877`.
+8. Use `vw_ping` from Claude Code as the real confirmation.
+
+### Persistent Menu Command
+
+1. Open `Tools > Plug-ins > Plug-in Manager`.
+2. Create `New > Menu Command`.
+3. Name it `VW MCP Listener`.
+4. Edit the script and paste the generated `vw_start_listener_2024.py`.
+5. Save it.
+6. Open `Tools > Workspaces > Edit Current Workspace > Menus`.
+7. Drag `VW MCP Listener` into a menu.
+8. Click that menu command once per Vectorworks session.
+
+## Verify End To End
+
+Restart Claude Code after setup, then run:
+
+```text
+/mcp
+```
+
+Confirm `vectorworks` is listed. With Vectorworks open and the listener running,
+try:
+
+```text
+Use vw_ping.
+Use vw_get_document_info.
+Create a 500x300 rectangle at position 0,0.
+```
+
+If `vw_ping` fails, Claude Code can start the MCP server, but the Vectorworks
+listener is not reachable on `127.0.0.1:9877`.
+
+## No-Vectorworks Verification
+
+These checks prove the host side works without opening Vectorworks:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\verify-no-vectorworks.ps1
+```
+
+Manual equivalent:
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile server.py vw_listener.py vw_start_listener_2024.py
+.\.venv\Scripts\python.exe -m unittest discover -v
+```
+
+## Available Tools
+
+Core:
+
 | Tool | Description |
 |------|-------------|
-| `vw_ping` | Health check — returns listener version and handler count |
-| `vw_run_script` | Execute arbitrary Python inside VW (escape hatch) |
-| `vw_create_object` | Create geometry: rect, circle, oval, line, arc, polygon |
-| `vw_get_layers` | List all layers with visibility |
+| `vw_ping` | Health check |
+| `vw_run_script` | Execute trusted Python inside Vectorworks |
+| `vw_create_object` | Create rect, circle, oval, line, arc, polygon |
+| `vw_get_layers` | List layers |
 | `vw_get_objects` | List objects filtered by layer/type |
 | `vw_set_object_property` | Change name, class, color, line weight, opacity |
-| `vw_find_objects` | Criteria-based search (`T=WALL`, `C='Furniture'`, etc.) |
+| `vw_find_objects` | Criteria-based search such as `T=WALL` |
 | `vw_manage_classes` | List, create, delete classes |
 | `vw_worksheet` | Read/write worksheet cells and ranges |
-| `vw_symbol` | List and insert symbols from resource library |
-| `vw_export` | Export to PDF, DXF, DWG, or image |
+| `vw_symbol` | List and insert symbols |
+| `vw_export` | Export PDF, DXF, DWG, or image where VW supports automation |
 | `vw_import_file` | Import DXF, DWG, or image files |
-| `vw_get_document_info` | Document metadata (layers, object count, etc.) |
-| `vw_screenshot` | Capture viewport screenshot |
-| `vw_stop_listener` | Ask the Vectorworks listener to stop gracefully |
-| `vw_selection` | Get/set/clear/delete/move/duplicate selected objects |
+| `vw_get_document_info` | Document metadata |
+| `vw_screenshot` | Capture viewport screenshot where supported |
+| `vw_stop_listener` | Ask the listener to stop gracefully |
+| `vw_selection` | Get, select, clear, delete, move, or duplicate selected objects |
 
-### Architectural
+Architectural:
+
 | Tool | Description |
 |------|-------------|
-| `vw_create_wall` | Parametric walls with height and thickness |
-| `vw_insert_door` | Parametric door (place near wall for auto-insertion) |
-| `vw_insert_window` | Parametric window with sill height |
-| `vw_create_slab` | Floor slab from polygon footprint (3D extrusion) |
-| `vw_create_roof` | Roof from footprint with slope, overhang, bearing height |
-| `vw_inspect_object` | Discover ALL parameters of any VW object |
+| `vw_create_wall` | Create parametric walls |
+| `vw_insert_door` | Insert a parametric door |
+| `vw_insert_window` | Insert a parametric window |
+| `vw_create_slab` | Create a slab from a polygon footprint |
+| `vw_create_roof` | Create a roof from a footprint |
+| `vw_inspect_object` | Discover object/plugin parameters |
 
-## Configuration
+## Agent Handoff
 
-All env vars are optional.
+Project instructions are in `AGENTS.md`; Claude Code imports them through
+`CLAUDE.md`.
 
-| Var | Default | Side | Purpose |
-|---|---|---|---|
-| `VW_MCP_HOST` | `127.0.0.1` | both | Bind/connect address |
-| `VW_MCP_PORT` | `9877` | both | Port |
-| `VW_MCP_TIMEOUT` | `60` | server | Per-request timeout (seconds) |
-| `VW_MCP_MAX_FRAME_BYTES` | `16777216` | both | Maximum TCP JSON frame size |
-| `VW_MCP_STOP_DIR` | `~/.vectorworks-mcp` | listener | Where the STOP sentinel lives |
-
-The listener and server must agree on host+port.
-
-## Stopping the Listener
-
-Any of:
-- In Claude Code, call `vw_stop_listener`
-- Create an empty file named `STOP` in the stop-file folder shown at startup
-  (default `~/.vectorworks-mcp/STOP`)
-- Quit Vectorworks or close the document
-
-On Windows PowerShell, the default STOP file can be created with:
+Known-good host checks:
 
 ```powershell
-New-Item -ItemType File -Force "$env:USERPROFILE\.vectorworks-mcp\STOP"
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-agent.ps1 -Verify
 ```
 
-## Development and Tests
+End-to-end requires:
 
-Tests do not require Vectorworks. They mock the `vs` module and use local
-loopback sockets to verify the length-prefixed JSON protocol.
-
-```cmd
-py -3 -m pip install -r requirements-dev.txt
-py -3 -m py_compile server.py vw_listener.py
-py -3 -m unittest discover -v
-# or, if pytest is installed:
-py -3 -m pytest
-```
+- Vectorworks 2024/2025 open
+- listener started from the generated `vw_start_listener_2024.py`, which should return immediately in background mode
+- MCP client restarted after registration
+- `/mcp` showing `vectorworks`
+- first tool call: `vw_ping`
 
 ## Troubleshooting
 
-**`Connection error: ... Is vw_listener.py running?`**
-- Confirm the listener is running inside VW (you should have seen the
-  "STARTED" alert). Click the menu command again or re-run the script.
-- Check the port matches on both sides (`VW_MCP_PORT`).
-- On Windows, confirm the Windows Firewall isn't blocking loopback —
-  localhost-only connections usually bypass it, but AV can interfere.
+`claude` is not recognized:
 
-**`Vectorworks MCP startup error: The 'fastmcp' package is not installed`**
-- Install host dependencies from this repo:
-  `py -3 -m pip install -r requirements.txt`
+- The setup script updates `~\.claude.json` directly when the CLI is missing.
+- Restart Claude Code afterward.
 
-**`VW MCP failed to bind 127.0.0.1:9877`**
-- A previous listener is still running. Close it via the STOP file or
-  restart Vectorworks. Alternatively set `VW_MCP_PORT` to a free port
-  on both sides.
+`vw_ping` reports a connection error:
 
-**"Handle not found"**
-- Handles are valid only for the current listener session. Restarting
-  the listener invalidates them — use `vw_get_objects` or
-  `vw_find_objects` to get fresh handles.
+- Start Vectorworks.
+- Run the generated `vw_start_listener_2024.py`.
+- Confirm the Vectorworks message bar reports background startup on `127.0.0.1:9877`, then verify with `vw_ping`.
+- Check that no previous listener is already using port `9877`.
 
-**Listener stops unexpectedly**
-- VW may interrupt long-running scripts in some configurations. The
-  menu-command install (option B above) is more robust than pasting
-  into the Script Editor each session.
+Vectorworks hangs after running the listener script:
 
-## Changelog
+- Regenerate `vw_start_listener_2024.py` with `.\scripts\bootstrap-claude-code.ps1 -Verify`.
+- Confirm the generated launcher contains `os.environ["VW_MCP_BACKGROUND"] = "1"`.
+- If Vectorworks is already stuck from an older foreground launcher, create
+  `C:\Users\<you>\.vectorworks-mcp\STOP`, wait a few seconds, then restart
+  Vectorworks if it does not recover.
 
-**0.3.0** — Windows/Claude Code hardening
-- Added bounded protocol frames, malformed-response diagnostics, safe response
-  serialization, and clearer startup/configuration errors
-- Fixed listener socket interest handling so idle clients do not create a busy
-  writable loop
-- Added graceful `vw_stop_listener`/`stop` action
-- Added Windows Claude Code registration script
-- Added unit test coverage with fake listener/socket and fake Vectorworks `vs`
-  module; no Vectorworks instance is required
+`VW MCP failed to bind 127.0.0.1:9877`:
 
-**0.2.0** — Socket transport
-- Replaced file-bridge polling with persistent TCP + length-prefixed JSON
-- `selectors`-based non-blocking I/O on VW's main thread (no threads, no
-  polling on disk)
-- Automatic reconnect on the host side
-- `vw_ping` health check
-- Menu-command install documented
+- A previous listener is still running. Call `vw_stop_listener`, create
+  `C:\Users\<you>\.vectorworks-mcp\STOP`, or restart Vectorworks.
 
-**0.1.0** — Initial file-bridge release.
+`Handle not found`:
+
+- Handles only live for the current listener session. Use `vw_get_objects` or
+  `vw_find_objects` again after restarting the listener.
+
+## Security
+
+This is a local-trust connector. `vw_run_script` can execute arbitrary Python
+inside Vectorworks. Only enable this MCP server in Claude Code profiles you
+trust.
