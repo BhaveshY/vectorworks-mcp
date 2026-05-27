@@ -5,6 +5,8 @@
 - `server.py` is the host-side stdio MCP server used by Claude Code.
 - `vw_listener.py` runs inside Vectorworks 2024/2025 and listens on TCP `127.0.0.1:9877` by default. Generated launchers normally run it with `VW_MCP_MODE=dialog`, the only pure-Python mode currently safe for real `vs.*` API calls. Background and Windows timer modes are transport-only diagnostics.
 - `native_bridge/` is the long-term native Vectorworks SDK bridge scaffold. It is planned, not compiled, and not wired into `.mcp.json` by default.
+- `native_bridge/HANDLER_MATRIX.md` is the handler-by-handler implementation map for the native SDK bridge.
+- `native_bridge/mock/mock_bridge.py` is a no-SDK contract harness for host/native protocol compatibility.
 - `scripts/run-mcp-server.ps1` is the self-bootstrapping MCP entrypoint. It creates `.venv`, installs `requirements.txt`, then launches `server.py`.
 - `scripts/register-claude-code.ps1` is the primary Windows setup command. It is idempotent: it refreshes dependencies, generates `vw_start_listener_2024.py`, and updates the `vectorworks` MCP server entry.
 - `plugins/vectorworks/` is the Claude Code plugin. Keep its manifest, skills, scripts, and `.mcp.json` aligned with the repo scripts.
@@ -61,6 +63,8 @@ If the generated launcher does not set `VW_MCP_MODE=dialog`, rerun
 Do not route users to `background` or `win_timer` for real Vectorworks work.
 Do not claim native non-modal support is installed unless a compiled bridge has
 been built from the Vectorworks SDK and smoke-tested in Vectorworks.
+Keep the native handler matrix in sync whenever `vw_listener.py` adds, removes,
+or renames a handler.
 
 ## Safe Verification
 

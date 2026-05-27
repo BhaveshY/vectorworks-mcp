@@ -36,6 +36,7 @@ class AgentReadinessTests(unittest.TestCase):
             "scripts/register-claude-code.ps1",
             "scripts/run-mcp-server.ps1",
             "scripts/verify-no-vectorworks.ps1",
+            ".github/workflows/verify.yml",
         ):
             self.assertTrue((ROOT / relative_path).exists(), relative_path)
 
@@ -93,6 +94,8 @@ class AgentReadinessTests(unittest.TestCase):
             "native_bridge/README.md",
             "native_bridge/PROTOCOL.md",
             "native_bridge/ACCEPTANCE.md",
+            "native_bridge/HANDLER_MATRIX.md",
+            "native_bridge/mock/mock_bridge.py",
             "native_bridge/src/README.md",
         )
         for relative_path in expected_files:
@@ -107,6 +110,10 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("4-byte big-endian", protocol)
         self.assertIn("must not call", protocol)
         self.assertIn("Vectorworks document APIs directly", protocol)
+
+        matrix = (ROOT / "native_bridge/HANDLER_MATRIX.md").read_text(encoding="utf-8")
+        self.assertIn("Native phase", matrix)
+        self.assertIn("main/plugin event context", matrix)
 
     def test_native_bridge_scripts_point_to_official_sdk_and_ignore_downloads(self):
         checker = (ROOT / "scripts/check-native-bridge-prereqs.ps1").read_text(encoding="utf-8")

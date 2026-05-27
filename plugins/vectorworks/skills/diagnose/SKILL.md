@@ -5,14 +5,17 @@ description: Diagnose Vectorworks MCP connection failures on Windows. Use when V
 
 # Vectorworks MCP Diagnosis
 
-Start with the deterministic diagnosis script:
+Start with the fast doctor wrapper when available:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}\scripts\doctor-vectorworks-mcp.ps1"
+```
+
+Fallback deterministic diagnosis script:
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}\scripts\diagnose-vectorworks-mcp.ps1"
 ```
-
-If the companion repo has `scripts\doctor-vectorworks-mcp.ps1`, use that output
-as the fastest source of the next action.
 
 Then map the result:
 

@@ -8,6 +8,7 @@ $ErrorActionPreference = "Stop"
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $RunnerPath = Join-Path $RepoRoot "scripts\run-mcp-server.ps1"
+$RegisterPath = Join-Path $RepoRoot "scripts\register-claude-code.ps1"
 $ServerPath = Join-Path $RepoRoot "server.py"
 $ListenerPath = Join-Path $RepoRoot "vw_listener.py"
 $VenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
@@ -41,6 +42,7 @@ function Invoke-Checked {
 }
 
 Assert-Path $RunnerPath "MCP runner"
+Assert-Path $RegisterPath "Claude Code registration script"
 Assert-Path $ServerPath "MCP server"
 Assert-Path $ListenerPath "Vectorworks listener"
 Assert-Path $ProjectMcpPath "Project MCP config"
@@ -51,6 +53,13 @@ Invoke-Checked "bootstrap venv/dependencies" {
 }
 
 Assert-Path $VenvPython "Virtualenv Python"
+
+if (-not (Test-Path $LauncherPath)) {
+    Invoke-Checked "generate Vectorworks launcher" {
+        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $RegisterPath -SkipInstall -NoClaudeConfig -LauncherPath $LauncherPath
+    }
+}
+
 Assert-Path $LauncherPath "Generated Vectorworks launcher"
 
 $LauncherText = Get-Content -Raw -Path $LauncherPath

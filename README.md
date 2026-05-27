@@ -13,7 +13,7 @@ Claude Code <--stdio--> scripts/run-mcp-server.ps1
 ```
 
 `scripts/run-mcp-server.ps1` is the self-bootstrapping entrypoint. It creates a
-repo-local `.venv`, installs `requirements.txt`, then starts `server.py`. The
+repo-local `.venv`, installs bounded host dependencies from `requirements.txt`, then starts `server.py`. The
 generated Vectorworks launcher sets `VW_MCP_MODE=dialog`, the only pure-Python
 mode currently safe for real `vs.*` API calls. It opens a modal agent-control
 dialog; close or stop it when you want to use Vectorworks manually.
@@ -31,6 +31,13 @@ The proper long-term fix for non-modal, always-on control is a native
 Vectorworks SDK plug-in bridge. The SDK bridge is scaffolded in
 `native_bridge/`, but it is not compiled or installed by default. Until that
 bridge exists, use the generated dialog launcher for real CAD work.
+
+Native bridge planning aids:
+
+- `native_bridge/HANDLER_MATRIX.md` maps every current listener action to native
+  phase, safety, and smoke-test expectations.
+- `native_bridge/mock/mock_bridge.py` is a no-SDK protocol harness proving the
+  host MCP server and preflight logic can talk to a future native bridge.
 
 Native bridge prerequisite check:
 
@@ -161,6 +168,8 @@ These checks prove the host side works without opening Vectorworks:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\verify-no-vectorworks.ps1
 ```
+
+The same no-Vectorworks verification runs in GitHub Actions on Windows.
 
 Manual equivalent:
 

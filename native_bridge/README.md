@@ -41,6 +41,10 @@ The host MCP server can keep using the same TCP protocol it uses today. The
 native bridge should replace `vw_listener.py` for always-on production use, not
 replace the host MCP tool surface.
 
+Use `HANDLER_MATRIX.md` as the native implementation roadmap. Use
+`mock/mock_bridge.py` as the no-SDK protocol harness when changing host
+preflight or server behavior.
+
 ## Build Prerequisites
 
 Run the prerequisite checker from the repo root:
