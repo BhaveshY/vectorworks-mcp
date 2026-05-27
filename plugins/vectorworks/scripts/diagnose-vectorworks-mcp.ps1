@@ -75,9 +75,13 @@ try {
 if ($RepoRoot) {
     $Launcher = Join-Path $RepoRoot "vw_start_listener_2024.py"
     $LauncherOk = (Test-Path -LiteralPath $Launcher) -and ((Get-Content -Raw -Path $Launcher) -match 'os\.environ\["VW_MCP_MODE"\]\s*=\s*["'']dialog["'']')
+    $NativeBridgeDir = Join-Path $RepoRoot "native_bridge"
+    $NativeChecker = Join-Path $RepoRoot "scripts\check-native-bridge-prereqs.ps1"
     Write-Host "Repo: $RepoRoot"
     Write-Host "Generated launcher: $Launcher"
     Write-Host "Launcher agent-session mode: $LauncherOk"
+    Write-Host "Native bridge scaffold: $([bool](Test-Path -LiteralPath $NativeBridgeDir))"
+    Write-Host "Native bridge prereq checker: $([bool](Test-Path -LiteralPath $NativeChecker))"
 }
 
 $Claude = Get-Command claude -ErrorAction SilentlyContinue

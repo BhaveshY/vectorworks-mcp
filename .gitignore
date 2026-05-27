@@ -55,6 +55,10 @@ bridge/responses/*
 !bridge/responses/.gitkeep
 bridge/STOP
 
+# Optional native Vectorworks SDK/bootstrap artifacts
+.cache/
+third_party/
+
 # Logs
 *.log
 

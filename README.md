@@ -18,6 +18,32 @@ generated Vectorworks launcher sets `VW_MCP_MODE=dialog`, the only pure-Python
 mode currently safe for real `vs.*` API calls. It opens a modal agent-control
 dialog; close or stop it when you want to use Vectorworks manually.
 
+## Bridge Status
+
+| Bridge path | Status | Real CAD/API handlers | Manual Vectorworks UI |
+|-------------|--------|-----------------------|------------------------|
+| Python `dialog` listener | supported fallback | yes | modal agent session |
+| Python `background` listener | diagnostic only | no, guarded | no reliable scheduling |
+| Python `win_timer` listener | diagnostic only | no, guarded | transport ping only |
+| Native SDK bridge | planned scaffold | intended yes | intended non-modal |
+
+The proper long-term fix for non-modal, always-on control is a native
+Vectorworks SDK plug-in bridge. The SDK bridge is scaffolded in
+`native_bridge/`, but it is not compiled or installed by default. Until that
+bridge exists, use the generated dialog launcher for real CAD work.
+
+Native bridge prerequisite check:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\check-native-bridge-prereqs.ps1
+```
+
+Optional SDK bootstrap helper:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-native-bridge.ps1
+```
+
 ## Agent-Ready Setup
 
 Fresh Windows 11 checkout:
@@ -143,7 +169,8 @@ Core:
 
 | Tool | Description |
 |------|-------------|
-| `vw_ping` | Health check |
+| `vw_ping` | Health check, including bridge mode and CAD safety status |
+| `vw_bridge_status` | Same status payload as `vw_ping`, named for agent preflight checks |
 | `vw_run_script` | Execute trusted Python inside Vectorworks |
 | `vw_create_object` | Create rect, circle, oval, line, arc, polygon |
 | `vw_get_layers` | List layers |
@@ -222,7 +249,7 @@ Vectorworks hangs after running the listener script:
   the generated launcher again.
 - Background and Windows timer modes are transport-only diagnostics; they can
   answer `vw_ping`, but real CAD handlers can deadlock outside a normal
-  foreground Vectorworks script context.
+  Vectorworks script or plug-in event context.
 
 `VW MCP failed to bind 127.0.0.1:9877`:
 

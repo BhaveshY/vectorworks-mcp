@@ -24,7 +24,7 @@ CONFIG (env vars, all optional):
   VW_MCP_PORT       default 9877
   VW_MCP_STOP_DIR   default ~/.vectorworks-mcp
   VW_MCP_MAX_FRAME_BYTES default 16777216
-  VW_MCP_MODE       win_timer | dialog | foreground | background
+  VW_MCP_MODE       win_timer | dialog | foreground | background; default dialog
   VW_MCP_DIALOG_TIMER_MS default 50
 """
 try:
@@ -563,7 +563,34 @@ HANDLERS = {
     "insert_window": handle_insert_window, "create_slab": handle_create_slab,
     "create_roof": handle_create_roof, "inspect_object": handle_inspect_object,
 }
-HANDLERS["ping"] = lambda p: _ok({"pong": True, "handlers": len(HANDLERS), "version": __VERSION__})
+
+
+def _bridge_status():
+    mode = _DISPATCH_MODE or "unknown"
+    transport_only = mode in ("background", "win_timer")
+    cad_api_safe = mode in ("dialog", "foreground") and not transport_only
+    if mode == "dialog":
+        bridge_kind = "python_dialog_agent_session"
+    elif mode == "foreground":
+        bridge_kind = "python_foreground_diagnostic"
+    elif transport_only:
+        bridge_kind = "python_transport_only"
+    else:
+        bridge_kind = "python_unknown"
+
+    return {
+        "pong": True,
+        "handlers": len(HANDLERS),
+        "version": __VERSION__,
+        "bridge_kind": bridge_kind,
+        "dispatch_mode": mode,
+        "cad_api_safe": cad_api_safe,
+        "transport_only": transport_only,
+        "native_bridge": False,
+    }
+
+
+HANDLERS["ping"] = lambda p: _ok(_bridge_status())
 
 def dispatch(req):
     if not isinstance(req, dict):
@@ -575,10 +602,10 @@ def dispatch(req):
             "success": False,
             "error": (
                 "VW_MCP_MODE={mode} is transport-only. It can answer ping/stop, "
-                "but Vectorworks API calls deadlock outside a normal foreground "
-                "Vectorworks script context. Use foreground/dialog mode only for "
-                "temporary agent-controlled CAD operations, or build the native "
-                "Vectorworks SDK bridge for non-modal long-running control."
+                "but Vectorworks API calls deadlock outside a normal Vectorworks "
+                "script context. Use dialog mode for temporary agent-controlled "
+                "CAD operations, or build the native Vectorworks SDK bridge for "
+                "non-modal long-running control."
             ).format(mode=_DISPATCH_MODE),
         }
     handler = HANDLERS.get(req.get("action", ""))
@@ -1193,7 +1220,7 @@ def _autostart_mode():
         return mode
     if os.environ.get("VW_MCP_BACKGROUND", "").lower() in ("1", "true", "yes"):
         return "dialog"
-    return "foreground"
+    return "dialog"
 
 
 if os.environ.get("VW_MCP_NO_AUTOSTART", "").lower() not in ("1", "true", "yes"):

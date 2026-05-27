@@ -30,6 +30,8 @@ class AgentReadinessTests(unittest.TestCase):
         for relative_path in (
             "scripts/bootstrap-agent.ps1",
             "scripts/bootstrap-claude-code.ps1",
+            "scripts/bootstrap-native-bridge.ps1",
+            "scripts/check-native-bridge-prereqs.ps1",
             "scripts/register-claude-code.ps1",
             "scripts/run-mcp-server.ps1",
             "scripts/verify-no-vectorworks.ps1",
@@ -84,6 +86,38 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIn('os.environ["VW_MCP_PORT"] = "19877"', launcher_text)
             self.assertIn('os.environ["VW_MCP_MODE"] = "dialog"', launcher_text)
             self.assertIn('os.environ["VW_MCP_DIALOG_TIMER_MS"] = "50"', launcher_text)
+
+    def test_native_bridge_scaffold_is_explicitly_not_default(self):
+        expected_files = (
+            "native_bridge/README.md",
+            "native_bridge/PROTOCOL.md",
+            "native_bridge/ACCEPTANCE.md",
+            "native_bridge/src/README.md",
+        )
+        for relative_path in expected_files:
+            self.assertTrue((ROOT / relative_path).exists(), relative_path)
+
+        native_readme = (ROOT / "native_bridge/README.md").read_text(encoding="utf-8")
+        self.assertIn("native Vectorworks SDK plug-in bridge", native_readme)
+        self.assertIn("marshaled back onto the Vectorworks main/plugin event context", native_readme)
+        self.assertIn("not compiled or installed by default", (ROOT / "README.md").read_text(encoding="utf-8"))
+
+        protocol = (ROOT / "native_bridge/PROTOCOL.md").read_text(encoding="utf-8")
+        self.assertIn("4-byte big-endian", protocol)
+        self.assertIn("must not call", protocol)
+        self.assertIn("Vectorworks document APIs directly", protocol)
+
+    def test_native_bridge_scripts_point_to_official_sdk_and_ignore_downloads(self):
+        checker = (ROOT / "scripts/check-native-bridge-prereqs.ps1").read_text(encoding="utf-8")
+        bootstrap = (ROOT / "scripts/bootstrap-native-bridge.ps1").read_text(encoding="utf-8")
+        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+
+        self.assertIn("https://www.vectorworks.net/en-US/support/custom/sdk/sdkdown", checker)
+        self.assertIn("2024-NNA-eng-win-SDK", checker)
+        self.assertIn("Invoke-WebRequest", bootstrap)
+        self.assertIn("-DownloadSdk", bootstrap)
+        self.assertIn(".cache/", gitignore)
+        self.assertIn("third_party/", gitignore)
 
 
 if __name__ == "__main__":

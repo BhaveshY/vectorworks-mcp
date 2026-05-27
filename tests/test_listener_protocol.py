@@ -115,21 +115,63 @@ class ListenerProtocolTests(unittest.TestCase):
         self.assertEqual(ping["id"], "1")
         self.assertTrue(ping["success"])
         self.assertTrue(ping["result"]["pong"])
+        self.assertEqual(ping["result"]["bridge_kind"], "python_unknown")
+        self.assertFalse(ping["result"]["cad_api_safe"])
+        self.assertFalse(ping["result"]["native_bridge"])
 
         unknown = listener.dispatch({"id": "2", "action": "missing", "params": {}})
         self.assertEqual(unknown, {"id": "2", "success": False, "error": "Unknown action: missing"})
 
     def test_transport_only_modes_reject_cad_handlers(self):
         listener, _alerts = self.load_listener()
-        listener._DISPATCH_MODE = "win_timer"
+        for mode in ("background", "win_timer"):
+            with self.subTest(mode=mode):
+                listener._DISPATCH_MODE = mode
+
+                ping = listener.dispatch({"id": "1", "action": "ping", "params": {}})
+                self.assertTrue(ping["success"])
+                self.assertEqual(ping["result"]["bridge_kind"], "python_transport_only")
+                self.assertFalse(ping["result"]["cad_api_safe"])
+                self.assertTrue(ping["result"]["transport_only"])
+
+                stop = listener.dispatch({"id": "stop", "action": "stop", "params": {}})
+                self.assertTrue(stop["success"])
+
+                for action in ("get_layers", "get_document_info", "create_object", "run_script"):
+                    result = listener.dispatch({"id": action, "action": action, "params": {}})
+                    self.assertEqual(result["id"], action)
+                    self.assertFalse(result["success"])
+                    self.assertIn("transport-only", result["error"])
+
+    def test_dialog_mode_ping_reports_cad_api_safe(self):
+        listener, _alerts = self.load_listener()
+        listener._DISPATCH_MODE = "dialog"
 
         ping = listener.dispatch({"id": "1", "action": "ping", "params": {}})
-        self.assertTrue(ping["success"])
 
-        result = listener.dispatch({"id": "2", "action": "get_layers", "params": {}})
-        self.assertEqual(result["id"], "2")
-        self.assertFalse(result["success"])
-        self.assertIn("transport-only", result["error"])
+        self.assertTrue(ping["success"])
+        self.assertEqual(ping["result"]["bridge_kind"], "python_dialog_agent_session")
+        self.assertEqual(ping["result"]["dispatch_mode"], "dialog")
+        self.assertTrue(ping["result"]["cad_api_safe"])
+        self.assertFalse(ping["result"]["transport_only"])
+
+    def test_default_autostart_mode_is_dialog(self):
+        listener, _alerts = self.load_listener()
+        old_mode = os.environ.get("VW_MCP_MODE", MISSING)
+        old_background = os.environ.get("VW_MCP_BACKGROUND", MISSING)
+        try:
+            os.environ.pop("VW_MCP_MODE", None)
+            os.environ.pop("VW_MCP_BACKGROUND", None)
+            self.assertEqual(listener._autostart_mode(), "dialog")
+        finally:
+            if old_mode is MISSING:
+                os.environ.pop("VW_MCP_MODE", None)
+            else:
+                os.environ["VW_MCP_MODE"] = old_mode
+            if old_background is MISSING:
+                os.environ.pop("VW_MCP_BACKGROUND", None)
+            else:
+                os.environ["VW_MCP_BACKGROUND"] = old_background
 
     def test_listener_main_serves_ping_and_graceful_stop(self):
         listener, alerts = self.load_listener()

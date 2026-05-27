@@ -134,6 +134,17 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertIn(f"127.0.0.1:{port}", result)
         self.assertIn("run the generated vw_start_listener_2024.py", result)
 
+    def test_bridge_status_tool_uses_ping_action(self):
+        calls = []
+        original_send = server._send
+        try:
+            server._send = lambda action, params=None: calls.append((action, params)) or '{"pong": true}'
+            self.assertEqual(server.vw_bridge_status(), '{"pong": true}')
+        finally:
+            server._send = original_send
+
+        self.assertEqual(calls, [("ping", None)])
+
 
 if __name__ == "__main__":
     unittest.main()

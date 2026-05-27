@@ -4,6 +4,7 @@
 
 - `server.py` is the host-side stdio MCP server used by Claude Code.
 - `vw_listener.py` runs inside Vectorworks 2024/2025 and listens on TCP `127.0.0.1:9877` by default. Generated launchers normally run it with `VW_MCP_MODE=dialog`, the only pure-Python mode currently safe for real `vs.*` API calls. Background and Windows timer modes are transport-only diagnostics.
+- `native_bridge/` is the long-term native Vectorworks SDK bridge scaffold. It is planned, not compiled, and not wired into `.mcp.json` by default.
 - `scripts/run-mcp-server.ps1` is the self-bootstrapping MCP entrypoint. It creates `.venv`, installs `requirements.txt`, then launches `server.py`.
 - `scripts/register-claude-code.ps1` is the primary Windows setup command. It is idempotent: it refreshes dependencies, generates `vw_start_listener_2024.py`, and updates the `vectorworks` MCP server entry.
 - `plugins/vectorworks/` is the Claude Code plugin. Keep its manifest, skills, scripts, and `.mcp.json` aligned with the repo scripts.
@@ -48,6 +49,19 @@ Plugin skills are namespaced as `/vectorworks:setup`, `/vectorworks:ping`,
 If the generated launcher does not set `VW_MCP_MODE=dialog`, rerun
 `scripts\register-claude-code.ps1` or `scripts\bootstrap-claude-code.ps1`.
 
+## Bridge Modes
+
+| Mode | Use | CAD/API handlers |
+|------|-----|------------------|
+| Python `dialog` | Current safe fallback agent session | Allowed |
+| Python `background` | Transport diagnostics only | Must reject |
+| Python `win_timer` | Transport diagnostics only | Must reject |
+| Native SDK bridge | Long-term non-modal target | Not available until compiled and installed |
+
+Do not route users to `background` or `win_timer` for real Vectorworks work.
+Do not claim native non-modal support is installed unless a compiled bridge has
+been built from the Vectorworks SDK and smoke-tested in Vectorworks.
+
 ## Safe Verification
 
 Run these before handing work back:
@@ -56,6 +70,13 @@ Run these before handing work back:
 .\.venv\Scripts\python.exe -m py_compile server.py vw_listener.py vw_start_listener_2024.py
 .\.venv\Scripts\python.exe -m unittest discover -v
 powershell -ExecutionPolicy Bypass -File .\scripts\verify-no-vectorworks.ps1
+```
+
+Native SDK bridge readiness is separate and advisory unless the user is
+specifically working on the native bridge:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\check-native-bridge-prereqs.ps1 -Advisory
 ```
 
 If `.venv` does not exist yet, run:

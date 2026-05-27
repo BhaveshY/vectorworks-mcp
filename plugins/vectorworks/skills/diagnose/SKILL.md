@@ -18,6 +18,7 @@ Then map the result:
 - `Listener TCP ... reachable: False`: Vectorworks is not listening. Start Vectorworks and run the generated launcher.
 - `Listener TCP ... reachable: True` plus raw ping timeout: Vectorworks owns the port, but the Python listener is not processing frames. Create `~\.vectorworks-mcp\STOP`; if it remains timed out, save work, restart Vectorworks, regenerate the dialog agent-session launcher, and rerun it.
 - `vw_ping` passes but CAD handlers time out: the launcher is probably running in background or Windows timer mode. Regenerate the launcher and replace the old Vectorworks script with the dialog agent-session version.
+- `vw_ping` returns `cad_api_safe: false` or `transport_only: true`: do not call CAD handlers. Regenerate the dialog launcher for today's workflow, or run the native bridge prerequisite checker if the user is explicitly building the long-term SDK bridge.
 - Raw listener ping passes but MCP tools are absent: plugin/MCP config is not loaded. Reload plugins or start Claude Code with `--plugin-dir`.
 - Port busy or stale listener: call `vw_stop_listener` if available, otherwise create `~\.vectorworks-mcp\STOP`, wait, and restart Vectorworks if needed.
 

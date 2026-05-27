@@ -403,7 +403,13 @@ def vw_screenshot(file_path: str = "") -> str:
 
 @mcp.tool
 def vw_ping() -> str:
-    """Health check. Returns listener version and handler count if connected."""
+    """Health check. Returns listener version, handler count, and CAD safety status if connected."""
+    return _send("ping")
+
+
+@mcp.tool
+def vw_bridge_status() -> str:
+    """Return bridge status from the listener, including whether real CAD/API handlers are safe."""
     return _send("ping")
 
 
