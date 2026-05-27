@@ -141,6 +141,246 @@ SelectionAction = Literal["get", "select", "clear", "delete", "move", "duplicate
 PointList = list[list[float]]
 
 
+_ANNOTATION_KEYS = ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint")
+
+TOOL_SAFETY: dict[str, dict[str, Any]] = {
+    "vw_tool_safety": {
+        "category": "metadata",
+        "wire_action": None,
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+        "requires_cad_preflight": False,
+    },
+    "vw_ping": {
+        "category": "health",
+        "wire_action": "ping",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+        "requires_cad_preflight": False,
+    },
+    "vw_bridge_status": {
+        "category": "health",
+        "wire_action": "ping",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+        "requires_cad_preflight": False,
+    },
+    "vw_preflight_for_cad": {
+        "category": "health",
+        "wire_action": "ping",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+        "requires_cad_preflight": False,
+    },
+    "vw_get_document_info": {
+        "category": "document-read",
+        "wire_action": "get_document_info",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_get_layers": {
+        "category": "document-read",
+        "wire_action": "get_layers",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_get_objects": {
+        "category": "document-read",
+        "wire_action": "get_objects",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_find_objects": {
+        "category": "document-read",
+        "wire_action": "find_objects",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_inspect_object": {
+        "category": "document-read",
+        "wire_action": "inspect_object",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_screenshot": {
+        "category": "document-export",
+        "wire_action": "screenshot",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_stop_listener": {
+        "category": "listener-control",
+        "wire_action": "stop",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": False,
+    },
+    "vw_create_object": {
+        "category": "document-write",
+        "wire_action": "create_object",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_set_object_property": {
+        "category": "document-write",
+        "wire_action": "set_property",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_worksheet": {
+        "category": "mixed-document-write",
+        "wire_action": "worksheet",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_symbol": {
+        "category": "mixed-document-write",
+        "wire_action": "symbol",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_export": {
+        "category": "file-write",
+        "wire_action": "export",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_import_file": {
+        "category": "document-write",
+        "wire_action": "import_file",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_create_wall": {
+        "category": "document-write",
+        "wire_action": "create_wall",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_insert_door": {
+        "category": "document-write",
+        "wire_action": "insert_door",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_insert_window": {
+        "category": "document-write",
+        "wire_action": "insert_window",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_create_slab": {
+        "category": "document-write",
+        "wire_action": "create_slab",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_create_roof": {
+        "category": "document-write",
+        "wire_action": "create_roof",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_manage_classes": {
+        "category": "mixed-destructive",
+        "wire_action": "manage_classes",
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_selection": {
+        "category": "mixed-destructive",
+        "wire_action": "selection",
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_run_script": {
+        "category": "trusted-code",
+        "wire_action": "run_script",
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+}
+
+
+def _annotations_for(tool_name: str) -> dict[str, bool]:
+    safety = TOOL_SAFETY[tool_name]
+    return {key: bool(safety[key]) for key in _ANNOTATION_KEYS}
+
+
+def _tool(tool_name: str):
+    return mcp.tool(annotations=_annotations_for(tool_name))
+
+
 def _close():
     global _sock
     if _sock is not None:
@@ -273,7 +513,13 @@ def _send(action: str, params: Optional[dict[str, Any]] = None) -> str:
     return "Unexpected error while talking to Vectorworks: request loop exited"
 
 
-@mcp.tool
+@_tool("vw_tool_safety")
+def vw_tool_safety() -> str:
+    """Return structured safety metadata for every Vectorworks MCP tool."""
+    return json.dumps(TOOL_SAFETY, indent=2, sort_keys=True)
+
+
+@_tool("vw_run_script")
 def vw_run_script(code: str) -> str:
     """Execute Python inside Vectorworks. The 'vs' module is available.
     Use print() to return output. Escape hatch for anything other tools do not cover.
@@ -281,7 +527,7 @@ def vw_run_script(code: str) -> str:
     return _send("run_script", {"code": code})
 
 
-@mcp.tool
+@_tool("vw_create_object")
 def vw_create_object(
     object_type: ObjectType,
     x1: float = 0,
@@ -318,37 +564,37 @@ def vw_create_object(
     )
 
 
-@mcp.tool
+@_tool("vw_get_layers")
 def vw_get_layers() -> str:
     """List all layers with name and visibility."""
     return _send("get_layers")
 
 
-@mcp.tool
+@_tool("vw_get_objects")
 def vw_get_objects(layer: str = "", object_type: str = "", limit: int = 100) -> str:
     """List objects. Filter by layer name and type such as rect, line, or wall."""
     return _send("get_objects", {"layer": layer, "object_type": object_type, "limit": limit})
 
 
-@mcp.tool
+@_tool("vw_set_object_property")
 def vw_set_object_property(handle: str, property_name: PropertyName, value: str) -> str:
     """Set an object property. Colors use 'r,g,b' values in Vectorworks 0-65535 color range."""
     return _send("set_property", {"handle": handle, "property_name": property_name, "value": value})
 
 
-@mcp.tool
+@_tool("vw_find_objects")
 def vw_find_objects(criteria: str, limit: int = 100) -> str:
     """Find objects using VW criteria such as 'T=RECT', 'T=WALL', 'C=Furniture', or 'ALL'."""
     return _send("find_objects", {"criteria": criteria, "limit": limit})
 
 
-@mcp.tool
+@_tool("vw_manage_classes")
 def vw_manage_classes(action: ClassAction, class_name: str = "") -> str:
     """List, create, or delete classes. class_name is ignored for list."""
     return _send("manage_classes", {"action": action, "class_name": class_name})
 
 
-@mcp.tool
+@_tool("vw_worksheet")
 def vw_worksheet(
     action: WorksheetAction,
     worksheet_name: str = "",
@@ -371,49 +617,49 @@ def vw_worksheet(
     )
 
 
-@mcp.tool
+@_tool("vw_symbol")
 def vw_symbol(action: SymbolAction, symbol_name: str = "", x: float = 0, y: float = 0, rotation: float = 0) -> str:
     """List symbols or insert a symbol at x/y with rotation."""
     return _send("symbol", {"action": action, "symbol_name": symbol_name, "x": x, "y": y, "rotation": rotation})
 
 
-@mcp.tool
+@_tool("vw_export")
 def vw_export(format: ExportFormat, file_path: str) -> str:
     """Export document. format is pdf, dxf, dwg, or image. file_path is the full output path."""
     return _send("export", {"format": format, "file_path": file_path})
 
 
-@mcp.tool
+@_tool("vw_import_file")
 def vw_import_file(file_path: str, format: ImportFormat = "auto") -> str:
     """Import a DXF, DWG, or image file. Use auto to detect from the extension."""
     return _send("import_file", {"file_path": file_path, "format": format})
 
 
-@mcp.tool
+@_tool("vw_get_document_info")
 def vw_get_document_info() -> str:
     """Get document metadata: filename, filepath, layer count, object count, and layer names."""
     return _send("get_document_info")
 
 
-@mcp.tool
+@_tool("vw_screenshot")
 def vw_screenshot(file_path: str = "") -> str:
     """Capture viewport screenshot as PNG. Empty file_path defaults to ~/.vectorworks-mcp/screenshot.png."""
     return _send("screenshot", {"file_path": file_path})
 
 
-@mcp.tool
+@_tool("vw_ping")
 def vw_ping() -> str:
     """Health check. Returns listener version, handler count, and CAD safety status if connected."""
     return _send("ping")
 
 
-@mcp.tool
+@_tool("vw_bridge_status")
 def vw_bridge_status() -> str:
     """Return bridge status from the listener, including whether real CAD/API handlers are safe."""
     return _send("ping")
 
 
-@mcp.tool
+@_tool("vw_preflight_for_cad")
 def vw_preflight_for_cad() -> str:
     """Return structured go/no-go status before real CAD/API handlers."""
     raw = _send("ping")
@@ -492,19 +738,19 @@ def vw_preflight_for_cad() -> str:
     )
 
 
-@mcp.tool
+@_tool("vw_stop_listener")
 def vw_stop_listener() -> str:
     """Ask the Vectorworks listener to stop gracefully after replying."""
     return _send("stop")
 
 
-@mcp.tool
+@_tool("vw_selection")
 def vw_selection(action: SelectionAction, criteria: str = "") -> str:
     """Selection ops. For select, criteria is a VW criteria string. For move, criteria is 'dx,dy'."""
     return _send("selection", {"action": action, "criteria": criteria})
 
 
-@mcp.tool
+@_tool("vw_create_wall")
 def vw_create_wall(
     start_x: float,
     start_y: float,
@@ -529,13 +775,13 @@ def vw_create_wall(
     )
 
 
-@mcp.tool
+@_tool("vw_insert_door")
 def vw_insert_door(x: float, y: float, width: float = 900, height: float = 2100, rotation: float = 0) -> str:
     """Insert parametric door. Place on or near a wall for auto-insertion."""
     return _send("insert_door", {"x": x, "y": y, "width": width, "height": height, "rotation": rotation})
 
 
-@mcp.tool
+@_tool("vw_insert_window")
 def vw_insert_window(
     x: float,
     y: float,
@@ -551,13 +797,13 @@ def vw_insert_window(
     )
 
 
-@mcp.tool
+@_tool("vw_create_slab")
 def vw_create_slab(points: PointList, thickness: float = 200, elevation: float = 0) -> str:
     """Create 3D floor slab from polygon. points is [[x, y], ...] in mm and needs at least 3 points."""
     return _send("create_slab", {"points": points, "thickness": thickness, "elevation": elevation})
 
 
-@mcp.tool
+@_tool("vw_create_roof")
 def vw_create_roof(
     points: PointList,
     bearing_height: float = 3000,
@@ -578,7 +824,7 @@ def vw_create_roof(
     )
 
 
-@mcp.tool
+@_tool("vw_inspect_object")
 def vw_inspect_object(handle: str = "", plugin_name: str = "") -> str:
     """Discover configurable parameters of a VW object. Provide handle or plugin_name such as Door or Wall."""
     return _send("inspect_object", {"handle": handle, "plugin_name": plugin_name})

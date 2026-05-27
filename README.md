@@ -186,7 +186,8 @@ Core:
 |------|-------------|
 | `vw_ping` | Health check, including bridge mode and CAD safety status |
 | `vw_bridge_status` | Same status payload as `vw_ping`, named for agent preflight checks |
-| `vw_preflight_for_cad` | Human-readable go/no-go check before real CAD/API handlers |
+| `vw_preflight_for_cad` | Structured JSON go/no-go check before real CAD/API handlers |
+| `vw_tool_safety` | Structured safety metadata for all tools |
 | `vw_run_script` | Execute trusted Python inside Vectorworks |
 | `vw_create_object` | Create rect, circle, oval, line, arc, polygon |
 | `vw_get_layers` | List layers |

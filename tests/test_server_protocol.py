@@ -1,4 +1,5 @@
 import json
+import inspect
 import socket
 import struct
 import threading
@@ -144,6 +145,53 @@ class ServerProtocolTests(unittest.TestCase):
             server._send = original_send
 
         self.assertEqual(calls, [("ping", None)])
+
+    def test_tool_safety_covers_all_server_tools(self):
+        tool_functions = {
+            name
+            for name, value in vars(server).items()
+            if name.startswith("vw_") and inspect.isfunction(value)
+        }
+
+        self.assertEqual(set(server.TOOL_SAFETY), tool_functions)
+
+    def test_tool_safety_annotations_are_consistent(self):
+        required = {
+            "category",
+            "wire_action",
+            "readOnlyHint",
+            "destructiveHint",
+            "idempotentHint",
+            "openWorldHint",
+            "requires_cad_preflight",
+        }
+        for tool_name, safety in server.TOOL_SAFETY.items():
+            with self.subTest(tool=tool_name):
+                self.assertTrue(required.issubset(safety))
+                self.assertIsInstance(safety["category"], str)
+                if safety["readOnlyHint"]:
+                    self.assertFalse(safety["destructiveHint"])
+                if safety["destructiveHint"]:
+                    self.assertFalse(safety["readOnlyHint"])
+                annotations = server._annotations_for(tool_name)
+                self.assertEqual(set(annotations), set(server._ANNOTATION_KEYS))
+
+    def test_tool_safety_tool_returns_structured_metadata(self):
+        safety = json.loads(server.vw_tool_safety())
+
+        self.assertIn("vw_run_script", safety)
+        self.assertTrue(safety["vw_ping"]["readOnlyHint"])
+        self.assertFalse(safety["vw_preflight_for_cad"]["requires_cad_preflight"])
+        self.assertTrue(safety["vw_get_layers"]["requires_cad_preflight"])
+        self.assertTrue(safety["vw_run_script"]["destructiveHint"])
+        self.assertTrue(safety["vw_create_object"]["requires_cad_preflight"])
+
+    def test_annotations_for_read_only_tool(self):
+        annotations = server._annotations_for("vw_get_layers")
+
+        self.assertEqual(set(annotations), set(server._ANNOTATION_KEYS))
+        self.assertTrue(annotations["readOnlyHint"])
+        self.assertFalse(annotations["destructiveHint"])
 
     def test_cad_preflight_allows_cad_safe_bridge(self):
         original_send = server._send
