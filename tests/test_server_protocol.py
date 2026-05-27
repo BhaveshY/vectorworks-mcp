@@ -55,14 +55,20 @@ class FakeListener:
     def _serve(self):
         self.ready.set()
         try:
-            conn, _addr = self.sock.accept()
-            with conn:
-                conn.settimeout(1)
-                for _ in range(self.max_requests):
-                    request = json.loads(_read_frame(conn).decode("utf-8"))
-                    self.requests.append(request)
-                    response = self.handler(request)
-                    if response is not None:
+            self.sock.settimeout(1)
+            while len(self.requests) < self.max_requests:
+                conn, _addr = self.sock.accept()
+                with conn:
+                    conn.settimeout(1)
+                    while len(self.requests) < self.max_requests:
+                        try:
+                            request = json.loads(_read_frame(conn).decode("utf-8"))
+                        except (AssertionError, ConnectionError, OSError, socket.timeout):
+                            break
+                        self.requests.append(request)
+                        response = self.handler(request)
+                        if response is None:
+                            break
                         if isinstance(response, bytes):
                             conn.sendall(response)
                         else:
@@ -396,11 +402,82 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertIn("did not retry", result)
         self.assertEqual([request["action"] for request in listener.requests], ["ping", "create_object"])
 
+    def test_send_tool_retries_read_only_mixed_variant_after_response_loss(self):
+        calls = []
+
+        def handler(request):
+            calls.append(request["action"])
+            if request["action"] == "ping":
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {
+                        "pong": True,
+                        "cad_api_safe": True,
+                        "transport_only": False,
+                        "bridge_kind": "native_sdk_bridge",
+                        "dispatch_mode": "native_sdk",
+                    },
+                }
+            if request["action"] == "selection" and calls.count("selection") == 1:
+                return None
+            if request["action"] == "selection":
+                return {"id": request["id"], "success": True, "result": []}
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=4) as listener:
+            _configure_server(listener.port)
+            server.TIMEOUT = 0.2
+            result = server.vw_selection("get")
+
+        self.assertEqual(json.loads(result), [])
+        self.assertEqual(
+            [request["action"] for request in listener.requests],
+            ["ping", "selection", "ping", "selection"],
+        )
+
+    def test_send_tool_does_not_retry_write_mixed_variant_after_response_loss(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {
+                        "pong": True,
+                        "cad_api_safe": True,
+                        "transport_only": False,
+                        "bridge_kind": "native_sdk_bridge",
+                        "dispatch_mode": "native_sdk",
+                    },
+                }
+            if request["action"] == "worksheet":
+                return None
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=2) as listener:
+            _configure_server(listener.port)
+            server.TIMEOUT = 0.2
+            result = server.vw_worksheet("write", "Schedule", row=1, col=1, value="Door")
+
+        self.assertIn("Unknown commit state", result)
+        self.assertIn("did not retry", result)
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "worksheet"])
+
     def test_action_retry_policy_uses_tool_safety_metadata(self):
         self.assertTrue(server._action_safe_to_retry("get_layers"))
         self.assertTrue(server._action_safe_to_retry("ping"))
+        self.assertTrue(server._action_safe_to_retry("selection", {"action": "get"}))
+        self.assertTrue(server._action_safe_to_retry("worksheet", {"action": "read"}))
+        self.assertTrue(server._action_safe_to_retry("worksheet", {"action": "read_range"}))
+        self.assertTrue(server._action_safe_to_retry("manage_classes", {"action": "list"}))
+        self.assertTrue(server._action_safe_to_retry("symbol", {"action": "list"}))
         self.assertFalse(server._action_safe_to_retry("create_object"))
         self.assertFalse(server._action_safe_to_retry("selection"))
+        self.assertFalse(server._action_safe_to_retry("selection", {"action": "delete"}))
+        self.assertFalse(server._action_safe_to_retry("selection", {"action": "move"}))
+        self.assertFalse(server._action_safe_to_retry("worksheet", {"action": "write"}))
+        self.assertFalse(server._action_safe_to_retry("manage_classes", {"action": "delete"}))
+        self.assertFalse(server._action_safe_to_retry("symbol", {"action": "insert"}))
         self.assertFalse(server._action_safe_to_retry("run_script"))
 
     def test_send_tool_leaves_health_tools_unguarded(self):
@@ -440,6 +517,23 @@ class ServerProtocolTests(unittest.TestCase):
             with self.subTest(tool=tool_name):
                 self.assertTrue(required.issubset(safety))
                 self.assertIsInstance(safety["category"], str)
+                if "actions" in safety:
+                    self.assertEqual(safety.get("action_param"), "action")
+                    self.assertIsInstance(safety["actions"], dict)
+                    self.assertGreater(len(safety["actions"]), 0)
+                    for variant_name, variant in safety["actions"].items():
+                        self.assertIsInstance(variant_name, str)
+                        self.assertTrue({"readOnlyHint", "destructiveHint", "idempotentHint"}.issubset(variant))
+                        operation = server._operation_safety(safety["wire_action"], {"action": variant_name})
+                        self.assertIsNotNone(operation)
+                        self.assertTrue(set(server._ANNOTATION_KEYS).issubset(operation))
+                        self.assertIn("writesDocument", variant)
+                        self.assertIn("writesFiles", variant)
+                        self.assertIn("confirmationRequired", variant)
+                        if variant["readOnlyHint"]:
+                            self.assertFalse(variant["destructiveHint"])
+                        if variant["destructiveHint"]:
+                            self.assertFalse(variant["readOnlyHint"])
                 if safety["readOnlyHint"]:
                     self.assertFalse(safety["destructiveHint"])
                 if safety["destructiveHint"]:
@@ -456,6 +550,16 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertTrue(safety["vw_get_layers"]["requires_cad_preflight"])
         self.assertTrue(safety["vw_run_script"]["destructiveHint"])
         self.assertTrue(safety["vw_create_object"]["requires_cad_preflight"])
+        self.assertTrue(safety["vw_selection"]["actions"]["get"]["readOnlyHint"])
+        self.assertTrue(safety["vw_selection"]["actions"]["delete"]["destructiveHint"])
+        self.assertTrue(safety["vw_selection"]["actions"]["delete"]["confirmationRequired"])
+        self.assertTrue(safety["vw_worksheet"]["actions"]["read_range"]["readOnlyHint"])
+        self.assertTrue(safety["vw_worksheet"]["actions"]["write"]["writesDocument"])
+        self.assertTrue(safety["vw_manage_classes"]["actions"]["delete"]["destructiveHint"])
+        self.assertTrue(safety["vw_symbol"]["actions"]["list"]["readOnlyHint"])
+        self.assertTrue(safety["vw_symbol"]["actions"]["insert"]["writesDocument"])
+        self.assertTrue(safety["vw_run_script"]["executesCode"])
+        self.assertTrue(safety["vw_run_script"]["confirmationRequired"])
 
     def test_annotations_for_read_only_tool(self):
         annotations = server._annotations_for("vw_get_layers")

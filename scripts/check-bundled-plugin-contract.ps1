@@ -54,6 +54,12 @@ foreach ($RelativePath in $RequiredFiles) {
     Assert-File $RelativePath
 }
 
+$BundledCompanionContract = Join-Path $BundledPlugin "scripts\check-companion-contract.ps1"
+& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $BundledCompanionContract -RepoPath $RepoRoot
+if ($LASTEXITCODE -ne 0) {
+    exit $LASTEXITCODE
+}
+
 $Manifest = Get-Content -Raw -LiteralPath (Join-Path $BundledPlugin ".claude-plugin\plugin.json") | ConvertFrom-Json
 if ($Manifest.name -ne "vectorworks" -or $Manifest.mcpServers -ne "./.mcp.json") {
     throw "Bundled plugin manifest is not a valid Vectorworks plugin manifest."

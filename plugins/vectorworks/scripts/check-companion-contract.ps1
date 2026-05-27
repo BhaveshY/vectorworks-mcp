@@ -122,11 +122,132 @@ if (@($SafetyTools | Where-Object { $_ -notin $DocumentedTools }).Count -gt 0 -o
 }
 
 $RequiredSafetyKeys = @("category", "wire_action", "readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint", "requires_cad_preflight")
+$RequiredVariantKeys = @("readOnlyHint", "destructiveHint", "idempotentHint", "writesDocument", "writesFiles", "confirmationRequired")
+$AllowedCategories = @(
+    "metadata",
+    "health",
+    "document-read",
+    "document-write",
+    "document-export",
+    "file-write",
+    "listener-control",
+    "mixed-document-write",
+    "mixed-destructive",
+    "trusted-code"
+)
 foreach ($ToolName in $SafetyTools) {
     $Safety = $ToolSafety.$ToolName
     $MissingSafetyKeys = @($RequiredSafetyKeys | Where-Object { $Safety.PSObject.Properties.Name -notcontains $_ })
     if ($MissingSafetyKeys.Count -gt 0) {
         throw "TOOL_SAFETY.$ToolName missing key(s): $($MissingSafetyKeys -join ', ')"
+    }
+    if ($Safety.category -notin $AllowedCategories) {
+        throw "TOOL_SAFETY.$ToolName has unknown category '$($Safety.category)'"
+    }
+    if ($null -ne $Safety.wire_action -and -not ($Safety.wire_action -is [string])) {
+        throw "TOOL_SAFETY.$ToolName wire_action must be string or null"
+    }
+    foreach ($Key in @("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint", "requires_cad_preflight")) {
+        if (-not ($Safety.$Key -is [bool])) {
+            throw "TOOL_SAFETY.$ToolName.$Key must be boolean"
+        }
+    }
+    if ($Safety.readOnlyHint -and $Safety.destructiveHint) {
+        throw "TOOL_SAFETY.$ToolName cannot be both readOnly and destructive"
+    }
+    if ($Safety.PSObject.Properties.Name -contains "actions") {
+        if ($Safety.action_param -ne "action") {
+            throw "TOOL_SAFETY.$ToolName action_param must be 'action'"
+        }
+        foreach ($ActionProperty in $Safety.actions.PSObject.Properties) {
+            $Variant = $ActionProperty.Value
+            $MissingVariantKeys = @($RequiredVariantKeys | Where-Object { $Variant.PSObject.Properties.Name -notcontains $_ })
+            if ($MissingVariantKeys.Count -gt 0) {
+                throw "TOOL_SAFETY.$ToolName.$($ActionProperty.Name) missing key(s): $($MissingVariantKeys -join ', ')"
+            }
+            foreach ($Key in @("readOnlyHint", "destructiveHint", "idempotentHint", "writesDocument", "writesFiles", "confirmationRequired")) {
+                if (-not ($Variant.$Key -is [bool])) {
+                    throw "TOOL_SAFETY.$ToolName.$($ActionProperty.Name).$Key must be boolean"
+                }
+            }
+            if (($Variant.PSObject.Properties.Name -contains "writesSelection") -and -not ($Variant.writesSelection -is [bool])) {
+                throw "TOOL_SAFETY.$ToolName.$($ActionProperty.Name).writesSelection must be boolean when present"
+            }
+            if ($Variant.readOnlyHint -and $Variant.destructiveHint) {
+                throw "TOOL_SAFETY.$ToolName.$($ActionProperty.Name) cannot be both readOnly and destructive"
+            }
+        }
+    }
+}
+
+$SafetyDocRows = @{}
+$SafetyPattern = '^\|\s*`(vw_[^`]+)`\s*\|\s*`([^`]*)`\s*\|\s*`([^`]*)`\s*\|\s*`(true|false)`\s*\|\s*`(true|false)`\s*\|\s*`(true|false)`\s*\|\s*`(true|false)`\s*\|\s*`(true|false)`\s*\|'
+foreach ($Line in ($ToolMapText -split "`r?`n")) {
+    $Match = [regex]::Match($Line, $SafetyPattern)
+    if ($Match.Success) {
+        $SafetyDocRows[$Match.Groups[1].Value] = [pscustomobject]@{
+            category = $Match.Groups[2].Value
+            wire_action = $Match.Groups[3].Value
+            readOnlyHint = [bool]::Parse($Match.Groups[4].Value)
+            destructiveHint = [bool]::Parse($Match.Groups[5].Value)
+            idempotentHint = [bool]::Parse($Match.Groups[6].Value)
+            openWorldHint = [bool]::Parse($Match.Groups[7].Value)
+            requires_cad_preflight = [bool]::Parse($Match.Groups[8].Value)
+        }
+    }
+}
+foreach ($ToolName in $SafetyTools) {
+    if (-not $SafetyDocRows.ContainsKey($ToolName)) {
+        throw "Tool map safety table missing $ToolName"
+    }
+    $Safety = $ToolSafety.$ToolName
+    $Doc = $SafetyDocRows[$ToolName]
+    $WireAction = if ($null -eq $Safety.wire_action) { "" } else { [string]$Safety.wire_action }
+    foreach ($Key in @("category", "readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint", "requires_cad_preflight")) {
+        if ($Doc.$Key -ne $Safety.$Key) {
+            throw "Tool map safety table drift for $ToolName.$Key. Doc=$($Doc.$Key), server=$($Safety.$Key)"
+        }
+    }
+    if ($Doc.wire_action -ne $WireAction) {
+        throw "Tool map safety table drift for $ToolName.wire_action. Doc=$($Doc.wire_action), server=$WireAction"
+    }
+}
+
+$VariantDocRows = @{}
+$VariantPattern = '^\|\s*`(vw_[^`.]+\.[^`]+)`\s*\|\s*`(true|false)`\s*\|\s*`(true|false)`\s*\|\s*`(true|false)`\s*\|\s*`(true|false)`\s*\|\s*`(true|false)`\s*\|\s*`(true|false)`\s*\|\s*`(true|false)`\s*\|'
+foreach ($Line in ($ToolMapText -split "`r?`n")) {
+    $Match = [regex]::Match($Line, $VariantPattern)
+    if ($Match.Success) {
+        $VariantDocRows[$Match.Groups[1].Value] = [pscustomobject]@{
+            readOnlyHint = [bool]::Parse($Match.Groups[2].Value)
+            destructiveHint = [bool]::Parse($Match.Groups[3].Value)
+            idempotentHint = [bool]::Parse($Match.Groups[4].Value)
+            writesDocument = [bool]::Parse($Match.Groups[5].Value)
+            writesSelection = [bool]::Parse($Match.Groups[6].Value)
+            writesFiles = [bool]::Parse($Match.Groups[7].Value)
+            confirmationRequired = [bool]::Parse($Match.Groups[8].Value)
+        }
+    }
+}
+foreach ($ToolName in $SafetyTools) {
+    $Safety = $ToolSafety.$ToolName
+    if ($Safety.PSObject.Properties.Name -notcontains "actions") { continue }
+    foreach ($ActionProperty in $Safety.actions.PSObject.Properties) {
+        $DocKey = "$ToolName.$($ActionProperty.Name)"
+        if (-not $VariantDocRows.ContainsKey($DocKey)) {
+            throw "Tool map mixed-action safety table missing $DocKey"
+        }
+        $Variant = $ActionProperty.Value
+        $Doc = $VariantDocRows[$DocKey]
+        foreach ($Key in @("readOnlyHint", "destructiveHint", "idempotentHint", "writesDocument", "writesFiles", "confirmationRequired")) {
+            if ($Doc.$Key -ne $Variant.$Key) {
+                throw "Tool map mixed-action table drift for $DocKey.$Key. Doc=$($Doc.$Key), server=$($Variant.$Key)"
+            }
+        }
+        $WritesSelection = if ($Variant.PSObject.Properties.Name -contains "writesSelection") { [bool]$Variant.writesSelection } else { $false }
+        if ($Doc.writesSelection -ne $WritesSelection) {
+            throw "Tool map mixed-action table drift for $DocKey.writesSelection. Doc=$($Doc.writesSelection), server=$WritesSelection"
+        }
     }
 }
 

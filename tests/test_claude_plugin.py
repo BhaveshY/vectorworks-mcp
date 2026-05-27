@@ -141,8 +141,33 @@ class ClaudePluginTests(unittest.TestCase):
         diagnose = (PLUGIN / "skills" / "diagnose" / "SKILL.md").read_text(encoding="utf-8")
 
         self.assertIn("blocked: true", work)
+        self.assertIn("vw_tool_safety", work)
+        self.assertIn("unknown commit state", work)
         self.assertIn("blocked: true", diagnose)
         self.assertIn("host-side safety guard", diagnose)
+        self.assertIn("unknown commit state", diagnose)
+
+    def test_plugin_tool_map_documents_safety_metadata_and_mixed_actions(self):
+        tool_map = (PLUGIN / "references" / "tool-map.md").read_text(encoding="utf-8")
+
+        for text in (
+            "## Safety Metadata",
+            "requires_cad_preflight",
+            "readOnlyHint",
+            "destructiveHint",
+            "idempotentHint",
+            "openWorldHint",
+            "## Mixed Tool Actions",
+            "`vw_selection.get`",
+            "`vw_selection.delete`",
+            "`vw_manage_classes.list`",
+            "`vw_manage_classes.delete`",
+            "`vw_worksheet.read_range`",
+            "`vw_worksheet.write`",
+            "`vw_symbol.list`",
+            "`vw_symbol.insert`",
+        ):
+            self.assertIn(text, tool_map)
 
     def test_bundled_wrappers_require_current_connector_contract(self):
         for relative_path in (

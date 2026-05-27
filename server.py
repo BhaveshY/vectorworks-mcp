@@ -289,6 +289,41 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
     "vw_worksheet": {
         "category": "mixed-document-write",
         "wire_action": "worksheet",
+        "action_param": "action",
+        "actions": {
+            "list": {
+                "readOnlyHint": True,
+                "destructiveHint": False,
+                "idempotentHint": True,
+                "writesDocument": False,
+                "writesFiles": False,
+                "confirmationRequired": False,
+            },
+            "read": {
+                "readOnlyHint": True,
+                "destructiveHint": False,
+                "idempotentHint": True,
+                "writesDocument": False,
+                "writesFiles": False,
+                "confirmationRequired": False,
+            },
+            "read_range": {
+                "readOnlyHint": True,
+                "destructiveHint": False,
+                "idempotentHint": True,
+                "writesDocument": False,
+                "writesFiles": False,
+                "confirmationRequired": False,
+            },
+            "write": {
+                "readOnlyHint": False,
+                "destructiveHint": False,
+                "idempotentHint": False,
+                "writesDocument": True,
+                "writesFiles": False,
+                "confirmationRequired": False,
+            },
+        },
         "readOnlyHint": False,
         "destructiveHint": False,
         "idempotentHint": False,
@@ -298,6 +333,25 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
     "vw_symbol": {
         "category": "mixed-document-write",
         "wire_action": "symbol",
+        "action_param": "action",
+        "actions": {
+            "list": {
+                "readOnlyHint": True,
+                "destructiveHint": False,
+                "idempotentHint": True,
+                "writesDocument": False,
+                "writesFiles": False,
+                "confirmationRequired": False,
+            },
+            "insert": {
+                "readOnlyHint": False,
+                "destructiveHint": False,
+                "idempotentHint": False,
+                "writesDocument": True,
+                "writesFiles": False,
+                "confirmationRequired": False,
+            },
+        },
         "readOnlyHint": False,
         "destructiveHint": False,
         "idempotentHint": False,
@@ -370,6 +424,33 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
     "vw_manage_classes": {
         "category": "mixed-destructive",
         "wire_action": "manage_classes",
+        "action_param": "action",
+        "actions": {
+            "list": {
+                "readOnlyHint": True,
+                "destructiveHint": False,
+                "idempotentHint": True,
+                "writesDocument": False,
+                "writesFiles": False,
+                "confirmationRequired": False,
+            },
+            "create": {
+                "readOnlyHint": False,
+                "destructiveHint": False,
+                "idempotentHint": False,
+                "writesDocument": True,
+                "writesFiles": False,
+                "confirmationRequired": False,
+            },
+            "delete": {
+                "readOnlyHint": False,
+                "destructiveHint": True,
+                "idempotentHint": False,
+                "writesDocument": True,
+                "writesFiles": False,
+                "confirmationRequired": True,
+            },
+        },
         "readOnlyHint": False,
         "destructiveHint": True,
         "idempotentHint": False,
@@ -379,6 +460,63 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
     "vw_selection": {
         "category": "mixed-destructive",
         "wire_action": "selection",
+        "action_param": "action",
+        "actions": {
+            "get": {
+                "readOnlyHint": True,
+                "destructiveHint": False,
+                "idempotentHint": True,
+                "writesDocument": False,
+                "writesSelection": False,
+                "writesFiles": False,
+                "confirmationRequired": False,
+            },
+            "select": {
+                "readOnlyHint": False,
+                "destructiveHint": False,
+                "idempotentHint": False,
+                "writesDocument": False,
+                "writesSelection": True,
+                "writesFiles": False,
+                "confirmationRequired": False,
+            },
+            "clear": {
+                "readOnlyHint": False,
+                "destructiveHint": False,
+                "idempotentHint": False,
+                "writesDocument": False,
+                "writesSelection": True,
+                "writesFiles": False,
+                "confirmationRequired": False,
+            },
+            "delete": {
+                "readOnlyHint": False,
+                "destructiveHint": True,
+                "idempotentHint": False,
+                "writesDocument": True,
+                "writesSelection": True,
+                "writesFiles": False,
+                "confirmationRequired": True,
+            },
+            "move": {
+                "readOnlyHint": False,
+                "destructiveHint": False,
+                "idempotentHint": False,
+                "writesDocument": True,
+                "writesSelection": False,
+                "writesFiles": False,
+                "confirmationRequired": False,
+            },
+            "duplicate": {
+                "readOnlyHint": False,
+                "destructiveHint": False,
+                "idempotentHint": False,
+                "writesDocument": True,
+                "writesSelection": False,
+                "writesFiles": False,
+                "confirmationRequired": False,
+            },
+        },
         "readOnlyHint": False,
         "destructiveHint": True,
         "idempotentHint": False,
@@ -388,6 +526,8 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
     "vw_run_script": {
         "category": "trusted-code",
         "wire_action": "run_script",
+        "executesCode": True,
+        "confirmationRequired": True,
         "readOnlyHint": False,
         "destructiveHint": True,
         "idempotentHint": False,
@@ -402,6 +542,25 @@ _ACTION_SAFETY = {
     for safety in TOOL_SAFETY.values()
     if isinstance(safety.get("wire_action"), str) and safety.get("wire_action")
 }
+
+
+def _operation_safety(action: str, params: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
+    safety = _ACTION_SAFETY.get(action)
+    if not safety:
+        return None
+    action_param = safety.get("action_param")
+    variants = safety.get("actions")
+    if isinstance(action_param, str) and isinstance(variants, dict):
+        variant_name = ""
+        if isinstance(params, dict):
+            variant_name = str(params.get(action_param, "") or "")
+        variant = variants.get(variant_name)
+        if isinstance(variant, dict):
+            merged = dict(safety)
+            merged.update(variant)
+            merged["variant"] = variant_name
+            return merged
+    return safety
 
 
 def _annotations_for(tool_name: str) -> dict[str, bool]:
@@ -513,8 +672,8 @@ def _connection_help(error: BaseException) -> str:
     )
 
 
-def _action_safe_to_retry(action: str) -> bool:
-    safety = _ACTION_SAFETY.get(action)
+def _action_safe_to_retry(action: str, params: Optional[dict[str, Any]] = None) -> bool:
+    safety = _operation_safety(action, params)
     if not safety:
         return False
     return (
@@ -681,7 +840,7 @@ def _send(action: str, params: Optional[dict[str, Any]] = None, require_cad_safe
                 return f"VW Error ({action}): {response.get('error', 'Unknown listener error')}"
             except ProtocolError as exc:
                 _close()
-                if not _action_safe_to_retry(action):
+                if not _action_safe_to_retry(action, params):
                     return _unknown_commit_state_help(action, exc)
                 return f"Protocol error: {exc}. Restart the Vectorworks listener if this persists."
             except RequestTransportError as exc:
@@ -690,9 +849,9 @@ def _send(action: str, params: Optional[dict[str, Any]] = None, require_cad_safe
                     if attempt == 0:
                         continue
                     return _connection_help(exc.original)
-                if attempt == 0 and _action_safe_to_retry(action):
+                if attempt == 0 and _action_safe_to_retry(action, params):
                     continue
-                if not _action_safe_to_retry(action):
+                if not _action_safe_to_retry(action, params):
                     return _unknown_commit_state_help(action, exc)
                 return _connection_help(exc.original)
             except (ConnectionError, TimeoutError, socket.timeout, OSError) as exc:

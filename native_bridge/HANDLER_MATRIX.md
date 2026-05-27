@@ -37,6 +37,31 @@ Legend:
 | `create_roof` | `handle_create_roof` | write | main/plugin event context | 4 | Creates and deletes a roof from a test footprint |
 | `inspect_object` | `handle_inspect_object` | read | main/plugin event context | 4 | Reports plugin/object parameters for a selected test object |
 
+## Mixed Action Safety
+
+Native bridge behavior must match host `vw_tool_safety` variant metadata for
+mixed handlers. Read-only variants are retry-safe after transport loss; write or
+destructive variants must not be retried automatically and should report an
+unknown commit state if the response is lost after the request was sent.
+
+| Variant | Safety | Retry policy |
+|---------|--------|--------------|
+| `selection.get` | read | retry-safe |
+| `selection.select` | selection-write | no automatic retry |
+| `selection.clear` | selection-write | no automatic retry |
+| `selection.delete` | destructive document write | no automatic retry; unknown commit state on response loss |
+| `selection.move` | document write | no automatic retry; unknown commit state on response loss |
+| `selection.duplicate` | document write | no automatic retry; unknown commit state on response loss |
+| `manage_classes.list` | read | retry-safe |
+| `manage_classes.create` | document write | no automatic retry; unknown commit state on response loss |
+| `manage_classes.delete` | destructive document write | no automatic retry; unknown commit state on response loss |
+| `worksheet.list` | read | retry-safe |
+| `worksheet.read` | read | retry-safe |
+| `worksheet.read_range` | read | retry-safe |
+| `worksheet.write` | document write | no automatic retry; unknown commit state on response loss |
+| `symbol.list` | read | retry-safe |
+| `symbol.insert` | document write | no automatic retry; unknown commit state on response loss |
+
 ## Native Acceptance Rule
 
 For each row, native implementation is only accepted after:

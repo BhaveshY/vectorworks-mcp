@@ -58,8 +58,14 @@ def _matrix_rows():
         if len(cells) < 2:
             continue
         action = cells[0].strip("`")
+        if "." in action:
+            continue
         rows[action] = cells[1]
     return rows
+
+
+def _matrix_text():
+    return (ROOT / "native_bridge" / "HANDLER_MATRIX.md").read_text(encoding="utf-8")
 
 
 def _wait_for_port_released(port, timeout=2.0):
@@ -274,6 +280,23 @@ class NativeBridgeContractTests(unittest.TestCase):
             if action == "ping":
                 continue
             self.assertEqual(matrix_rows[action], "`{0}`".format(handler))
+
+    def test_handler_matrix_documents_mixed_action_safety(self):
+        matrix = _matrix_text()
+
+        for text in (
+            "`selection.get`",
+            "`selection.delete`",
+            "`worksheet.read_range`",
+            "`worksheet.write`",
+            "`manage_classes.list`",
+            "`manage_classes.delete`",
+            "`symbol.list`",
+            "`symbol.insert`",
+            "retry-safe",
+            "unknown commit state",
+        ):
+            self.assertIn(text, matrix)
 
 
 if __name__ == "__main__":
