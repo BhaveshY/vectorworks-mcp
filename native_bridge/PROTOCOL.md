@@ -50,6 +50,13 @@ Failure:
 }
 ```
 
+The smoke harness treats the response envelope strictly:
+
+- `success` must be boolean `true` or boolean `false`; string or numeric
+  lookalikes fail.
+- A successful response must include `result`.
+- A failed response must include a non-empty string `error`.
+
 ## Threading Contract
 
 The socket worker may decode frames and enqueue requests. It must not call
@@ -76,3 +83,35 @@ The native bridge should initially implement these handlers first:
 
 After those are stable, port the remaining handlers from `vw_listener.py` in
 small groups with smoke tests.
+
+## Phase-1 Smoke Schemas
+
+The smoke harness validates more than transport success. Phase-1 native bridge
+responses must satisfy these minimum shapes:
+
+- `ping`: object with `pong: true`, non-empty string `version`,
+  non-empty string `bridge_kind`, non-empty string `dispatch_mode`, positive
+  non-boolean integer `handlers` greater than or equal to the phase-1 handler
+  count, `cad_api_safe: true`, `transport_only: false`, and `native_bridge:
+  true` unless the harness is explicitly run with `--allow-non-native`. Native
+  mode must report `dispatch_mode: "native_sdk"` and a `bridge_kind` beginning
+  with `native_sdk_bridge`; known Python diagnostic modes are rejected.
+- `get_document_info`: object with non-empty string `filename`, string
+  `filepath` when present, `layers` as a list of strings, non-negative integer
+  `layer_count` matching `layers.length`, and non-negative integer
+  `total_objects`.
+- `get_layers`: list of objects. Each layer must have a non-empty string
+  `name`; `visible`, when present, must be boolean.
+- `get_objects`: list of objects. Each object must have a non-empty string
+  `handle` and `type`; optional `type_id` must be a non-negative integer;
+  optional `name` must be a string; optional `bounds` must be `null` or contain
+  `top_left` and `bottom_right` as two-number lists.
+
+The harness also cross-checks the first successful phase-1 read snapshots:
+
+- `get_document_info.layers` must match names from `get_layers`.
+- `get_document_info.layer_count` must match the number of layer rows.
+- `get_document_info.total_objects` must be greater than or equal to the number
+  of objects returned by the bounded `get_objects` call.
+- `get_objects` must honor requested `limit`, `object_type`, and `layer`
+  filters when those params are present.

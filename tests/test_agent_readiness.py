@@ -361,6 +361,7 @@ class AgentReadinessTests(unittest.TestCase):
         smoke_script = (ROOT / "scripts/smoke-native-bridge.ps1").read_text(encoding="utf-8")
         acceptance = (ROOT / "native_bridge/ACCEPTANCE.md").read_text(encoding="utf-8")
         native_readme = (ROOT / "native_bridge/README.md").read_text(encoding="utf-8")
+        protocol = (ROOT / "native_bridge/PROTOCOL.md").read_text(encoding="utf-8")
 
         self.assertIn("native_bridge\\smoke.py", smoke_script)
         self.assertIn("--ping-count", smoke_script)
@@ -368,7 +369,15 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("--phase", smoke_script)
         self.assertIn("--allow-write-fixture", smoke_script)
         self.assertIn("smoke-native-bridge.ps1", acceptance)
+        self.assertIn("schema failures", acceptance)
         self.assertIn("smoke-native-bridge.ps1", native_readme)
+        self.assertIn("minimum response", native_readme)
+        self.assertIn("Phase-1 Smoke Schemas", protocol)
+        self.assertIn("success` must be boolean", protocol)
+        self.assertIn('dispatch_mode: "native_sdk"', protocol)
+        self.assertIn("cross-checks", native_readme)
+        self.assertIn("get_document_info", protocol)
+        self.assertIn("get_objects", protocol)
 
     def test_native_doctor_can_plan_and_install_explicit_artifact(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")

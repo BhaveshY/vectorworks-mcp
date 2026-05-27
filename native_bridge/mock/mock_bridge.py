@@ -41,7 +41,16 @@ def _write_json_frame(sock, payload):
 class MockNativeBridge:
     """Small TCP bridge used by tests to exercise the native protocol contract."""
 
-    def __init__(self, status=None, release_on_stop=True):
+    def __init__(
+        self,
+        status=None,
+        document_info=None,
+        layers=None,
+        objects=None,
+        response_overrides=None,
+        respect_object_filters=True,
+        release_on_stop=True,
+    ):
         self.status = status or {
             "pong": True,
             "handlers": len(IMPLEMENTED_ACTIONS),
@@ -52,7 +61,8 @@ class MockNativeBridge:
             "transport_only": False,
             "native_bridge": True,
         }
-        self.objects = [
+        self.layers = layers if layers is not None else [{"name": "Design Layer-1", "visible": True}]
+        self.objects = objects if objects is not None else [
             {
                 "handle": "mock-rect-1",
                 "type": "rect",
@@ -63,8 +73,17 @@ class MockNativeBridge:
                 },
             }
         ]
+        self.document_info = document_info if document_info is not None else {
+            "filename": "Mock.vwx",
+            "filepath": "",
+            "layers": [layer["name"] for layer in self.layers if isinstance(layer, dict) and "name" in layer],
+            "layer_count": len(self.layers),
+            "total_objects": len(self.objects),
+        }
         self.selection = []
         self.created_count = 0
+        self.response_overrides = response_overrides or {}
+        self.respect_object_filters = respect_object_filters
         self.release_on_stop = release_on_stop
         self.requests = []
         self.ready = threading.Event()
@@ -116,6 +135,12 @@ class MockNativeBridge:
                 self.requests.append(request)
                 action = request.get("action", "")
                 request_id = request.get("id", "")
+                if action in self.response_overrides:
+                    override = self.response_overrides[action]
+                    payload = override(request) if callable(override) else dict(override)
+                    payload.setdefault("id", request_id)
+                    _write_json_frame(conn, payload)
+                    continue
                 if action == "ping":
                     _write_json_frame(conn, {"id": request_id, "success": True, "result": self.status})
                 elif action == "get_document_info":
@@ -124,13 +149,7 @@ class MockNativeBridge:
                         {
                             "id": request_id,
                             "success": True,
-                            "result": {
-                                "filename": "Mock.vwx",
-                                "filepath": "",
-                                "layers": ["Design Layer-1"],
-                                "layer_count": 1,
-                                "total_objects": len(self.objects),
-                            },
+                            "result": self.document_info,
                         },
                     )
                 elif action == "get_layers":
@@ -139,17 +158,19 @@ class MockNativeBridge:
                         {
                             "id": request_id,
                             "success": True,
-                            "result": [{"name": "Design Layer-1", "visible": True}],
+                            "result": self.layers,
                         },
                     )
                 elif action == "get_objects":
                     params = request.get("params", {})
                     limit = int(params.get("limit", 100))
                     object_type = str(params.get("object_type", "")).lower()
-                    objects = [
-                        obj for obj in self.objects
-                        if not object_type or obj.get("type") == object_type
-                    ][:limit]
+                    objects = list(self.objects)
+                    if self.respect_object_filters:
+                        objects = [
+                            obj for obj in objects
+                            if not object_type or obj.get("type") == object_type
+                        ][:limit]
                     _write_json_frame(
                         conn,
                         {

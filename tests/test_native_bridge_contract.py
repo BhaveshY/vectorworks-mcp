@@ -266,8 +266,226 @@ class NativeBridgeContractTests(unittest.TestCase):
 
         self.assertFalse(report["ok"])
         self.assertIn("bridge did not report cad_api_safe=true", report["failures"])
-        self.assertIn("bridge reported transport_only=true", report["failures"])
+        self.assertIn("bridge did not report transport_only=false", report["failures"])
         self.assertIn("bridge did not report native_bridge=true", report["failures"])
+        self.assertIn("ping dispatch_mode reported unsafe mode background", report["failures"])
+        self.assertIn("ping bridge_kind reported unsafe bridge python_transport_only", report["failures"])
+
+    def test_native_smoke_harness_rejects_incomplete_ping_schema(self):
+        status = {
+            "pong": True,
+            "cad_api_safe": True,
+            "transport_only": False,
+            "native_bridge": True,
+        }
+        with MockNativeBridge(status=status) as bridge:
+            report = run_smoke(port=bridge.port, ping_count=1, read_count=0, timeout=1, phase=0)
+
+        self.assertFalse(report["ok"])
+        self.assertIn("ping version was not a non-empty string", report["failures"])
+        self.assertIn("ping bridge_kind was not a non-empty string", report["failures"])
+        self.assertIn("ping dispatch_mode was not a non-empty string", report["failures"])
+        self.assertIn("ping handlers was not an integer >= 7", report["failures"])
+
+    def test_native_smoke_harness_rejects_non_boolean_success_envelope(self):
+        with MockNativeBridge(
+            response_overrides={
+                "ping": {
+                    "success": "true",
+                    "result": {
+                        "pong": True,
+                        "handlers": 7,
+                        "version": "mock-native-bridge",
+                        "bridge_kind": "native_sdk_bridge_mock",
+                        "dispatch_mode": "native_sdk",
+                        "cad_api_safe": True,
+                        "transport_only": False,
+                        "native_bridge": True,
+                    },
+                }
+            }
+        ) as bridge:
+            report = run_smoke(port=bridge.port, ping_count=1, read_count=0, timeout=1, phase=0)
+
+        self.assertFalse(report["ok"])
+        self.assertIn("bridge response success for ping was not boolean true/false", report["failures"])
+
+    def test_native_smoke_harness_rejects_non_native_claims(self):
+        for bridge_kind, dispatch_mode, expected in (
+            (
+                "python_foreground_diagnostic",
+                "foreground",
+                (
+                    "ping dispatch_mode reported unsafe mode foreground",
+                    "ping bridge_kind reported unsafe bridge python_foreground_diagnostic",
+                    "native bridge dispatch_mode was not native_sdk",
+                    "native bridge bridge_kind did not start with native_sdk_bridge",
+                ),
+            ),
+            (
+                "python_dialog_agent_session",
+                "dialog",
+                (
+                    "native bridge dispatch_mode was not native_sdk",
+                    "native bridge bridge_kind did not start with native_sdk_bridge",
+                ),
+            ),
+        ):
+            status = {
+                "pong": True,
+                "handlers": 7,
+                "version": "claimed-native",
+                "bridge_kind": bridge_kind,
+                "dispatch_mode": dispatch_mode,
+                "cad_api_safe": True,
+                "transport_only": False,
+                "native_bridge": True,
+            }
+            with self.subTest(bridge_kind=bridge_kind, dispatch_mode=dispatch_mode):
+                with MockNativeBridge(status=status) as bridge:
+                    report = run_smoke(port=bridge.port, ping_count=1, read_count=0, timeout=1, phase=0)
+
+                self.assertFalse(report["ok"])
+                for failure in expected:
+                    self.assertIn(failure, report["failures"])
+
+    def test_native_smoke_harness_rejects_bad_handler_count(self):
+        for handlers in (True, 1):
+            status = {
+                "pong": True,
+                "handlers": handlers,
+                "version": "mock-native-bridge",
+                "bridge_kind": "native_sdk_bridge_mock",
+                "dispatch_mode": "native_sdk",
+                "cad_api_safe": True,
+                "transport_only": False,
+                "native_bridge": True,
+            }
+            with self.subTest(handlers=handlers):
+                with MockNativeBridge(status=status) as bridge:
+                    report = run_smoke(port=bridge.port, ping_count=1, read_count=0, timeout=1, phase=0)
+
+                self.assertFalse(report["ok"])
+                self.assertIn("ping handlers was not an integer >= 7", report["failures"])
+
+    def test_native_smoke_harness_rejects_malformed_phase_one_read_schemas(self):
+        with MockNativeBridge(
+            document_info={
+                "filename": "",
+                "filepath": 123,
+                "layers": ["Design Layer-1", 42],
+                "layer_count": 99,
+                "total_objects": -1,
+            },
+            layers=[{"visible": True}, {"name": "Design Layer-2", "visible": "yes"}, "not-a-layer"],
+            objects=[
+                {
+                    "handle": "",
+                    "type": "",
+                    "name": 42,
+                    "type_id": -1,
+                    "bounds": {"top_left": [0], "bottom_right": ["x", 1]},
+                },
+                "not-an-object",
+            ],
+        ) as bridge:
+            report = run_smoke(port=bridge.port, ping_count=1, read_count=1, timeout=1)
+
+        self.assertFalse(report["ok"])
+        for expected in (
+            "get_document_info filename was not a non-empty string",
+            "get_document_info filepath was not a string",
+            "get_document_info layers was not a list of strings",
+            "get_document_info layer_count did not match layers length",
+            "get_document_info total_objects was not a non-negative integer",
+            "get_layers item 0 name was not a non-empty string",
+            "get_layers item 1 visible was not a boolean",
+            "get_layers item 2 was not an object",
+            "get_objects item 0 handle was not a non-empty string",
+            "get_objects item 0 type was not a non-empty string",
+            "get_objects item 0 type_id was not a non-negative integer",
+            "get_objects item 0 name was not a string",
+            "get_objects object 0 bounds.top_left was not a two-number list",
+            "get_objects object 0 bounds.bottom_right was not a two-number list",
+            "get_objects item 1 was not an object",
+        ):
+            self.assertIn(expected, report["failures"])
+
+    def test_native_smoke_harness_cross_checks_phase_one_read_snapshots(self):
+        with MockNativeBridge(
+            document_info={
+                "filename": "Mock.vwx",
+                "filepath": "",
+                "layers": ["Wrong Layer", "Extra Layer"],
+                "layer_count": 2,
+                "total_objects": 0,
+            },
+        ) as bridge:
+            report = run_smoke(port=bridge.port, ping_count=1, read_count=1, timeout=1)
+
+        self.assertFalse(report["ok"])
+        self.assertIn("get_document_info layers did not match get_layers names", report["failures"])
+        self.assertIn("get_document_info layer_count did not match get_layers length", report["failures"])
+        self.assertIn("get_document_info total_objects was less than returned get_objects count", report["failures"])
+
+    def test_native_smoke_harness_rejects_object_limit_and_type_drift(self):
+        objects = [
+            {"handle": "line-1", "type": "line", "name": "Line"},
+            *[
+                {"handle": "rect-{0}".format(index), "type": "rect", "name": "Rect {0}".format(index)}
+                for index in range(11)
+            ],
+        ]
+        with MockNativeBridge(objects=objects, respect_object_filters=False) as bridge:
+            report = run_smoke(port=bridge.port, ping_count=1, read_count=1, timeout=1)
+
+        self.assertFalse(report["ok"])
+        self.assertIn("get_objects returned more objects than requested limit 10", report["failures"])
+
+        report = {"checks": [], "failures": []}
+        smoke_module._validate_read_result(
+            report,
+            "get_objects",
+            [{"handle": "line-1", "type": "line", "name": "Line"}],
+            params={"object_type": "rect"},
+        )
+        self.assertIn("get_objects item 0 type did not match requested object_type rect", report["failures"])
+
+    def test_native_smoke_write_fixture_validates_fixture_object_schema(self):
+        calls = []
+        state = {"fixture_name": ""}
+        original_record_call = smoke_module._record_call
+
+        def fake_record_call(_sock, _report, action, iteration, params=None):
+            calls.append((action, iteration, params or {}))
+            if action == "create_object":
+                state["fixture_name"] = str((params or {}).get("name", ""))
+                return {"success": True, "result": "Created rect, handle: fixture-1"}
+            if action == "get_objects" and iteration == "fixture-present":
+                return {
+                    "success": True,
+                    "result": [{"handle": "fixture-1", "type": "line", "name": state["fixture_name"]}],
+                }
+            if action == "selection" and iteration == "fixture-get":
+                return {
+                    "success": True,
+                    "result": [{"handle": "fixture-1", "type": "line", "name": state["fixture_name"]}],
+                }
+            return {"success": True, "result": "OK"}
+
+        try:
+            smoke_module._record_call = fake_record_call
+            report = {"checks": [], "failures": []}
+            smoke_module._run_phase_one_write_fixture(object(), report)
+        finally:
+            smoke_module._record_call = original_record_call
+
+        self.assertIn(
+            "fixture object check item 0 type did not match requested object_type rect",
+            report["failures"],
+        )
+        self.assertIn("skipped fixture delete because fixture selection was not proven safe", report["failures"])
+        self.assertNotIn(("selection", "fixture-delete", {"action": "delete"}), calls)
 
     def test_handler_matrix_matches_listener_and_server_wire_actions(self):
         listener_handlers = _listener_handlers()

@@ -129,10 +129,14 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke-
 
 It speaks the raw bridge protocol directly, requires a native CAD-safe bridge by
 default, and runs the phase-1 read gate: `ping`, `get_document_info`,
-`get_layers`, and `get_objects`. Add `-AllowWriteFixture` only in a disposable
-test document; it creates a uniquely named rectangle and deletes it only after
-the fixture identity and exact selection are verified. Use `-Phase 0 -Stop` for
-transport-only shutdown/port-release verification.
+`get_layers`, and `get_objects`. The read gate validates the minimum response
+schemas documented in `PROTOCOL.md`, including ping safety fields, document
+counts, layer names, object handle/type fields, bounded object query semantics,
+and cross-checks between document/layer/object snapshots. Add
+`-AllowWriteFixture` only in a disposable test document; it creates a uniquely
+named rectangle and deletes it only after the fixture identity, object schema,
+and exact selection are verified. Use `-Phase 0 -Stop` for transport-only
+shutdown/port-release verification.
 
 Before installing a compiled bridge artifact, use the native doctor to inspect
 the current stage and plan the user Plug-ins deployment:

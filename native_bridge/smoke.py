@@ -8,6 +8,13 @@ import time
 from typing import Any
 
 
+PHASE_ONE_MIN_HANDLER_COUNT = 7
+UNSAFE_DISPATCH_MODES = {"background", "foreground", "win_timer"}
+UNSAFE_BRIDGE_KINDS = {"python_foreground_diagnostic", "python_transport_only"}
+NATIVE_DISPATCH_MODES = {"native_sdk"}
+NATIVE_BRIDGE_KIND_PREFIXES = ("native_sdk_bridge",)
+
+
 def _read_exact(sock: socket.socket, size: int) -> bytes:
     data = bytearray()
     while len(data) < size:
@@ -34,6 +41,8 @@ def _write_frame(sock: socket.socket, payload: dict[str, Any]) -> None:
 def _call(sock: socket.socket, action: str, params: dict[str, Any] | None, request_id: str) -> dict[str, Any]:
     _write_frame(sock, {"id": request_id, "action": action, "params": params or {}})
     response = _read_frame(sock)
+    if not isinstance(response, dict):
+        raise RuntimeError("bridge response for {0} was not an object".format(action))
     if response.get("id") != request_id:
         raise RuntimeError("bridge response id mismatch for {0}".format(action))
     return response
@@ -51,18 +60,34 @@ def _record_call(
     try:
         response = _call(sock, action, params, request_id)
         elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
-        ok = bool(response.get("success"))
+        success = response.get("success")
         check = {
             "action": action,
             "iteration": iteration,
-            "ok": ok,
+            "ok": False,
             "elapsed_ms": elapsed_ms,
         }
-        if not ok:
-            check["error"] = str(response.get("error", "unknown bridge error"))
+        if success is True:
+            if "result" not in response:
+                check["error"] = "bridge success response for {0} did not include result".format(action)
+                report["failures"].append(check["error"])
+                report["checks"].append(check)
+                return None
+            check["ok"] = True
+            report["checks"].append(check)
+            return response
+        if success is False:
+            error = response.get("error")
+            if not isinstance(error, str) or not error.strip():
+                error = "bridge failure response for {0} did not include a non-empty error string".format(action)
+            check["error"] = error
             report["failures"].append(check["error"])
+            report["checks"].append(check)
+            return None
+        check["error"] = "bridge response success for {0} was not boolean true/false".format(action)
+        report["failures"].append(check["error"])
         report["checks"].append(check)
-        return response if ok else None
+        return None
     except Exception as exc:
         elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
         check = {
@@ -85,19 +110,160 @@ def _validate_ping(report: dict[str, Any], result: Any, require_native: bool) ->
     report["last_ping"] = result
     if result.get("pong") is not True:
         report["failures"].append("ping did not return pong=true")
+    if not isinstance(result.get("version"), str) or not result.get("version", "").strip():
+        report["failures"].append("ping version was not a non-empty string")
+    bridge_kind = str(result.get("bridge_kind", "") or "")
+    dispatch_mode = str(result.get("dispatch_mode", "") or "")
+    bridge_kind_normalized = bridge_kind.strip().lower()
+    dispatch_mode_normalized = dispatch_mode.strip().lower()
+    if not isinstance(result.get("bridge_kind"), str) or not bridge_kind_normalized:
+        report["failures"].append("ping bridge_kind was not a non-empty string")
+    if not isinstance(result.get("dispatch_mode"), str) or not dispatch_mode_normalized:
+        report["failures"].append("ping dispatch_mode was not a non-empty string")
+    if dispatch_mode_normalized in UNSAFE_DISPATCH_MODES:
+        report["failures"].append("ping dispatch_mode reported unsafe mode {0}".format(dispatch_mode))
+    if bridge_kind_normalized in UNSAFE_BRIDGE_KINDS:
+        report["failures"].append("ping bridge_kind reported unsafe bridge {0}".format(bridge_kind))
+    if require_native and dispatch_mode_normalized not in NATIVE_DISPATCH_MODES:
+        report["failures"].append("native bridge dispatch_mode was not native_sdk")
+    if require_native and not bridge_kind_normalized.startswith(NATIVE_BRIDGE_KIND_PREFIXES):
+        report["failures"].append("native bridge bridge_kind did not start with native_sdk_bridge")
+    handlers = result.get("handlers")
+    if (
+        not isinstance(handlers, int)
+        or isinstance(handlers, bool)
+        or handlers < PHASE_ONE_MIN_HANDLER_COUNT
+    ):
+        report["failures"].append(
+            "ping handlers was not an integer >= {0}".format(PHASE_ONE_MIN_HANDLER_COUNT)
+        )
     if result.get("cad_api_safe") is not True:
         report["failures"].append("bridge did not report cad_api_safe=true")
-    if result.get("transport_only") is True:
-        report["failures"].append("bridge reported transport_only=true")
+    if result.get("transport_only") is not False:
+        report["failures"].append("bridge did not report transport_only=false")
     if require_native and result.get("native_bridge") is not True:
         report["failures"].append("bridge did not report native_bridge=true")
 
 
-def _validate_read_result(report: dict[str, Any], action: str, result: Any) -> None:
-    if action == "get_document_info" and not isinstance(result, dict):
-        report["failures"].append("get_document_info result was not an object")
-    if action in ("get_layers", "get_objects") and not isinstance(result, list):
+def _is_non_empty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _is_non_negative_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _validate_bounds(report: dict[str, Any], action: str, index: int, bounds: Any) -> None:
+    if bounds is None:
+        return
+    if not isinstance(bounds, dict):
+        report["failures"].append("{0} object {1} bounds was not an object or null".format(action, index))
+        return
+    for key in ("top_left", "bottom_right"):
+        point = bounds.get(key)
+        if not isinstance(point, list) or len(point) != 2 or not all(_is_number(coord) for coord in point):
+            report["failures"].append(
+                "{0} object {1} bounds.{2} was not a two-number list".format(action, index, key)
+            )
+
+
+def _validate_object_list(
+    report: dict[str, Any],
+    action: str,
+    result: Any,
+    params: dict[str, Any] | None = None,
+) -> bool:
+    valid = True
+    params = params or {}
+    if not isinstance(result, list):
         report["failures"].append("{0} result was not a list".format(action))
+        return False
+
+    limit = params.get("limit")
+    if isinstance(limit, int) and not isinstance(limit, bool) and len(result) > limit:
+        report["failures"].append("{0} returned more objects than requested limit {1}".format(action, limit))
+        valid = False
+    object_type = str(params.get("object_type", "") or "").lower()
+    layer = str(params.get("layer", "") or "")
+
+    for index, obj in enumerate(result):
+        if not isinstance(obj, dict):
+            report["failures"].append("{0} item {1} was not an object".format(action, index))
+            valid = False
+            continue
+        if not _is_non_empty_string(obj.get("handle")):
+            report["failures"].append("{0} item {1} handle was not a non-empty string".format(action, index))
+            valid = False
+        obj_type = str(obj.get("type", "") or "")
+        if not _is_non_empty_string(obj.get("type")):
+            report["failures"].append("{0} item {1} type was not a non-empty string".format(action, index))
+            valid = False
+        elif object_type and obj_type.lower() != object_type:
+            report["failures"].append(
+                "{0} item {1} type did not match requested object_type {2}".format(action, index, object_type)
+            )
+            valid = False
+        if layer and obj.get("layer") != layer:
+            report["failures"].append("{0} item {1} layer did not match requested layer".format(action, index))
+            valid = False
+        if "type_id" in obj and not _is_non_negative_int(obj.get("type_id")):
+            report["failures"].append("{0} item {1} type_id was not a non-negative integer".format(action, index))
+            valid = False
+        if "name" in obj and not isinstance(obj.get("name"), str):
+            report["failures"].append("{0} item {1} name was not a string".format(action, index))
+            valid = False
+        before = len(report["failures"])
+        _validate_bounds(report, action, index, obj.get("bounds"))
+        if len(report["failures"]) > before:
+            valid = False
+    return valid
+
+
+def _validate_read_result(
+    report: dict[str, Any],
+    action: str,
+    result: Any,
+    params: dict[str, Any] | None = None,
+) -> None:
+    if action == "get_document_info":
+        if not isinstance(result, dict):
+            report["failures"].append("get_document_info result was not an object")
+            return
+        if not _is_non_empty_string(result.get("filename")):
+            report["failures"].append("get_document_info filename was not a non-empty string")
+        if "filepath" in result and not isinstance(result.get("filepath"), str):
+            report["failures"].append("get_document_info filepath was not a string")
+        layers = result.get("layers")
+        if not isinstance(layers, list) or not all(isinstance(name, str) for name in layers):
+            report["failures"].append("get_document_info layers was not a list of strings")
+        if not _is_non_negative_int(result.get("layer_count")):
+            report["failures"].append("get_document_info layer_count was not a non-negative integer")
+        elif isinstance(layers, list) and result.get("layer_count") != len(layers):
+            report["failures"].append("get_document_info layer_count did not match layers length")
+        if not _is_non_negative_int(result.get("total_objects")):
+            report["failures"].append("get_document_info total_objects was not a non-negative integer")
+        return
+
+    if action == "get_layers":
+        if not isinstance(result, list):
+            report["failures"].append("get_layers result was not a list")
+            return
+        for index, layer in enumerate(result):
+            if not isinstance(layer, dict):
+                report["failures"].append("get_layers item {0} was not an object".format(index))
+                continue
+            if not _is_non_empty_string(layer.get("name")):
+                report["failures"].append("get_layers item {0} name was not a non-empty string".format(index))
+            if "visible" in layer and not isinstance(layer.get("visible"), bool):
+                report["failures"].append("get_layers item {0} visible was not a boolean".format(index))
+        return
+
+    if action == "get_objects":
+        _validate_object_list(report, action, result, params=params)
 
 
 def _object_matches_fixture(obj: Any, fixture_name: str, fixture_handle: str | None = None) -> bool:
@@ -114,8 +280,7 @@ def _validate_fixture_present(
     fixture_name: str,
     fixture_handle: str | None = None,
 ) -> bool:
-    if not isinstance(result, list):
-        report["failures"].append("fixture object check did not return a list")
+    if not _validate_object_list(report, "fixture object check", result, params={"limit": 200, "object_type": "rect"}):
         return False
     if not any(_object_matches_fixture(obj, fixture_name, fixture_handle) for obj in result):
         report["failures"].append("created fixture object was not visible in get_objects")
@@ -129,8 +294,7 @@ def _validate_fixture_absent(
     fixture_name: str,
     fixture_handle: str | None = None,
 ) -> bool:
-    if not isinstance(result, list):
-        report["failures"].append("fixture cleanup check did not return a list")
+    if not _validate_object_list(report, "fixture cleanup check", result, params={"limit": 200, "object_type": "rect"}):
         return False
     if any(_object_matches_fixture(obj, fixture_name, fixture_handle) for obj in result):
         report["failures"].append("created fixture object remained after cleanup")
@@ -144,8 +308,7 @@ def _validate_fixture_selected(
     fixture_name: str,
     fixture_handle: str | None = None,
 ) -> bool:
-    if not isinstance(result, list):
-        report["failures"].append("selection get did not return a list")
+    if not _validate_object_list(report, "selection get", result, params={"object_type": "rect"}):
         return False
     if not result:
         report["failures"].append("fixture object was not selected")
@@ -175,6 +338,25 @@ def _extract_created_handle(result: Any) -> str | None:
     return None
 
 
+def _validate_fixture_delete_result(report: dict[str, Any], result: Any) -> bool:
+    deleted_count = None
+    if isinstance(result, dict):
+        for key in ("deleted", "deleted_count", "count"):
+            value = result.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                deleted_count = value
+                break
+    elif isinstance(result, str):
+        match = re.search(r"Deleted\s+(\d+)\s+objects?", result, flags=re.IGNORECASE)
+        if match:
+            deleted_count = int(match.group(1))
+
+    if deleted_count is None or deleted_count < 1:
+        report["failures"].append("fixture delete result did not report deleting at least one object")
+        return False
+    return True
+
+
 def _run_phase_one_write_fixture(sock: socket.socket, report: dict[str, Any]) -> None:
     fixture_name = "VW_MCP_NATIVE_SMOKE_{0}".format(int(time.time() * 1000))
     create_response = _record_call(
@@ -192,6 +374,8 @@ def _run_phase_one_write_fixture(sock: socket.socket, report: dict[str, Any]) ->
         },
     )
     fixture_handle = _extract_created_handle(create_response.get("result")) if create_response else None
+    if create_response is not None and not fixture_handle:
+        report["failures"].append("create_object fixture result did not include a handle")
     fixture_present = False
     fixture_selected = False
     selection_cleared = False
@@ -227,6 +411,7 @@ def _run_phase_one_write_fixture(sock: socket.socket, report: dict[str, Any]) ->
     delete_response = _record_call(sock, report, "selection", "fixture-delete", params={"action": "delete"})
     if delete_response is None:
         return
+    _validate_fixture_delete_result(report, delete_response.get("result"))
 
     cleanup_response = _record_call(
         sock,
@@ -237,6 +422,30 @@ def _run_phase_one_write_fixture(sock: socket.socket, report: dict[str, Any]) ->
     )
     if cleanup_response is not None:
         _validate_fixture_absent(report, cleanup_response.get("result"), fixture_name, fixture_handle)
+
+
+def _validate_phase_one_consistency(report: dict[str, Any], snapshots: dict[str, Any]) -> None:
+    document_info = snapshots.get("get_document_info")
+    layers = snapshots.get("get_layers")
+    objects = snapshots.get("get_objects")
+
+    if isinstance(document_info, dict) and isinstance(layers, list):
+        info_layers = document_info.get("layers")
+        layer_names = [
+            layer.get("name")
+            for layer in layers
+            if isinstance(layer, dict) and isinstance(layer.get("name"), str)
+        ]
+        if isinstance(info_layers, list) and all(isinstance(name, str) for name in info_layers):
+            if info_layers != layer_names:
+                report["failures"].append("get_document_info layers did not match get_layers names")
+        if _is_non_negative_int(document_info.get("layer_count")) and document_info["layer_count"] != len(layer_names):
+            report["failures"].append("get_document_info layer_count did not match get_layers length")
+
+    if isinstance(document_info, dict) and isinstance(objects, list):
+        total_objects = document_info.get("total_objects")
+        if _is_non_negative_int(total_objects) and total_objects < len(objects):
+            report["failures"].append("get_document_info total_objects was less than returned get_objects count")
 
 
 def _wait_for_port_closed(host: str, port: int, timeout: float) -> bool:
@@ -296,6 +505,7 @@ def run_smoke(
     }
 
     stop_acknowledged = False
+    phase_one_snapshots: dict[str, Any] = {}
     try:
         with socket.create_connection((host, port), timeout=timeout) as sock:
             sock.settimeout(timeout)
@@ -315,7 +525,13 @@ def run_smoke(
                     params = {"limit": 10} if action == "get_objects" else None
                     response = _record_call(sock, report, action, index, params=params)
                     if response is not None:
-                        _validate_read_result(report, action, response.get("result"))
+                        result = response.get("result")
+                        _validate_read_result(report, action, result, params=params)
+                        if index == 1 and action not in phase_one_snapshots:
+                            phase_one_snapshots[action] = result
+
+            if phase_one_snapshots:
+                _validate_phase_one_consistency(report, phase_one_snapshots)
 
             if phase >= 1 and allow_write_fixture:
                 _run_phase_one_write_fixture(sock, report)
