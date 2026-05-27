@@ -75,6 +75,38 @@ class ClaudePluginTests(unittest.TestCase):
 
         self.assertTrue((ROOT / "scripts" / "check-bundled-plugin-contract.ps1").exists())
 
+    def test_plugin_diagnose_reports_identity_and_loader_metadata(self):
+        diagnose = (PLUGIN / "scripts" / "diagnose-vectorworks-mcp.ps1").read_text(encoding="utf-8")
+        doctor = (PLUGIN / "scripts" / "doctor-vectorworks-mcp.ps1").read_text(encoding="utf-8")
+        diagnose_skill = (PLUGIN / "skills" / "diagnose" / "SKILL.md").read_text(encoding="utf-8")
+
+        for text in (
+            "Plugin root:",
+            "Plugin version:",
+            "Plugin marketplace:",
+            "Connector contract:",
+            "Connector git:",
+            "Generated loader metadata:",
+            "VW_MCP_LOADER_METADATA",
+            "contractVersion",
+            "requiredFeatures",
+            "generatedAtUtc",
+        ):
+            self.assertIn(text, diagnose)
+
+        for text in (
+            "Plugin root:",
+            "Plugin version:",
+            "Plugin marketplace:",
+            "Connector contract:",
+            "Connector git:",
+            "-RequireContract",
+        ):
+            self.assertIn(text, doctor)
+
+        for text in ("Plugin version", "Connector git", "Generated loader metadata: stale"):
+            self.assertIn(text, diagnose_skill)
+
     def test_plugin_resolver_finds_this_repo(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
         if not powershell:

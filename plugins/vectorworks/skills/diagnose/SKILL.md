@@ -19,6 +19,9 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN
 
 Then map the result:
 
+- `Plugin version`, `Plugin root`, and `Plugin marketplace`: confirm Claude Code loaded the expected plugin checkout before debugging Vectorworks.
+- `Connector git` and `Connector contract`: confirm the plugin resolved a current `vectorworks-mcp` checkout on the expected branch/head.
+- `Generated loader metadata: stale`: regenerate/copy the loader and replace the old script inside Vectorworks with the fresh `vw_load_listener_2024.py`.
 - `Repo: NOT FOUND`: configure plugin `vectorworks_repo`, set `VW_MCP_REPO`, or start Claude Code from the `vectorworks-mcp` repo.
 - `Launcher agent-session mode: False`: run `/vectorworks:setup` or the bootstrap wrapper, then replace the old script inside Vectorworks with `vw_load_listener_2024.py`.
 - `Listener TCP ... reachable: False`: Vectorworks is not listening. Start Vectorworks and run the generated loader.
