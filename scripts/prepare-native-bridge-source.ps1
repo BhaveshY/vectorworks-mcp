@@ -11,7 +11,8 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $SdkRequirementsPath = Join-Path $RepoRoot "native_bridge\SDK_REQUIREMENTS.json"
 $WorkRoot = Join-Path $RepoRoot "native_bridge\worktree"
-$TargetDir = Join-Path $WorkRoot "VectorworksMCPBridge"
+$WorktreeRoot = Join-Path $WorkRoot "SDKExamples"
+$TargetDir = Join-Path $WorktreeRoot "Examples$VectorworksVersion\VectorworksMCPBridge"
 
 if (-not (Test-Path -LiteralPath $SdkRequirementsPath)) {
     throw "Native bridge SDK requirements file was not found at $SdkRequirementsPath"
@@ -64,6 +65,27 @@ function Get-FirstSdkExamplesLayout {
     return ""
 }
 
+function New-DirectoryLinkOrCopy {
+    param(
+        [string]$LinkPath,
+        [string]$TargetPath
+    )
+
+    if (-not (Test-Path -LiteralPath $TargetPath -PathType Container)) {
+        throw "Required SDK examples dependency was not found at $TargetPath"
+    }
+    if (Test-Path -LiteralPath $LinkPath) {
+        return
+    }
+
+    try {
+        New-Item -ItemType Junction -Path $LinkPath -Target $TargetPath | Out-Null
+    } catch {
+        Write-Warning "Could not create junction $LinkPath -> $TargetPath; copying instead. This may take a while."
+        Copy-Item -LiteralPath $TargetPath -Destination $LinkPath -Recurse
+    }
+}
+
 if (-not $SdkExamplesDir) {
     $SdkExamplesDir = Get-FirstSdkExamplesLayout -Version $VectorworksVersion
 }
@@ -106,20 +128,22 @@ Fix one of these:
 $SdkExamplesDir = (Resolve-Path -LiteralPath $SdkExamplesDir).Path
 $SourceExampleDir = Join-Path $SdkExamplesDir "Examples$VectorworksVersion\ObjectExample"
 
-if ((Test-Path -LiteralPath $TargetDir) -and -not $Force) {
-    throw "Native bridge worktree already exists at $TargetDir. Pass -Force to recreate it."
+if ((Test-Path -LiteralPath $WorktreeRoot) -and -not $Force) {
+    throw "Native bridge worktree already exists at $WorktreeRoot. Pass -Force to recreate it."
 }
 
-if (Test-Path -LiteralPath $TargetDir) {
-    $ResolvedTarget = (Resolve-Path -LiteralPath $TargetDir).Path
-    if (-not $ResolvedTarget.StartsWith($WorkRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "Refusing to remove target outside native_bridge\worktree: $ResolvedTarget"
+if (Test-Path -LiteralPath $WorktreeRoot) {
+    $ResolvedWorktree = (Resolve-Path -LiteralPath $WorktreeRoot).Path
+    if (-not $ResolvedWorktree.StartsWith($WorkRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to remove target outside native_bridge\worktree: $ResolvedWorktree"
     }
-    Remove-Item -LiteralPath $TargetDir -Recurse -Force
+    Remove-Item -LiteralPath $WorktreeRoot -Recurse -Force
 }
 
-New-Item -ItemType Directory -Force -Path $WorkRoot | Out-Null
+New-Item -ItemType Directory -Force -Path (Split-Path -Parent $TargetDir) | Out-Null
 Copy-Item -LiteralPath $SourceExampleDir -Destination $TargetDir -Recurse
+New-DirectoryLinkOrCopy -LinkPath (Join-Path $WorktreeRoot "VectorworksSDK") -TargetPath (Join-Path $SdkExamplesDir "VectorworksSDK")
+New-DirectoryLinkOrCopy -LinkPath (Join-Path $WorktreeRoot "ThirdPartySource") -TargetPath (Join-Path $SdkExamplesDir "ThirdPartySource")
 
 $NotesPath = Join-Path $TargetDir "VECTORWORKS_MCP_BRIDGE_NOTES.md"
 $Notes = @"
@@ -130,11 +154,16 @@ Vectorworks SDK example:
 
 - SDK examples: ``$SdkExamplesDir``
 - Source example: ``Examples$VectorworksVersion\ObjectExample``
+- Worktree root: ``$WorktreeRoot``
 - Target Vectorworks version: ``$VectorworksVersion``
 
 This folder is intentionally ignored by git. Use it as the local SDK-backed
 implementation workspace, then copy only reviewable source changes back into
 ``native_bridge/src`` when they are ready.
+
+The copied project keeps the official example's relative layout. ``VectorworksSDK``
+and ``ThirdPartySource`` are junctions to the official SDK examples clone when
+possible, or copied folders if junction creation is unavailable.
 
 Recommended order:
 
@@ -149,6 +178,8 @@ Recommended order:
 Set-Content -LiteralPath $NotesPath -Value $Notes -Encoding UTF8
 
 Write-Host "Prepared native bridge source worktree:"
+Write-Host $WorktreeRoot
+Write-Host "Bridge project:"
 Write-Host $TargetDir
 Write-Host ""
 Write-Host "Next build command:"

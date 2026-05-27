@@ -61,6 +61,12 @@ Optional SDK bootstrap helper:
 powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-native-bridge.ps1
 ```
 
+Opt-in Windows 11 native prerequisite setup:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-native-bridge.ps1 -InstallVisualStudioBuildTools -DownloadSdk -CloneSdkExamples -PrepareSource
+```
+
 After the SDK examples and Visual Studio tools are installed, prepare and build
 the native worktree:
 

@@ -93,9 +93,13 @@ For native bridge implementation work, first prepare an ignored SDK example
 worktree and prove the unmodified Vectorworks example builds:
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-native-bridge.ps1 -InstallVisualStudioBuildTools -DownloadSdk -CloneSdkExamples -PrepareSource
 powershell -ExecutionPolicy Bypass -File .\scripts\prepare-native-bridge-source.ps1 -CloneSdkExamples
 powershell -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
 ```
+
+The installer flags are opt-in because they can download large SDK files and
+launch the Visual Studio Build Tools installer.
 
 If `.venv` does not exist yet, run:
 

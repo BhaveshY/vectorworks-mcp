@@ -159,6 +159,8 @@ function Find-SdkInstall {
     if ($env:VECTORWORKS_SDK_DIR) { $Candidates += $env:VECTORWORKS_SDK_DIR }
     $Candidates += Join-Path $RepoRoot "third_party\VectorworksSDK\$Version"
     $Candidates += Join-Path $RepoRoot "third_party\VectorworksSDK"
+    $Candidates += Join-Path $RepoRoot "third_party\VectorworksSDKExamples\VectorworksSDK\SDK$Version"
+    $Candidates += Join-Path $RepoRoot ".cache\VectorworksSDKExamples\VectorworksSDK\SDK$Version"
     if ($env:USERPROFILE) {
         $Candidates += Join-Path $env:USERPROFILE "Downloads\Vectorworks SDK $Version"
         $Candidates += Join-Path $env:USERPROFILE "Downloads\$Version-NNA-eng-win-SDK"

@@ -74,6 +74,16 @@ The bootstrap helper does not download the SDK unless explicitly requested:
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-native-bridge.ps1
 ```
 
+It can also perform the opt-in Windows setup path:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-native-bridge.ps1 -InstallVisualStudioBuildTools -DownloadSdk -CloneSdkExamples -PrepareSource
+```
+
+`-InstallVisualStudioBuildTools` uses winget package
+`Microsoft.VisualStudio.2022.BuildTools` with the C++ workload. It may require
+administrator approval or a reboot before MSBuild is available.
+
 To download the official Windows SDK archive into a repo-local ignored folder:
 
 ```powershell
@@ -99,9 +109,11 @@ extension code with the MCP bridge:
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
 ```
 
-The generated worktree lives under `native_bridge/worktree/` and is ignored by
-git. Copy only deliberate, reviewable bridge source back into `native_bridge/src`
-after the SDK-backed build is understood.
+The generated worktree lives under `native_bridge/worktree/SDKExamples/` and is
+ignored by git. It preserves the official examples' relative layout so the
+Visual Studio project can find `VectorworksSDK` and `ThirdPartySource`. Copy
+only deliberate, reviewable bridge source back into `native_bridge/src` after
+the SDK-backed build is understood.
 
 ## Implementation Rules
 

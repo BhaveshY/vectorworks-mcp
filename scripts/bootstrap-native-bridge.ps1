@@ -2,7 +2,14 @@
 param(
     [string]$VectorworksVersion = "2024",
     [string]$SdkDir = "",
+    [string]$SdkExamplesDir = "",
     [switch]$DownloadSdk,
+    [switch]$InstallVisualStudioBuildTools,
+    [switch]$CloneSdkExamples,
+    [switch]$PrepareSource,
+    [switch]$Build,
+    [ValidateSet("Debug", "Release")]
+    [string]$Configuration = "Debug",
     [switch]$Force
 )
 
@@ -10,6 +17,8 @@ $ErrorActionPreference = "Stop"
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $CheckerPath = Join-Path $PSScriptRoot "check-native-bridge-prereqs.ps1"
+$PreparePath = Join-Path $PSScriptRoot "prepare-native-bridge-source.ps1"
+$BuildPath = Join-Path $PSScriptRoot "build-native-bridge.ps1"
 $SdkRequirementsPath = Join-Path $RepoRoot "native_bridge\SDK_REQUIREMENTS.json"
 if (-not (Test-Path -LiteralPath $SdkRequirementsPath)) {
     throw "Native bridge SDK requirements file was not found at $SdkRequirementsPath"
@@ -33,6 +42,29 @@ if (-not (Test-Path -LiteralPath $CheckerPath)) {
 Write-Host "Vectorworks native bridge bootstrap ($VectorworksVersion)"
 Write-Host "Repo: $RepoRoot"
 Write-Host "SDK directory: $SdkDir"
+
+if ($InstallVisualStudioBuildTools) {
+    $Winget = Get-Command winget.exe -ErrorAction SilentlyContinue
+    if (-not $Winget) {
+        throw "winget.exe was not found. Install App Installer or install Visual Studio 2022 Build Tools manually."
+    }
+
+    Write-Host "Installing Visual Studio 2022 Build Tools C++ workload with winget."
+    Write-Host "Package: Microsoft.VisualStudio.2022.BuildTools"
+    & $Winget.Source install `
+        --id Microsoft.VisualStudio.2022.BuildTools `
+        --exact `
+        --source winget `
+        --accept-package-agreements `
+        --accept-source-agreements `
+        --override "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+    if ($LASTEXITCODE -ne 0) {
+        throw "winget Visual Studio Build Tools install failed with exit code $LASTEXITCODE"
+    }
+    Write-Host "Visual Studio Build Tools installer finished. A reboot may still be required before MSBuild is visible."
+} else {
+    Write-Host "Visual Studio Build Tools install skipped. Pass -InstallVisualStudioBuildTools to install the C++ workload with winget."
+}
 
 if ($DownloadSdk) {
     $CacheDir = Join-Path $RepoRoot ".cache\vectorworks-sdk"
@@ -58,5 +90,33 @@ if ($DownloadSdk) {
     Write-Host "Official SDK page: $OfficialSdkPage"
 }
 
+$PrepareRequested = $PrepareSource -or $CloneSdkExamples -or $Build
+if ($PrepareRequested) {
+    if (-not (Test-Path -LiteralPath $PreparePath)) {
+        throw "Native source preparation script not found at $PreparePath"
+    }
+
+    $PrepareArgs = @("-VectorworksVersion", $VectorworksVersion)
+    if ($SdkExamplesDir) { $PrepareArgs += @("-SdkExamplesDir", $SdkExamplesDir) }
+    if ($CloneSdkExamples) { $PrepareArgs += "-CloneSdkExamples" }
+    if ($Force) { $PrepareArgs += "-Force" }
+
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $PreparePath @PrepareArgs
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+
 & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $CheckerPath -VectorworksVersion $VectorworksVersion -SdkDir $SdkDir
-exit $LASTEXITCODE
+$CheckExitCode = $LASTEXITCODE
+if ($CheckExitCode -ne 0) {
+    exit $CheckExitCode
+}
+
+if ($Build) {
+    if (-not (Test-Path -LiteralPath $BuildPath)) {
+        throw "Native build script not found at $BuildPath"
+    }
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $BuildPath -VectorworksVersion $VectorworksVersion -Configuration $Configuration
+    exit $LASTEXITCODE
+}
+
+exit 0

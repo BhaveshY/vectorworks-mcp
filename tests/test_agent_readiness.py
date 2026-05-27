@@ -152,6 +152,8 @@ class AgentReadinessTests(unittest.TestCase):
     def test_native_bridge_prepare_and_build_scripts_use_official_sdk_examples(self):
         prepare = (ROOT / "scripts/prepare-native-bridge-source.ps1").read_text(encoding="utf-8")
         build = (ROOT / "scripts/build-native-bridge.ps1").read_text(encoding="utf-8")
+        bootstrap = (ROOT / "scripts/bootstrap-native-bridge.ps1").read_text(encoding="utf-8")
+        checker = (ROOT / "scripts/check-native-bridge-prereqs.ps1").read_text(encoding="utf-8")
         gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
 
         self.assertIn("officialSdkExamples", prepare)
@@ -159,13 +161,64 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("VectorworksSDK\\SDK$Version\\SDKLib", prepare)
         self.assertIn("git clone --depth 1", prepare)
         self.assertIn("native_bridge\\worktree", prepare)
+        self.assertIn("SDKExamples", prepare)
         self.assertIn("VectorworksMCPBridge", prepare)
 
         self.assertIn("check-native-bridge-prereqs.ps1", build)
         self.assertIn("MSBuild", build)
         self.assertIn("*$VectorworksVersion.sln", build)
         self.assertIn("/p:Platform=x64", build)
+        self.assertIn("Microsoft.VisualStudio.2022.BuildTools", bootstrap)
+        self.assertIn("Microsoft.VisualStudio.Workload.VCTools", bootstrap)
+        self.assertIn("[switch]$PrepareSource", bootstrap)
+        self.assertIn("[switch]$Build", bootstrap)
+        self.assertIn("third_party\\VectorworksSDKExamples\\VectorworksSDK\\SDK$Version", checker)
         self.assertIn("native_bridge/worktree/", gitignore)
+
+    def test_prepare_native_bridge_source_preserves_sdk_example_layout(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise native source preparation")
+
+        worktree = ROOT / "native_bridge" / "worktree"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            examples = Path(temp_dir) / "SDKExamples"
+            source = examples / "Examples2024" / "ObjectExample"
+            (source / "Source").mkdir(parents=True)
+            (examples / "VectorworksSDK" / "SDK2024" / "SDKLib").mkdir(parents=True)
+            (examples / "ThirdPartySource" / "libcurl").mkdir(parents=True)
+            (source / "ObjectExample2024.sln").write_text("fake solution\n", encoding="utf-8")
+
+            try:
+                subprocess.run(
+                    [
+                        powershell,
+                        "-NoLogo",
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(ROOT / "scripts/prepare-native-bridge-source.ps1"),
+                        "-SdkExamplesDir",
+                        str(examples),
+                        "-Force",
+                    ],
+                    cwd=str(ROOT),
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+
+                root = worktree / "SDKExamples"
+                bridge = root / "Examples2024" / "VectorworksMCPBridge"
+                self.assertTrue((bridge / "ObjectExample2024.sln").exists())
+                self.assertTrue((bridge / "VECTORWORKS_MCP_BRIDGE_NOTES.md").exists())
+                self.assertTrue((root / "VectorworksSDK" / "SDK2024" / "SDKLib").exists())
+                self.assertTrue((root / "ThirdPartySource" / "libcurl").exists())
+            finally:
+                if worktree.exists():
+                    shutil.rmtree(worktree)
 
     def test_powershell_scripts_parse(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")

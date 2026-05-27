@@ -13,7 +13,7 @@ $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $CheckerPath = Join-Path $PSScriptRoot "check-native-bridge-prereqs.ps1"
 $PreparePath = Join-Path $PSScriptRoot "prepare-native-bridge-source.ps1"
 if (-not $SourceDir) {
-    $SourceDir = Join-Path $RepoRoot "native_bridge\worktree\VectorworksMCPBridge"
+    $SourceDir = Join-Path $RepoRoot "native_bridge\worktree\SDKExamples"
 }
 
 function Get-MSBuildFromPath {
