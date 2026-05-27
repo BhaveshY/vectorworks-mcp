@@ -68,7 +68,7 @@ if ($Manifest.name -ne "vectorworks" -or $Manifest.mcpServers -ne "./.mcp.json")
     throw "Bundled plugin manifest is not a valid Vectorworks plugin manifest."
 }
 $Marketplace = Get-Content -Raw -LiteralPath (Join-Path $BundledPlugin ".claude-plugin\marketplace.json") | ConvertFrom-Json
-if ($Marketplace.name -ne "vectorworks-mcp" -or $Marketplace.plugins[0].name -ne "vectorworks") {
+if ($Marketplace.name -ne "vectorworks-claude-plugin" -or $Marketplace.plugins[0].name -ne "vectorworks") {
     throw "Bundled plugin marketplace manifest is invalid."
 }
 

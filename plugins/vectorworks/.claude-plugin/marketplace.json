@@ -1,5 +1,5 @@
 {
-  "name": "vectorworks-mcp",
+  "name": "vectorworks-claude-plugin",
   "description": "Claude Code plugins for Vectorworks MCP workflows.",
   "owner": {
     "name": "BhaveshY"

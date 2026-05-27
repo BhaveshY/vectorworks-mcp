@@ -150,7 +150,9 @@ and cross-checks between document/layer/object snapshots. Add
 `-AllowWriteFixture` only in a disposable test document; it creates a uniquely
 named rectangle and deletes it only after the fixture identity, object schema,
 and exact selection are verified. Use `-Phase 0 -Stop` for transport-only
-shutdown/port-release verification.
+shutdown/port-release verification. Phase 0 accepts the reviewed native
+scaffold's honest `cad_api_safe: false` / `transport_only: true` ping, but the
+default phase-1 smoke still requires a real CAD-safe bridge.
 
 Before installing a compiled bridge artifact, use the native doctor to inspect
 the current stage and plan the user Plug-ins deployment:

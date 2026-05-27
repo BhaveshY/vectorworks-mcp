@@ -30,7 +30,7 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertEqual(manifest["version"], "0.3.0")
         self.assertEqual(manifest["mcpServers"], "./.mcp.json")
         self.assertIn("vectorworks_repo", manifest["userConfig"])
-        self.assertEqual(marketplace["name"], "vectorworks-mcp")
+        self.assertEqual(marketplace["name"], "vectorworks-claude-plugin")
         self.assertEqual(marketplace["plugins"][0]["name"], "vectorworks")
 
     def test_plugin_mcp_config_uses_wrapper(self):

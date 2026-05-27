@@ -565,6 +565,9 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("schema failures", acceptance)
         self.assertIn("smoke-native-bridge.ps1", native_readme)
         self.assertIn("minimum response", native_readme)
+        self.assertIn("Phase 0 accepts", native_readme)
+        self.assertIn("cad_api_safe: false", native_readme)
+        self.assertIn("Phase-0 Smoke Schema", protocol)
         self.assertIn("Phase-1 Smoke Schemas", protocol)
         self.assertIn("success` must be boolean", protocol)
         self.assertIn('dispatch_mode: "native_sdk"', protocol)
@@ -611,7 +614,57 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertEqual(installed_path, install_dir / artifact.name)
             self.assertTrue(installed_path.exists())
             self.assertEqual(report["builtArtifact"], str(artifact))
+            self.assertEqual(report["installDestination"], str(install_dir / artifact.name))
+            self.assertTrue(report["installPerformed"])
+            self.assertFalse(report["installWhatIf"])
             self.assertIn("smoke-native-bridge.ps1 -Json", "\n".join(report["nextActions"]))
+
+    def test_native_doctor_whatif_install_is_non_mutating(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise the native doctor")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            artifact = temp_root / "VectorworksMCPBridge.vwlibrary"
+            install_dir = temp_root / "Plug-ins"
+            artifact.write_text("fake native bridge artifact\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/doctor-native-bridge.ps1"),
+                    "-BuiltArtifact",
+                    str(artifact),
+                    "-InstallDir",
+                    str(install_dir),
+                    "-Install",
+                    "-WhatIf",
+                    "-Json",
+                ],
+                cwd=str(ROOT),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            report = json.loads(result.stdout)
+            destination = install_dir / artifact.name
+            self.assertFalse(destination.exists())
+            self.assertFalse(install_dir.exists())
+            self.assertTrue(report["installRequested"])
+            self.assertTrue(report["installWhatIf"])
+            self.assertFalse(report["installPerformed"])
+            self.assertEqual(report["installDestination"], str(destination))
+            self.assertEqual(report["installedPath"], "")
+            self.assertNotIn("Restart Vectorworks", "\n".join(report["nextActions"]))
+            self.assertIn("without -WhatIf", "\n".join(report["nextActions"]))
 
     def test_native_doctor_detects_partial_scaffold_copy(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")

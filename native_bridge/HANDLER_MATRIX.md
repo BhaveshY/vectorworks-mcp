@@ -14,7 +14,7 @@ Legend:
 
 | Action | Python handler | Safety | Context | Native phase | Smoke test |
 |--------|----------------|--------|---------|--------------|------------|
-| `ping` | transport status | read | transport-only is allowed | 0 | Returns `native_bridge: true`, `cad_api_safe: true`, version, and handler count |
+| `ping` | transport status | read | transport-only is allowed | 0 | Phase-0 scaffold returns `native_bridge: true`, `cad_api_safe: false`, `transport_only: true`, version, and handler count; production phase-1 returns `cad_api_safe: true` |
 | `stop` | `handle_stop` | write | transport plus plugin unload/stop path | 0 | Releases port `9877` |
 | `get_document_info` | `handle_get_document_info` | read | main/plugin event context | 1 | Returns filename, path, layer count, object count |
 | `get_layers` | `handle_get_layers` | read | main/plugin event context | 1 | Lists layers repeatedly without freezing Vectorworks |

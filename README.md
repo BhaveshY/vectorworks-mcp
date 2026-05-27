@@ -143,9 +143,13 @@ For the longer-term Claude Code workflow, use the standalone marketplace plugin:
 
 ```text
 /plugin marketplace add BhaveshY/vectorworks-claude-plugin
-/plugin install vectorworks@vectorworks-mcp
+/plugin install vectorworks@vectorworks-claude-plugin
 /reload-plugins
 ```
+
+The marketplace suffix is the Claude plugin marketplace name. The connector
+repo remains `BhaveshY/vectorworks-mcp` and is resolved or cloned separately by
+the plugin setup wrapper.
 
 For local development of this connector repo, a bundled plugin mirror is also
 available. It is checked against the standalone marketplace plugin in CI, and

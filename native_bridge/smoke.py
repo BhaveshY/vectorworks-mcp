@@ -8,6 +8,7 @@ import time
 from typing import Any
 
 
+PHASE_ZERO_MIN_HANDLER_COUNT = 2
 PHASE_ONE_MIN_HANDLER_COUNT = 7
 UNSAFE_DISPATCH_MODES = {"background", "foreground", "win_timer"}
 UNSAFE_BRIDGE_KINDS = {"python_foreground_diagnostic", "python_transport_only"}
@@ -102,7 +103,7 @@ def _record_call(
         return None
 
 
-def _validate_ping(report: dict[str, Any], result: Any, require_native: bool) -> None:
+def _validate_ping(report: dict[str, Any], result: Any, require_native: bool, phase: int) -> None:
     if not isinstance(result, dict):
         report["failures"].append("ping result was not an object")
         return
@@ -129,18 +130,31 @@ def _validate_ping(report: dict[str, Any], result: Any, require_native: bool) ->
     if require_native and not bridge_kind_normalized.startswith(NATIVE_BRIDGE_KIND_PREFIXES):
         report["failures"].append("native bridge bridge_kind did not start with native_sdk_bridge")
     handlers = result.get("handlers")
+    min_handlers = PHASE_ONE_MIN_HANDLER_COUNT if phase >= 1 else PHASE_ZERO_MIN_HANDLER_COUNT
     if (
         not isinstance(handlers, int)
         or isinstance(handlers, bool)
-        or handlers < PHASE_ONE_MIN_HANDLER_COUNT
+        or handlers < min_handlers
     ):
         report["failures"].append(
-            "ping handlers was not an integer >= {0}".format(PHASE_ONE_MIN_HANDLER_COUNT)
+            "ping handlers was not an integer >= {0}".format(min_handlers)
         )
-    if result.get("cad_api_safe") is not True:
-        report["failures"].append("bridge did not report cad_api_safe=true")
-    if result.get("transport_only") is not False:
-        report["failures"].append("bridge did not report transport_only=false")
+    cad_api_safe = result.get("cad_api_safe")
+    transport_only = result.get("transport_only")
+    if phase >= 1:
+        if cad_api_safe is not True:
+            report["failures"].append("bridge did not report cad_api_safe=true")
+        if transport_only is not False:
+            report["failures"].append("bridge did not report transport_only=false")
+    else:
+        if cad_api_safe not in (True, False):
+            report["failures"].append("bridge cad_api_safe was not boolean")
+        if transport_only not in (True, False):
+            report["failures"].append("bridge transport_only was not boolean")
+        if cad_api_safe is True and transport_only is not False:
+            report["failures"].append("CAD-safe phase-0 bridge must report transport_only=false")
+        if cad_api_safe is False and transport_only is not True:
+            report["failures"].append("transport-only phase-0 bridge must report transport_only=true")
     if require_native and result.get("native_bridge") is not True:
         report["failures"].append("bridge did not report native_bridge=true")
 
@@ -512,7 +526,7 @@ def run_smoke(
             for index in range(1, ping_count + 1):
                 response = _record_call(sock, report, "ping", index)
                 if response is not None:
-                    _validate_ping(report, response.get("result"), require_native=require_native)
+                    _validate_ping(report, response.get("result"), require_native=require_native, phase=phase)
 
             read_actions = []
             if phase >= 1:

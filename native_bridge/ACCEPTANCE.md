@@ -24,7 +24,19 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor
 3. Enable the native bridge plug-in.
 4. Confirm Vectorworks can still be clicked, panned, and used while the bridge
    is idle.
-5. Run the native smoke harness:
+5. If only the phase-0 scaffold is wired, run the transport shutdown check
+   first:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Phase 0 -Stop -Json
+```
+
+Expected result: `ok: true`, `native_bridge: true`, and
+`"stop_port_released": true`. A phase-0 scaffold may still report
+`cad_api_safe: false` and `transport_only: true`; that is not production-ready.
+
+6. After real CAD handlers are implemented, run the default native smoke
+   harness:
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Json
@@ -34,7 +46,7 @@ Expected result: `ok: true`, `native_bridge: true`, `cad_api_safe: true`, and
 no phase-1 read-handler timeouts or schema failures. The default smoke phase
 covers `ping`, `get_document_info`, `get_layers`, and `get_objects`.
 
-6. In a disposable test document, run the explicit write fixture:
+7. In a disposable test document, run the explicit write fixture:
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -AllowWriteFixture -Json
@@ -44,13 +56,8 @@ Expected result: the bridge creates a uniquely named rectangle, finds it,
 proves the selection contains exactly that fixture, deletes it, and verifies
 cleanup. If any identity check fails, the smoke harness must skip deletion.
 
-7. For phase-0 transport shutdown, run:
-
-```powershell
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Phase 0 -Stop -Json
-```
-
-8. Confirm the JSON report includes `"stop_port_released": true`.
+8. Confirm the JSON report includes `"stop_port_released": true` for the phase-0
+   shutdown check.
 
 Record:
 

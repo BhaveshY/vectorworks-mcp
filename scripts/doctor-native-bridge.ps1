@@ -85,18 +85,20 @@ if ($BuiltArtifact) {
     $BuiltArtifact = Get-FirstFile -Root $BridgeSourceDir -Patterns @("*.vwlibrary", "*.vsm", "*.vst", "*.vso", "*.dll")
 }
 
+$InstallDestination = ""
+$InstallPerformed = $false
+$InstallWhatIf = [bool]$WhatIfPreference
 $InstalledPath = ""
 if ($Install) {
     if (-not $BuiltArtifact) {
         throw "Pass -BuiltArtifact before using -Install, or build the native bridge first."
     }
-    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-    $Destination = Join-Path $InstallDir (Split-Path -Leaf $BuiltArtifact)
-    if ($PSCmdlet.ShouldProcess($Destination, "Install native Vectorworks bridge artifact")) {
-        Copy-Item -LiteralPath $BuiltArtifact -Destination $Destination -Force
-        $InstalledPath = (Resolve-Path -LiteralPath $Destination).Path
-    } else {
-        $InstalledPath = $Destination
+    $InstallDestination = Join-Path $InstallDir (Split-Path -Leaf $BuiltArtifact)
+    if (-not $WhatIfPreference -and $PSCmdlet.ShouldProcess($InstallDestination, "Install native Vectorworks bridge artifact")) {
+        New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+        Copy-Item -LiteralPath $BuiltArtifact -Destination $InstallDestination -Force
+        $InstalledPath = (Resolve-Path -LiteralPath $InstallDestination).Path
+        $InstallPerformed = $true
     }
 }
 
@@ -121,7 +123,10 @@ if ($BuiltArtifact -and -not $Install) {
     Add-NextAction $NextActions "Dry-run install: scripts\doctor-native-bridge.ps1 -BuiltArtifact `"$BuiltArtifact`" -Install -WhatIf"
     Add-NextAction $NextActions "Install when ready: scripts\doctor-native-bridge.ps1 -BuiltArtifact `"$BuiltArtifact`" -Install"
 }
-if ($InstalledPath) {
+if ($Install -and $BuiltArtifact -and -not $InstallPerformed) {
+    Add-NextAction $NextActions "Dry-run only: rerun scripts\doctor-native-bridge.ps1 -BuiltArtifact `"$BuiltArtifact`" -Install without -WhatIf to copy the bridge artifact."
+}
+if ($InstallPerformed) {
     Add-NextAction $NextActions "Restart Vectorworks $VectorworksVersion, enable/load the native bridge plug-in, then run scripts\smoke-native-bridge.ps1 -Json"
 }
 if ($NextActions.Count -eq 0) {
@@ -144,6 +149,9 @@ $Report = [pscustomobject]@{
     builtArtifact = $BuiltArtifact
     installDir = $InstallDir
     installRequested = [bool]$Install
+    installDestination = $InstallDestination
+    installPerformed = [bool]$InstallPerformed
+    installWhatIf = [bool]$InstallWhatIf
     installedPath = $InstalledPath
     helperScripts = [pscustomobject]@{
         prereq = $PrereqPath
@@ -167,6 +175,11 @@ if ($Json) {
     Write-Host "Solution: $(if ($SolutionPath) { $SolutionPath } else { 'not found' })"
     Write-Host "Built artifact: $(if ($BuiltArtifact) { $BuiltArtifact } else { 'not found' })"
     Write-Host "Install dir: $InstallDir"
+    if ($InstallDestination) {
+        Write-Host "Install destination: $InstallDestination"
+        Write-Host "Install performed: $InstallPerformed"
+        Write-Host "Install WhatIf: $InstallWhatIf"
+    }
     if ($InstalledPath) {
         Write-Host "Installed path: $InstalledPath"
     }

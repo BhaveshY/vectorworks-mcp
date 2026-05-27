@@ -84,6 +84,21 @@ The native bridge should initially implement these handlers first:
 After those are stable, port the remaining handlers from `vw_listener.py` in
 small groups with smoke tests.
 
+## Phase-0 Smoke Schema
+
+Phase 0 proves that a native SDK transport shell is loaded and can shut down
+cleanly. It does not prove CAD handler safety.
+
+- `ping`: object with `pong: true`, non-empty string `version`,
+  non-empty string `bridge_kind`, non-empty string `dispatch_mode`, non-boolean
+  integer `handlers` greater than or equal to the phase-0 handler count, and
+  boolean `cad_api_safe` / `transport_only` fields that agree with each other.
+  A scaffold bridge may report `cad_api_safe: false` and `transport_only: true`
+  while `bridge_kind` still begins with `native_sdk_bridge` and
+  `dispatch_mode` is `native_sdk`.
+- `stop`: when requested with `--stop`, the bridge must acknowledge `stop` and
+  release the listening port.
+
 ## Phase-1 Smoke Schemas
 
 The smoke harness validates more than transport success. Phase-1 native bridge

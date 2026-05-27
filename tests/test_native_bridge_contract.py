@@ -194,6 +194,46 @@ class NativeBridgeContractTests(unittest.TestCase):
         self.assertEqual([request["action"] for request in bridge.requests], ["ping", "stop"])
         self.assertTrue(_wait_for_port_released(port))
 
+    def test_native_smoke_harness_accepts_phase_zero_transport_scaffold(self):
+        status = {
+            "pong": True,
+            "handlers": 2,
+            "version": "native-scaffold-phase0",
+            "bridge_kind": "native_sdk_bridge_scaffold",
+            "dispatch_mode": "native_sdk",
+            "cad_api_safe": False,
+            "transport_only": True,
+            "native_bridge": True,
+            "cad_handlers_implemented": False,
+        }
+        with MockNativeBridge(status=status) as bridge:
+            report = run_smoke(port=bridge.port, ping_count=1, read_count=0, timeout=1, phase=0)
+
+        self.assertTrue(report["ok"], report["failures"])
+        self.assertEqual(report["last_ping"]["cad_api_safe"], False)
+        self.assertEqual(report["last_ping"]["transport_only"], True)
+        self.assertEqual([request["action"] for request in bridge.requests], ["ping"])
+
+    def test_native_smoke_harness_rejects_transport_scaffold_in_phase_one(self):
+        status = {
+            "pong": True,
+            "handlers": 2,
+            "version": "native-scaffold-phase0",
+            "bridge_kind": "native_sdk_bridge_scaffold",
+            "dispatch_mode": "native_sdk",
+            "cad_api_safe": False,
+            "transport_only": True,
+            "native_bridge": True,
+            "cad_handlers_implemented": False,
+        }
+        with MockNativeBridge(status=status) as bridge:
+            report = run_smoke(port=bridge.port, ping_count=1, read_count=0, timeout=1, phase=1)
+
+        self.assertFalse(report["ok"])
+        self.assertIn("ping handlers was not an integer >= 7", report["failures"])
+        self.assertIn("bridge did not report cad_api_safe=true", report["failures"])
+        self.assertIn("bridge did not report transport_only=false", report["failures"])
+
     def test_native_smoke_harness_fails_if_stop_does_not_release_port(self):
         with MockNativeBridge(release_on_stop=False) as bridge:
             port = bridge.port
@@ -285,7 +325,7 @@ class NativeBridgeContractTests(unittest.TestCase):
         self.assertIn("ping version was not a non-empty string", report["failures"])
         self.assertIn("ping bridge_kind was not a non-empty string", report["failures"])
         self.assertIn("ping dispatch_mode was not a non-empty string", report["failures"])
-        self.assertIn("ping handlers was not an integer >= 7", report["failures"])
+        self.assertIn("ping handlers was not an integer >= 2", report["failures"])
 
     def test_native_smoke_harness_rejects_non_boolean_success_envelope(self):
         with MockNativeBridge(
@@ -366,7 +406,7 @@ class NativeBridgeContractTests(unittest.TestCase):
                     report = run_smoke(port=bridge.port, ping_count=1, read_count=0, timeout=1, phase=0)
 
                 self.assertFalse(report["ok"])
-                self.assertIn("ping handlers was not an integer >= 7", report["failures"])
+                self.assertIn("ping handlers was not an integer >= 2", report["failures"])
 
     def test_native_smoke_harness_rejects_malformed_phase_one_read_schemas(self):
         with MockNativeBridge(
