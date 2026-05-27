@@ -14,9 +14,11 @@ $ListenerPath = Join-Path $RepoRoot "vw_listener.py"
 $VenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 $ProjectMcpPath = Join-Path $RepoRoot ".mcp.json"
 $NativePrereqPath = Join-Path $RepoRoot "scripts\check-native-bridge-prereqs.ps1"
+$FreshLauncher = $false
 
 if (-not $LauncherPath) {
-    $LauncherPath = Join-Path $RepoRoot "vw_start_listener_2024.py"
+    $LauncherPath = Join-Path ([System.IO.Path]::GetTempPath()) ("vectorworks-mcp-verify-launcher-{0}.py" -f $PID)
+    $FreshLauncher = $true
 }
 
 function Assert-Path {
@@ -54,7 +56,7 @@ Invoke-Checked "bootstrap venv/dependencies" {
 
 Assert-Path $VenvPython "Virtualenv Python"
 
-if (-not (Test-Path $LauncherPath)) {
+if ($FreshLauncher -or -not (Test-Path $LauncherPath)) {
     Invoke-Checked "generate Vectorworks launcher" {
         & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $RegisterPath -SkipInstall -NoClaudeConfig -LauncherPath $LauncherPath
     }
@@ -119,6 +121,10 @@ if (Test-Path $ClaudeJsonPath) {
     } else {
         Write-Warning "$ClaudeJsonPath does not contain mcpServers.$Name. Project .mcp.json still exists."
     }
+}
+
+if ($FreshLauncher -and (Test-Path -LiteralPath $LauncherPath)) {
+    Remove-Item -LiteralPath $LauncherPath -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "OK: no-Vectorworks verification passed."

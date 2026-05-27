@@ -15,7 +15,8 @@
         "VW_MCP_REPO": "${user_config.vectorworks_repo}",
         "VW_MCP_HOST": "127.0.0.1",
         "VW_MCP_PORT": "9877",
-        "VW_MCP_TIMEOUT": "60"
+        "VW_MCP_TIMEOUT": "60",
+        "VW_MCP_PREFLIGHT_CACHE_MS": "750"
       },
       "timeout": 120000
     }

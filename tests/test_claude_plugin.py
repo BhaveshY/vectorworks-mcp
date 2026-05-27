@@ -38,6 +38,7 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("scripts/run-vectorworks-mcp.ps1", "/".join(server["args"]).replace("\\", "/"))
         self.assertEqual(server["env"]["VW_MCP_HOST"], "127.0.0.1")
         self.assertEqual(server["env"]["VW_MCP_PORT"], "9877")
+        self.assertEqual(server["env"]["VW_MCP_PREFLIGHT_CACHE_MS"], "750")
 
     def test_plugin_skills_exist(self):
         for name in ("setup", "ping", "diagnose", "work"):

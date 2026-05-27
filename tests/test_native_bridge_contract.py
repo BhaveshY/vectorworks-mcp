@@ -19,6 +19,7 @@ def _configure_server(port):
     server.PORT = port
     server.TIMEOUT = 1
     server.MAX_FRAME_BYTES = 1024 * 1024
+    server.PREFLIGHT_CACHE_SECONDS = 0.75
     server._CONFIG_ERROR = None
 
 
@@ -90,7 +91,7 @@ class NativeBridgeContractTests(unittest.TestCase):
         self.assertTrue(preflight["native_bridge"])
         self.assertEqual(preflight["bridge_kind"], "native_sdk_bridge_mock")
         self.assertEqual(layers, [{"name": "Design Layer-1", "visible": True}])
-        self.assertEqual([request["action"] for request in bridge.requests], ["ping", "ping", "get_layers"])
+        self.assertEqual([request["action"] for request in bridge.requests], ["ping", "get_layers"])
 
     def test_mock_native_bridge_covers_phase_one_actions(self):
         with MockNativeBridge() as bridge:
@@ -109,18 +110,7 @@ class NativeBridgeContractTests(unittest.TestCase):
         self.assertIn("mock-created-1", created)
         self.assertEqual(
             [request["action"] for request in bridge.requests],
-            [
-                "ping",
-                "get_document_info",
-                "ping",
-                "get_layers",
-                "ping",
-                "get_objects",
-                "ping",
-                "selection",
-                "ping",
-                "create_object",
-            ],
+            ["ping", "get_document_info", "get_layers", "get_objects", "selection", "create_object"],
         )
 
     def test_mock_native_bridge_stop_releases_listener_port(self):

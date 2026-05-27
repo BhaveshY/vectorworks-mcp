@@ -77,6 +77,7 @@ def _configure_server(port, max_frame_bytes=1024 * 1024):
     server.PORT = port
     server.TIMEOUT = 1
     server.MAX_FRAME_BYTES = max_frame_bytes
+    server.PREFLIGHT_CACHE_SECONDS = 0.75
     server._CONFIG_ERROR = None
 
 
@@ -202,6 +203,142 @@ class ServerProtocolTests(unittest.TestCase):
 
         self.assertEqual(json.loads(result), [{"name": "Layer 1"}])
         self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_layers"])
+
+    def test_send_tool_reuses_recent_safe_preflight(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {
+                        "pong": True,
+                        "cad_api_safe": True,
+                        "transport_only": False,
+                        "bridge_kind": "python_dialog_agent_session",
+                        "dispatch_mode": "dialog",
+                    },
+                }
+            if request["action"] == "get_layers":
+                return {"id": request["id"], "success": True, "result": [{"name": "Layer 1"}]}
+            if request["action"] == "get_document_info":
+                return {"id": request["id"], "success": True, "result": {"filename": "Test.vwx"}}
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=3) as listener:
+            _configure_server(listener.port)
+            layers = server.vw_get_layers()
+            info = server.vw_get_document_info()
+
+        self.assertEqual(json.loads(layers), [{"name": "Layer 1"}])
+        self.assertEqual(json.loads(info), {"filename": "Test.vwx"})
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_layers", "get_document_info"])
+
+    def test_send_tool_rechecks_preflight_after_cache_expires(self):
+        now = [100.0]
+        original_monotonic = server.time.monotonic
+        ping_count = 0
+
+        def handler(request):
+            nonlocal ping_count
+            if request["action"] == "ping":
+                ping_count += 1
+                safe = ping_count == 1
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {
+                        "pong": True,
+                        "cad_api_safe": safe,
+                        "transport_only": not safe,
+                        "bridge_kind": "python_dialog_agent_session" if safe else "python_transport_only",
+                        "dispatch_mode": "dialog" if safe else "background",
+                    },
+                }
+            if request["action"] == "get_layers":
+                return {"id": request["id"], "success": True, "result": [{"name": "Layer 1"}]}
+            self.fail(f"Unexpected action: {request['action']}")
+
+        try:
+            server.time.monotonic = lambda: now[0]
+            with FakeListener(handler, max_requests=3) as listener:
+                _configure_server(listener.port)
+                layers = server.vw_get_layers()
+                now[0] += 1.0
+                blocked = json.loads(server.vw_get_document_info())
+        finally:
+            server.time.monotonic = original_monotonic
+
+        self.assertEqual(json.loads(layers), [{"name": "Layer 1"}])
+        self.assertFalse(blocked["ok"])
+        self.assertTrue(blocked["blocked"])
+        self.assertEqual(blocked["reason"], "transport_only_bridge")
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_layers", "ping"])
+
+    def test_send_tool_can_disable_preflight_cache(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {
+                        "pong": True,
+                        "cad_api_safe": True,
+                        "transport_only": False,
+                        "bridge_kind": "native_sdk_bridge",
+                        "dispatch_mode": "native_sdk",
+                    },
+                }
+            if request["action"] == "get_layers":
+                return {"id": request["id"], "success": True, "result": [{"name": "Layer 1"}]}
+            if request["action"] == "get_document_info":
+                return {"id": request["id"], "success": True, "result": {"filename": "Test.vwx"}}
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=4) as listener:
+            _configure_server(listener.port)
+            server.PREFLIGHT_CACHE_SECONDS = 0
+            layers = server.vw_get_layers()
+            info = server.vw_get_document_info()
+
+        self.assertEqual(json.loads(layers), [{"name": "Layer 1"}])
+        self.assertEqual(json.loads(info), {"filename": "Test.vwx"})
+        self.assertEqual(
+            [request["action"] for request in listener.requests],
+            ["ping", "get_layers", "ping", "get_document_info"],
+        )
+
+    def test_send_tool_does_not_cache_unsafe_preflight(self):
+        ping_count = 0
+
+        def handler(request):
+            nonlocal ping_count
+            if request["action"] == "ping":
+                ping_count += 1
+                safe = ping_count == 2
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {
+                        "pong": True,
+                        "cad_api_safe": safe,
+                        "transport_only": not safe,
+                        "bridge_kind": "native_sdk_bridge" if safe else "python_transport_only",
+                        "dispatch_mode": "native_sdk" if safe else "background",
+                    },
+                }
+            if request["action"] == "get_layers":
+                return {"id": request["id"], "success": True, "result": [{"name": "Layer 1"}]}
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=3) as listener:
+            _configure_server(listener.port)
+            blocked = json.loads(server.vw_get_layers())
+            layers = server.vw_get_layers()
+
+        self.assertFalse(blocked["ok"])
+        self.assertEqual(blocked["reason"], "transport_only_bridge")
+        self.assertEqual(json.loads(layers), [{"name": "Layer 1"}])
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "ping", "get_layers"])
 
     def test_send_tool_leaves_health_tools_unguarded(self):
         calls = []

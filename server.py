@@ -12,6 +12,8 @@ Environment variables, all optional:
   VW_MCP_PORT             default 9877
   VW_MCP_TIMEOUT          per-request timeout in seconds, default 60
   VW_MCP_MAX_FRAME_BYTES  max protocol frame size, default 16777216
+  VW_MCP_PREFLIGHT_CACHE_MS
+                          safe-CAD preflight success cache in ms, default 750
 """
 
 import atexit
@@ -21,6 +23,7 @@ import socket
 import struct
 import sys
 import threading
+import time
 import uuid
 from typing import Any, Literal, Optional
 
@@ -39,6 +42,8 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9877
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024
+DEFAULT_PREFLIGHT_CACHE_MS = 750
+MAX_PREFLIGHT_CACHE_MS = 5_000
 
 
 class ConfigError(ValueError):
@@ -98,7 +103,7 @@ def _parse_float_env(name: str, default: float, min_value: float) -> float:
     return value
 
 
-def _load_config() -> tuple[str, int, float, int]:
+def _load_config() -> tuple[str, int, float, int, int]:
     host = os.environ.get("VW_MCP_HOST", DEFAULT_HOST).strip() or DEFAULT_HOST
     port = _parse_int_env("VW_MCP_PORT", DEFAULT_PORT, 1, 65535)
     timeout = _parse_float_env("VW_MCP_TIMEOUT", DEFAULT_TIMEOUT, 0.1)
@@ -108,18 +113,27 @@ def _load_config() -> tuple[str, int, float, int]:
         1024,
         128 * 1024 * 1024,
     )
-    return host, port, timeout, max_frame
+    preflight_cache_ms = _parse_int_env(
+        "VW_MCP_PREFLIGHT_CACHE_MS",
+        DEFAULT_PREFLIGHT_CACHE_MS,
+        0,
+        MAX_PREFLIGHT_CACHE_MS,
+    )
+    return host, port, timeout, max_frame, preflight_cache_ms
 
 
 _CONFIG_ERROR: Optional[str] = None
 try:
-    HOST, PORT, TIMEOUT, MAX_FRAME_BYTES = _load_config()
+    HOST, PORT, TIMEOUT, MAX_FRAME_BYTES, PREFLIGHT_CACHE_MS = _load_config()
 except ConfigError as exc:
     _CONFIG_ERROR = str(exc)
     HOST = DEFAULT_HOST
     PORT = DEFAULT_PORT
     TIMEOUT = DEFAULT_TIMEOUT
     MAX_FRAME_BYTES = DEFAULT_MAX_FRAME_BYTES
+    PREFLIGHT_CACHE_MS = DEFAULT_PREFLIGHT_CACHE_MS
+
+PREFLIGHT_CACHE_SECONDS = PREFLIGHT_CACHE_MS / 1000.0
 
 
 mcp = FastMCP("Vectorworks 2024/2025") if FastMCP is not None else _MissingFastMCP("Vectorworks 2024/2025")
@@ -128,6 +142,7 @@ mcp = FastMCP("Vectorworks 2024/2025") if FastMCP is not None else _MissingFastM
 # interleave frames on the same socket.
 _sock: Optional[socket.socket] = None
 _lock = threading.Lock()
+_cad_safe_cache: Optional[tuple[float, dict[str, Any]]] = None
 
 
 ObjectType = Literal["rect", "circle", "oval", "line", "arc", "polygon"]
@@ -381,8 +396,14 @@ def _tool(tool_name: str):
     return mcp.tool(annotations=_annotations_for(tool_name))
 
 
+def _clear_cad_safe_cache():
+    global _cad_safe_cache
+    _cad_safe_cache = None
+
+
 def _close():
     global _sock
+    _clear_cad_safe_cache()
     if _sock is not None:
         try:
             _sock.close()
@@ -475,41 +496,54 @@ def _connection_help(error: BaseException) -> str:
     )
 
 
-def _cad_preflight_block(action: str) -> Optional[str]:
-    response = _request_once("ping", None)
-    if response.get("success") is not True:
-        return json.dumps(
-            {
-                "ok": False,
-                "blocked": True,
-                "blocked_action": action,
-                "cad_api_safe": False,
-                "reason": "preflight_ping_error",
-                "next_action": "Fix listener connectivity before CAD work.",
-                "raw_status": response,
-            },
-            indent=2,
-            sort_keys=True,
-        )
+def _with_block_context(payload: dict[str, Any], blocked_action: Optional[str]) -> dict[str, Any]:
+    if blocked_action:
+        payload = dict(payload)
+        payload["blocked"] = True
+        payload["blocked_action"] = blocked_action
+    return payload
 
-    status = response.get("result")
+
+def _cad_preflight_ping_error_payload(raw_status: Any, blocked_action: Optional[str] = None) -> dict[str, Any]:
+    return _with_block_context(
+        {
+            "ok": False,
+            "cad_api_safe": False,
+            "reason": "preflight_ping_error",
+            "next_action": "Fix listener connectivity before CAD work.",
+            "raw_status": raw_status,
+        },
+        blocked_action,
+    )
+
+
+def _evaluate_cad_preflight_status(status: Any, blocked_action: Optional[str] = None) -> dict[str, Any]:
     if not isinstance(status, dict):
-        return json.dumps(
+        return _with_block_context(
             {
                 "ok": False,
-                "blocked": True,
-                "blocked_action": action,
                 "cad_api_safe": False,
                 "reason": "preflight_ping_non_object",
                 "next_action": "Update/regenerate the Vectorworks listener before real CAD work.",
                 "raw_status": status,
             },
-            indent=2,
-            sort_keys=True,
+            blocked_action,
         )
 
     if status.get("cad_api_safe") is True and status.get("transport_only") is not True:
-        return None
+        return {
+            "ok": True,
+            "cad_api_safe": True,
+            "bridge_kind": status.get("bridge_kind", "unknown"),
+            "dispatch_mode": status.get("dispatch_mode", "unknown"),
+            "transport_only": bool(status.get("transport_only")),
+            "native_bridge": bool(status.get("native_bridge")),
+            "handlers": status.get("handlers"),
+            "version": status.get("version"),
+            "reason": "cad_api_safe",
+            "next_action": "Call vw_get_document_info before non-trivial CAD work.",
+            "raw_status": status,
+        }
 
     if status.get("transport_only") is True:
         reason = "transport_only_bridge"
@@ -521,11 +555,9 @@ def _cad_preflight_block(action: str) -> Optional[str]:
         reason = "listener_reports_cad_api_unsafe"
         next_action = "Do not call CAD handlers until the dialog launcher or native SDK bridge is active."
 
-    return json.dumps(
+    return _with_block_context(
         {
             "ok": False,
-            "blocked": True,
-            "blocked_action": action,
             "cad_api_safe": False,
             "bridge_kind": status.get("bridge_kind", "unknown"),
             "dispatch_mode": status.get("dispatch_mode", "unknown"),
@@ -535,9 +567,42 @@ def _cad_preflight_block(action: str) -> Optional[str]:
             "next_action": next_action,
             "raw_status": status,
         },
-        indent=2,
-        sort_keys=True,
+        blocked_action,
     )
+
+
+def _remember_cad_safe_status(status: dict[str, Any]):
+    global _cad_safe_cache
+    if PREFLIGHT_CACHE_SECONDS <= 0:
+        return
+    _cad_safe_cache = (time.monotonic(), dict(status))
+
+
+def _cached_cad_safe_status() -> Optional[dict[str, Any]]:
+    if PREFLIGHT_CACHE_SECONDS <= 0 or _cad_safe_cache is None:
+        return None
+    timestamp, status = _cad_safe_cache
+    if time.monotonic() - timestamp <= PREFLIGHT_CACHE_SECONDS:
+        return dict(status)
+    _clear_cad_safe_cache()
+    return None
+
+
+def _cad_preflight_block(action: str) -> Optional[str]:
+    if _cached_cad_safe_status() is not None:
+        return None
+
+    response = _request_once("ping", None)
+    if response.get("success") is not True:
+        payload = _cad_preflight_ping_error_payload(response, blocked_action=action)
+        return json.dumps(payload, indent=2, sort_keys=True)
+
+    status = response.get("result")
+    payload = _evaluate_cad_preflight_status(status, blocked_action=action)
+    if payload["ok"] and isinstance(status, dict):
+        _remember_cad_safe_status(status)
+        return None
+    return json.dumps(payload, indent=2, sort_keys=True)
 
 
 def _request_once(action: str, params: Optional[dict[str, Any]]) -> dict[str, Any]:
@@ -743,76 +808,14 @@ def vw_preflight_for_cad() -> str:
     try:
         status = json.loads(raw)
     except json.JSONDecodeError:
-        return json.dumps(
-            {
-                "ok": False,
-                "cad_api_safe": False,
-                "reason": "ping_failed_or_non_json",
-                "next_action": "Fix listener connectivity before CAD work.",
-                "raw_status": raw,
-            }
-        )
+        payload = _cad_preflight_ping_error_payload(raw)
+        payload["reason"] = "ping_failed_or_non_json"
+        return json.dumps(payload, sort_keys=True)
 
-    if status.get("cad_api_safe") is True:
-        return json.dumps(
-            {
-                "ok": True,
-                "cad_api_safe": True,
-                "bridge_kind": status.get("bridge_kind", "unknown"),
-                "dispatch_mode": status.get("dispatch_mode", "unknown"),
-                "transport_only": bool(status.get("transport_only")),
-                "native_bridge": bool(status.get("native_bridge")),
-                "handlers": status.get("handlers"),
-                "version": status.get("version"),
-                "reason": "cad_api_safe",
-                "next_action": "Call vw_get_document_info before non-trivial CAD work.",
-                "raw_status": status,
-            }
-        )
-
-    if status.get("transport_only") is True:
-        return json.dumps(
-            {
-                "ok": False,
-                "cad_api_safe": False,
-                "bridge_kind": status.get("bridge_kind", "unknown"),
-                "dispatch_mode": status.get("dispatch_mode", "unknown"),
-                "transport_only": True,
-                "native_bridge": bool(status.get("native_bridge")),
-                "reason": "transport_only_bridge",
-                "next_action": "Do not call CAD handlers. Regenerate/run the dialog launcher or use a compiled native SDK bridge.",
-                "raw_status": status,
-            }
-        )
-
-    if "cad_api_safe" not in status:
-        return json.dumps(
-            {
-                "ok": False,
-                "cad_api_safe": False,
-                "bridge_kind": status.get("bridge_kind", "legacy_or_unknown"),
-                "dispatch_mode": status.get("dispatch_mode", "unknown"),
-                "transport_only": bool(status.get("transport_only")),
-                "native_bridge": bool(status.get("native_bridge")),
-                "reason": "legacy_status_without_cad_api_safe",
-                "next_action": "Update/regenerate the Vectorworks listener before real CAD work.",
-                "raw_status": status,
-            }
-        )
-
-    return json.dumps(
-        {
-            "ok": False,
-            "cad_api_safe": False,
-            "bridge_kind": status.get("bridge_kind", "unknown"),
-            "dispatch_mode": status.get("dispatch_mode", "unknown"),
-            "transport_only": bool(status.get("transport_only")),
-            "native_bridge": bool(status.get("native_bridge")),
-            "reason": "listener_reports_cad_api_unsafe",
-            "next_action": "Do not call CAD handlers until the dialog launcher or native SDK bridge is active.",
-            "raw_status": status,
-        }
-    )
+    payload = _evaluate_cad_preflight_status(status)
+    if payload["ok"] and isinstance(status, dict):
+        _remember_cad_safe_status(status)
+    return json.dumps(payload, sort_keys=True)
 
 
 @_tool("vw_stop_listener")

@@ -20,6 +20,7 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("scripts/run-mcp-server.ps1", "/".join(server["args"]).replace("\\", "/"))
         self.assertEqual(server["env"]["VW_MCP_HOST"], "127.0.0.1")
         self.assertEqual(server["env"]["VW_MCP_PORT"], "9877")
+        self.assertEqual(server["env"]["VW_MCP_PREFLIGHT_CACHE_MS"], "750")
 
     def test_agent_instruction_files_exist(self):
         self.assertTrue((ROOT / "AGENTS.md").exists())
@@ -47,12 +48,21 @@ class AgentReadinessTests(unittest.TestCase):
         register_script = (ROOT / "scripts/register-claude-code.ps1").read_text(encoding="utf-8")
         self.assertIn('os.environ["VW_MCP_MODE"] = "dialog"', register_script)
         self.assertIn('os.environ["VW_MCP_DIALOG_TIMER_MS"] = "50"', register_script)
+        self.assertIn('VW_MCP_PREFLIGHT_CACHE_MS = "750"', register_script)
 
         launcher_path = ROOT / "vw_start_listener_2024.py"
         if launcher_path.exists():
             launcher_text = launcher_path.read_text(encoding="utf-8")
             self.assertIn('os.environ["VW_MCP_MODE"] = "dialog"', launcher_text)
             self.assertIn('os.environ["VW_MCP_DIALOG_TIMER_MS"] = "50"', launcher_text)
+
+    def test_no_vectorworks_verifier_generates_fresh_launcher_by_default(self):
+        verifier = (ROOT / "scripts/verify-no-vectorworks.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("[System.IO.Path]::GetTempPath()", verifier)
+        self.assertIn("$FreshLauncher = $true", verifier)
+        self.assertIn("$FreshLauncher -or -not (Test-Path $LauncherPath)", verifier)
+        self.assertIn("Remove-Item -LiteralPath $LauncherPath", verifier)
 
     def test_register_script_generates_dialog_agent_session_launcher(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")

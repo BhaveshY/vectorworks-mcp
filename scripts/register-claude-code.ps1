@@ -95,6 +95,7 @@ function New-ClaudeServerConfig {
             VW_MCP_HOST = $HostName
             VW_MCP_PORT = "$ListenPort"
             VW_MCP_TIMEOUT = "$ToolTimeoutSeconds"
+            VW_MCP_PREFLIGHT_CACHE_MS = "750"
             VW_MCP_STOP_DIR = (Join-Path $env:USERPROFILE ".vectorworks-mcp")
         }
         timeout = ($ToolTimeoutSeconds * 1000)
