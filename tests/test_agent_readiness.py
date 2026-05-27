@@ -31,8 +31,10 @@ class AgentReadinessTests(unittest.TestCase):
             "scripts/bootstrap-agent.ps1",
             "scripts/bootstrap-claude-code.ps1",
             "scripts/bootstrap-native-bridge.ps1",
+            "scripts/build-native-bridge.ps1",
             "scripts/check-native-bridge-prereqs.ps1",
             "scripts/doctor-vectorworks-mcp.ps1",
+            "scripts/prepare-native-bridge-source.ps1",
             "scripts/register-claude-code.ps1",
             "scripts/run-mcp-server.ps1",
             "scripts/verify-no-vectorworks.ps1",
@@ -146,6 +148,57 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertNotIn("2026-NNA-eng-win-SDK.zip", checker)
         self.assertIn("Supported versions", checker)
         self.assertIn("Supported versions", bootstrap)
+
+    def test_native_bridge_prepare_and_build_scripts_use_official_sdk_examples(self):
+        prepare = (ROOT / "scripts/prepare-native-bridge-source.ps1").read_text(encoding="utf-8")
+        build = (ROOT / "scripts/build-native-bridge.ps1").read_text(encoding="utf-8")
+        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+
+        self.assertIn("officialSdkExamples", prepare)
+        self.assertIn("Examples$VectorworksVersion\\ObjectExample", prepare)
+        self.assertIn("VectorworksSDK\\SDK$Version\\SDKLib", prepare)
+        self.assertIn("git clone --depth 1", prepare)
+        self.assertIn("native_bridge\\worktree", prepare)
+        self.assertIn("VectorworksMCPBridge", prepare)
+
+        self.assertIn("check-native-bridge-prereqs.ps1", build)
+        self.assertIn("MSBuild", build)
+        self.assertIn("*$VectorworksVersion.sln", build)
+        self.assertIn("/p:Platform=x64", build)
+        self.assertIn("native_bridge/worktree/", gitignore)
+
+    def test_powershell_scripts_parse(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to parse scripts")
+
+        scripts = sorted((ROOT / "scripts").glob("*.ps1"))
+        self.assertGreater(len(scripts), 0)
+        for script in scripts:
+            with self.subTest(script=script.name):
+                script_literal = str(script).replace("'", "''")
+                parser = (
+                    "$errors=$null; "
+                    "[System.Management.Automation.Language.Parser]::ParseFile("
+                    f"'{script_literal}', [ref]$null, [ref]$errors) > $null; "
+                    "if ($errors.Count) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }"
+                )
+                subprocess.run(
+                    [
+                        powershell,
+                        "-NoLogo",
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command",
+                        parser,
+                    ],
+                    cwd=str(ROOT),
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
 
     def test_doctor_script_reports_next_actions_and_cad_safety(self):
         doctor = (ROOT / "scripts/doctor-vectorworks-mcp.ps1").read_text(encoding="utf-8")

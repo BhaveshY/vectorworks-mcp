@@ -38,6 +38,10 @@ Native bridge planning aids:
   phase, safety, and smoke-test expectations.
 - `native_bridge/mock/mock_bridge.py` is a no-SDK protocol harness proving the
   host MCP server and preflight logic can talk to a future native bridge.
+- `scripts/prepare-native-bridge-source.ps1` prepares an ignored SDK-backed
+  source worktree from Vectorworks' official SDK examples.
+- `scripts/build-native-bridge.ps1` builds that worktree after native
+  prerequisites are present.
 
 Native bridge prerequisite check:
 
@@ -55,6 +59,14 @@ Optional SDK bootstrap helper:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-native-bridge.ps1
+```
+
+After the SDK examples and Visual Studio tools are installed, prepare and build
+the native worktree:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\prepare-native-bridge-source.ps1 -CloneSdkExamples
+powershell -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
 ```
 
 ## Agent-Ready Setup

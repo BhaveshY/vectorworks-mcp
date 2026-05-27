@@ -3,9 +3,10 @@
 This folder is reserved for the Vectorworks SDK plug-in source.
 
 Do not add fake build files that appear to compile without the Vectorworks SDK.
-The next implementation step after prerequisites are installed is to create the
-plug-in from the official Vectorworks 2024 SDK sample/template, then wire it to
-the protocol in `..\PROTOCOL.md`.
+After prerequisites are installed, run `..\..\scripts\prepare-native-bridge-source.ps1`
+to create an ignored SDK-backed worktree from the official Vectorworks example,
+then run `..\..\scripts\build-native-bridge.ps1` to prove the unmodified example
+builds before wiring it to the protocol in `..\PROTOCOL.md`.
 
 Minimum source shape once the SDK is available:
 

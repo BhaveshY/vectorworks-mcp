@@ -83,6 +83,26 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootst
 Downloading is opt-in because the SDK archive is large and covered by
 Vectorworks' SDK terms.
 
+## Source Worktree
+
+Once the SDK examples and Visual Studio tools are available, prepare an ignored
+local source worktree from Vectorworks' official `ObjectExample`:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\prepare-native-bridge-source.ps1 -CloneSdkExamples
+```
+
+Then verify that the unmodified SDK example builds before replacing its example
+extension code with the MCP bridge:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
+```
+
+The generated worktree lives under `native_bridge/worktree/` and is ignored by
+git. Copy only deliberate, reviewable bridge source back into `native_bridge/src`
+after the SDK-backed build is understood.
+
 ## Implementation Rules
 
 - Do not run `vs.*` or SDK document APIs from a socket worker thread.

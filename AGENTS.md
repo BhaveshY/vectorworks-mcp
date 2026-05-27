@@ -89,6 +89,14 @@ specifically working on the native bridge:
 powershell -ExecutionPolicy Bypass -File .\scripts\check-native-bridge-prereqs.ps1 -Advisory
 ```
 
+For native bridge implementation work, first prepare an ignored SDK example
+worktree and prove the unmodified Vectorworks example builds:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\prepare-native-bridge-source.ps1 -CloneSdkExamples
+powershell -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
+```
+
 If `.venv` does not exist yet, run:
 
 ```powershell

@@ -58,6 +58,7 @@ bridge/STOP
 # Optional native Vectorworks SDK/bootstrap artifacts
 .cache/
 third_party/
+native_bridge/worktree/
 
 # Logs
 *.log
