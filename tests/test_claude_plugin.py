@@ -70,6 +70,7 @@ class ClaudePluginTests(unittest.TestCase):
             "scripts/bootstrap-native-bridge.ps1",
             "scripts/prepare-native-bridge-source.ps1",
             "scripts/build-native-bridge.ps1",
+            "scripts/wire-native-bridge-project.ps1",
             "scripts/smoke-native-bridge.ps1",
         ):
             self.assertTrue((PLUGIN / relative_path).exists(), relative_path)
@@ -231,6 +232,7 @@ class ClaudePluginTests(unittest.TestCase):
             "scripts/bootstrap-native-bridge.ps1",
             "scripts/prepare-native-bridge-source.ps1",
             "scripts/build-native-bridge.ps1",
+            "scripts/wire-native-bridge-project.ps1",
             "scripts/smoke-native-bridge.ps1",
         ):
             text = (PLUGIN / relative_path).read_text(encoding="utf-8")
@@ -247,12 +249,14 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("-LoaderPath", bootstrap)
         self.assertIn("copy-vectorworks-loader.ps1", bootstrap)
         self.assertIn("SkipClipboard", bootstrap)
-        self.assertIn("[int]$MinimumContractVersion = 7", resolver)
+        self.assertIn("[int]$MinimumContractVersion = 8", resolver)
         self.assertIn("requiredFeatures", resolver)
-        self.assertIn("contractVersion >= 7", contract)
+        self.assertIn("contractVersion >= 8", contract)
         self.assertIn("native-bridge-scaffold-copy", contract)
         self.assertIn("native-doctor-next-command", contract)
         self.assertIn("native-doctor-command-spec", contract)
+        self.assertIn("native-bridge-project-wire", contract)
+        self.assertIn("wire-native-project", contract)
         self.assertIn("nextCommandReason", contract)
         self.assertIn("nextCommandSpec", contract)
         self.assertIn("probe -WorktreeRoot", contract)

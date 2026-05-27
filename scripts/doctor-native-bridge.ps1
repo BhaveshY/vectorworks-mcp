@@ -18,6 +18,7 @@ $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $PrereqPath = Join-Path $PSScriptRoot "check-native-bridge-prereqs.ps1"
 $PreparePath = Join-Path $PSScriptRoot "prepare-native-bridge-source.ps1"
 $BuildPath = Join-Path $PSScriptRoot "build-native-bridge.ps1"
+$WirePath = Join-Path $PSScriptRoot "wire-native-bridge-project.ps1"
 $SmokePath = Join-Path $PSScriptRoot "smoke-native-bridge.ps1"
 $WorktreeRootWasExplicit = -not [string]::IsNullOrWhiteSpace($WorktreeRoot)
 if (-not $WorktreeRoot) {
@@ -193,6 +194,9 @@ function Add-SwitchCommandArgument {
 if (-not (Test-Path -LiteralPath $PrereqPath)) {
     throw "Native prerequisite checker not found at $PrereqPath"
 }
+if (-not (Test-Path -LiteralPath $WirePath)) {
+    throw "Native project wiring helper not found at $WirePath"
+}
 
 $PrereqArgs = @("-VectorworksVersion", $VectorworksVersion, "-Advisory", "-Json")
 if ($SdkDirWasExplicit) { $PrereqArgs += @("-SdkDir", $SdkDir) }
@@ -204,6 +208,23 @@ $MissingScaffoldFiles = @($RequiredScaffoldFiles | Where-Object {
     -not (Test-Path -LiteralPath (Join-Path $ScaffoldDestinationDir $_) -PathType Leaf)
 })
 $ScaffoldCopied = $MissingScaffoldFiles.Count -eq 0
+$ProjectWiringReport = $null
+$ProjectWiringError = ""
+$ProjectWired = $false
+$ProjectPath = ""
+$MissingProjectItems = @()
+if ($SourcePrepared -and $SolutionPath -and $ScaffoldCopied) {
+    try {
+        $WireArgs = @("-VectorworksVersion", $VectorworksVersion, "-WorktreeRoot", $WorktreeRoot, "-CheckOnly", "-Json")
+        $ProjectWiringRaw = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $WirePath @WireArgs | Out-String
+        $ProjectWiringReport = $ProjectWiringRaw | ConvertFrom-Json
+        $ProjectWired = [bool]$ProjectWiringReport.projectWired
+        $ProjectPath = [string]$ProjectWiringReport.projectPath
+        $MissingProjectItems = @($ProjectWiringReport.missingProjectItems | ForEach-Object { [string]$_ })
+    } catch {
+        $ProjectWiringError = $_.Exception.Message
+    }
+}
 
 if ($BuiltArtifactWasExplicit) {
     if (-not (Test-Path -LiteralPath $BuiltArtifact -PathType Leaf)) {
@@ -250,6 +271,9 @@ if ($SourcePrepared -and $SolutionPath -and -not $BuiltArtifact -and -not $Built
 if ($SourcePrepared -and $SolutionPath -and -not $ScaffoldCopied) {
     $ForceHint = if ($MissingScaffoldFiles.Count -lt $RequiredScaffoldFiles.Count) { " -Force" } else { "" }
     Add-NextAction $NextActions "After the unmodified SDK example builds, run scripts\copy-native-bridge-scaffold.ps1 -VectorworksVersion $VectorworksVersion$ForceHint"
+}
+if ($SourcePrepared -and $SolutionPath -and $ScaffoldCopied -and -not $ProjectWired) {
+    Add-NextAction $NextActions "Run scripts\wire-native-bridge-project.ps1 -VectorworksVersion $VectorworksVersion"
 }
 $InstallCandidate = if ($BuiltArtifact) { $BuiltArtifact } else { $BuiltArtifactCandidate }
 if ($InstallCandidate -and -not $Install) {
@@ -299,6 +323,11 @@ if ($InstallPerformed) {
     Add-SwitchCommandArgument $CopyArgs "Force" $true
     if ($WorktreeRootWasExplicit) { Add-NamedCommandArgument $CopyArgs "WorktreeRoot" $WorktreeRoot }
     Set-NextCommandPlan -ScriptName "copy-native-bridge-scaffold.ps1" -Arguments $CopyArgs -Stage "copy-native-scaffold" -Reason "The reviewed bridge scaffold is partially copied; force-copy it to restore a consistent source tree before building." -RerunDoctorAfter $true
+} elseif ($SourcePrepared -and $SolutionPath -and $ScaffoldCopied -and -not $ProjectWired) {
+    $WireArgs = [System.Collections.Generic.List[string]]::new()
+    Add-NamedCommandArgument $WireArgs "VectorworksVersion" $VectorworksVersion
+    if ($WorktreeRootWasExplicit) { Add-NamedCommandArgument $WireArgs "WorktreeRoot" $WorktreeRoot }
+    Set-NextCommandPlan -ScriptName "wire-native-bridge-project.ps1" -Arguments $WireArgs -Stage "wire-native-project" -Reason "The scaffold files are copied, but the SDK Visual C++ project does not include them yet." -RerunDoctorAfter $true
 } elseif (-not $Prereqs.ready) {
     $BootstrapArgs = [System.Collections.Generic.List[string]]::new()
     Add-NamedCommandArgument $BootstrapArgs "VectorworksVersion" $VectorworksVersion
@@ -370,6 +399,11 @@ $Report = [pscustomobject]@{
     scaffoldFiles = @($RequiredScaffoldFiles)
     missingScaffoldFiles = @($MissingScaffoldFiles)
     scaffoldCopied = [bool]$ScaffoldCopied
+    projectWired = [bool]$ProjectWired
+    projectPath = $ProjectPath
+    projectWiringError = $ProjectWiringError
+    missingProjectItems = @($MissingProjectItems)
+    projectWiring = $ProjectWiringReport
     sourcePrepared = [bool]$SourcePrepared
     solutionPath = $SolutionPath
     sdkDir = $SdkDir
@@ -391,6 +425,7 @@ $Report = [pscustomobject]@{
         prereq = $PrereqPath
         prepare = $PreparePath
         build = $BuildPath
+        wire = $WirePath
         smoke = $SmokePath
     }
     nextActions = @($NextActions)
@@ -403,8 +438,15 @@ if ($Json) {
     Write-Host "Prerequisites ready: $($Report.prereqsReady)"
     Write-Host "Source prepared: $($Report.sourcePrepared)"
     Write-Host "Scaffold copied: $($Report.scaffoldCopied)"
+    Write-Host "Project wired: $($Report.projectWired)"
     if ($MissingScaffoldFiles.Count -gt 0) {
         Write-Host "Missing scaffold files: $($MissingScaffoldFiles -join ', ')"
+    }
+    if ($MissingProjectItems.Count -gt 0) {
+        Write-Host "Missing project items: $($MissingProjectItems -join ', ')"
+    }
+    if ($ProjectWiringError) {
+        Write-Host "Project wiring check error: $ProjectWiringError"
     }
     Write-Host "Solution: $(if ($SolutionPath) { $SolutionPath } else { 'not found' })"
     Write-Host "Built artifact: $(if ($BuiltArtifact) { $BuiltArtifact } else { 'not provided explicitly' })"

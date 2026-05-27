@@ -204,7 +204,8 @@ Recommended order:
 2. Confirm Vectorworks can load the example plug-in.
 3. Copy the reviewed no-SDK scaffold with
    ``scripts\copy-native-bridge-scaffold.ps1``.
-4. Rename the module/project and wire the scaffold into the SDK entry points.
+4. Wire the scaffold into the SDK project with
+   ``scripts\wire-native-bridge-project.ps1``.
 5. Keep socket work off the Vectorworks API path; marshal CAD handlers to the
    Vectorworks main/plugin event context.
 6. Implement phase 0 and phase 1 from ``native_bridge\HANDLER_MATRIX.md``.

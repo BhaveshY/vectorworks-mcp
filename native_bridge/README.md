@@ -129,10 +129,11 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-
 ```
 
 After that proof build, copy the reviewed SDK-agnostic scaffold into the ignored
-worktree:
+worktree and wire it into the SDK project:
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\copy-native-bridge-scaffold.ps1
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\wire-native-bridge-project.ps1
 ```
 
 The scaffold lives in `native_bridge/src/`. It encodes the protocol constants,

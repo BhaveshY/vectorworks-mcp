@@ -64,6 +64,8 @@ Native bridge planning aids:
   source worktree from Vectorworks' official SDK examples.
 - `scripts/copy-native-bridge-scaffold.ps1` copies the reviewed no-SDK native
   scaffold into that worktree after the unmodified SDK example builds.
+- `scripts/wire-native-bridge-project.ps1` idempotently adds the copied
+  scaffold files to the SDK `.vcxproj` and `.vcxproj.filters`.
 - `scripts/build-native-bridge.ps1` builds that worktree after native
   prerequisites are present.
 - `scripts/smoke-native-bridge.ps1` verifies a loaded native bridge with
@@ -118,6 +120,7 @@ the native worktree:
 powershell -ExecutionPolicy Bypass -File .\scripts\prepare-native-bridge-source.ps1 -CloneSdkExamples
 powershell -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\copy-native-bridge-scaffold.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\wire-native-bridge-project.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\VectorworksMCPBridge.vwlibrary -Install -WhatIf
 powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\VectorworksMCPBridge.vwlibrary -Install

@@ -38,12 +38,13 @@ $RequiredScripts = @(
     "scripts\bootstrap-native-bridge.ps1",
     "scripts\prepare-native-bridge-source.ps1",
     "scripts\build-native-bridge.ps1",
+    "scripts\wire-native-bridge-project.ps1",
     "scripts\smoke-native-bridge.ps1",
     "scripts\copy-native-bridge-scaffold.ps1",
     "scripts\test-native-bridge-scaffold.ps1"
 )
 
-$RequiredFeatures = @("stable-loader", "loader-clipboard-copy", "native-bridge-scaffold", "native-bridge-scaffold-copy", "native-doctor-next-command", "native-doctor-command-spec")
+$RequiredFeatures = @("stable-loader", "loader-clipboard-copy", "native-bridge-scaffold", "native-bridge-scaffold-copy", "native-doctor-next-command", "native-doctor-command-spec", "native-bridge-project-wire")
 
 $ContractMarker = Join-Path $RepoRoot ".vectorworks-mcp-contract.json"
 if (-not (Test-Path -LiteralPath $ContractMarker)) {
@@ -57,10 +58,10 @@ try {
 try {
     $ContractVersion = [int]$Contract.contractVersion
 } catch {
-    throw "Companion repo contract marker is incompatible. Expected numeric contractVersion >= 7."
+    throw "Companion repo contract marker is incompatible. Expected numeric contractVersion >= 8."
 }
-if ($Contract.name -ne "vectorworks-mcp" -or $ContractVersion -lt 7) {
-    throw "Companion repo contract marker is incompatible. Expected vectorworks-mcp contractVersion >= 7."
+if ($Contract.name -ne "vectorworks-mcp" -or $ContractVersion -lt 8) {
+    throw "Companion repo contract marker is incompatible. Expected vectorworks-mcp contractVersion >= 8."
 }
 $ContractFeatures = @($Contract.requiredFeatures | ForEach-Object { [string]$_ })
 foreach ($RequiredFeature in $RequiredFeatures) {
@@ -210,6 +211,7 @@ $KnownNativeDoctorStages = @(
     "repair-native-source",
     "build-unmodified-sdk-example",
     "copy-native-scaffold",
+    "wire-native-project",
     "build-native-bridge",
     "dry-run-install-native-artifact",
     "install-native-artifact",

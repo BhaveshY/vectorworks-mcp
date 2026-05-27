@@ -32,7 +32,7 @@ class AgentReadinessTests(unittest.TestCase):
         marker = json.loads((ROOT / ".vectorworks-mcp-contract.json").read_text(encoding="utf-8"))
 
         self.assertEqual(marker["name"], "vectorworks-mcp")
-        self.assertGreaterEqual(marker["contractVersion"], 7)
+        self.assertGreaterEqual(marker["contractVersion"], 8)
         for feature in (
             "stable-loader",
             "loader-clipboard-copy",
@@ -40,6 +40,7 @@ class AgentReadinessTests(unittest.TestCase):
             "native-bridge-scaffold-copy",
             "native-doctor-next-command",
             "native-doctor-command-spec",
+            "native-bridge-project-wire",
         ):
             self.assertIn(feature, marker["requiredFeatures"])
 
@@ -61,6 +62,7 @@ class AgentReadinessTests(unittest.TestCase):
             "scripts/smoke-native-bridge.ps1",
             "scripts/test-native-bridge-scaffold.ps1",
             "scripts/verify-no-vectorworks.ps1",
+            "scripts/wire-native-bridge-project.ps1",
             ".github/workflows/verify.yml",
         ):
             self.assertTrue((ROOT / relative_path).exists(), relative_path)
@@ -225,10 +227,11 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIn("runpy.run_path", loader_text)
             self.assertIn(str(launcher_path).replace("\\", "\\\\"), loader_text)
             self.assertIn("VW_MCP_LOADER_METADATA", loader_text)
-            self.assertIn('"contractVersion": 7', loader_text)
+            self.assertIn('"contractVersion": 8', loader_text)
             self.assertIn('"native-bridge-scaffold-copy"', loader_text)
             self.assertIn('"native-doctor-next-command"', loader_text)
             self.assertIn('"native-doctor-command-spec"', loader_text)
+            self.assertIn('"native-bridge-project-wire"', loader_text)
 
     def test_native_bridge_scaffold_is_explicitly_not_default(self):
         expected_files = (
@@ -386,6 +389,8 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("[string]$SdkDir", prepare)
 
         self.assertIn("check-native-bridge-prereqs.ps1", build)
+        self.assertIn("wire-native-bridge-project.ps1", build)
+        self.assertIn("not wired into the SDK project", build)
         self.assertIn("MSBuild", build)
         self.assertIn("*$VectorworksVersion.sln", build)
         self.assertIn("/p:Platform=x64", build)
@@ -484,6 +489,119 @@ class AgentReadinessTests(unittest.TestCase):
                 text=True,
             )
             self.assertIn("CancelAll", (destination / "CadRequestQueue.hpp").read_text(encoding="utf-8"))
+
+    def test_wire_native_bridge_project_adds_scaffold_files_idempotently(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise native project wiring")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worktree = Path(temp_dir) / "SDK Examples With Spaces"
+            bridge = worktree / "Examples2024" / "VectorworksMCPBridge"
+            source_root = bridge / "Source"
+            source_root.mkdir(parents=True)
+            project = bridge / "VectorworksMCPBridge2024.vcxproj"
+            filters = bridge / "VectorworksMCPBridge2024.vcxproj.filters"
+            project.write_text(
+                """<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="Source\\Existing.cpp" />
+  </ItemGroup>
+</Project>
+""",
+                encoding="utf-8",
+            )
+            filters.write_text(
+                """<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files" />
+    <Filter Include="Header Files" />
+  </ItemGroup>
+</Project>
+""",
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/copy-native-bridge-scaffold.ps1"),
+                    "-WorktreeRoot",
+                    str(worktree),
+                ],
+                cwd=str(ROOT),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            first = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/wire-native-bridge-project.ps1"),
+                    "-WorktreeRoot",
+                    str(worktree),
+                    "-Json",
+                ],
+                cwd=str(ROOT),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            first_report = json.loads(first.stdout)
+            self.assertFalse(first_report["projectWired"])
+            self.assertGreaterEqual(len(first_report["addedProjectItems"]), 5)
+            project_text = project.read_text(encoding="utf-8")
+            filters_text = filters.read_text(encoding="utf-8")
+            for include in (
+                "Source\\VectorworksMCPBridge\\BridgeProtocol.cpp",
+                "Source\\VectorworksMCPBridge\\VectorworksMCPBridge.cpp",
+                "Source\\VectorworksMCPBridge\\BridgeProtocol.hpp",
+                "Source\\VectorworksMCPBridge\\BridgeDispatcher.hpp",
+                "Source\\VectorworksMCPBridge\\CadRequestQueue.hpp",
+            ):
+                self.assertIn(include, project_text)
+                self.assertEqual(project_text.count(include), 1)
+                self.assertIn(include, filters_text)
+
+            second = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/wire-native-bridge-project.ps1"),
+                    "-WorktreeRoot",
+                    str(worktree),
+                    "-Json",
+                ],
+                cwd=str(ROOT),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            second_report = json.loads(second.stdout)
+            self.assertTrue(second_report["projectWired"])
+            self.assertEqual(second_report["addedProjectItems"], [])
+            self.assertEqual(project.read_text(encoding="utf-8").count("Source\\VectorworksMCPBridge\\BridgeProtocol.cpp"), 1)
 
     def test_prepare_native_bridge_source_preserves_sdk_example_layout(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
@@ -714,6 +832,7 @@ class AgentReadinessTests(unittest.TestCase):
         )
         self.assertIn("enable/load the native VectorworksMCPBridge plug-in", root_readme)
         self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", root_readme)
+        self.assertIn("wire-native-bridge-project.ps1", root_readme)
         self.assertIn("nextCommand", root_readme)
         self.assertIn("nextCommandReason", root_readme)
         self.assertIn("nextCommandSpec", root_readme)
@@ -729,6 +848,7 @@ class AgentReadinessTests(unittest.TestCase):
             agents,
         )
         self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", agents)
+        self.assertIn("wire-native-bridge-project.ps1", agents)
         self.assertIn("nextCommand", agents)
         self.assertIn("nextCommandReason", agents)
         self.assertIn("nextCommandSpec", agents)
@@ -753,6 +873,8 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("prepare-native-bridge-source.ps1", doctor)
         self.assertIn("build-native-bridge.ps1", doctor)
         self.assertIn("copy-native-bridge-scaffold.ps1", doctor)
+        self.assertIn("wire-native-bridge-project.ps1", doctor)
+        self.assertIn("wire-native-project", doctor)
         self.assertIn("without -WhatIf", doctor)
         self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", doctor)
 
@@ -1058,6 +1180,75 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIn("-WorktreeRoot", report["nextCommand"])
             self.assertIn("partially copied", report["nextCommandReason"])
             self.assertEqual(report["nextCommandSpec"]["stage"], "copy-native-scaffold")
+            self.assertIn(str(worktree), report["nextCommandSpec"]["arguments"])
+
+    def test_native_doctor_plans_project_wiring_after_scaffold_copy(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise the native doctor")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            worktree = temp_root / "SDKExamples"
+            bridge_source = worktree / "Examples2024" / "VectorworksMCPBridge"
+            (bridge_source / "Source").mkdir(parents=True)
+            (bridge_source / "VectorworksMCPBridge2024.sln").write_text("fake solution\n", encoding="utf-8")
+            (bridge_source / "VectorworksMCPBridge2024.vcxproj").write_text(
+                """<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup />
+</Project>
+""",
+                encoding="utf-8",
+            )
+
+            subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/copy-native-bridge-scaffold.ps1"),
+                    "-WorktreeRoot",
+                    str(worktree),
+                ],
+                cwd=str(ROOT),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            result = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/doctor-native-bridge.ps1"),
+                    "-WorktreeRoot",
+                    str(worktree),
+                    "-InstallDir",
+                    str(temp_root / "Plug-ins"),
+                    "-Json",
+                ],
+                cwd=str(ROOT),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            report = json.loads(result.stdout)
+            self.assertTrue(report["scaffoldCopied"])
+            self.assertFalse(report["projectWired"])
+            self.assertIn("BridgeProtocol.cpp", "\n".join(report["missingProjectItems"]))
+            self.assertEqual(report["nextCommandSpec"]["stage"], "wire-native-project")
+            self.assertIn("wire-native-bridge-project.ps1", report["nextCommand"])
             self.assertIn(str(worktree), report["nextCommandSpec"]["arguments"])
 
     def test_native_prereq_checker_reports_supported_versions_for_unknown_version(self):

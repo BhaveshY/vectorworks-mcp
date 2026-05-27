@@ -32,7 +32,8 @@ Recommended native flow:
    builds.
 3. Run `..\..\scripts\copy-native-bridge-scaffold.ps1` to copy these reviewed
    scaffold files into `Source\VectorworksMCPBridge` inside the worktree.
-4. Wire the scaffold into the SDK project and replace each placeholder with
-   actual SDK entry points and handlers.
+4. Run `..\..\scripts\wire-native-bridge-project.ps1` to add the scaffold files
+   to the SDK `.vcxproj`, then replace each placeholder with actual SDK entry
+   points and handlers.
 5. Build, install with `doctor-native-bridge.ps1`, and prove behavior with
    `smoke-native-bridge.ps1`.
