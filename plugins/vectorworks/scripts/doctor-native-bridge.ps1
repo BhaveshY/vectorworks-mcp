@@ -2,6 +2,7 @@
 param(
     [string]$VectorworksVersion = "2024",
     [string]$BuiltArtifact = "",
+    [string]$WorktreeRoot = "",
     [string]$InstallDir = "",
     [switch]$Install,
     [switch]$Json
@@ -19,6 +20,7 @@ if (-not (Test-Path -LiteralPath $Doctor)) {
 
 $Args = @("-VectorworksVersion", $VectorworksVersion)
 if ($BuiltArtifact) { $Args += @("-BuiltArtifact", $BuiltArtifact) }
+if ($WorktreeRoot) { $Args += @("-WorktreeRoot", $WorktreeRoot) }
 if ($InstallDir) { $Args += @("-InstallDir", $InstallDir) }
 if ($Install) { $Args += "-Install" }
 if ($Json) { $Args += "-Json" }

@@ -255,6 +255,15 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("VectorworksMainPluginContext", combined)
         self.assertIn("TryDequeueOnVectorworksMainContext", combined)
         self.assertIn("CompleteFromVectorworksMainContext", combined)
+        self.assertIn("std::atomic_bool", combined)
+        self.assertIn("WaitForResponseOnSocketThread", combined)
+        self.assertIn("wait_for", combined)
+        self.assertIn("kCadRequestTimeout", combined)
+        self.assertIn("CancelAll", combined)
+        self.assertIn("ResetCancellation", combined)
+        self.assertIn("native bridge timed out waiting for Vectorworks main/plugin context", combined)
+        self.assertIn('"cad_api_safe":false', combined)
+        self.assertIn('"transport_only":true', combined)
 
         for name in scaffold_files:
             text = (src / name).read_text(encoding="utf-8")
@@ -361,6 +370,49 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertTrue((destination / "CadRequestQueue.hpp").exists())
             self.assertTrue((destination / "VectorworksMCPBridge.cpp").exists())
             self.assertIn("native_sdk_bridge_scaffold", (destination / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8"))
+            self.assertIn("CancelAll", (destination / "CadRequestQueue.hpp").read_text(encoding="utf-8"))
+
+            refusal = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/copy-native-bridge-scaffold.ps1"),
+                    "-WorktreeRoot",
+                    str(worktree),
+                ],
+                cwd=str(ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertNotEqual(refusal.returncode, 0)
+            self.assertIn("Refusing to overwrite", refusal.stderr + refusal.stdout)
+
+            (destination / "CadRequestQueue.hpp").write_text("stale scaffold\n", encoding="utf-8")
+            subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/copy-native-bridge-scaffold.ps1"),
+                    "-WorktreeRoot",
+                    str(worktree),
+                    "-Force",
+                ],
+                cwd=str(ROOT),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertIn("CancelAll", (destination / "CadRequestQueue.hpp").read_text(encoding="utf-8"))
 
     def test_prepare_native_bridge_source_preserves_sdk_example_layout(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
@@ -560,6 +612,49 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertTrue(installed_path.exists())
             self.assertEqual(report["builtArtifact"], str(artifact))
             self.assertIn("smoke-native-bridge.ps1 -Json", "\n".join(report["nextActions"]))
+
+    def test_native_doctor_detects_partial_scaffold_copy(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise the native doctor")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            worktree = temp_root / "SDKExamples"
+            bridge_source = worktree / "Examples2024" / "VectorworksMCPBridge"
+            scaffold_dir = bridge_source / "Source" / "VectorworksMCPBridge"
+            scaffold_dir.mkdir(parents=True)
+            (bridge_source / "VectorworksMCPBridge2024.sln").write_text("fake solution\n", encoding="utf-8")
+            (scaffold_dir / "BridgeProtocol.hpp").write_text("partial scaffold\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/doctor-native-bridge.ps1"),
+                    "-WorktreeRoot",
+                    str(worktree),
+                    "-InstallDir",
+                    str(temp_root / "Plug-ins"),
+                    "-Json",
+                ],
+                cwd=str(ROOT),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            report = json.loads(result.stdout)
+            self.assertFalse(report["scaffoldCopied"])
+            self.assertEqual(report["worktreeRoot"], str(worktree))
+            self.assertIn("CadRequestQueue.hpp", report["missingScaffoldFiles"])
+            self.assertIn("VectorworksMCPBridge.cpp", report["missingScaffoldFiles"])
+            self.assertIn("copy-native-bridge-scaffold.ps1 -VectorworksVersion 2024 -Force", "\n".join(report["nextActions"]))
 
     def test_native_prereq_checker_reports_supported_versions_for_unknown_version(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")

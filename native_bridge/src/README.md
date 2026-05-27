@@ -17,6 +17,10 @@ Files:
 - `VectorworksMCPBridge.cpp`: SDK hook placeholders for plugin load/unload,
   socket dispatch, stop, and main/plugin event pumping.
 
+The copied scaffold is phase-0 only. Its `ping` response intentionally reports
+`transport_only: true` and `cad_api_safe: false` until real Vectorworks SDK
+handlers replace the placeholders and pass the smoke harness.
+
 Recommended native flow:
 
 1. Run `..\..\scripts\prepare-native-bridge-source.ps1` to create an ignored

@@ -2,6 +2,7 @@
 param(
     [string]$VectorworksVersion = "2024",
     [string]$BuiltArtifact = "",
+    [string]$WorktreeRoot = "",
     [string]$InstallDir = "",
     [switch]$Install,
     [switch]$Json
@@ -14,9 +15,18 @@ $PrereqPath = Join-Path $PSScriptRoot "check-native-bridge-prereqs.ps1"
 $PreparePath = Join-Path $PSScriptRoot "prepare-native-bridge-source.ps1"
 $BuildPath = Join-Path $PSScriptRoot "build-native-bridge.ps1"
 $SmokePath = Join-Path $PSScriptRoot "smoke-native-bridge.ps1"
-$WorktreeRoot = Join-Path $RepoRoot "native_bridge\worktree\SDKExamples"
+if (-not $WorktreeRoot) {
+    $WorktreeRoot = Join-Path $RepoRoot "native_bridge\worktree\SDKExamples"
+}
 $BridgeSourceDir = Join-Path $WorktreeRoot "Examples$VectorworksVersion\VectorworksMCPBridge"
 $ScaffoldDestinationDir = Join-Path $BridgeSourceDir "Source\VectorworksMCPBridge"
+$RequiredScaffoldFiles = @(
+    "BridgeProtocol.hpp",
+    "BridgeProtocol.cpp",
+    "BridgeDispatcher.hpp",
+    "CadRequestQueue.hpp",
+    "VectorworksMCPBridge.cpp"
+)
 
 if (-not $InstallDir) {
     if (-not $env:APPDATA) {
@@ -61,7 +71,10 @@ $PrereqRaw = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $
 $Prereqs = $PrereqRaw | ConvertFrom-Json
 $SourcePrepared = Test-Path -LiteralPath $BridgeSourceDir -PathType Container
 $SolutionPath = Get-FirstFile -Root $BridgeSourceDir -Patterns @("*$VectorworksVersion.sln")
-$ScaffoldCopied = Test-Path -LiteralPath (Join-Path $ScaffoldDestinationDir "BridgeProtocol.hpp") -PathType Leaf
+$MissingScaffoldFiles = @($RequiredScaffoldFiles | Where-Object {
+    -not (Test-Path -LiteralPath (Join-Path $ScaffoldDestinationDir $_) -PathType Leaf)
+})
+$ScaffoldCopied = $MissingScaffoldFiles.Count -eq 0
 
 if ($BuiltArtifact) {
     if (-not (Test-Path -LiteralPath $BuiltArtifact -PathType Leaf)) {
@@ -101,7 +114,8 @@ if ($SourcePrepared -and $SolutionPath -and -not $BuiltArtifact) {
     Add-NextAction $NextActions "Run scripts\build-native-bridge.ps1 -VectorworksVersion $VectorworksVersion"
 }
 if ($SourcePrepared -and $SolutionPath -and -not $ScaffoldCopied) {
-    Add-NextAction $NextActions "After the unmodified SDK example builds, run scripts\copy-native-bridge-scaffold.ps1 -VectorworksVersion $VectorworksVersion"
+    $ForceHint = if ($MissingScaffoldFiles.Count -lt $RequiredScaffoldFiles.Count) { " -Force" } else { "" }
+    Add-NextAction $NextActions "After the unmodified SDK example builds, run scripts\copy-native-bridge-scaffold.ps1 -VectorworksVersion $VectorworksVersion$ForceHint"
 }
 if ($BuiltArtifact -and -not $Install) {
     Add-NextAction $NextActions "Dry-run install: scripts\doctor-native-bridge.ps1 -BuiltArtifact `"$BuiltArtifact`" -Install -WhatIf"
@@ -122,6 +136,8 @@ $Report = [pscustomobject]@{
     worktreeRoot = $WorktreeRoot
     bridgeSourceDir = $BridgeSourceDir
     scaffoldDestinationDir = $ScaffoldDestinationDir
+    scaffoldFiles = @($RequiredScaffoldFiles)
+    missingScaffoldFiles = @($MissingScaffoldFiles)
     scaffoldCopied = [bool]$ScaffoldCopied
     sourcePrepared = [bool]$SourcePrepared
     solutionPath = $SolutionPath
@@ -145,6 +161,9 @@ if ($Json) {
     Write-Host "Prerequisites ready: $($Report.prereqsReady)"
     Write-Host "Source prepared: $($Report.sourcePrepared)"
     Write-Host "Scaffold copied: $($Report.scaffoldCopied)"
+    if ($MissingScaffoldFiles.Count -gt 0) {
+        Write-Host "Missing scaffold files: $($MissingScaffoldFiles -join ', ')"
+    }
     Write-Host "Solution: $(if ($SolutionPath) { $SolutionPath } else { 'not found' })"
     Write-Host "Built artifact: $(if ($BuiltArtifact) { $BuiltArtifact } else { 'not found' })"
     Write-Host "Install dir: $InstallDir"

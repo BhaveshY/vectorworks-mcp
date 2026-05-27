@@ -2,6 +2,8 @@
 #include "BridgeProtocol.hpp"
 #include "CadRequestQueue.hpp"
 
+#include <atomic>
+#include <chrono>
 #include <string>
 
 namespace VectorworksMCP {
@@ -9,13 +11,14 @@ namespace VectorworksMCP {
 namespace {
 
 CadRequestQueue gCadQueue;
-bool gStopRequested = false;
+std::atomic_bool gStopRequested{false};
+constexpr auto kCadRequestTimeout = std::chrono::seconds(30);
 
 Protocol::ResponseEnvelope HandlePingOnTransportThread(const Protocol::RequestEnvelope& request) {
     return {
         request.id,
         true,
-        R"({"pong":true,"version":"native-scaffold","bridge_kind":"native_sdk_bridge_scaffold","dispatch_mode":"native_sdk","handlers":7,"cad_api_safe":true,"transport_only":false,"native_bridge":true})",
+        R"({"pong":true,"version":"native-scaffold-phase0","bridge_kind":"native_sdk_bridge_scaffold","dispatch_mode":"native_sdk","handlers":2,"cad_api_safe":false,"transport_only":true,"native_bridge":true,"cad_handlers_implemented":false})",
         "",
     };
 }
@@ -38,12 +41,14 @@ void OnPluginLoadStartTransport() {
     // SDK hook placeholder: start the local socket worker here.
     // The worker may parse frames and answer ping, but any action listed in
     // kPhaseOneActions must be enqueued with gCadQueue instead of touching CAD.
-    gStopRequested = false;
+    gStopRequested.store(false);
+    gCadQueue.ResetCancellation();
 }
 
 void OnPluginUnloadStopTransport() {
     // SDK hook placeholder: stop the socket worker and release port 9877.
-    gStopRequested = true;
+    gStopRequested.store(true);
+    gCadQueue.CancelAll("native bridge is unloading");
 }
 
 void OnVectorworksMainPluginEvent() {
@@ -59,18 +64,22 @@ Protocol::ResponseEnvelope DispatchFromSocketWorker(const Protocol::RequestEnvel
         return HandlePingOnTransportThread(request);
     }
     if (request.action == "stop") {
-        gStopRequested = true;
+        gStopRequested.store(true);
+        gCadQueue.CancelAll("native bridge stop requested");
         return {request.id, true, R"("Native bridge stop requested")", ""};
     }
     if (RequiresCadMainContext(request.action)) {
+        if (gStopRequested.load()) {
+            return {request.id, false, "", "native bridge is stopping"};
+        }
         gCadQueue.EnqueueFromSocketThread(request);
-        return gCadQueue.WaitForResponseOnSocketThread(request.id);
+        return gCadQueue.WaitForResponseOnSocketThread(request.id, kCadRequestTimeout);
     }
     return {request.id, false, "", "unknown native bridge action: " + request.action};
 }
 
 bool StopRequested() {
-    return gStopRequested;
+    return gStopRequested.load();
 }
 
 }  // namespace VectorworksMCP

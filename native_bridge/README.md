@@ -130,7 +130,9 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\copy-n
 The scaffold lives in `native_bridge/src/`. It encodes the protocol constants,
 phase-0/phase-1 dispatcher map, and the worker-thread to Vectorworks main/plugin
 event-context queue. It intentionally has no Vectorworks SDK includes and no
-standalone project files.
+standalone project files. A copied scaffold should only advertise phase-0
+transport readiness; it must not report `cad_api_safe: true` until real SDK CAD
+handlers are implemented and smoke-tested.
 
 After a compiled native bridge is loaded in Vectorworks, run the native smoke
 harness:
