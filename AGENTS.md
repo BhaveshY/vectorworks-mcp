@@ -102,9 +102,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -Jso
 For native bridge implementation work, prefer the native doctor's JSON
 `nextCommand` and `nextCommandReason`, but use
 `scripts\invoke-native-bridge-next.ps1 -Json` as the first execution loop. It
-reads `nextCommandSpec`, blocks on missing safety flags / allow-flags, runs
-executable/arguments as an array, and reruns the native doctor when
-`rerunDoctorAfter` is true. The manual sequence below is only a
+reads and validates `nextCommandSpec`, blocks on missing safety flags /
+allow-flags, reports `status`, `missingAllowFlags`, `safetyBlocks`, and
+`validationErrors`, runs executable/arguments as an array, and reruns the native
+doctor when `rerunDoctorAfter` is true. Treat `invalid_spec` as a hard stop and
+only pass missing allow switches after explicit user review. The manual sequence
+below is only a
 fallback/reference:
 
 ```powershell

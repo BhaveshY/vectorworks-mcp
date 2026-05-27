@@ -32,7 +32,7 @@ class AgentReadinessTests(unittest.TestCase):
         marker = json.loads((ROOT / ".vectorworks-mcp-contract.json").read_text(encoding="utf-8"))
 
         self.assertEqual(marker["name"], "vectorworks-mcp")
-        self.assertGreaterEqual(marker["contractVersion"], 9)
+        self.assertGreaterEqual(marker["contractVersion"], 10)
         for feature in (
             "stable-loader",
             "loader-clipboard-copy",
@@ -42,6 +42,7 @@ class AgentReadinessTests(unittest.TestCase):
             "native-doctor-command-spec",
             "native-bridge-project-wire",
             "native-doctor-next-runner",
+            "native-runner-spec-validation",
         ):
             self.assertIn(feature, marker["requiredFeatures"])
 
@@ -158,6 +159,10 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("nextCommandReason", verifier)
         self.assertIn("nextCommandSpec", verifier)
         self.assertIn("invoke-native-bridge-next.ps1", verifier)
+        self.assertIn("status -ne \"plan_only\"", verifier)
+        self.assertIn("missingAllowFlags", verifier)
+        self.assertIn("validationErrors", verifier)
+        self.assertIn("safetyBlocks", verifier)
 
     def test_native_bridge_scaffold_compile_smoke_script_exercises_protocol(self):
         smoke = (ROOT / "scripts/test-native-bridge-scaffold.ps1").read_text(encoding="utf-8")
@@ -231,12 +236,13 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIn("runpy.run_path", loader_text)
             self.assertIn(str(launcher_path).replace("\\", "\\\\"), loader_text)
             self.assertIn("VW_MCP_LOADER_METADATA", loader_text)
-            self.assertIn('"contractVersion": 9', loader_text)
+            self.assertIn('"contractVersion": 10', loader_text)
             self.assertIn('"native-bridge-scaffold-copy"', loader_text)
             self.assertIn('"native-doctor-next-command"', loader_text)
             self.assertIn('"native-doctor-command-spec"', loader_text)
             self.assertIn('"native-bridge-project-wire"', loader_text)
             self.assertIn('"native-doctor-next-runner"', loader_text)
+            self.assertIn('"native-runner-spec-validation"', loader_text)
 
     def test_native_bridge_scaffold_is_explicitly_not_default(self):
         expected_files = (
@@ -642,9 +648,22 @@ class AgentReadinessTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
             report = json.loads(result.stdout)
+            self.assertEqual(report["status"], "blocked_by_safety_flag")
             self.assertTrue(report["blocked"])
             self.assertFalse(report["failed"])
+            self.assertEqual(
+                report["missingAllowFlags"],
+                ["-AllowDownloadLargeFiles", "-AllowInstallSoftware", "-AllowNetwork", "-AllowRebootRisk"],
+            )
             self.assertEqual(report["steps"][0]["stage"], "bootstrap-native-prereqs")
+            self.assertEqual(report["steps"][0]["missingAllowFlags"], report["missingAllowFlags"])
+            self.assertEqual(len(report["steps"][0]["safetyBlocks"]), 4)
+            for safety_block in report["steps"][0]["safetyBlocks"]:
+                self.assertIn("field", safety_block)
+                self.assertIn("allowSwitch", safety_block)
+                self.assertIn("reason", safety_block)
+            self.assertEqual(report["validationErrors"], [])
+            self.assertEqual(report["steps"][0]["validationErrors"], [])
             reasons = "\n".join(report["steps"][0]["blockedReasons"])
             self.assertIn("-AllowNetwork", reasons)
             self.assertIn("-AllowInstallSoftware", reasons)
@@ -715,13 +734,175 @@ class AgentReadinessTests(unittest.TestCase):
             )
 
             report = json.loads(result.stdout)
+            self.assertIn(report["status"], ("completed", "max_steps_reached"))
             self.assertFalse(report["blocked"])
             self.assertFalse(report["failed"])
+            self.assertEqual(report["missingAllowFlags"], [])
+            self.assertEqual(report["validationErrors"], [])
             self.assertEqual(report["steps"][0]["stage"], "wire-native-project")
             self.assertTrue(report["steps"][0]["executed"])
             self.assertEqual(report["steps"][0]["exitCode"], 0)
+            self.assertEqual(report["steps"][0]["safetyBlocks"], [])
+            self.assertEqual(report["steps"][0]["missingAllowFlags"], [])
+            self.assertEqual(report["steps"][0]["validationErrors"], [])
             self.assertIn(str(worktree), report["steps"][0]["arguments"])
             self.assertIn("Source\\VectorworksMCPBridge\\BridgeProtocol.cpp", project.read_text(encoding="utf-8"))
+
+    def test_invoke_native_bridge_next_plan_only_reports_missing_allow_flags(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise native next-step runner")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            result = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/invoke-native-bridge-next.ps1"),
+                    "-SdkDir",
+                    str(temp_root / "SDK With Spaces"),
+                    "-SdkExamplesDir",
+                    str(temp_root / "SDKExamples With Spaces"),
+                    "-WorktreeRoot",
+                    str(temp_root / "Worktree With Spaces"),
+                    "-InstallDir",
+                    str(temp_root / "Plug-ins With Spaces"),
+                    "-PlanOnly",
+                    "-Json",
+                ],
+                cwd=str(ROOT),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            report = json.loads(result.stdout)
+            self.assertEqual(report["status"], "plan_only")
+            self.assertTrue(report["planOnly"])
+            self.assertFalse(report["blocked"])
+            self.assertFalse(report["failed"])
+            self.assertEqual(report["steps"][0]["plannedOnly"], True)
+            self.assertEqual(
+                report["missingAllowFlags"],
+                ["-AllowDownloadLargeFiles", "-AllowInstallSoftware", "-AllowNetwork", "-AllowRebootRisk"],
+            )
+            self.assertEqual(report["validationErrors"], [])
+
+    def test_invoke_native_bridge_next_accepts_allow_flag_aliases(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise native next-step runner")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            result = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/invoke-native-bridge-next.ps1"),
+                    "-SdkDir",
+                    str(temp_root / "SDK With Spaces"),
+                    "-SdkExamplesDir",
+                    str(temp_root / "SDKExamples With Spaces"),
+                    "-WorktreeRoot",
+                    str(temp_root / "Worktree With Spaces"),
+                    "-InstallDir",
+                    str(temp_root / "Plug-ins With Spaces"),
+                    "-AllowSoftwareInstall",
+                    "-AllowLargeDownloads",
+                    "-Json",
+                ],
+                cwd=str(ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["status"], "blocked_by_safety_flag")
+            self.assertEqual(report["missingAllowFlags"], ["-AllowNetwork", "-AllowRebootRisk"])
+
+    def test_invoke_native_bridge_next_rejects_malformed_next_command_spec(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise native next-step runner")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            fake_doctor = temp_root / "fake-doctor.ps1"
+            fake_doctor.write_text(
+                """
+param([string]$VectorworksVersion = '', [string]$BuiltArtifact = '', [string]$SdkDir = '', [string]$SdkExamplesDir = '', [string]$WorktreeRoot = '', [string]$InstallDir = '', [string]$Configuration = '', [switch]$Install, [switch]$Json)
+if ($Json) {
+    [pscustomobject]@{
+        nextCommand = 'powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File C:\\outside\\bad.ps1'
+        nextCommandReason = 'malformed spec for test'
+        nextCommandSpec = [pscustomobject]@{
+            stage = 'not-a-stage'
+            executable = 'powershell.exe'
+            arguments = @('-NoLogo', '-File', 'C:\\outside\\bad.ps1')
+            workingDirectory = 'C:\\outside'
+            scriptPath = 'C:\\outside\\bad.ps1'
+            command = 'powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File C:\\outside\\bad.ps1'
+            requiresNetwork = $false
+            mayInstallSoftware = $false
+            mayDownloadLargeFiles = $false
+            mayModifyVectorworksUserPlugins = $false
+            requiresVectorworksRestartBeforeRun = $false
+            mayRequireReboot = $false
+            isDryRun = $false
+            rerunDoctorAfter = $false
+        }
+        nextActions = @('do not run')
+    } | ConvertTo-Json
+}
+""".strip(),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/invoke-native-bridge-next.ps1"),
+                    "-DoctorPath",
+                    str(fake_doctor),
+                    "-Json",
+                ],
+                cwd=str(ROOT),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 3, result.stderr + result.stdout)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["status"], "invalid_spec")
+            self.assertFalse(report["blocked"])
+            self.assertTrue(report["failed"])
+            self.assertEqual(report["exitCode"], 3)
+            self.assertEqual(report["missingAllowFlags"], [])
+            validation_errors = "\n".join(report["validationErrors"])
+            self.assertIn("stage", validation_errors)
+            self.assertIn("workingDirectory", validation_errors)
+            self.assertIn("scriptPath", validation_errors)
+            self.assertEqual(report["steps"][0]["validationErrors"], report["validationErrors"])
+            self.assertFalse(report["steps"][0]["executed"])
 
     def test_prepare_native_bridge_source_preserves_sdk_example_layout(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
@@ -1004,6 +1185,10 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("AllowDownloadLargeFiles", runner)
         self.assertIn("AllowModifyVectorworksUserPlugins", runner)
         self.assertIn("AllowRebootRisk", runner)
+        self.assertIn("AllowSoftwareInstall", runner)
+        self.assertIn("missingAllowFlags", runner)
+        self.assertIn("validationErrors", runner)
+        self.assertIn("safetyBlocks", runner)
         self.assertIn("nextCommandSpec", runner)
         self.assertIn("rerunDoctorAfter", runner)
 

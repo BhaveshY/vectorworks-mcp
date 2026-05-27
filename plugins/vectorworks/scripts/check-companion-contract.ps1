@@ -45,7 +45,7 @@ $RequiredScripts = @(
     "scripts\test-native-bridge-scaffold.ps1"
 )
 
-$RequiredFeatures = @("stable-loader", "loader-clipboard-copy", "native-bridge-scaffold", "native-bridge-scaffold-copy", "native-doctor-next-command", "native-doctor-command-spec", "native-bridge-project-wire", "native-doctor-next-runner")
+$RequiredFeatures = @("stable-loader", "loader-clipboard-copy", "native-bridge-scaffold", "native-bridge-scaffold-copy", "native-doctor-next-command", "native-doctor-command-spec", "native-bridge-project-wire", "native-doctor-next-runner", "native-runner-spec-validation")
 
 $ContractMarker = Join-Path $RepoRoot ".vectorworks-mcp-contract.json"
 if (-not (Test-Path -LiteralPath $ContractMarker)) {
@@ -59,10 +59,10 @@ try {
 try {
     $ContractVersion = [int]$Contract.contractVersion
 } catch {
-    throw "Companion repo contract marker is incompatible. Expected numeric contractVersion >= 9."
+    throw "Companion repo contract marker is incompatible. Expected numeric contractVersion >= 10."
 }
-if ($Contract.name -ne "vectorworks-mcp" -or $ContractVersion -lt 9) {
-    throw "Companion repo contract marker is incompatible. Expected vectorworks-mcp contractVersion >= 9."
+if ($Contract.name -ne "vectorworks-mcp" -or $ContractVersion -lt 10) {
+    throw "Companion repo contract marker is incompatible. Expected vectorworks-mcp contractVersion >= 10."
 }
 $ContractFeatures = @($Contract.requiredFeatures | ForEach-Object { [string]$_ })
 foreach ($RequiredFeature in $RequiredFeatures) {
@@ -227,6 +227,41 @@ foreach ($BooleanCommandSpecField in @("requiresNetwork", "mayInstallSoftware", 
     if ($NativeDoctorCommandSpec.PSObject.Properties.Name -notcontains $BooleanCommandSpecField -or
         -not ($NativeDoctorCommandSpec.$BooleanCommandSpecField -is [bool])) {
         throw "Companion native doctor nextCommandSpec.$BooleanCommandSpecField must be boolean."
+    }
+}
+
+$NativeRunnerPath = Join-Path $RepoRoot "scripts\invoke-native-bridge-next.ps1"
+$NativeRunnerJson = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $NativeRunnerPath -SdkDir $NativeDoctorProbeSdkDir -SdkExamplesDir $NativeDoctorProbeSdkExamplesDir -WorktreeRoot $NativeDoctorProbeWorktree -InstallDir $NativeDoctorProbeInstallDir -Configuration Release -PlanOnly -Json
+if ($LASTEXITCODE -ne 0) {
+    throw "Companion native next-step runner plan probe failed with exit code $LASTEXITCODE."
+}
+try {
+    $NativeRunnerReport = $NativeRunnerJson | ConvertFrom-Json
+} catch {
+    throw "Companion native next-step runner did not emit valid JSON."
+}
+foreach ($RequiredNativeRunnerField in @("status", "missingAllowFlags", "validationErrors", "steps")) {
+    if ($NativeRunnerReport.PSObject.Properties.Name -notcontains $RequiredNativeRunnerField) {
+        throw "Companion native next-step runner JSON is missing required field: $RequiredNativeRunnerField"
+    }
+}
+if ($NativeRunnerReport.status -ne "plan_only" -or $NativeRunnerReport.blocked -or $NativeRunnerReport.failed -or @($NativeRunnerReport.steps).Count -ne 1) {
+    throw "Companion native next-step runner did not emit one non-mutating plan with status=plan_only."
+}
+$NativeRunnerStep = $NativeRunnerReport.steps[0]
+foreach ($RequiredNativeRunnerStepField in @("safetyBlocks", "missingAllowFlags", "validationErrors", "blockedReasons", "plannedOnly")) {
+    if ($NativeRunnerStep.PSObject.Properties.Name -notcontains $RequiredNativeRunnerStepField) {
+        throw "Companion native next-step runner step JSON is missing required field: $RequiredNativeRunnerStepField"
+    }
+}
+if (-not $NativeRunnerStep.plannedOnly -or @($NativeRunnerReport.validationErrors).Count -ne 0 -or @($NativeRunnerStep.validationErrors).Count -ne 0) {
+    throw "Companion native next-step runner plan unexpectedly missed plannedOnly or reported validation errors."
+}
+foreach ($SafetyBlock in @($NativeRunnerStep.safetyBlocks)) {
+    foreach ($RequiredSafetyBlockField in @("field", "allowSwitch", "reason")) {
+        if ($SafetyBlock.PSObject.Properties.Name -notcontains $RequiredSafetyBlockField) {
+            throw "Companion native next-step runner safetyBlocks entries must include $RequiredSafetyBlockField."
+        }
     }
 }
 

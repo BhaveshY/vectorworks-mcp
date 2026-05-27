@@ -6,6 +6,7 @@ param(
     [string]$SdkExamplesDir = "",
     [string]$WorktreeRoot = "",
     [string]$InstallDir = "",
+    [string]$DoctorPath = "",
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Debug",
     [switch]$Install,
@@ -13,8 +14,11 @@ param(
     [int]$MaxSteps = 1,
     [switch]$AllowNetwork,
     [switch]$AllowInstallSoftware,
+    [switch]$AllowSoftwareInstall,
     [switch]$AllowDownloadLargeFiles,
+    [switch]$AllowLargeDownloads,
     [switch]$AllowModifyVectorworksUserPlugins,
+    [switch]$AllowVectorworksPluginModify,
     [switch]$AllowVectorworksRestartStep,
     [switch]$AllowRebootRisk,
     [switch]$PlanOnly,
@@ -40,11 +44,15 @@ if ($SdkDir) { $Args += @("-SdkDir", $SdkDir) }
 if ($SdkExamplesDir) { $Args += @("-SdkExamplesDir", $SdkExamplesDir) }
 if ($WorktreeRoot) { $Args += @("-WorktreeRoot", $WorktreeRoot) }
 if ($InstallDir) { $Args += @("-InstallDir", $InstallDir) }
+if ($DoctorPath) { $Args += @("-DoctorPath", $DoctorPath) }
 if ($Install) { $Args += "-Install" }
 if ($AllowNetwork) { $Args += "-AllowNetwork" }
 if ($AllowInstallSoftware) { $Args += "-AllowInstallSoftware" }
+if ($AllowSoftwareInstall) { $Args += "-AllowSoftwareInstall" }
 if ($AllowDownloadLargeFiles) { $Args += "-AllowDownloadLargeFiles" }
+if ($AllowLargeDownloads) { $Args += "-AllowLargeDownloads" }
 if ($AllowModifyVectorworksUserPlugins) { $Args += "-AllowModifyVectorworksUserPlugins" }
+if ($AllowVectorworksPluginModify) { $Args += "-AllowVectorworksPluginModify" }
 if ($AllowVectorworksRestartStep) { $Args += "-AllowVectorworksRestartStep" }
 if ($AllowRebootRisk) { $Args += "-AllowRebootRisk" }
 if ($PlanOnly) { $Args += "-PlanOnly" }

@@ -6,6 +6,7 @@ param(
     [string]$SdkExamplesDir = "",
     [string]$WorktreeRoot = "",
     [string]$InstallDir = "",
+    [string]$DoctorPath = "",
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Debug",
     [switch]$Install,
@@ -13,8 +14,11 @@ param(
     [int]$MaxSteps = 1,
     [switch]$AllowNetwork,
     [switch]$AllowInstallSoftware,
+    [switch]$AllowSoftwareInstall,
     [switch]$AllowDownloadLargeFiles,
+    [switch]$AllowLargeDownloads,
     [switch]$AllowModifyVectorworksUserPlugins,
+    [switch]$AllowVectorworksPluginModify,
     [switch]$AllowVectorworksRestartStep,
     [switch]$AllowRebootRisk,
     [switch]$PlanOnly,
@@ -24,10 +28,41 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$DoctorPath = Join-Path $PSScriptRoot "doctor-native-bridge.ps1"
+if (-not $DoctorPath) {
+    $DoctorPath = Join-Path $PSScriptRoot "doctor-native-bridge.ps1"
+}
 if (-not (Test-Path -LiteralPath $DoctorPath -PathType Leaf)) {
     throw "Native bridge doctor was not found at $DoctorPath"
 }
+$DoctorPath = (Resolve-Path -LiteralPath $DoctorPath).Path
+$AllowInstallSoftwareEffective = [bool]($AllowInstallSoftware -or $AllowSoftwareInstall)
+$AllowDownloadLargeFilesEffective = [bool]($AllowDownloadLargeFiles -or $AllowLargeDownloads)
+$AllowModifyVectorworksUserPluginsEffective = [bool]($AllowModifyVectorworksUserPlugins -or $AllowVectorworksPluginModify)
+
+$KnownNativeDoctorStages = @(
+    "bootstrap-native-prereqs",
+    "prepare-native-source",
+    "repair-native-source",
+    "build-unmodified-sdk-example",
+    "copy-native-scaffold",
+    "wire-native-project",
+    "build-native-bridge",
+    "dry-run-install-native-artifact",
+    "install-native-artifact",
+    "smoke-phase-0",
+    "rerun-native-doctor"
+)
+
+$BooleanCommandSpecFields = @(
+    "requiresNetwork",
+    "mayInstallSoftware",
+    "mayDownloadLargeFiles",
+    "mayModifyVectorworksUserPlugins",
+    "requiresVectorworksRestartBeforeRun",
+    "mayRequireReboot",
+    "isDryRun",
+    "rerunDoctorAfter"
+)
 
 function Add-NamedArgument {
     param(
@@ -68,29 +103,173 @@ function Invoke-NativeBridgeDoctor {
     }
 }
 
-function Get-SafetyBlockReasons {
+function Test-PathUnderDirectory {
+    param(
+        [string]$Path,
+        [string]$Directory
+    )
+    if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Directory)) {
+        return $false
+    }
+    try {
+        $ResolvedPath = [System.IO.Path]::GetFullPath($Path)
+        $ResolvedDirectory = [System.IO.Path]::GetFullPath($Directory)
+    } catch {
+        return $false
+    }
+    $TrimChars = @([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $DirectoryPrefix = $ResolvedDirectory.TrimEnd($TrimChars) + [System.IO.Path]::DirectorySeparatorChar
+    return (
+        $ResolvedPath.Equals($ResolvedDirectory, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $ResolvedPath.StartsWith($DirectoryPrefix, [System.StringComparison]::OrdinalIgnoreCase)
+    )
+}
+
+function Test-SameFullPath {
+    param(
+        [string]$Left,
+        [string]$Right
+    )
+    if ([string]::IsNullOrWhiteSpace($Left) -or [string]::IsNullOrWhiteSpace($Right)) {
+        return $false
+    }
+    try {
+        $ResolvedLeft = [System.IO.Path]::GetFullPath($Left)
+        $ResolvedRight = [System.IO.Path]::GetFullPath($Right)
+    } catch {
+        return $false
+    }
+    return $ResolvedLeft.Equals($ResolvedRight, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-NativeCommandSpec {
+    param(
+        [object]$DoctorReport,
+        [object]$Spec
+    )
+
+    $Errors = [System.Collections.Generic.List[string]]::new()
+    if (-not $Spec) {
+        $Errors.Add("nextCommandSpec is missing.")
+        return @($Errors)
+    }
+
+    $SpecPropertyNames = @($Spec.PSObject.Properties.Name)
+    foreach ($RequiredField in @("stage", "executable", "arguments", "workingDirectory", "scriptPath", "command")) {
+        if ($RequiredField -notin $SpecPropertyNames) {
+            $Errors.Add("nextCommandSpec.$RequiredField is missing.")
+        }
+    }
+    if ($Errors.Count -gt 0) {
+        return @($Errors)
+    }
+
+    if ([string]::IsNullOrWhiteSpace([string]$Spec.stage) -or [string]$Spec.stage -notin $KnownNativeDoctorStages) {
+        $Errors.Add("nextCommandSpec.stage is not recognized: $($Spec.stage)")
+    }
+    if ([string]$Spec.executable -ne "powershell.exe") {
+        $Errors.Add("nextCommandSpec.executable must be powershell.exe.")
+    }
+    if ([string]$Spec.command -ne [string]$DoctorReport.nextCommand) {
+        $Errors.Add("nextCommandSpec.command must exactly match nextCommand.")
+    }
+
+    $Arguments = @($Spec.arguments | ForEach-Object { [string]$_ })
+    if ($Arguments.Count -lt 6) {
+        $Errors.Add("nextCommandSpec.arguments must contain the full PowerShell argument array.")
+    }
+
+    if (-not (Test-SameFullPath -Left ([string]$Spec.workingDirectory) -Right $RepoRoot)) {
+        $Errors.Add("nextCommandSpec.workingDirectory must be the companion repo root.")
+    }
+
+    $ResolvedScriptPath = ""
+    if ([string]::IsNullOrWhiteSpace([string]$Spec.scriptPath)) {
+        $Errors.Add("nextCommandSpec.scriptPath is required.")
+    } elseif (-not [System.IO.Path]::IsPathRooted([string]$Spec.scriptPath)) {
+        $Errors.Add("nextCommandSpec.scriptPath must be absolute.")
+    } else {
+        try {
+            $ResolvedScriptPath = [System.IO.Path]::GetFullPath([string]$Spec.scriptPath)
+        } catch {
+            $Errors.Add("nextCommandSpec.scriptPath could not be resolved: $($_.Exception.Message)")
+        }
+    }
+
+    $ScriptsRoot = Join-Path $RepoRoot "scripts"
+    if ($ResolvedScriptPath) {
+        if (-not (Test-PathUnderDirectory -Path $ResolvedScriptPath -Directory $ScriptsRoot)) {
+            $Errors.Add("nextCommandSpec.scriptPath must be under the companion scripts folder.")
+        } elseif (-not (Test-Path -LiteralPath $ResolvedScriptPath -PathType Leaf)) {
+            $Errors.Add("nextCommandSpec.scriptPath must point to an existing script.")
+        }
+    }
+
+    $FileIndex = [array]::IndexOf($Arguments, "-File")
+    if ($FileIndex -lt 0 -or $FileIndex -ge ($Arguments.Count - 1)) {
+        $Errors.Add("nextCommandSpec.arguments must include -File followed by scriptPath.")
+    } elseif ($ResolvedScriptPath -and -not (Test-SameFullPath -Left $Arguments[$FileIndex + 1] -Right $ResolvedScriptPath)) {
+        $Errors.Add("nextCommandSpec.arguments -File target must match scriptPath.")
+    }
+
+    foreach ($BooleanCommandSpecField in $BooleanCommandSpecFields) {
+        if ($BooleanCommandSpecField -notin $SpecPropertyNames) {
+            $Errors.Add("nextCommandSpec.$BooleanCommandSpecField is missing.")
+        } elseif (-not ($Spec.$BooleanCommandSpecField -is [bool])) {
+            $Errors.Add("nextCommandSpec.$BooleanCommandSpecField must be boolean.")
+        }
+    }
+
+    return @($Errors)
+}
+
+function Get-SafetyBlocks {
     param([object]$Spec)
 
-    $Reasons = [System.Collections.Generic.List[string]]::new()
+    $Blocks = [System.Collections.Generic.List[object]]::new()
     if ([bool]$Spec.requiresNetwork -and -not $AllowNetwork) {
-        $Reasons.Add("requiresNetwork=true; rerun with -AllowNetwork")
+        $Blocks.Add([pscustomobject]@{
+            field = "requiresNetwork"
+            allowSwitch = "-AllowNetwork"
+            reason = "requiresNetwork=true; rerun with -AllowNetwork"
+        })
     }
-    if ([bool]$Spec.mayInstallSoftware -and -not $AllowInstallSoftware) {
-        $Reasons.Add("mayInstallSoftware=true; rerun with -AllowInstallSoftware")
+    if ([bool]$Spec.mayInstallSoftware -and -not $AllowInstallSoftwareEffective) {
+        $Blocks.Add([pscustomobject]@{
+            field = "mayInstallSoftware"
+            allowSwitch = "-AllowInstallSoftware"
+            reason = "mayInstallSoftware=true; rerun with -AllowInstallSoftware"
+        })
     }
-    if ([bool]$Spec.mayDownloadLargeFiles -and -not $AllowDownloadLargeFiles) {
-        $Reasons.Add("mayDownloadLargeFiles=true; rerun with -AllowDownloadLargeFiles")
+    if ([bool]$Spec.mayDownloadLargeFiles -and -not $AllowDownloadLargeFilesEffective) {
+        $Blocks.Add([pscustomobject]@{
+            field = "mayDownloadLargeFiles"
+            allowSwitch = "-AllowDownloadLargeFiles"
+            reason = "mayDownloadLargeFiles=true; rerun with -AllowDownloadLargeFiles"
+        })
     }
-    if ([bool]$Spec.mayModifyVectorworksUserPlugins -and -not $AllowModifyVectorworksUserPlugins) {
-        $Reasons.Add("mayModifyVectorworksUserPlugins=true; rerun with -AllowModifyVectorworksUserPlugins")
+    if ([bool]$Spec.mayModifyVectorworksUserPlugins -and -not $AllowModifyVectorworksUserPluginsEffective) {
+        $Blocks.Add([pscustomobject]@{
+            field = "mayModifyVectorworksUserPlugins"
+            allowSwitch = "-AllowModifyVectorworksUserPlugins"
+            reason = "mayModifyVectorworksUserPlugins=true; rerun with -AllowModifyVectorworksUserPlugins"
+        })
     }
     if ([bool]$Spec.requiresVectorworksRestartBeforeRun -and -not $AllowVectorworksRestartStep) {
-        $Reasons.Add("requiresVectorworksRestartBeforeRun=true; restart/load Vectorworks as instructed, then rerun with -AllowVectorworksRestartStep")
+        $Blocks.Add([pscustomobject]@{
+            field = "requiresVectorworksRestartBeforeRun"
+            allowSwitch = "-AllowVectorworksRestartStep"
+            reason = "requiresVectorworksRestartBeforeRun=true; restart/load Vectorworks as instructed, then rerun with -AllowVectorworksRestartStep"
+        })
     }
     if ([bool]$Spec.mayRequireReboot -and -not $AllowRebootRisk) {
-        $Reasons.Add("mayRequireReboot=true; rerun with -AllowRebootRisk")
+        $Blocks.Add([pscustomobject]@{
+            field = "mayRequireReboot"
+            allowSwitch = "-AllowRebootRisk"
+            reason = "mayRequireReboot=true; rerun with -AllowRebootRisk"
+        })
     }
-    return @($Reasons)
+    return @($Blocks)
 }
 
 function New-StepRecord {
@@ -99,13 +278,18 @@ function New-StepRecord {
         [object]$DoctorReport,
         [object]$Spec
     )
+    $Arguments = if ($Spec -and $Spec.PSObject.Properties.Name -contains "arguments") {
+        @($Spec.arguments | ForEach-Object { [string]$_ })
+    } else {
+        @()
+    }
     return [ordered]@{
         index = $Index
         stage = [string]$Spec.stage
         nextCommand = [string]$DoctorReport.nextCommand
         nextCommandReason = [string]$DoctorReport.nextCommandReason
         executable = [string]$Spec.executable
-        arguments = @($Spec.arguments | ForEach-Object { [string]$_ })
+        arguments = $Arguments
         workingDirectory = [string]$Spec.workingDirectory
         safety = [ordered]@{
             requiresNetwork = [bool]$Spec.requiresNetwork
@@ -117,6 +301,9 @@ function New-StepRecord {
             isDryRun = [bool]$Spec.isDryRun
             rerunDoctorAfter = [bool]$Spec.rerunDoctorAfter
         }
+        safetyBlocks = @()
+        missingAllowFlags = @()
+        validationErrors = @()
         blockedReasons = @()
         plannedOnly = $false
         executed = $false
@@ -131,40 +318,54 @@ $Blocked = $false
 $Failed = $false
 $ExitCode = 0
 $StopReason = ""
+$Status = "not_started"
+$MissingAllowFlags = @()
+$ValidationErrors = @()
 
 for ($Index = 1; $Index -le $MaxSteps; $Index++) {
     $DoctorReport = Invoke-NativeBridgeDoctor
     $Spec = $DoctorReport.nextCommandSpec
-    if (-not $Spec -or [string]::IsNullOrWhiteSpace([string]$Spec.executable) -or @($Spec.arguments).Count -eq 0) {
-        throw "Native bridge doctor did not return an executable nextCommandSpec."
+    $Step = New-StepRecord -Index $Index -DoctorReport $DoctorReport -Spec $Spec
+    $StepValidationErrors = @(Test-NativeCommandSpec -DoctorReport $DoctorReport -Spec $Spec)
+    if ($StepValidationErrors.Count -gt 0) {
+        $Step.validationErrors = @($StepValidationErrors)
+        $Step.stopReason = "invalid nextCommandSpec"
+        $Steps.Add([pscustomobject]$Step)
+        $ValidationErrors = @($StepValidationErrors)
+        $Failed = $true
+        $ExitCode = 3
+        $StopReason = $Step.stopReason
+        $Status = "invalid_spec"
+        break
     }
 
-    $Step = New-StepRecord -Index $Index -DoctorReport $DoctorReport -Spec $Spec
-    $BlockReasons = @(Get-SafetyBlockReasons -Spec $Spec)
+    $SafetyBlocks = @(Get-SafetyBlocks -Spec $Spec)
+    $BlockReasons = @($SafetyBlocks | ForEach-Object { [string]$_.reason })
+    $Step.safetyBlocks = @($SafetyBlocks)
+    $Step.blockedReasons = @($BlockReasons)
+    $Step.missingAllowFlags = @($SafetyBlocks | ForEach-Object { [string]$_.allowSwitch } | Sort-Object -Unique)
+    $MissingAllowFlags = @($Step.missingAllowFlags)
     if ($PlanOnly) {
-        $Step.blockedReasons = @($BlockReasons)
         $Step.plannedOnly = $true
         $Step.stopReason = "plan only"
         $Steps.Add([pscustomobject]$Step)
         $StopReason = $Step.stopReason
+        $Status = "plan_only"
         break
     }
 
     if ($BlockReasons.Count -gt 0) {
-        $Step.blockedReasons = @($BlockReasons)
         $Step.stopReason = "blocked by safety flags"
         $Steps.Add([pscustomobject]$Step)
         $Blocked = $true
         $ExitCode = 2
         $StopReason = $Step.stopReason
+        $Status = "blocked_by_safety_flag"
         break
     }
 
     $CommandArguments = @($Spec.arguments | ForEach-Object { [string]$_ })
-    $WorkingDirectory = if ([string]::IsNullOrWhiteSpace([string]$Spec.workingDirectory)) { $RepoRoot } else { [string]$Spec.workingDirectory }
-    if (-not (Test-Path -LiteralPath $WorkingDirectory -PathType Container)) {
-        throw "nextCommandSpec.workingDirectory does not exist: $WorkingDirectory"
-    }
+    $WorkingDirectory = [string]$Spec.workingDirectory
 
     Push-Location $WorkingDirectory
     try {
@@ -183,6 +384,7 @@ for ($Index = 1; $Index -le $MaxSteps; $Index++) {
         $Failed = $true
         $ExitCode = if ($CommandExitCode) { $CommandExitCode } else { 1 }
         $StopReason = $Step.stopReason
+        $Status = "child_failed"
         break
     }
 
@@ -190,18 +392,21 @@ for ($Index = 1; $Index -le $MaxSteps; $Index++) {
         $Step.stopReason = "dry-run command executed; not escalating to a mutating command automatically"
         $Steps.Add([pscustomobject]$Step)
         $StopReason = $Step.stopReason
+        $Status = "dry_run_executed"
         break
     }
     if (-not [bool]$Spec.rerunDoctorAfter) {
         $Step.stopReason = "command executed; doctor rerun not requested"
         $Steps.Add([pscustomobject]$Step)
         $StopReason = $Step.stopReason
+        $Status = "completed"
         break
     }
     if ($Index -eq $MaxSteps) {
         $Step.stopReason = "max steps reached after executing command"
         $Steps.Add([pscustomobject]$Step)
         $StopReason = $Step.stopReason
+        $Status = "max_steps_reached"
         break
     }
 
@@ -214,10 +419,13 @@ $Result = [pscustomobject]@{
     vectorworksVersion = $VectorworksVersion
     maxSteps = $MaxSteps
     planOnly = [bool]$PlanOnly
+    status = $Status
     blocked = [bool]$Blocked
     failed = [bool]$Failed
     exitCode = $ExitCode
     stopReason = $StopReason
+    missingAllowFlags = @($MissingAllowFlags)
+    validationErrors = @($ValidationErrors)
     steps = @($Steps)
 }
 
@@ -225,6 +433,7 @@ if ($Json) {
     $Result | ConvertTo-Json -Depth 12
 } else {
     Write-Host "Vectorworks native bridge next-step runner"
+    Write-Host "Status: $($Result.status)"
     Write-Host "Blocked: $($Result.blocked)"
     Write-Host "Failed: $($Result.failed)"
     Write-Host "Stop reason: $($Result.stopReason)"
@@ -232,7 +441,12 @@ if ($Json) {
         Write-Host ""
         Write-Host ("Step {0}: {1}" -f $Step.index, $Step.stage)
         Write-Host ("Reason: {0}" -f $Step.nextCommandReason)
-        if ($Step.blockedReasons.Count -gt 0) {
+        if ($Step.validationErrors.Count -gt 0) {
+            Write-Host "Validation errors:"
+            foreach ($ValidationError in $Step.validationErrors) {
+                Write-Host "- $ValidationError"
+            }
+        } elseif ($Step.blockedReasons.Count -gt 0) {
             Write-Host "Blocked reasons:"
             foreach ($Reason in $Step.blockedReasons) {
                 Write-Host "- $Reason"

@@ -98,11 +98,15 @@ powershell -ExecutionPolicy Bypass -File .\scripts\invoke-native-bridge-next.ps1
 Use the runner before hand-executing doctor output. It reads
 `nextCommandSpec`, blocks unless required safety flags are explicitly allowed
 (`requiresNetwork`, `mayInstallSoftware`, `mayDownloadLargeFiles`,
-`mayModifyVectorworksUserPlugins`, `mayRequireReboot`), runs the executable
-with arguments as an array, and reruns the doctor up to `-MaxSteps` whenever
-`rerunDoctorAfter` is true. The lower-level doctor JSON remains useful for
-inspecting `nextCommandReason`; the older manual sequence below is reference
-material.
+`mayModifyVectorworksUserPlugins`, `requiresVectorworksRestartBeforeRun`,
+`mayRequireReboot`), validates the command spec before execution, runs the
+executable with arguments as an array, and reruns the doctor up to `-MaxSteps`
+whenever `rerunDoctorAfter` is true. Agents should read the structured
+`status`, `missingAllowFlags`, `safetyBlocks`, and `validationErrors` fields;
+`blocked_by_safety_flag` means add the explicit allow switches only after user
+review, and `invalid_spec` means stop because the doctor/runner contract is
+stale or unsafe. The lower-level doctor JSON remains useful for inspecting
+`nextCommandReason`; the older manual sequence below is reference material.
 
 Optional SDK bootstrap helper:
 

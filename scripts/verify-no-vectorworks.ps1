@@ -138,11 +138,21 @@ Invoke-Checked "native bridge guarded next-step plan" {
     $ProbeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("vectorworks-mcp-verify-native-runner-{0}" -f $PID)
     $RunnerJson = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $NativeNextRunnerPath -WorktreeRoot (Join-Path $ProbeRoot "SDKExamples") -InstallDir (Join-Path $ProbeRoot "Plug-ins") -PlanOnly -Json
     $RunnerReport = $RunnerJson | ConvertFrom-Json
-    if ($RunnerReport.blocked -or $RunnerReport.failed -or -not $RunnerReport.planOnly -or @($RunnerReport.steps).Count -ne 1) {
+    if ($RunnerReport.status -ne "plan_only" -or $RunnerReport.blocked -or $RunnerReport.failed -or -not $RunnerReport.planOnly -or @($RunnerReport.steps).Count -ne 1) {
         throw "Native bridge next-step runner did not emit a single non-mutating plan."
     }
     if (-not $RunnerReport.steps[0].plannedOnly -or [string]::IsNullOrWhiteSpace([string]$RunnerReport.steps[0].stage)) {
         throw "Native bridge next-step runner plan is missing plannedOnly/stage metadata."
+    }
+    if ($RunnerReport.PSObject.Properties.Name -notcontains "missingAllowFlags" -or
+        $RunnerReport.PSObject.Properties.Name -notcontains "validationErrors" -or
+        $RunnerReport.steps[0].PSObject.Properties.Name -notcontains "safetyBlocks" -or
+        $RunnerReport.steps[0].PSObject.Properties.Name -notcontains "missingAllowFlags" -or
+        $RunnerReport.steps[0].PSObject.Properties.Name -notcontains "validationErrors") {
+        throw "Native bridge next-step runner plan is missing structured status/safety validation fields."
+    }
+    if (@($RunnerReport.validationErrors).Count -ne 0 -or @($RunnerReport.steps[0].validationErrors).Count -ne 0) {
+        throw "Native bridge next-step runner plan unexpectedly reported validation errors."
     }
 }
 
