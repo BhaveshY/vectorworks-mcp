@@ -183,11 +183,12 @@ Recommended order:
 
 1. Build the unmodified copied example with ``scripts\build-native-bridge.ps1``.
 2. Confirm Vectorworks can load the example plug-in.
-3. Rename the module/project and replace the example extension code with the
-   bridge transport and request queue.
-4. Keep socket work off the Vectorworks API path; marshal CAD handlers to the
+3. Copy the reviewed no-SDK scaffold with
+   ``scripts\copy-native-bridge-scaffold.ps1``.
+4. Rename the module/project and wire the scaffold into the SDK entry points.
+5. Keep socket work off the Vectorworks API path; marshal CAD handlers to the
    Vectorworks main/plugin event context.
-5. Implement phase 0 and phase 1 from ``native_bridge\HANDLER_MATRIX.md``.
+6. Implement phase 0 and phase 1 from ``native_bridge\HANDLER_MATRIX.md``.
 "@
 Set-Content -LiteralPath $NotesPath -Value $Notes -Encoding UTF8
 

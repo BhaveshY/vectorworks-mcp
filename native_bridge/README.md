@@ -120,6 +120,18 @@ extension code with the MCP bridge:
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
 ```
 
+After that proof build, copy the reviewed SDK-agnostic scaffold into the ignored
+worktree:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\copy-native-bridge-scaffold.ps1
+```
+
+The scaffold lives in `native_bridge/src/`. It encodes the protocol constants,
+phase-0/phase-1 dispatcher map, and the worker-thread to Vectorworks main/plugin
+event-context queue. It intentionally has no Vectorworks SDK includes and no
+standalone project files.
+
 After a compiled native bridge is loaded in Vectorworks, run the native smoke
 harness:
 

@@ -6,7 +6,8 @@ param(
     [string]$InstallRepoUrl = "https://github.com/BhaveshY/vectorworks-mcp.git",
     [switch]$RequireContract,
     [ValidateRange(1, 100)]
-    [int]$MinimumContractVersion = 4
+    [int]$MinimumContractVersion = 5,
+    [string[]]$RequiredFeatures = @("stable-loader", "loader-clipboard-copy", "native-bridge-scaffold", "native-bridge-scaffold-copy")
 )
 
 $ErrorActionPreference = "Stop"
@@ -60,6 +61,13 @@ function Test-VectorworksMcpRepo {
     if ($ContractVersion -lt $MinimumContractVersion) {
         $script:RejectedRepos.Add("$Resolved (contractVersion $($Contract.contractVersion) < $MinimumContractVersion)") | Out-Null
         return $false
+    }
+    $ContractFeatures = @($Contract.requiredFeatures | ForEach-Object { [string]$_ })
+    foreach ($RequiredFeature in $RequiredFeatures) {
+        if ($RequiredFeature -notin $ContractFeatures) {
+            $script:RejectedRepos.Add("$Resolved (missing required feature '$RequiredFeature')") | Out-Null
+            return $false
+        }
     }
     return $true
 }

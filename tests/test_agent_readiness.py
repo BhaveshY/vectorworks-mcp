@@ -32,7 +32,14 @@ class AgentReadinessTests(unittest.TestCase):
         marker = json.loads((ROOT / ".vectorworks-mcp-contract.json").read_text(encoding="utf-8"))
 
         self.assertEqual(marker["name"], "vectorworks-mcp")
-        self.assertGreaterEqual(marker["contractVersion"], 4)
+        self.assertGreaterEqual(marker["contractVersion"], 5)
+        for feature in (
+            "stable-loader",
+            "loader-clipboard-copy",
+            "native-bridge-scaffold",
+            "native-bridge-scaffold-copy",
+        ):
+            self.assertIn(feature, marker["requiredFeatures"])
 
     def test_bootstrap_scripts_exist(self):
         for relative_path in (
@@ -43,6 +50,7 @@ class AgentReadinessTests(unittest.TestCase):
             "scripts/check-bundled-plugin-contract.ps1",
             "scripts/check-native-bridge-prereqs.ps1",
             "scripts/copy-vectorworks-loader.ps1",
+            "scripts/copy-native-bridge-scaffold.ps1",
             "scripts/doctor-vectorworks-mcp.ps1",
             "scripts/doctor-native-bridge.ps1",
             "scripts/prepare-native-bridge-source.ps1",
@@ -70,6 +78,8 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn('VW_MCP_PREFLIGHT_CACHE_MS = "750"', register_script)
         self.assertIn("CopyLoaderToClipboard", register_script)
         self.assertIn("copy-vectorworks-loader.ps1", register_script)
+        self.assertIn("VW_MCP_LOADER_METADATA", register_script)
+        self.assertIn("requiredFeatures", register_script)
 
         launcher_path = ROOT / "vw_start_listener_2024.py"
         if launcher_path.exists():
@@ -178,6 +188,9 @@ class AgentReadinessTests(unittest.TestCase):
             loader_text = loader_path.read_text(encoding="utf-8")
             self.assertIn("runpy.run_path", loader_text)
             self.assertIn(str(launcher_path).replace("\\", "\\\\"), loader_text)
+            self.assertIn("VW_MCP_LOADER_METADATA", loader_text)
+            self.assertIn('"contractVersion": 5', loader_text)
+            self.assertIn('"native-bridge-scaffold-copy"', loader_text)
 
     def test_native_bridge_scaffold_is_explicitly_not_default(self):
         expected_files = (
@@ -189,6 +202,11 @@ class AgentReadinessTests(unittest.TestCase):
             "native_bridge/mock/mock_bridge.py",
             "native_bridge/smoke.py",
             "native_bridge/src/README.md",
+            "native_bridge/src/BridgeProtocol.hpp",
+            "native_bridge/src/BridgeProtocol.cpp",
+            "native_bridge/src/BridgeDispatcher.hpp",
+            "native_bridge/src/CadRequestQueue.hpp",
+            "native_bridge/src/VectorworksMCPBridge.cpp",
         )
         for relative_path in expected_files:
             self.assertTrue((ROOT / relative_path).exists(), relative_path)
@@ -206,6 +224,45 @@ class AgentReadinessTests(unittest.TestCase):
         matrix = (ROOT / "native_bridge/HANDLER_MATRIX.md").read_text(encoding="utf-8")
         self.assertIn("Native phase", matrix)
         self.assertIn("main/plugin event context", matrix)
+
+    def test_native_bridge_source_scaffold_encodes_threading_contract(self):
+        src = ROOT / "native_bridge" / "src"
+        scaffold_files = (
+            "BridgeProtocol.hpp",
+            "BridgeProtocol.cpp",
+            "BridgeDispatcher.hpp",
+            "CadRequestQueue.hpp",
+            "VectorworksMCPBridge.cpp",
+        )
+        combined = "\n".join((src / name).read_text(encoding="utf-8") for name in scaffold_files)
+
+        for action in (
+            "ping",
+            "stop",
+            "get_document_info",
+            "get_layers",
+            "get_objects",
+            "selection",
+            "create_object",
+        ):
+            self.assertIn(action, combined)
+
+        self.assertIn("kMaxFrameBytes", combined)
+        self.assertIn("EncodeFrameHeader", combined)
+        self.assertIn("DecodeFrameHeader", combined)
+        self.assertIn("CadRequestQueue", combined)
+        self.assertIn("Socket worker thread must not call Vectorworks document", combined)
+        self.assertIn("VectorworksMainPluginContext", combined)
+        self.assertIn("TryDequeueOnVectorworksMainContext", combined)
+        self.assertIn("CompleteFromVectorworksMainContext", combined)
+
+        for name in scaffold_files:
+            text = (src / name).read_text(encoding="utf-8")
+            self.assertNotRegex(text, r'#include\s+[<"].*(Vectorworks|VWFC|MiniCad|SDK).*?[>"]', name)
+
+        readme = (src / "README.md").read_text(encoding="utf-8")
+        self.assertIn("not a standalone build system", readme)
+        self.assertIn("copy-native-bridge-scaffold.ps1", readme)
 
     def test_native_bridge_scripts_point_to_official_sdk_and_ignore_downloads(self):
         requirements = json.loads((ROOT / "native_bridge/SDK_REQUIREMENTS.json").read_text(encoding="utf-8"))
@@ -251,6 +308,7 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("VectorworksSDK\\SDK$Version\\SDKLib", prepare)
         self.assertIn("git clone --depth 1", prepare)
         self.assertIn("native_bridge\\worktree", prepare)
+        self.assertIn("copy-native-bridge-scaffold.ps1", prepare)
         self.assertIn("SDKExamples", prepare)
         self.assertIn("VectorworksMCPBridge", prepare)
         self.assertIn("[string]$SdkDir", prepare)
@@ -268,6 +326,41 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn('"-SdkDir", $SdkDir', bootstrap)
         self.assertIn("third_party\\VectorworksSDKExamples\\VectorworksSDK\\SDK$Version", checker)
         self.assertIn("native_bridge/worktree/", gitignore)
+
+    def test_copy_native_bridge_scaffold_script_copies_reviewed_sources(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise native scaffold copy")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worktree = Path(temp_dir) / "SDKExamples"
+            source_dir = worktree / "Examples2024" / "VectorworksMCPBridge" / "Source"
+            source_dir.mkdir(parents=True)
+
+            subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/copy-native-bridge-scaffold.ps1"),
+                    "-WorktreeRoot",
+                    str(worktree),
+                ],
+                cwd=str(ROOT),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            destination = source_dir / "VectorworksMCPBridge"
+            self.assertTrue((destination / "BridgeProtocol.hpp").exists())
+            self.assertTrue((destination / "CadRequestQueue.hpp").exists())
+            self.assertTrue((destination / "VectorworksMCPBridge.cpp").exists())
+            self.assertIn("native_sdk_bridge_scaffold", (destination / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8"))
 
     def test_prepare_native_bridge_source_preserves_sdk_example_layout(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
@@ -402,6 +495,8 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("LoaderStatus", doctor)
         self.assertIn("copy-vectorworks-loader.ps1", doctor)
         self.assertIn("stable loader", doctor)
+        self.assertIn("connector contract", doctor)
+        self.assertIn("VW_MCP_LOADER_METADATA", doctor)
 
     def test_native_smoke_script_is_documented(self):
         smoke_script = (ROOT / "scripts/smoke-native-bridge.ps1").read_text(encoding="utf-8")

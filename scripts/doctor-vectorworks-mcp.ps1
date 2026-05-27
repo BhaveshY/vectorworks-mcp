@@ -15,6 +15,7 @@ $LauncherPath = Join-Path $RepoRoot "vw_start_listener_2024.py"
 $LoaderPath = Join-Path $RepoRoot "vw_load_listener_2024.py"
 $NativeCheckerPath = Join-Path $RepoRoot "scripts\check-native-bridge-prereqs.ps1"
 $ProjectMcpPath = Join-Path $RepoRoot ".mcp.json"
+$ContractMarkerPath = Join-Path $RepoRoot ".vectorworks-mcp-contract.json"
 $ServerPath = Join-Path $RepoRoot "server.py"
 $ListenerPath = Join-Path $RepoRoot "vw_listener.py"
 
@@ -130,6 +131,23 @@ $NextActions = New-Object System.Collections.Generic.List[string]
 
 $Findings += New-Finding -Name "repo" -Status "ok" -Detail $RepoRoot
 
+$ContractVersion = 0
+$ContractFeatures = @()
+if (Test-Path -LiteralPath $ContractMarkerPath) {
+    try {
+        $Contract = Get-Content -Raw -LiteralPath $ContractMarkerPath | ConvertFrom-Json
+        $ContractVersion = [int]$Contract.contractVersion
+        $ContractFeatures = @($Contract.requiredFeatures | ForEach-Object { [string]$_ })
+        $Findings += New-Finding -Name "connector contract" -Status "ok" -Detail ("version={0}; features={1}" -f $ContractVersion, ($ContractFeatures -join ", "))
+    } catch {
+        $Findings += New-Finding -Name "connector contract" -Status "error" -Detail $_.Exception.Message
+        $NextActions.Add("Fix .vectorworks-mcp-contract.json before using plugin wrappers.")
+    }
+} else {
+    $Findings += New-Finding -Name "connector contract" -Status "missing" -Detail $ContractMarkerPath
+    $NextActions.Add("Update the connector checkout; .vectorworks-mcp-contract.json is missing.")
+}
+
 $RequiredFiles = @($ServerPath, $ListenerPath, $ProjectMcpPath)
 $MissingFiles = @($RequiredFiles | Where-Object { -not (Test-Path -LiteralPath $_) })
 if ($MissingFiles.Count -eq 0) {
@@ -162,9 +180,23 @@ $LoaderDetail = $LoaderPath
 if (Test-Path -LiteralPath $LoaderPath) {
     $LoaderText = Get-Content -Raw -LiteralPath $LoaderPath
     $ExpectedLauncherLiteral = ConvertTo-PythonRawStringLiteralText $LauncherPath
+    $ExpectedRepoLiteral = ConvertTo-PythonRawStringLiteralText $RepoRoot
     if ($LoaderText -match "runpy\.run_path" -and $LoaderText.Contains($ExpectedLauncherLiteral)) {
         $LoaderStatus = "ok"
         $LoaderDetail = "stable loader: $LoaderPath"
+        if (-not $LoaderText.Contains("VW_MCP_LOADER_METADATA")) {
+            $LoaderStatus = "stale"
+            $LoaderDetail = "loader exists but is missing versioned metadata"
+            $NextActions.Add("Run scripts\copy-vectorworks-loader.ps1 -Regenerate, then replace the old Vectorworks script/menu command with the clipboard contents.")
+        } elseif (-not $LoaderText.Contains($ExpectedRepoLiteral)) {
+            $LoaderStatus = "stale"
+            $LoaderDetail = "loader metadata points at a different connector repo"
+            $NextActions.Add("Run scripts\copy-vectorworks-loader.ps1 -Regenerate, then replace the old Vectorworks script/menu command with the clipboard contents.")
+        } elseif ($ContractVersion -gt 0 -and $LoaderText -notmatch ('"contractVersion":\s*' + [regex]::Escape([string]$ContractVersion))) {
+            $LoaderStatus = "stale"
+            $LoaderDetail = "loader metadata does not match connector contract version $ContractVersion"
+            $NextActions.Add("Run scripts\copy-vectorworks-loader.ps1 -Regenerate, then replace the old Vectorworks script/menu command with the clipboard contents.")
+        }
     } else {
         $LoaderStatus = "stale"
         $LoaderDetail = "loader exists but does not point to the generated launcher"

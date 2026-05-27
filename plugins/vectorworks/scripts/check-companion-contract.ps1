@@ -36,8 +36,11 @@ $RequiredScripts = @(
     "scripts\bootstrap-native-bridge.ps1",
     "scripts\prepare-native-bridge-source.ps1",
     "scripts\build-native-bridge.ps1",
-    "scripts\smoke-native-bridge.ps1"
+    "scripts\smoke-native-bridge.ps1",
+    "scripts\copy-native-bridge-scaffold.ps1"
 )
+
+$RequiredFeatures = @("stable-loader", "loader-clipboard-copy", "native-bridge-scaffold", "native-bridge-scaffold-copy")
 
 $ContractMarker = Join-Path $RepoRoot ".vectorworks-mcp-contract.json"
 if (-not (Test-Path -LiteralPath $ContractMarker)) {
@@ -51,10 +54,16 @@ try {
 try {
     $ContractVersion = [int]$Contract.contractVersion
 } catch {
-    throw "Companion repo contract marker is incompatible. Expected numeric contractVersion >= 4."
+    throw "Companion repo contract marker is incompatible. Expected numeric contractVersion >= 5."
 }
-if ($Contract.name -ne "vectorworks-mcp" -or $ContractVersion -lt 4) {
-    throw "Companion repo contract marker is incompatible. Expected vectorworks-mcp contractVersion >= 4."
+if ($Contract.name -ne "vectorworks-mcp" -or $ContractVersion -lt 5) {
+    throw "Companion repo contract marker is incompatible. Expected vectorworks-mcp contractVersion >= 5."
+}
+$ContractFeatures = @($Contract.requiredFeatures | ForEach-Object { [string]$_ })
+foreach ($RequiredFeature in $RequiredFeatures) {
+    if ($RequiredFeature -notin $ContractFeatures) {
+        throw "Companion repo contract marker is incompatible. Missing required feature '$RequiredFeature'."
+    }
 }
 
 $Missing = @()
@@ -294,6 +303,7 @@ $WrapperParamContracts = @{
     "scripts\prepare-native-bridge-source.ps1" = "scripts\prepare-native-bridge-source.ps1"
     "scripts\build-native-bridge.ps1" = "scripts\build-native-bridge.ps1"
     "scripts\smoke-native-bridge.ps1" = "scripts\smoke-native-bridge.ps1"
+    "scripts\copy-native-bridge-scaffold.ps1" = "scripts\copy-native-bridge-scaffold.ps1"
 }
 foreach ($RelativeWrapper in $WrapperParamContracts.Keys) {
     $WrapperPath = Join-Path $PluginRoot $RelativeWrapper

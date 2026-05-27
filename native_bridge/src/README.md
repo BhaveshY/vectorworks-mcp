@@ -1,17 +1,31 @@
-# Native Source Placeholder
+# Native Source Scaffold
 
-This folder is reserved for the Vectorworks SDK plug-in source.
+This folder contains the reviewed, SDK-agnostic native bridge scaffold. It is
+not a standalone build system and it deliberately avoids Vectorworks SDK
+includes so this repo still verifies on machines that do not have the SDK.
 
-Do not add fake build files that appear to compile without the Vectorworks SDK.
-After prerequisites are installed, run `..\..\scripts\prepare-native-bridge-source.ps1`
-to create an ignored SDK-backed worktree from the official Vectorworks example,
-then run `..\..\scripts\build-native-bridge.ps1` to prove the unmodified example
-builds before wiring it to the protocol in `..\PROTOCOL.md`.
+Files:
 
-Minimum source shape once the SDK is available:
+- `BridgeProtocol.hpp` / `BridgeProtocol.cpp`: length-prefixed frame constants
+  and strict request/response envelope names from `..\PROTOCOL.md`.
+- `BridgeDispatcher.hpp`: phase-0 and phase-1 action map from
+  `..\HANDLER_MATRIX.md`, including the worker-thread vs main/plugin-context
+  split.
+- `CadRequestQueue.hpp`: worker-to-main-context queue abstraction. Socket
+  worker code must enqueue CAD/API work and wait for completion; it must not
+  call Vectorworks document APIs directly.
+- `VectorworksMCPBridge.cpp`: SDK hook placeholders for plugin load/unload,
+  socket dispatch, stop, and main/plugin event pumping.
 
-- A Vectorworks SDK plug-in entry point.
-- A local TCP server or transport object.
-- A thread-safe request queue from socket worker to Vectorworks event context.
-- Handler implementations that mirror `vw_listener.py`.
-- A stop/unload path that releases port `9877`.
+Recommended native flow:
+
+1. Run `..\..\scripts\prepare-native-bridge-source.ps1` to create an ignored
+   SDK-backed worktree from the official `ObjectExample`.
+2. Run `..\..\scripts\build-native-bridge.ps1` and prove the unmodified example
+   builds.
+3. Run `..\..\scripts\copy-native-bridge-scaffold.ps1` to copy these reviewed
+   scaffold files into `Source\VectorworksMCPBridge` inside the worktree.
+4. Wire the scaffold into the SDK project and replace each placeholder with
+   actual SDK entry points and handlers.
+5. Build, install with `doctor-native-bridge.ps1`, and prove behavior with
+   `smoke-native-bridge.ps1`.

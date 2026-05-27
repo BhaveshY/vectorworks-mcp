@@ -27,7 +27,7 @@ class ClaudePluginTests(unittest.TestCase):
         marketplace = json.loads((PLUGIN / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
 
         self.assertEqual(manifest["name"], "vectorworks")
-        self.assertEqual(manifest["version"], "0.2.0")
+        self.assertEqual(manifest["version"], "0.3.0")
         self.assertEqual(manifest["mcpServers"], "./.mcp.json")
         self.assertIn("vectorworks_repo", manifest["userConfig"])
         self.assertEqual(marketplace["name"], "vectorworks-mcp")
@@ -60,6 +60,7 @@ class ClaudePluginTests(unittest.TestCase):
             "scripts/run-vectorworks-mcp.ps1",
             "scripts/bootstrap-vectorworks-mcp.ps1",
             "scripts/copy-vectorworks-loader.ps1",
+            "scripts/copy-native-bridge-scaffold.ps1",
             "scripts/test-vectorworks-listener.ps1",
             "scripts/diagnose-vectorworks-mcp.ps1",
             "scripts/doctor-vectorworks-mcp.ps1",
@@ -180,6 +181,7 @@ class ClaudePluginTests(unittest.TestCase):
             "scripts/run-vectorworks-mcp.ps1",
             "scripts/bootstrap-vectorworks-mcp.ps1",
             "scripts/copy-vectorworks-loader.ps1",
+            "scripts/copy-native-bridge-scaffold.ps1",
             "scripts/diagnose-vectorworks-mcp.ps1",
             "scripts/doctor-vectorworks-mcp.ps1",
             "scripts/doctor-native-bridge.ps1",
@@ -201,8 +203,10 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("-LoaderPath", bootstrap)
         self.assertIn("copy-vectorworks-loader.ps1", bootstrap)
         self.assertIn("SkipClipboard", bootstrap)
-        self.assertIn("[int]$MinimumContractVersion = 4", resolver)
-        self.assertIn("contractVersion >= 4", contract)
+        self.assertIn("[int]$MinimumContractVersion = 5", resolver)
+        self.assertIn("requiredFeatures", resolver)
+        self.assertIn("contractVersion >= 5", contract)
+        self.assertIn("native-bridge-scaffold-copy", contract)
         self.assertIn("LoaderPath", contract)
         self.assertIn("CopyLoaderToClipboard", contract)
 

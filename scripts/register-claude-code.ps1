@@ -87,8 +87,28 @@ function New-VectorworksLoader {
         [string]$TargetLauncherPath
     )
     $LauncherLiteral = ConvertTo-PythonRawStringLiteral $TargetLauncherPath
+    $RepoRootLiteral = ConvertTo-PythonRawStringLiteral $RepoRoot
+    $ContractMarker = Join-Path $RepoRoot ".vectorworks-mcp-contract.json"
+    $ContractVersion = 0
+    $FeatureLiteral = ""
+    if (Test-Path -LiteralPath $ContractMarker) {
+        $Contract = Get-Content -Raw -LiteralPath $ContractMarker | ConvertFrom-Json
+        $ContractVersion = [int]$Contract.contractVersion
+        $FeatureLiteral = (@($Contract.requiredFeatures) | ForEach-Object {
+            ConvertTo-PythonRawStringLiteral ([string]$_)
+        }) -join ", "
+    }
+    $GeneratedAtUtc = [DateTime]::UtcNow.ToString("o")
     $Text = @"
 import runpy
+
+VW_MCP_LOADER_METADATA = {
+    "repoRoot": $RepoRootLiteral,
+    "launcherPath": $LauncherLiteral,
+    "contractVersion": $ContractVersion,
+    "requiredFeatures": [$FeatureLiteral],
+    "generatedAtUtc": "$GeneratedAtUtc",
+}
 
 runpy.run_path($LauncherLiteral, run_name="__main__")
 "@

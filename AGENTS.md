@@ -7,6 +7,7 @@
 - `native_bridge/` is the long-term native Vectorworks SDK bridge scaffold. It is planned, not compiled, and not wired into `.mcp.json` by default.
 - `native_bridge/HANDLER_MATRIX.md` is the handler-by-handler implementation map for the native SDK bridge.
 - `native_bridge/mock/mock_bridge.py` is a no-SDK contract harness for host/native protocol compatibility.
+- `native_bridge/src/` contains SDK-agnostic native source scaffold files. They are not a standalone build and intentionally avoid Vectorworks SDK includes.
 - `scripts/run-mcp-server.ps1` is the self-bootstrapping MCP entrypoint. It creates `.venv`, installs `requirements.txt`, then launches `server.py`.
 - `scripts/register-claude-code.ps1` is the primary Windows setup command. It is idempotent: it refreshes dependencies, generates `vw_start_listener_2024.py` plus the stable `vw_load_listener_2024.py` Vectorworks loader, can copy the loader text to the clipboard, and updates the `vectorworks` MCP server entry.
 - `scripts/copy-vectorworks-loader.ps1` is the first-class Vectorworks handoff helper. Use it whenever the user or an agent is unsure what to paste into Vectorworks.
@@ -103,6 +104,8 @@ worktree and prove the unmodified Vectorworks example builds:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-native-bridge.ps1 -InstallVisualStudioBuildTools -DownloadSdk -CloneSdkExamples -PrepareSource
 powershell -ExecutionPolicy Bypass -File .\scripts\prepare-native-bridge-source.ps1 -CloneSdkExamples
+powershell -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\copy-native-bridge-scaffold.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -Json
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Json
