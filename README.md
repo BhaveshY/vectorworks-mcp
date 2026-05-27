@@ -89,17 +89,20 @@ Native bridge doctor/deploy planner:
 powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -Json
 ```
 
-For agent-driven native setup, treat the JSON `nextCommand` as the single
-primary next step and show `nextCommandReason` before running it. Prefer
-`nextCommandSpec.executable` plus `nextCommandSpec.arguments` when executing
-programmatically instead of parsing the shell string. The older manual sequence
-below is reference material; the doctor preserves custom version, worktree, and
-install paths in its generated command.
-Before executing, inspect the `nextCommandSpec` safety flags such as
-`requiresNetwork`, `mayInstallSoftware`, `mayDownloadLargeFiles`,
-`mayModifyVectorworksUserPlugins`, and `mayRequireReboot`. Run the executable
-with the arguments as an array, then rerun the native doctor whenever
-`rerunDoctorAfter` is true.
+Agent-safe native setup runner:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\invoke-native-bridge-next.ps1 -Json
+```
+
+Use the runner before hand-executing doctor output. It reads
+`nextCommandSpec`, blocks unless required safety flags are explicitly allowed
+(`requiresNetwork`, `mayInstallSoftware`, `mayDownloadLargeFiles`,
+`mayModifyVectorworksUserPlugins`, `mayRequireReboot`), runs the executable
+with arguments as an array, and reruns the doctor up to `-MaxSteps` whenever
+`rerunDoctorAfter` is true. The lower-level doctor JSON remains useful for
+inspecting `nextCommandReason`; the older manual sequence below is reference
+material.
 
 Optional SDK bootstrap helper:
 

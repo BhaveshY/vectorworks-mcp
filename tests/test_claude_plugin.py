@@ -66,6 +66,7 @@ class ClaudePluginTests(unittest.TestCase):
             "scripts/diagnose-vectorworks-mcp.ps1",
             "scripts/doctor-vectorworks-mcp.ps1",
             "scripts/doctor-native-bridge.ps1",
+            "scripts/invoke-native-bridge-next.ps1",
             "scripts/check-companion-contract.ps1",
             "scripts/bootstrap-native-bridge.ps1",
             "scripts/prepare-native-bridge-source.ps1",
@@ -228,6 +229,7 @@ class ClaudePluginTests(unittest.TestCase):
             "scripts/diagnose-vectorworks-mcp.ps1",
             "scripts/doctor-vectorworks-mcp.ps1",
             "scripts/doctor-native-bridge.ps1",
+            "scripts/invoke-native-bridge-next.ps1",
             "scripts/test-vectorworks-listener.ps1",
             "scripts/bootstrap-native-bridge.ps1",
             "scripts/prepare-native-bridge-source.ps1",
@@ -249,13 +251,14 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("-LoaderPath", bootstrap)
         self.assertIn("copy-vectorworks-loader.ps1", bootstrap)
         self.assertIn("SkipClipboard", bootstrap)
-        self.assertIn("[int]$MinimumContractVersion = 8", resolver)
+        self.assertIn("[int]$MinimumContractVersion = 9", resolver)
         self.assertIn("requiredFeatures", resolver)
-        self.assertIn("contractVersion >= 8", contract)
+        self.assertIn("contractVersion >= 9", contract)
         self.assertIn("native-bridge-scaffold-copy", contract)
         self.assertIn("native-doctor-next-command", contract)
         self.assertIn("native-doctor-command-spec", contract)
         self.assertIn("native-bridge-project-wire", contract)
+        self.assertIn("native-doctor-next-runner", contract)
         self.assertIn("wire-native-project", contract)
         self.assertIn("nextCommandReason", contract)
         self.assertIn("nextCommandSpec", contract)

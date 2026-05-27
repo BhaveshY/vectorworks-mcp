@@ -35,6 +35,7 @@ $RequiredScripts = @(
     "scripts\doctor-vectorworks-mcp.ps1",
     "scripts\check-native-bridge-prereqs.ps1",
     "scripts\doctor-native-bridge.ps1",
+    "scripts\invoke-native-bridge-next.ps1",
     "scripts\bootstrap-native-bridge.ps1",
     "scripts\prepare-native-bridge-source.ps1",
     "scripts\build-native-bridge.ps1",
@@ -44,7 +45,7 @@ $RequiredScripts = @(
     "scripts\test-native-bridge-scaffold.ps1"
 )
 
-$RequiredFeatures = @("stable-loader", "loader-clipboard-copy", "native-bridge-scaffold", "native-bridge-scaffold-copy", "native-doctor-next-command", "native-doctor-command-spec", "native-bridge-project-wire")
+$RequiredFeatures = @("stable-loader", "loader-clipboard-copy", "native-bridge-scaffold", "native-bridge-scaffold-copy", "native-doctor-next-command", "native-doctor-command-spec", "native-bridge-project-wire", "native-doctor-next-runner")
 
 $ContractMarker = Join-Path $RepoRoot ".vectorworks-mcp-contract.json"
 if (-not (Test-Path -LiteralPath $ContractMarker)) {
@@ -58,10 +59,10 @@ try {
 try {
     $ContractVersion = [int]$Contract.contractVersion
 } catch {
-    throw "Companion repo contract marker is incompatible. Expected numeric contractVersion >= 8."
+    throw "Companion repo contract marker is incompatible. Expected numeric contractVersion >= 9."
 }
-if ($Contract.name -ne "vectorworks-mcp" -or $ContractVersion -lt 8) {
-    throw "Companion repo contract marker is incompatible. Expected vectorworks-mcp contractVersion >= 8."
+if ($Contract.name -ne "vectorworks-mcp" -or $ContractVersion -lt 9) {
+    throw "Companion repo contract marker is incompatible. Expected vectorworks-mcp contractVersion >= 9."
 }
 $ContractFeatures = @($Contract.requiredFeatures | ForEach-Object { [string]$_ })
 foreach ($RequiredFeature in $RequiredFeatures) {
@@ -394,6 +395,8 @@ $WrapperParamContracts = @{
     "scripts\bootstrap-native-bridge.ps1" = "scripts\bootstrap-native-bridge.ps1"
     "scripts\prepare-native-bridge-source.ps1" = "scripts\prepare-native-bridge-source.ps1"
     "scripts\build-native-bridge.ps1" = "scripts\build-native-bridge.ps1"
+    "scripts\wire-native-bridge-project.ps1" = "scripts\wire-native-bridge-project.ps1"
+    "scripts\invoke-native-bridge-next.ps1" = "scripts\invoke-native-bridge-next.ps1"
     "scripts\smoke-native-bridge.ps1" = "scripts\smoke-native-bridge.ps1"
     "scripts\copy-native-bridge-scaffold.ps1" = "scripts\copy-native-bridge-scaffold.ps1"
 }

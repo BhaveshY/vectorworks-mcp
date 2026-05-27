@@ -16,6 +16,7 @@ $VenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 $ProjectMcpPath = Join-Path $RepoRoot ".mcp.json"
 $NativePrereqPath = Join-Path $RepoRoot "scripts\check-native-bridge-prereqs.ps1"
 $NativeDoctorPath = Join-Path $RepoRoot "scripts\doctor-native-bridge.ps1"
+$NativeNextRunnerPath = Join-Path $RepoRoot "scripts\invoke-native-bridge-next.ps1"
 $NativeScaffoldTestPath = Join-Path $RepoRoot "scripts\test-native-bridge-scaffold.ps1"
 $FreshLauncher = $false
 $FreshLoader = $false
@@ -58,6 +59,7 @@ Assert-Path $ListenerPath "Vectorworks listener"
 Assert-Path $ProjectMcpPath "Project MCP config"
 Assert-Path $NativePrereqPath "Native bridge prerequisite checker"
 Assert-Path $NativeDoctorPath "Native bridge doctor"
+Assert-Path $NativeNextRunnerPath "Native bridge next-step runner"
 Assert-Path $NativeScaffoldTestPath "Native bridge scaffold smoke test"
 
 Invoke-Checked "bootstrap venv/dependencies" {
@@ -129,6 +131,18 @@ Invoke-Checked "native bridge doctor next command" {
     if ([string]$DoctorReport.nextCommandSpec.command -ne [string]$DoctorReport.nextCommand -or
         @($DoctorReport.nextCommandSpec.arguments).Count -lt 6) {
         throw "Native bridge doctor nextCommandSpec does not match nextCommand."
+    }
+}
+
+Invoke-Checked "native bridge guarded next-step plan" {
+    $ProbeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("vectorworks-mcp-verify-native-runner-{0}" -f $PID)
+    $RunnerJson = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $NativeNextRunnerPath -WorktreeRoot (Join-Path $ProbeRoot "SDKExamples") -InstallDir (Join-Path $ProbeRoot "Plug-ins") -PlanOnly -Json
+    $RunnerReport = $RunnerJson | ConvertFrom-Json
+    if ($RunnerReport.blocked -or $RunnerReport.failed -or -not $RunnerReport.planOnly -or @($RunnerReport.steps).Count -ne 1) {
+        throw "Native bridge next-step runner did not emit a single non-mutating plan."
+    }
+    if (-not $RunnerReport.steps[0].plannedOnly -or [string]::IsNullOrWhiteSpace([string]$RunnerReport.steps[0].stage)) {
+        throw "Native bridge next-step runner plan is missing plannedOnly/stage metadata."
     }
 }
 
