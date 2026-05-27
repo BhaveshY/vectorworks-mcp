@@ -124,6 +124,7 @@ The setup is idempotent and safe to rerun. It:
 - installs pinned host dependencies
 - generates `vw_start_listener_2024.py` with machine-specific absolute paths and `VW_MCP_MODE=dialog`
 - generates `vw_load_listener_2024.py`, a tiny stable Vectorworks script/menu loader that runs the current launcher file
+- best-effort copies the exact loader script text to your clipboard
 - registers the `vectorworks` MCP server with Claude Code
 - falls back to updating `C:\Users\<you>\.claude.json` if `claude` is not on PATH
 - runs no-Vectorworks host verification when `-Verify` is passed
@@ -175,6 +176,13 @@ After setup, open the generated loader file:
 
 ```text
 vw_load_listener_2024.py
+```
+
+Setup tries to copy this loader script to your clipboard automatically. If you
+need to copy it again, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\copy-vectorworks-loader.ps1
 ```
 
 Paste/install the loader in Vectorworks, not the full launcher. The loader is a
@@ -316,7 +324,7 @@ End-to-end requires:
 Vectorworks hangs after running the listener script:
 
 - Regenerate `vw_start_listener_2024.py` with `.\scripts\bootstrap-claude-code.ps1 -Verify`.
-- Replace any old pasted Vectorworks script with `vw_load_listener_2024.py`; it loads the current launcher from disk and prevents stale pasted listener code from lingering in a menu command.
+- Run `.\scripts\copy-vectorworks-loader.ps1`, then replace any old pasted Vectorworks script with the clipboard contents from `vw_load_listener_2024.py`; it loads the current launcher from disk and prevents stale pasted listener code from lingering in a menu command.
 - Confirm the generated launcher contains `os.environ["VW_MCP_MODE"] = "dialog"`.
 - If Vectorworks is already stuck from an older foreground launcher, create
   `C:\Users\<you>\.vectorworks-mcp\STOP`, wait a few seconds, then restart

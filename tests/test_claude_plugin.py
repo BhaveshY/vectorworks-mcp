@@ -59,6 +59,7 @@ class ClaudePluginTests(unittest.TestCase):
             "scripts/resolve-vectorworks-mcp-repo.ps1",
             "scripts/run-vectorworks-mcp.ps1",
             "scripts/bootstrap-vectorworks-mcp.ps1",
+            "scripts/copy-vectorworks-loader.ps1",
             "scripts/test-vectorworks-listener.ps1",
             "scripts/diagnose-vectorworks-mcp.ps1",
             "scripts/doctor-vectorworks-mcp.ps1",
@@ -178,6 +179,7 @@ class ClaudePluginTests(unittest.TestCase):
         for relative_path in (
             "scripts/run-vectorworks-mcp.ps1",
             "scripts/bootstrap-vectorworks-mcp.ps1",
+            "scripts/copy-vectorworks-loader.ps1",
             "scripts/diagnose-vectorworks-mcp.ps1",
             "scripts/doctor-vectorworks-mcp.ps1",
             "scripts/doctor-native-bridge.ps1",
@@ -197,9 +199,12 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("-RepoPath", bootstrap)
         self.assertIn("vw_load_listener_2024.py", bootstrap)
         self.assertIn("-LoaderPath", bootstrap)
-        self.assertIn("[int]$MinimumContractVersion = 3", resolver)
-        self.assertIn("contractVersion >= 3", contract)
+        self.assertIn("copy-vectorworks-loader.ps1", bootstrap)
+        self.assertIn("SkipClipboard", bootstrap)
+        self.assertIn("[int]$MinimumContractVersion = 4", resolver)
+        self.assertIn("contractVersion >= 4", contract)
         self.assertIn("LoaderPath", contract)
+        self.assertIn("CopyLoaderToClipboard", contract)
 
     def test_connector_ci_checks_bundled_plugin_contract(self):
         workflow = (ROOT / ".github" / "workflows" / "verify.yml").read_text(encoding="utf-8")

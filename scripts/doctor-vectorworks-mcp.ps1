@@ -12,6 +12,7 @@ $ErrorActionPreference = "Stop"
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $LauncherPath = Join-Path $RepoRoot "vw_start_listener_2024.py"
+$LoaderPath = Join-Path $RepoRoot "vw_load_listener_2024.py"
 $NativeCheckerPath = Join-Path $RepoRoot "scripts\check-native-bridge-prereqs.ps1"
 $ProjectMcpPath = Join-Path $RepoRoot ".mcp.json"
 $ServerPath = Join-Path $RepoRoot "server.py"
@@ -119,6 +120,11 @@ function Get-PortOwners {
     }
 }
 
+function ConvertTo-PythonRawStringLiteralText {
+    param([string]$Value)
+    return $Value.Replace("\", "\\").Replace('"', '\"')
+}
+
 $Findings = @()
 $NextActions = New-Object System.Collections.Generic.List[string]
 
@@ -151,6 +157,24 @@ if (Test-Path -LiteralPath $LauncherPath) {
 }
 $Findings += New-Finding -Name "launcher" -Status $LauncherStatus -Detail $LauncherDetail
 
+$LoaderStatus = "missing"
+$LoaderDetail = $LoaderPath
+if (Test-Path -LiteralPath $LoaderPath) {
+    $LoaderText = Get-Content -Raw -LiteralPath $LoaderPath
+    $ExpectedLauncherLiteral = ConvertTo-PythonRawStringLiteralText $LauncherPath
+    if ($LoaderText -match "runpy\.run_path" -and $LoaderText.Contains($ExpectedLauncherLiteral)) {
+        $LoaderStatus = "ok"
+        $LoaderDetail = "stable loader: $LoaderPath"
+    } else {
+        $LoaderStatus = "stale"
+        $LoaderDetail = "loader exists but does not point to the generated launcher"
+        $NextActions.Add("Run scripts\copy-vectorworks-loader.ps1 -Regenerate, then replace the old Vectorworks script/menu command with the clipboard contents.")
+    }
+} else {
+    $NextActions.Add("Run scripts\copy-vectorworks-loader.ps1 -Regenerate to create and copy vw_load_listener_2024.py.")
+}
+$Findings += New-Finding -Name "loader" -Status $LoaderStatus -Detail $LoaderDetail
+
 $Ping = $null
 $PingError = ""
 try {
@@ -159,13 +183,13 @@ try {
         $Result = $Ping.result
         $Findings += New-Finding -Name "listener ping" -Status "ok" -Detail ("bridge={0}; mode={1}; cad_api_safe={2}; transport_only={3}" -f $Result.bridge_kind, $Result.dispatch_mode, $Result.cad_api_safe, $Result.transport_only)
         if ($Result.transport_only -or $Result.cad_api_safe -eq $false) {
-            $NextActions.Add("Do not call CAD handlers. Regenerate/run the dialog launcher, or build the native SDK bridge.")
+            $NextActions.Add("Do not call CAD handlers. Regenerate/copy/run the stable loader, or build the native SDK bridge.")
         } else {
             $NextActions.Add("Listener is CAD-safe. Use vw_get_document_info next before CAD work.")
         }
     } else {
         $Findings += New-Finding -Name "listener ping" -Status "error" -Detail $Ping.error
-        $NextActions.Add("Listener answered with an error; rerun the dialog launcher or inspect Vectorworks alerts.")
+        $NextActions.Add("Listener answered with an error; rerun the stable loader or inspect Vectorworks alerts.")
     }
 } catch {
     $PingError = $_.Exception.Message
@@ -176,7 +200,7 @@ $PortOwners = @(Get-PortOwners -PortNumber $Port)
 if ($PortOwners.Count -eq 0) {
     $Findings += New-Finding -Name "port owner" -Status "none" -Detail "nothing owns $HostName`:$Port"
     if (-not $Ping) {
-        $NextActions.Add("Open Vectorworks 2024 and run the generated dialog launcher.")
+        $NextActions.Add("Open Vectorworks 2024 and run the generated loader.")
     }
 } else {
     $OwnerSummary = ($PortOwners | ForEach-Object { "{0}({1}) responding={2}" -f $_.processName, $_.id, $_.responding }) -join "; "
@@ -184,7 +208,7 @@ if ($PortOwners.Count -eq 0) {
     if (-not $Ping) {
         $UnresponsiveVectorworks = @($PortOwners | Where-Object { $_.processName -like "Vectorworks*" -and $_.responding -eq $false })
         if ($UnresponsiveVectorworks.Count -gt 0) {
-            $NextActions.Add("Vectorworks owns the port but is not responding. Save if possible, then restart Vectorworks before running the dialog launcher.")
+            $NextActions.Add("Vectorworks owns the port but is not responding. Save if possible, then restart Vectorworks before running the stable loader.")
         } else {
             $NextActions.Add("Port $Port is owned but ping failed. Create ~/.vectorworks-mcp/STOP; if it stays stuck, restart Vectorworks.")
         }
@@ -210,7 +234,7 @@ if ($NextActions.Count -eq 0) {
 }
 
 $Overall = "needs-attention"
-if ($Ping -and $Ping.success -and $Ping.result.cad_api_safe -eq $true -and $LauncherStatus -eq "ok") {
+if ($Ping -and $Ping.success -and $Ping.result.cad_api_safe -eq $true -and $LauncherStatus -eq "ok" -and $LoaderStatus -eq "ok") {
     $Overall = "cad-ready"
 } elseif ($Ping -and $Ping.success -and ($Ping.result.transport_only -or $Ping.result.cad_api_safe -eq $false)) {
     $Overall = "transport-only"

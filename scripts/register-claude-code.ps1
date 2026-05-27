@@ -10,6 +10,8 @@ param(
     [string]$LoaderPath = "",
     [switch]$SkipInstall,
     [switch]$NoClaudeConfig,
+    [switch]$CopyLoaderToClipboard,
+    [switch]$BestEffortClipboard,
     [switch]$Verify
 )
 
@@ -20,6 +22,7 @@ $ServerPath = Join-Path $RepoRoot "server.py"
 $ListenerPath = Join-Path $RepoRoot "vw_listener.py"
 $RunnerPath = Join-Path $RepoRoot "scripts\run-mcp-server.ps1"
 $VerifierPath = Join-Path $RepoRoot "scripts\verify-no-vectorworks.ps1"
+$CopyLoaderPath = Join-Path $RepoRoot "scripts\copy-vectorworks-loader.ps1"
 
 if (-not $LauncherPath) {
     $LauncherPath = Join-Path $RepoRoot "vw_start_listener_2024.py"
@@ -200,6 +203,15 @@ Write-Host "Listener address: $ListenHost`:$Port"
 Write-Host "Vectorworks launcher: $GeneratedLauncherPath"
 Write-Host "Vectorworks loader to paste/install: $GeneratedLoaderPath"
 Write-Host "MCP runner: $RunnerPath"
+
+if ($CopyLoaderToClipboard) {
+    $CopyArgs = @("-LauncherPath", $GeneratedLauncherPath, "-LoaderPath", $GeneratedLoaderPath)
+    if ($BestEffortClipboard) { $CopyArgs += "-BestEffort" }
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $CopyLoaderPath @CopyArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "copy-vectorworks-loader.ps1 failed with exit code $LASTEXITCODE"
+    }
+}
 
 if ($Verify) {
     & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $VerifierPath -Name $Name -LauncherPath $GeneratedLauncherPath -LoaderPath $GeneratedLoaderPath

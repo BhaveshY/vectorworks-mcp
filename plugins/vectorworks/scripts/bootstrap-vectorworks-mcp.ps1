@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$SkipVerify,
-    [switch]$SkipContract
+    [switch]$SkipContract,
+    [switch]$SkipClipboard
 )
 
 $ErrorActionPreference = "Stop"
@@ -17,6 +18,7 @@ $ContractCheck = Join-Path $PSScriptRoot "check-companion-contract.ps1"
 $Runner = Join-Path $RepoRoot "scripts\run-mcp-server.ps1"
 $Register = Join-Path $RepoRoot "scripts\register-claude-code.ps1"
 $Verify = Join-Path $RepoRoot "scripts\verify-no-vectorworks.ps1"
+$CopyLoader = Join-Path $PSScriptRoot "copy-vectorworks-loader.ps1"
 $Launcher = Join-Path $RepoRoot "vw_start_listener_2024.py"
 $Loader = Join-Path $RepoRoot "vw_load_listener_2024.py"
 
@@ -36,6 +38,15 @@ if (-not $SkipVerify) {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
+if (-not $SkipClipboard) {
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $CopyLoader -LauncherPath $Launcher -LoaderPath $Loader -BestEffort
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
+
 Write-Host "OK: generated Vectorworks launcher at $Launcher"
 Write-Host "OK: generated Vectorworks loader at $Loader"
-Write-Host "Next: paste/run the loader inside Vectorworks, then run scripts\test-vectorworks-listener.ps1."
+if ($SkipClipboard) {
+    Write-Host "Next: copy the loader with scripts\copy-vectorworks-loader.ps1, paste it inside Vectorworks, then run scripts\test-vectorworks-listener.ps1."
+} else {
+    Write-Host "Next: paste/run the clipboard loader inside Vectorworks, then run scripts\test-vectorworks-listener.ps1."
+}

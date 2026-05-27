@@ -32,7 +32,7 @@ class AgentReadinessTests(unittest.TestCase):
         marker = json.loads((ROOT / ".vectorworks-mcp-contract.json").read_text(encoding="utf-8"))
 
         self.assertEqual(marker["name"], "vectorworks-mcp")
-        self.assertGreaterEqual(marker["contractVersion"], 3)
+        self.assertGreaterEqual(marker["contractVersion"], 4)
 
     def test_bootstrap_scripts_exist(self):
         for relative_path in (
@@ -42,6 +42,7 @@ class AgentReadinessTests(unittest.TestCase):
             "scripts/build-native-bridge.ps1",
             "scripts/check-bundled-plugin-contract.ps1",
             "scripts/check-native-bridge-prereqs.ps1",
+            "scripts/copy-vectorworks-loader.ps1",
             "scripts/doctor-vectorworks-mcp.ps1",
             "scripts/doctor-native-bridge.ps1",
             "scripts/prepare-native-bridge-source.ps1",
@@ -67,6 +68,8 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("New-VectorworksLoader", register_script)
         self.assertIn("vw_load_listener_2024.py", register_script)
         self.assertIn('VW_MCP_PREFLIGHT_CACHE_MS = "750"', register_script)
+        self.assertIn("CopyLoaderToClipboard", register_script)
+        self.assertIn("copy-vectorworks-loader.ps1", register_script)
 
         launcher_path = ROOT / "vw_start_listener_2024.py"
         if launcher_path.exists():
@@ -79,6 +82,46 @@ class AgentReadinessTests(unittest.TestCase):
             loader_text = loader_path.read_text(encoding="utf-8")
             self.assertIn("runpy.run_path", loader_text)
             self.assertIn("vw_start_listener_2024.py", loader_text)
+
+    def test_copy_loader_helper_regenerates_and_captures_loader_text(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise the loader clipboard helper")
+        if not os.environ.get("USERPROFILE"):
+            self.skipTest("USERPROFILE is required for the generated Windows launcher")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            launcher_path = Path(temp_dir) / "vw_start_listener_2024.py"
+            loader_path = Path(temp_dir) / "vw_load_listener_2024.py"
+            script = str(ROOT / "scripts/copy-vectorworks-loader.ps1").replace("'", "''")
+            launcher = str(launcher_path).replace("'", "''")
+            loader = str(loader_path).replace("'", "''")
+            command = (
+                "$global:VW_TEST_CLIPBOARD = ''; "
+                "function Set-Clipboard { param([string]$Value) $global:VW_TEST_CLIPBOARD = $Value }; "
+                f"& '{script}' -LauncherPath '{launcher}' -LoaderPath '{loader}' -Regenerate -Print; "
+                "if (-not $global:VW_TEST_CLIPBOARD.Contains('runpy.run_path')) { throw 'clipboard capture missing loader text' }"
+            )
+            result = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    command,
+                ],
+                cwd=str(ROOT),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertTrue(loader_path.exists())
+            self.assertIn("runpy.run_path", result.stdout)
+            self.assertIn(str(launcher_path).replace("\\", "\\\\"), loader_path.read_text(encoding="utf-8"))
 
     def test_no_vectorworks_verifier_generates_fresh_launcher_by_default(self):
         verifier = (ROOT / "scripts/verify-no-vectorworks.ps1").read_text(encoding="utf-8")
@@ -356,6 +399,9 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("cad_api_safe", doctor)
         self.assertIn("transport_only", doctor)
         self.assertIn("check-native-bridge-prereqs.ps1", doctor)
+        self.assertIn("LoaderStatus", doctor)
+        self.assertIn("copy-vectorworks-loader.ps1", doctor)
+        self.assertIn("stable loader", doctor)
 
     def test_native_smoke_script_is_documented(self):
         smoke_script = (ROOT / "scripts/smoke-native-bridge.ps1").read_text(encoding="utf-8")

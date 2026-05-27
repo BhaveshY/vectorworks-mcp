@@ -27,6 +27,7 @@ try {
 $RequiredScripts = @(
     "scripts\run-mcp-server.ps1",
     "scripts\register-claude-code.ps1",
+    "scripts\copy-vectorworks-loader.ps1",
     "scripts\verify-no-vectorworks.ps1",
     "scripts\test-vectorworks-listener.ps1",
     "scripts\doctor-vectorworks-mcp.ps1",
@@ -50,10 +51,10 @@ try {
 try {
     $ContractVersion = [int]$Contract.contractVersion
 } catch {
-    throw "Companion repo contract marker is incompatible. Expected numeric contractVersion >= 3."
+    throw "Companion repo contract marker is incompatible. Expected numeric contractVersion >= 4."
 }
-if ($Contract.name -ne "vectorworks-mcp" -or $ContractVersion -lt 3) {
-    throw "Companion repo contract marker is incompatible. Expected vectorworks-mcp contractVersion >= 3."
+if ($Contract.name -ne "vectorworks-mcp" -or $ContractVersion -lt 4) {
+    throw "Companion repo contract marker is incompatible. Expected vectorworks-mcp contractVersion >= 4."
 }
 
 $Missing = @()
@@ -109,9 +110,15 @@ function Get-ScriptParameterNames {
 }
 
 $RegisterParams = @(Get-ScriptParameterNames -Path (Join-Path $RepoRoot "scripts\register-claude-code.ps1"))
-foreach ($RequiredParam in @("LauncherPath", "LoaderPath")) {
+foreach ($RequiredParam in @("LauncherPath", "LoaderPath", "CopyLoaderToClipboard", "BestEffortClipboard")) {
     if ($RequiredParam -notin $RegisterParams) {
         throw "Companion register-claude-code.ps1 does not expose required parameter: $RequiredParam"
+    }
+}
+$CopyParams = @(Get-ScriptParameterNames -Path (Join-Path $RepoRoot "scripts\copy-vectorworks-loader.ps1"))
+foreach ($RequiredParam in @("LauncherPath", "LoaderPath", "Regenerate", "Print", "BestEffort")) {
+    if ($RequiredParam -notin $CopyParams) {
+        throw "Companion copy-vectorworks-loader.ps1 does not expose required parameter: $RequiredParam"
     }
 }
 $VerifyParams = @(Get-ScriptParameterNames -Path (Join-Path $RepoRoot "scripts\verify-no-vectorworks.ps1"))
@@ -279,6 +286,7 @@ foreach ($Key in @("VW_MCP_HOST", "VW_MCP_PORT", "VW_MCP_TIMEOUT", "VW_MCP_PREFL
 }
 
 $WrapperParamContracts = @{
+    "scripts\copy-vectorworks-loader.ps1" = "scripts\copy-vectorworks-loader.ps1"
     "scripts\test-vectorworks-listener.ps1" = "scripts\test-vectorworks-listener.ps1"
     "scripts\doctor-vectorworks-mcp.ps1" = "scripts\doctor-vectorworks-mcp.ps1"
     "scripts\doctor-native-bridge.ps1" = "scripts\doctor-native-bridge.ps1"

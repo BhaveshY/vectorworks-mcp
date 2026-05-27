@@ -35,6 +35,7 @@ $RequiredFiles = @(
     ".claude-plugin\marketplace.json",
     "references\tool-map.md",
     "scripts\bootstrap-vectorworks-mcp.ps1",
+    "scripts\copy-vectorworks-loader.ps1",
     "scripts\diagnose-vectorworks-mcp.ps1",
     "scripts\doctor-vectorworks-mcp.ps1",
     "scripts\doctor-native-bridge.ps1",
@@ -88,6 +89,7 @@ if ($Resolver -notmatch "InstallIfMissing" -or $Resolver -notmatch "RequireContr
 foreach ($RelativePath in @(
     "scripts\run-vectorworks-mcp.ps1",
     "scripts\bootstrap-vectorworks-mcp.ps1",
+    "scripts\copy-vectorworks-loader.ps1",
     "scripts\diagnose-vectorworks-mcp.ps1",
     "scripts\doctor-vectorworks-mcp.ps1",
     "scripts\test-vectorworks-listener.ps1",
@@ -134,6 +136,7 @@ if ($StandalonePluginPath) {
         ".claude-plugin\marketplace.json",
         "references\tool-map.md",
         "scripts\bootstrap-vectorworks-mcp.ps1",
+        "scripts\copy-vectorworks-loader.ps1",
         "scripts\diagnose-vectorworks-mcp.ps1",
         "scripts\doctor-vectorworks-mcp.ps1",
         "scripts\doctor-native-bridge.ps1",

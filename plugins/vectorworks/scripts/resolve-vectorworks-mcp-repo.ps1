@@ -6,7 +6,7 @@ param(
     [string]$InstallRepoUrl = "https://github.com/BhaveshY/vectorworks-mcp.git",
     [switch]$RequireContract,
     [ValidateRange(1, 100)]
-    [int]$MinimumContractVersion = 3
+    [int]$MinimumContractVersion = 4
 )
 
 $ErrorActionPreference = "Stop"

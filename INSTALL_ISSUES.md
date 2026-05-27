@@ -1,5 +1,9 @@
 # vectorworks-mcp install log
 
+Historical note: this is an archived install log from an early setup attempt,
+not the current setup guide. Prefer `README.md`, `AGENTS.md`, and
+`scripts\doctor-vectorworks-mcp.ps1` for current agent instructions.
+
 Install attempt on 2026-05-20 — Windows 11 Pro 10.0.26200, Python 3.12.10, PowerShell + Git Bash.
 Repo head at install time: `b81e24e` (after `git pull` from origin/main).
 

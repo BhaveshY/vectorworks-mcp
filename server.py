@@ -764,13 +764,13 @@ def _evaluate_cad_preflight_status(status: Any, blocked_action: Optional[str] = 
 
     if status.get("transport_only") is True:
         reason = "transport_only_bridge"
-        next_action = "Do not call CAD handlers. Regenerate/run the dialog launcher or use a compiled native SDK bridge."
+        next_action = "Do not call CAD handlers. Regenerate/copy/run the stable loader or use a compiled native SDK bridge."
     elif "cad_api_safe" not in status:
         reason = "legacy_status_without_cad_api_safe"
         next_action = "Update/regenerate the Vectorworks listener before real CAD work."
     else:
         reason = "listener_reports_cad_api_unsafe"
-        next_action = "Do not call CAD handlers until the dialog launcher or native SDK bridge is active."
+        next_action = "Do not call CAD handlers until the stable loader or native SDK bridge is active."
 
     return _with_block_context(
         {

@@ -8,7 +8,8 @@
 - `native_bridge/HANDLER_MATRIX.md` is the handler-by-handler implementation map for the native SDK bridge.
 - `native_bridge/mock/mock_bridge.py` is a no-SDK contract harness for host/native protocol compatibility.
 - `scripts/run-mcp-server.ps1` is the self-bootstrapping MCP entrypoint. It creates `.venv`, installs `requirements.txt`, then launches `server.py`.
-- `scripts/register-claude-code.ps1` is the primary Windows setup command. It is idempotent: it refreshes dependencies, generates `vw_start_listener_2024.py` plus the stable `vw_load_listener_2024.py` Vectorworks loader, and updates the `vectorworks` MCP server entry.
+- `scripts/register-claude-code.ps1` is the primary Windows setup command. It is idempotent: it refreshes dependencies, generates `vw_start_listener_2024.py` plus the stable `vw_load_listener_2024.py` Vectorworks loader, can copy the loader text to the clipboard, and updates the `vectorworks` MCP server entry.
+- `scripts/copy-vectorworks-loader.ps1` is the first-class Vectorworks handoff helper. Use it whenever the user or an agent is unsure what to paste into Vectorworks.
 - `plugins/vectorworks/` is the Claude Code plugin. Keep its manifest, skills, scripts, and `.mcp.json` aligned with the repo scripts.
 
 ## Windows Baseline
@@ -37,6 +38,7 @@ This does not require Vectorworks. It should create/update:
 - `.venv\`
 - `vw_start_listener_2024.py` with `os.environ["VW_MCP_MODE"] = "dialog"`
 - `vw_load_listener_2024.py`, the stable script/menu loader to paste into Vectorworks
+- clipboard contents set to that stable loader script when the desktop clipboard is available
 - project `.mcp.json`
 - user `~\.claude.json` when the `claude` CLI is not available
 
@@ -120,7 +122,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run-mcp-server.ps1 -SetupOnly
 End-to-end tests require the user to open Vectorworks. Do not claim full end-to-end success unless these have happened:
 
 - Vectorworks 2024/2025 is open.
-- The generated `vw_load_listener_2024.py` has been pasted into Resource Manager or installed as a Plug-in Manager menu command. It should run the current `vw_start_listener_2024.py` from disk and open a `VW MCP Listener` dialog; leave that dialog open while the agent controls Vectorworks, then stop/close it for manual work.
+- The generated `vw_load_listener_2024.py` has been copied with `scripts\copy-vectorworks-loader.ps1`, then pasted into Resource Manager or installed as a Plug-in Manager menu command. It should run the current `vw_start_listener_2024.py` from disk and open a `VW MCP Listener` dialog; leave that dialog open while the agent controls Vectorworks, then stop/close it for manual work.
 - Claude Code has been restarted after MCP registration.
 - `/mcp` shows `vectorworks`.
 - First tool call is `vw_ping`; do not treat listener startup as fully proven until this works.
