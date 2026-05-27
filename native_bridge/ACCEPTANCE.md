@@ -17,11 +17,17 @@ what is installed or missing.
 2. Enable the native bridge plug-in.
 3. Confirm Vectorworks can still be clicked, panned, and used while the bridge
    is idle.
-4. Run `vw_ping` ten times.
-5. Run `vw_get_document_info` ten times.
-6. Run `vw_get_layers` ten times.
-7. Create and delete a simple rectangle in a test document.
-8. Stop the bridge and confirm port `9877` is released.
+4. Run the native smoke harness:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Json
+```
+
+Expected result: `ok: true`, `native_bridge: true`, `cad_api_safe: true`, and
+no read-handler timeouts.
+
+5. Create and delete a simple rectangle in a test document.
+6. Stop the bridge and confirm port `9877` is released.
 
 Record:
 

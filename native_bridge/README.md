@@ -109,6 +109,16 @@ extension code with the MCP bridge:
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
 ```
 
+After a compiled native bridge is loaded in Vectorworks, run the native smoke
+harness:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Json
+```
+
+It speaks the raw bridge protocol directly, requires a native CAD-safe bridge by
+default, and repeats `ping`, `get_document_info`, and `get_layers`.
+
 The generated worktree lives under `native_bridge/worktree/SDKExamples/` and is
 ignored by git. It preserves the official examples' relative layout so the
 Visual Studio project can find `VectorworksSDK` and `ThirdPartySource`. Copy

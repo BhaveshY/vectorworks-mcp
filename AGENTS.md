@@ -96,6 +96,7 @@ worktree and prove the unmodified Vectorworks example builds:
 powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-native-bridge.ps1 -InstallVisualStudioBuildTools -DownloadSdk -CloneSdkExamples -PrepareSource
 powershell -ExecutionPolicy Bypass -File .\scripts\prepare-native-bridge-source.ps1 -CloneSdkExamples
 powershell -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Json
 ```
 
 The installer flags are opt-in because they can download large SDK files and

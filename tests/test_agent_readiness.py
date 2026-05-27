@@ -37,6 +37,7 @@ class AgentReadinessTests(unittest.TestCase):
             "scripts/prepare-native-bridge-source.ps1",
             "scripts/register-claude-code.ps1",
             "scripts/run-mcp-server.ps1",
+            "scripts/smoke-native-bridge.ps1",
             "scripts/verify-no-vectorworks.ps1",
             ".github/workflows/verify.yml",
         ):
@@ -99,6 +100,7 @@ class AgentReadinessTests(unittest.TestCase):
             "native_bridge/HANDLER_MATRIX.md",
             "native_bridge/SDK_REQUIREMENTS.json",
             "native_bridge/mock/mock_bridge.py",
+            "native_bridge/smoke.py",
             "native_bridge/src/README.md",
         )
         for relative_path in expected_files:
@@ -261,6 +263,17 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("cad_api_safe", doctor)
         self.assertIn("transport_only", doctor)
         self.assertIn("check-native-bridge-prereqs.ps1", doctor)
+
+    def test_native_smoke_script_is_documented(self):
+        smoke_script = (ROOT / "scripts/smoke-native-bridge.ps1").read_text(encoding="utf-8")
+        acceptance = (ROOT / "native_bridge/ACCEPTANCE.md").read_text(encoding="utf-8")
+        native_readme = (ROOT / "native_bridge/README.md").read_text(encoding="utf-8")
+
+        self.assertIn("native_bridge\\smoke.py", smoke_script)
+        self.assertIn("--ping-count", smoke_script)
+        self.assertIn("--read-count", smoke_script)
+        self.assertIn("smoke-native-bridge.ps1", acceptance)
+        self.assertIn("smoke-native-bridge.ps1", native_readme)
 
     def test_native_prereq_checker_reports_supported_versions_for_unknown_version(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")

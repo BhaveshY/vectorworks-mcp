@@ -7,6 +7,7 @@ import unittest
 
 import server
 from native_bridge.mock.mock_bridge import MockNativeBridge
+from native_bridge.smoke import run_smoke
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -137,6 +138,36 @@ class NativeBridgeContractTests(unittest.TestCase):
 
         self.assertEqual(result, "Mock bridge stop requested")
         self.assertTrue(_wait_for_port_released(port))
+
+    def test_native_smoke_harness_accepts_mock_bridge(self):
+        with MockNativeBridge() as bridge:
+            report = run_smoke(port=bridge.port, ping_count=3, read_count=2, timeout=1)
+
+        self.assertTrue(report["ok"], report["failures"])
+        self.assertEqual(len(report["checks"]), 7)
+        self.assertEqual(
+            [request["action"] for request in bridge.requests],
+            ["ping", "ping", "ping", "get_document_info", "get_document_info", "get_layers", "get_layers"],
+        )
+
+    def test_native_smoke_harness_rejects_transport_only_bridge(self):
+        status = {
+            "pong": True,
+            "handlers": 1,
+            "version": "mock-transport-only",
+            "bridge_kind": "python_transport_only",
+            "dispatch_mode": "background",
+            "cad_api_safe": False,
+            "transport_only": True,
+            "native_bridge": False,
+        }
+        with MockNativeBridge(status=status) as bridge:
+            report = run_smoke(port=bridge.port, ping_count=1, read_count=1, timeout=1)
+
+        self.assertFalse(report["ok"])
+        self.assertIn("bridge did not report cad_api_safe=true", report["failures"])
+        self.assertIn("bridge reported transport_only=true", report["failures"])
+        self.assertIn("bridge did not report native_bridge=true", report["failures"])
 
     def test_handler_matrix_matches_listener_and_server_wire_actions(self):
         listener_handlers = _listener_handlers()

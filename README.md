@@ -42,6 +42,8 @@ Native bridge planning aids:
   source worktree from Vectorworks' official SDK examples.
 - `scripts/build-native-bridge.ps1` builds that worktree after native
   prerequisites are present.
+- `scripts/smoke-native-bridge.ps1` verifies a loaded native bridge with
+  repeated raw-protocol ping and read-only CAD calls.
 
 Native bridge prerequisite check:
 
@@ -73,6 +75,7 @@ the native worktree:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\prepare-native-bridge-source.ps1 -CloneSdkExamples
 powershell -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Json
 ```
 
 ## Agent-Ready Setup
