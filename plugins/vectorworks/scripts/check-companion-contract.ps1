@@ -31,6 +31,7 @@ $RequiredScripts = @(
     "scripts\test-vectorworks-listener.ps1",
     "scripts\doctor-vectorworks-mcp.ps1",
     "scripts\check-native-bridge-prereqs.ps1",
+    "scripts\doctor-native-bridge.ps1",
     "scripts\bootstrap-native-bridge.ps1",
     "scripts\prepare-native-bridge-source.ps1",
     "scripts\build-native-bridge.ps1",
@@ -49,10 +50,10 @@ try {
 try {
     $ContractVersion = [int]$Contract.contractVersion
 } catch {
-    throw "Companion repo contract marker is incompatible. Expected numeric contractVersion >= 2."
+    throw "Companion repo contract marker is incompatible. Expected numeric contractVersion >= 3."
 }
-if ($Contract.name -ne "vectorworks-mcp" -or $ContractVersion -lt 2) {
-    throw "Companion repo contract marker is incompatible. Expected vectorworks-mcp contractVersion >= 2."
+if ($Contract.name -ne "vectorworks-mcp" -or $ContractVersion -lt 3) {
+    throw "Companion repo contract marker is incompatible. Expected vectorworks-mcp contractVersion >= 3."
 }
 
 $Missing = @()
@@ -105,6 +106,19 @@ function Get-ScriptParameterNames {
         return @()
     }
     return @($Ast.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+}
+
+$RegisterParams = @(Get-ScriptParameterNames -Path (Join-Path $RepoRoot "scripts\register-claude-code.ps1"))
+foreach ($RequiredParam in @("LauncherPath", "LoaderPath")) {
+    if ($RequiredParam -notin $RegisterParams) {
+        throw "Companion register-claude-code.ps1 does not expose required parameter: $RequiredParam"
+    }
+}
+$VerifyParams = @(Get-ScriptParameterNames -Path (Join-Path $RepoRoot "scripts\verify-no-vectorworks.ps1"))
+foreach ($RequiredParam in @("LauncherPath", "LoaderPath")) {
+    if ($RequiredParam -notin $VerifyParams) {
+        throw "Companion verify-no-vectorworks.ps1 does not expose required parameter: $RequiredParam"
+    }
 }
 
 $Python = Get-FirstPythonCommand
@@ -267,6 +281,7 @@ foreach ($Key in @("VW_MCP_HOST", "VW_MCP_PORT", "VW_MCP_TIMEOUT", "VW_MCP_PREFL
 $WrapperParamContracts = @{
     "scripts\test-vectorworks-listener.ps1" = "scripts\test-vectorworks-listener.ps1"
     "scripts\doctor-vectorworks-mcp.ps1" = "scripts\doctor-vectorworks-mcp.ps1"
+    "scripts\doctor-native-bridge.ps1" = "scripts\doctor-native-bridge.ps1"
     "scripts\bootstrap-native-bridge.ps1" = "scripts\bootstrap-native-bridge.ps1"
     "scripts\prepare-native-bridge-source.ps1" = "scripts\prepare-native-bridge-source.ps1"
     "scripts\build-native-bridge.ps1" = "scripts\build-native-bridge.ps1"

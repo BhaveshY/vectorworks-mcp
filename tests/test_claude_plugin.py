@@ -62,6 +62,7 @@ class ClaudePluginTests(unittest.TestCase):
             "scripts/test-vectorworks-listener.ps1",
             "scripts/diagnose-vectorworks-mcp.ps1",
             "scripts/doctor-vectorworks-mcp.ps1",
+            "scripts/doctor-native-bridge.ps1",
             "scripts/check-companion-contract.ps1",
             "scripts/bootstrap-native-bridge.ps1",
             "scripts/prepare-native-bridge-source.ps1",
@@ -139,6 +140,8 @@ class ClaudePluginTests(unittest.TestCase):
     def test_plugin_skills_mention_host_side_blocked_guard(self):
         work = (PLUGIN / "skills" / "work" / "SKILL.md").read_text(encoding="utf-8")
         diagnose = (PLUGIN / "skills" / "diagnose" / "SKILL.md").read_text(encoding="utf-8")
+        setup = (PLUGIN / "skills" / "setup" / "SKILL.md").read_text(encoding="utf-8")
+        ping = (PLUGIN / "skills" / "ping" / "SKILL.md").read_text(encoding="utf-8")
 
         self.assertIn("blocked: true", work)
         self.assertIn("vw_tool_safety", work)
@@ -146,6 +149,8 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("blocked: true", diagnose)
         self.assertIn("host-side safety guard", diagnose)
         self.assertIn("unknown commit state", diagnose)
+        self.assertIn("vw_load_listener_2024.py", setup)
+        self.assertIn("vw_load_listener_2024.py", ping)
 
     def test_plugin_tool_map_documents_safety_metadata_and_mixed_actions(self):
         tool_map = (PLUGIN / "references" / "tool-map.md").read_text(encoding="utf-8")
@@ -175,6 +180,7 @@ class ClaudePluginTests(unittest.TestCase):
             "scripts/bootstrap-vectorworks-mcp.ps1",
             "scripts/diagnose-vectorworks-mcp.ps1",
             "scripts/doctor-vectorworks-mcp.ps1",
+            "scripts/doctor-native-bridge.ps1",
             "scripts/test-vectorworks-listener.ps1",
             "scripts/bootstrap-native-bridge.ps1",
             "scripts/prepare-native-bridge-source.ps1",
@@ -185,8 +191,15 @@ class ClaudePluginTests(unittest.TestCase):
             self.assertIn("-RequireContract", text, relative_path)
 
         bootstrap = (PLUGIN / "scripts" / "bootstrap-vectorworks-mcp.ps1").read_text(encoding="utf-8")
+        resolver = (PLUGIN / "scripts" / "resolve-vectorworks-mcp-repo.ps1").read_text(encoding="utf-8")
+        contract = (PLUGIN / "scripts" / "check-companion-contract.ps1").read_text(encoding="utf-8")
         self.assertIn("check-companion-contract.ps1", bootstrap)
         self.assertIn("-RepoPath", bootstrap)
+        self.assertIn("vw_load_listener_2024.py", bootstrap)
+        self.assertIn("-LoaderPath", bootstrap)
+        self.assertIn("[int]$MinimumContractVersion = 3", resolver)
+        self.assertIn("contractVersion >= 3", contract)
+        self.assertIn("LoaderPath", contract)
 
     def test_connector_ci_checks_bundled_plugin_contract(self):
         workflow = (ROOT / ".github" / "workflows" / "verify.yml").read_text(encoding="utf-8")

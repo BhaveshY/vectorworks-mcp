@@ -23,8 +23,8 @@ os.environ["VW_MCP_MODE"] = "dialog"
 os.environ["VW_MCP_DIALOG_TIMER_MS"] = "50"
 ```
 
-4. Tell the user to replace any old Vectorworks Resource Manager or Plug-in Manager script with the generated `vw_start_listener_2024.py`.
-5. After the user runs the launcher inside Vectorworks, run the ping wrapper:
+4. Tell the user to replace any old Vectorworks Resource Manager or Plug-in Manager script with the generated `vw_load_listener_2024.py`. That loader runs the current `vw_start_listener_2024.py` from disk, so future setup repairs do not leave stale pasted listener code inside Vectorworks.
+5. After the user runs the loader inside Vectorworks, run the ping wrapper:
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}\scripts\test-vectorworks-listener.ps1"
@@ -36,6 +36,6 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN
 
 - `/mcp` is only an interactive Claude Code command. Do not rely on it in Codex, Cursor, or non-interactive shells.
 - The tool name is `vw_ping`, not `vw-ping`.
-- If Vectorworks hangs or the raw ping times out while Vectorworks owns the port, the user is probably running a stale foreground/background/timer launcher. Create `~\.vectorworks-mcp\STOP`, regenerate the launcher, and have them paste the dialog agent-session launcher into Vectorworks.
+- If Vectorworks hangs or the raw ping times out while Vectorworks owns the port, the user is probably running a stale foreground/background/timer launcher. Create `~\.vectorworks-mcp\STOP`, regenerate the launcher, and have them replace the Vectorworks script/menu command with the stable `vw_load_listener_2024.py` loader.
 - Background and Windows timer modes are transport-only diagnostics. They may answer `vw_ping`, but real CAD handlers can deadlock outside a normal Vectorworks script or plug-in event context.
 - The long-term non-modal fix is the native Vectorworks SDK bridge scaffold in the companion `vectorworks-mcp` repo. Do not describe it as installed or production-ready until the SDK prerequisites pass and a compiled bridge has been smoke-tested in Vectorworks.

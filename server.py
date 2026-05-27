@@ -666,7 +666,7 @@ def _format_result(value: Any) -> str:
 def _connection_help(error: BaseException) -> str:
     return (
         f"Connection error: {error}. Could not reach the Vectorworks MCP listener on {HOST}:{PORT}. "
-        "Start Vectorworks, run the generated vw_start_listener_2024.py from Resource Manager "
+        "Start Vectorworks, run the generated vw_load_listener_2024.py from Resource Manager "
         "or the installed VW MCP Listener menu command, and verify VW_MCP_HOST/VW_MCP_PORT "
         "match on both sides."
     )
@@ -724,6 +724,24 @@ def _evaluate_cad_preflight_status(status: Any, blocked_action: Optional[str] = 
                 "cad_api_safe": False,
                 "reason": "preflight_ping_non_object",
                 "next_action": "Update/regenerate the Vectorworks listener before real CAD work.",
+                "raw_status": status,
+            },
+            blocked_action,
+        )
+
+    dispatch_mode = str(status.get("dispatch_mode", "") or "").lower()
+    bridge_kind = str(status.get("bridge_kind", "") or "").lower()
+    if dispatch_mode == "foreground" or bridge_kind == "python_foreground_diagnostic":
+        return _with_block_context(
+            {
+                "ok": False,
+                "cad_api_safe": False,
+                "bridge_kind": status.get("bridge_kind", "unknown"),
+                "dispatch_mode": status.get("dispatch_mode", "unknown"),
+                "transport_only": bool(status.get("transport_only")),
+                "native_bridge": bool(status.get("native_bridge")),
+                "reason": "foreground_diagnostic_bridge",
+                "next_action": "Do not call CAD handlers. Replace the old foreground script with vw_load_listener_2024.py or use a compiled native SDK bridge.",
                 "raw_status": status,
             },
             blocked_action,

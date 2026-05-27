@@ -7,6 +7,7 @@ param(
     [ValidateRange(1, 3600)]
     [int]$TimeoutSeconds = 60,
     [string]$LauncherPath = "",
+    [string]$LoaderPath = "",
     [switch]$SkipInstall,
     [switch]$NoClaudeConfig,
     [switch]$Verify
@@ -22,6 +23,9 @@ $VerifierPath = Join-Path $RepoRoot "scripts\verify-no-vectorworks.ps1"
 
 if (-not $LauncherPath) {
     $LauncherPath = Join-Path $RepoRoot "vw_start_listener_2024.py"
+}
+if (-not $LoaderPath) {
+    $LoaderPath = Join-Path $RepoRoot "vw_load_listener_2024.py"
 }
 
 if (-not (Test-Path $ServerPath)) { throw "server.py was not found at $ServerPath" }
@@ -69,6 +73,21 @@ os.environ["VW_MCP_MODE"] = "dialog"
 os.environ["VW_MCP_DIALOG_TIMER_MS"] = "50"
 
 runpy.run_path($ListenerLiteral, run_name="__main__")
+"@
+    Write-AtomicText -Path $Path -Text $Text
+    return $Path
+}
+
+function New-VectorworksLoader {
+    param(
+        [string]$Path,
+        [string]$TargetLauncherPath
+    )
+    $LauncherLiteral = ConvertTo-PythonRawStringLiteral $TargetLauncherPath
+    $Text = @"
+import runpy
+
+runpy.run_path($LauncherLiteral, run_name="__main__")
 "@
     Write-AtomicText -Path $Path -Text $Text
     return $Path
@@ -149,6 +168,7 @@ if (-not $SkipInstall) {
 }
 
 $GeneratedLauncherPath = New-VectorworksLauncher -Path $LauncherPath -HostName $ListenHost -ListenPort $Port
+$GeneratedLoaderPath = New-VectorworksLoader -Path $LoaderPath -TargetLauncherPath $GeneratedLauncherPath
 $Config = New-ClaudeServerConfig -HostName $ListenHost -ListenPort $Port -ToolTimeoutSeconds $TimeoutSeconds
 $Json = $Config | ConvertTo-Json -Depth 10 -Compress
 
@@ -178,9 +198,10 @@ Write-Host "Vectorworks MCP setup complete."
 Write-Host "Repo: $RepoRoot"
 Write-Host "Listener address: $ListenHost`:$Port"
 Write-Host "Vectorworks launcher: $GeneratedLauncherPath"
+Write-Host "Vectorworks loader to paste/install: $GeneratedLoaderPath"
 Write-Host "MCP runner: $RunnerPath"
 
 if ($Verify) {
-    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $VerifierPath -Name $Name -LauncherPath $GeneratedLauncherPath
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $VerifierPath -Name $Name -LauncherPath $GeneratedLauncherPath -LoaderPath $GeneratedLoaderPath
     exit $LASTEXITCODE
 }

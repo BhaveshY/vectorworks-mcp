@@ -1,5 +1,5 @@
 {
   "name": "vectorworks-mcp",
-  "contractVersion": 2,
+  "contractVersion": 3,
   "description": "Companion connector contract marker used by the standalone Claude Code plugin before accepting this checkout."
 }

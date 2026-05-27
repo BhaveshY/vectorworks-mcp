@@ -13,6 +13,8 @@ The tested Python modes behave like this:
 
 - `dialog`: safe for real CAD handlers because requests run from a Vectorworks
   dialog timer callback. It is modal, so it is an agent-control session.
+- `foreground`: legacy diagnostic only. It can monopolize Vectorworks' UI and
+  is blocked for real CAD handlers by host preflight.
 - `background`: transport-only. It can bind a socket, but Vectorworks does not
   reliably service CAD work after the script returns.
 - `win_timer`: transport-only. It can answer `ping`, but CAD handlers can
@@ -131,6 +133,20 @@ default, and runs the phase-1 read gate: `ping`, `get_document_info`,
 test document; it creates a uniquely named rectangle and deletes it only after
 the fixture identity and exact selection are verified. Use `-Phase 0 -Stop` for
 transport-only shutdown/port-release verification.
+
+Before installing a compiled bridge artifact, use the native doctor to inspect
+the current stage and plan the user Plug-ins deployment:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -Json
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\VectorworksMCPBridge.vwlibrary -Install -WhatIf
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\VectorworksMCPBridge.vwlibrary -Install
+```
+
+The doctor does not install anything unless `-Install` is passed with an
+explicit `-BuiltArtifact`. By default it reports prerequisites, source worktree
+state, candidate artifact, target user Plug-ins folder, and the next command an
+agent should run.
 
 The generated worktree lives under `native_bridge/worktree/SDKExamples/` and is
 ignored by git. It preserves the official examples' relative layout so the

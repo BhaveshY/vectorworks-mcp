@@ -144,7 +144,7 @@ if (Test-Path -LiteralPath $LauncherPath) {
     } else {
         $LauncherStatus = "unsafe"
         $LauncherDetail = "launcher exists but is not the dialog agent-session launcher"
-        $NextActions.Add("Run scripts\bootstrap-claude-code.ps1 -Verify, then replace the old Vectorworks script with vw_start_listener_2024.py.")
+        $NextActions.Add("Run scripts\bootstrap-claude-code.ps1 -Verify, then replace the old Vectorworks script/menu command with vw_load_listener_2024.py.")
     }
 } else {
     $NextActions.Add("Run scripts\bootstrap-claude-code.ps1 -Verify to generate vw_start_listener_2024.py.")

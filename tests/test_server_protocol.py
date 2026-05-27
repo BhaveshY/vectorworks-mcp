@@ -143,7 +143,7 @@ class ServerProtocolTests(unittest.TestCase):
 
         self.assertTrue(result.startswith("Connection error:"))
         self.assertIn(f"127.0.0.1:{port}", result)
-        self.assertIn("run the generated vw_start_listener_2024.py", result)
+        self.assertIn("run the generated vw_load_listener_2024.py", result)
 
     def test_bridge_status_tool_uses_ping_action(self):
         calls = []
@@ -614,6 +614,28 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertFalse(preflight["cad_api_safe"])
         self.assertTrue(preflight["transport_only"])
         self.assertEqual(preflight["reason"], "transport_only_bridge")
+
+    def test_cad_preflight_blocks_legacy_foreground_bridge(self):
+        original_send = server._send
+        try:
+            server._send = lambda action, params=None: json.dumps(
+                {
+                    "pong": True,
+                    "cad_api_safe": True,
+                    "transport_only": False,
+                    "bridge_kind": "python_foreground_diagnostic",
+                    "dispatch_mode": "foreground",
+                }
+            )
+            result = server.vw_preflight_for_cad()
+        finally:
+            server._send = original_send
+
+        preflight = json.loads(result)
+        self.assertFalse(preflight["ok"])
+        self.assertFalse(preflight["cad_api_safe"])
+        self.assertEqual(preflight["reason"], "foreground_diagnostic_bridge")
+        self.assertIn("vw_load_listener_2024.py", preflight["next_action"])
 
     def test_cad_preflight_blocks_legacy_status_without_safety_field(self):
         original_send = server._send

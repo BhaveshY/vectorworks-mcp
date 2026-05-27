@@ -28,6 +28,7 @@ transport-only or legacy listeners.
 | Bridge path | Status | Real CAD/API handlers | Manual Vectorworks UI |
 |-------------|--------|-----------------------|------------------------|
 | Python `dialog` listener | supported fallback | yes | modal agent session |
+| Python `foreground` listener | legacy diagnostic only | no, guarded | blocks UI |
 | Python `background` listener | diagnostic only | no, guarded | no reliable scheduling |
 | Python `win_timer` listener | diagnostic only | no, guarded | transport ping only |
 | Native SDK bridge | planned scaffold | intended yes | intended non-modal |
@@ -62,6 +63,12 @@ Fast doctor for the current machine/session:
 powershell -ExecutionPolicy Bypass -File .\scripts\doctor-vectorworks-mcp.ps1
 ```
 
+Native bridge doctor/deploy planner:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -Json
+```
+
 Optional SDK bootstrap helper:
 
 ```powershell
@@ -80,6 +87,7 @@ the native worktree:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\prepare-native-bridge-source.ps1 -CloneSdkExamples
 powershell -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\VectorworksMCPBridge.vwlibrary -Install -WhatIf
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Json
 ```
 
@@ -115,6 +123,7 @@ The setup is idempotent and safe to rerun. It:
 - creates or refreshes `.venv`
 - installs pinned host dependencies
 - generates `vw_start_listener_2024.py` with machine-specific absolute paths and `VW_MCP_MODE=dialog`
+- generates `vw_load_listener_2024.py`, a tiny stable Vectorworks script/menu loader that runs the current launcher file
 - registers the `vectorworks` MCP server with Claude Code
 - falls back to updating `C:\Users\<you>\.claude.json` if `claude` is not on PATH
 - runs no-Vectorworks host verification when `-Verify` is passed
@@ -152,7 +161,7 @@ claude --plugin-dir C:\Users\Bhavesh\repos\vectorworks-mcp\plugins\vectorworks
 
 The plugin adds namespaced skills:
 
-- `/vectorworks:setup` bootstraps dependencies and regenerates the Vectorworks launcher.
+- `/vectorworks:setup` bootstraps dependencies and regenerates the Vectorworks launcher plus stable loader.
 - `/vectorworks:ping` checks the raw listener and then `vw_ping` when MCP tools are loaded.
 - `/vectorworks:diagnose` checks repo resolution, launcher agent-session mode, Claude availability, and listener reachability.
 - `/vectorworks:work` guides CAD/BIM operations with the `vw_*` MCP tools.
@@ -162,11 +171,18 @@ other `vw_*` tools become available when the plugin is enabled.
 
 ## Start Vectorworks Listener
 
-After setup, open the generated file:
+After setup, open the generated loader file:
 
 ```text
-vw_start_listener_2024.py
+vw_load_listener_2024.py
 ```
+
+Paste/install the loader in Vectorworks, not the full launcher. The loader is a
+stable two-line script that runs the regenerated `vw_start_listener_2024.py`
+from disk, so future setup repairs update the launcher without requiring you to
+replace the Vectorworks Resource Manager or menu-command script again. If you
+previously pasted an old full foreground/background launcher, replace it with
+this loader once.
 
 ### One-Session Script
 
@@ -174,7 +190,7 @@ vw_start_listener_2024.py
 2. Open Resource Manager with `Ctrl+R`.
 3. Create `New Resource > Script`.
 4. Choose Python Script.
-5. Paste the generated `vw_start_listener_2024.py`.
+5. Paste the generated `vw_load_listener_2024.py`.
 6. Run the script resource.
 7. A small `VW MCP Listener` dialog should stay open during the agent-control session.
 8. Use `vw_ping` from Claude Code as the real confirmation, then close/stop the dialog when you want manual Vectorworks control back.
@@ -184,7 +200,7 @@ vw_start_listener_2024.py
 1. Open `Tools > Plug-ins > Plug-in Manager`.
 2. Create `New > Menu Command`.
 3. Name it `VW MCP Listener`.
-4. Edit the script and paste the generated `vw_start_listener_2024.py`.
+4. Edit the script and paste the generated `vw_load_listener_2024.py`.
 5. Save it.
 6. Open `Tools > Workspaces > Edit Current Workspace > Menus`.
 7. Drag `VW MCP Listener` into a menu.
@@ -223,7 +239,7 @@ The same no-Vectorworks verification runs in GitHub Actions on Windows.
 Manual equivalent:
 
 ```powershell
-.\.venv\Scripts\python.exe -m py_compile server.py vw_listener.py vw_start_listener_2024.py
+.\.venv\Scripts\python.exe -m py_compile server.py vw_listener.py vw_start_listener_2024.py vw_load_listener_2024.py
 .\.venv\Scripts\python.exe -m unittest discover -v
 ```
 
@@ -278,7 +294,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-agent.ps1 -Verify
 End-to-end requires:
 
 - Vectorworks 2024/2025 open
-- listener started from the generated `vw_start_listener_2024.py`; leave the `VW MCP Listener` dialog open while the agent works
+- listener started through the generated `vw_load_listener_2024.py`; leave the `VW MCP Listener` dialog open while the agent works
 - MCP client restarted after registration
 - `/mcp` showing `vectorworks`
 - first tool call: `vw_ping`
@@ -293,13 +309,14 @@ End-to-end requires:
 `vw_ping` reports a connection error:
 
 - Start Vectorworks.
-- Run the generated `vw_start_listener_2024.py`.
+- Run the generated `vw_load_listener_2024.py` inside Vectorworks.
 - Confirm the `VW MCP Listener` dialog is open on `127.0.0.1:9877`, then verify with `vw_ping`.
 - Check that no previous listener is already using port `9877`.
 
 Vectorworks hangs after running the listener script:
 
 - Regenerate `vw_start_listener_2024.py` with `.\scripts\bootstrap-claude-code.ps1 -Verify`.
+- Replace any old pasted Vectorworks script with `vw_load_listener_2024.py`; it loads the current launcher from disk and prevents stale pasted listener code from lingering in a menu command.
 - Confirm the generated launcher contains `os.environ["VW_MCP_MODE"] = "dialog"`.
 - If Vectorworks is already stuck from an older foreground launcher, create
   `C:\Users\<you>\.vectorworks-mcp\STOP`, wait a few seconds, then restart
@@ -312,7 +329,7 @@ Vectorworks hangs after running the listener script:
   owning process and socket state.
 - Create `C:\Users\<you>\.vectorworks-mcp\STOP` and wait a few seconds.
 - If the port still times out, save your work and restart Vectorworks. Then run
-  the generated launcher again.
+  the generated loader again.
 - Background and Windows timer modes are transport-only diagnostics; they can
   answer `vw_ping`, but real CAD handlers can deadlock outside a normal
   Vectorworks script or plug-in event context.

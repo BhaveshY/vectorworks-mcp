@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$Name = "vectorworks",
-    [string]$LauncherPath = ""
+    [string]$LauncherPath = "",
+    [string]$LoaderPath = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,10 +16,15 @@ $VenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 $ProjectMcpPath = Join-Path $RepoRoot ".mcp.json"
 $NativePrereqPath = Join-Path $RepoRoot "scripts\check-native-bridge-prereqs.ps1"
 $FreshLauncher = $false
+$FreshLoader = $false
 
 if (-not $LauncherPath) {
     $LauncherPath = Join-Path ([System.IO.Path]::GetTempPath()) ("vectorworks-mcp-verify-launcher-{0}.py" -f $PID)
     $FreshLauncher = $true
+}
+if (-not $LoaderPath) {
+    $LoaderPath = Join-Path ([System.IO.Path]::GetTempPath()) ("vectorworks-mcp-verify-loader-{0}.py" -f $PID)
+    $FreshLoader = $true
 }
 
 function Assert-Path {
@@ -56,13 +62,14 @@ Invoke-Checked "bootstrap venv/dependencies" {
 
 Assert-Path $VenvPython "Virtualenv Python"
 
-if ($FreshLauncher -or -not (Test-Path $LauncherPath)) {
+if ($FreshLauncher -or $FreshLoader -or -not (Test-Path $LauncherPath) -or -not (Test-Path $LoaderPath)) {
     Invoke-Checked "generate Vectorworks launcher" {
-        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $RegisterPath -SkipInstall -NoClaudeConfig -LauncherPath $LauncherPath
+        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $RegisterPath -SkipInstall -NoClaudeConfig -LauncherPath $LauncherPath -LoaderPath $LoaderPath
     }
 }
 
 Assert-Path $LauncherPath "Generated Vectorworks launcher"
+Assert-Path $LoaderPath "Generated Vectorworks loader"
 
 $LauncherText = Get-Content -Raw -Path $LauncherPath
 if ($LauncherText -notmatch 'os\.environ\["VW_MCP_MODE"\]\s*=\s*["'']dialog["'']') {
@@ -70,6 +77,14 @@ if ($LauncherText -notmatch 'os\.environ\["VW_MCP_MODE"\]\s*=\s*["'']dialog["'']
 }
 if ($LauncherText -notmatch 'os\.environ\["VW_MCP_DIALOG_TIMER_MS"\]\s*=\s*["'']50["'']') {
     throw "Generated Vectorworks launcher does not set VW_MCP_DIALOG_TIMER_MS=50; regenerate it with scripts\register-claude-code.ps1."
+}
+$LoaderText = Get-Content -Raw -Path $LoaderPath
+if ($LoaderText -notmatch 'runpy\.run_path') {
+    throw "Generated Vectorworks loader does not run the launcher with runpy.run_path; regenerate it with scripts\register-claude-code.ps1."
+}
+$ExpectedLauncherLiteral = $LauncherPath.Replace("\", "\\").Replace('"', '\"')
+if (-not $LoaderText.Contains($ExpectedLauncherLiteral)) {
+    throw "Generated Vectorworks loader does not point at $LauncherPath; regenerate it with scripts\register-claude-code.ps1."
 }
 
 Invoke-Checked "fastmcp import" {
@@ -81,7 +96,7 @@ Invoke-Checked "server import" {
 }
 
 Invoke-Checked "Python compilation" {
-    & $VenvPython -m py_compile $ServerPath $ListenerPath $LauncherPath
+    & $VenvPython -m py_compile $ServerPath $ListenerPath $LauncherPath $LoaderPath
 }
 
 Invoke-Checked "unit tests" {
@@ -125,6 +140,9 @@ if (Test-Path $ClaudeJsonPath) {
 
 if ($FreshLauncher -and (Test-Path -LiteralPath $LauncherPath)) {
     Remove-Item -LiteralPath $LauncherPath -Force -ErrorAction SilentlyContinue
+}
+if ($FreshLoader -and (Test-Path -LiteralPath $LoaderPath)) {
+    Remove-Item -LiteralPath $LoaderPath -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "OK: no-Vectorworks verification passed."

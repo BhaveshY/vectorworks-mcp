@@ -65,4 +65,5 @@ native_bridge/worktree/
 
 # Machine-generated setup artifacts
 vw_start_listener_2024.py
+vw_load_listener_2024.py
 *.bak.*

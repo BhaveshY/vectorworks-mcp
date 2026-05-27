@@ -32,7 +32,7 @@ class AgentReadinessTests(unittest.TestCase):
         marker = json.loads((ROOT / ".vectorworks-mcp-contract.json").read_text(encoding="utf-8"))
 
         self.assertEqual(marker["name"], "vectorworks-mcp")
-        self.assertGreaterEqual(marker["contractVersion"], 2)
+        self.assertGreaterEqual(marker["contractVersion"], 3)
 
     def test_bootstrap_scripts_exist(self):
         for relative_path in (
@@ -43,6 +43,7 @@ class AgentReadinessTests(unittest.TestCase):
             "scripts/check-bundled-plugin-contract.ps1",
             "scripts/check-native-bridge-prereqs.ps1",
             "scripts/doctor-vectorworks-mcp.ps1",
+            "scripts/doctor-native-bridge.ps1",
             "scripts/prepare-native-bridge-source.ps1",
             "scripts/register-claude-code.ps1",
             "scripts/run-mcp-server.ps1",
@@ -63,6 +64,8 @@ class AgentReadinessTests(unittest.TestCase):
         register_script = (ROOT / "scripts/register-claude-code.ps1").read_text(encoding="utf-8")
         self.assertIn('os.environ["VW_MCP_MODE"] = "dialog"', register_script)
         self.assertIn('os.environ["VW_MCP_DIALOG_TIMER_MS"] = "50"', register_script)
+        self.assertIn("New-VectorworksLoader", register_script)
+        self.assertIn("vw_load_listener_2024.py", register_script)
         self.assertIn('VW_MCP_PREFLIGHT_CACHE_MS = "750"', register_script)
 
         launcher_path = ROOT / "vw_start_listener_2024.py"
@@ -71,13 +74,22 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIn('os.environ["VW_MCP_MODE"] = "dialog"', launcher_text)
             self.assertIn('os.environ["VW_MCP_DIALOG_TIMER_MS"] = "50"', launcher_text)
 
+        loader_path = ROOT / "vw_load_listener_2024.py"
+        if loader_path.exists():
+            loader_text = loader_path.read_text(encoding="utf-8")
+            self.assertIn("runpy.run_path", loader_text)
+            self.assertIn("vw_start_listener_2024.py", loader_text)
+
     def test_no_vectorworks_verifier_generates_fresh_launcher_by_default(self):
         verifier = (ROOT / "scripts/verify-no-vectorworks.ps1").read_text(encoding="utf-8")
 
         self.assertIn("[System.IO.Path]::GetTempPath()", verifier)
         self.assertIn("$FreshLauncher = $true", verifier)
-        self.assertIn("$FreshLauncher -or -not (Test-Path $LauncherPath)", verifier)
+        self.assertIn("$FreshLoader = $true", verifier)
+        self.assertIn("$FreshLauncher -or $FreshLoader -or -not (Test-Path $LauncherPath)", verifier)
         self.assertIn("Remove-Item -LiteralPath $LauncherPath", verifier)
+        self.assertIn("Remove-Item -LiteralPath $LoaderPath", verifier)
+        self.assertIn("Generated Vectorworks loader", verifier)
 
     def test_register_script_generates_dialog_agent_session_launcher(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
@@ -88,6 +100,7 @@ class AgentReadinessTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             launcher_path = Path(temp_dir) / "vw_start_listener_2024.py"
+            loader_path = Path(temp_dir) / "vw_load_listener_2024.py"
             subprocess.run(
                 [
                     powershell,
@@ -101,6 +114,8 @@ class AgentReadinessTests(unittest.TestCase):
                     "-NoClaudeConfig",
                     "-LauncherPath",
                     str(launcher_path),
+                    "-LoaderPath",
+                    str(loader_path),
                     "-Port",
                     "19877",
                 ],
@@ -116,6 +131,10 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIn('os.environ["VW_MCP_PORT"] = "19877"', launcher_text)
             self.assertIn('os.environ["VW_MCP_MODE"] = "dialog"', launcher_text)
             self.assertIn('os.environ["VW_MCP_DIALOG_TIMER_MS"] = "50"', launcher_text)
+
+            loader_text = loader_path.read_text(encoding="utf-8")
+            self.assertIn("runpy.run_path", loader_text)
+            self.assertIn(str(launcher_path).replace("\\", "\\\\"), loader_text)
 
     def test_native_bridge_scaffold_is_explicitly_not_default(self):
         expected_files = (
@@ -162,6 +181,7 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("-DownloadSdk", bootstrap)
         self.assertIn(".cache/", gitignore)
         self.assertIn("third_party/", gitignore)
+        self.assertIn("vw_load_listener_2024.py", gitignore)
 
         for version, data in requirements["versions"].items():
             self.assertRegex(version, r"^20\d{2}$")
@@ -349,6 +369,47 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("--allow-write-fixture", smoke_script)
         self.assertIn("smoke-native-bridge.ps1", acceptance)
         self.assertIn("smoke-native-bridge.ps1", native_readme)
+
+    def test_native_doctor_can_plan_and_install_explicit_artifact(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise the native doctor")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            artifact = temp_root / "VectorworksMCPBridge.vwlibrary"
+            install_dir = temp_root / "Plug-ins"
+            artifact.write_text("fake native bridge artifact\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/doctor-native-bridge.ps1"),
+                    "-BuiltArtifact",
+                    str(artifact),
+                    "-InstallDir",
+                    str(install_dir),
+                    "-Install",
+                    "-Json",
+                ],
+                cwd=str(ROOT),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            report = json.loads(result.stdout)
+            installed_path = Path(report["installedPath"])
+            self.assertEqual(installed_path, install_dir / artifact.name)
+            self.assertTrue(installed_path.exists())
+            self.assertEqual(report["builtArtifact"], str(artifact))
+            self.assertIn("smoke-native-bridge.ps1 -Json", "\n".join(report["nextActions"]))
 
     def test_native_prereq_checker_reports_supported_versions_for_unknown_version(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")

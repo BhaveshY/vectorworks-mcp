@@ -6,13 +6,14 @@ non-blocking I/O via selectors. The generated launcher starts the listener in
 dialog mode, which is modal but runs inside a normal Vectorworks script context
 that can safely call the `vs` API. Background and Windows timer modes are kept
 as transport-only diagnostics because real CAD handlers can deadlock outside
-that script context.
+that script context. Foreground mode is also diagnostic only because it can
+monopolize the Vectorworks UI.
 
 INSTALL OPTIONS
   A) Quick in Vectorworks 2024 - Resource Manager > New Resource > Script,
-     choose Python Script, paste the generated vw_start_listener_2024.py, run it.
+     choose Python Script, paste the generated vw_load_listener_2024.py, run it.
   B) Persistent menu command - Tools > Plug-ins > Plug-in Manager >
-     New > Menu Command, paste the generated vw_start_listener_2024.py. Then
+     New > Menu Command, paste the generated vw_load_listener_2024.py. Then
      Tools > Workspaces > Edit Current Workspace > Menus and drag the
      new command into a menu. Click it once per VW session to start.
 
@@ -645,8 +646,8 @@ HANDLERS = {
 
 def _bridge_status():
     mode = _DISPATCH_MODE or "unknown"
-    transport_only = mode in ("background", "win_timer")
-    cad_api_safe = mode in ("dialog", "foreground") and not transport_only
+    transport_only = mode in ("background", "win_timer", "foreground")
+    cad_api_safe = mode == "dialog"
     if mode == "dialog":
         bridge_kind = "python_dialog_agent_session"
     elif mode == "foreground":
@@ -694,7 +695,7 @@ def dispatch(req):
     params = req.get("params", {}) if "params" in req else {}
     if not isinstance(params, dict):
         return _request_error(req, "Request params must be a JSON object")
-    if _DISPATCH_MODE in ("background", "win_timer") and action not in ("ping", "stop"):
+    if _DISPATCH_MODE in ("background", "win_timer", "foreground") and action not in ("ping", "stop"):
         return {
             "id": _request_id(req),
             "success": False,

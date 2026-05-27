@@ -227,13 +227,14 @@ class ListenerProtocolTests(unittest.TestCase):
 
     def test_transport_only_modes_reject_cad_handlers(self):
         listener, _alerts = self.load_listener()
-        for mode in ("background", "win_timer"):
+        for mode in ("background", "win_timer", "foreground"):
             with self.subTest(mode=mode):
                 listener._DISPATCH_MODE = mode
 
                 ping = listener.dispatch({"id": "1", "action": "ping", "params": {}})
                 self.assertTrue(ping["success"])
-                self.assertEqual(ping["result"]["bridge_kind"], "python_transport_only")
+                expected_kind = "python_foreground_diagnostic" if mode == "foreground" else "python_transport_only"
+                self.assertEqual(ping["result"]["bridge_kind"], expected_kind)
                 self.assertFalse(ping["result"]["cad_api_safe"])
                 self.assertTrue(ping["result"]["transport_only"])
 
