@@ -264,6 +264,8 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("native bridge timed out waiting for Vectorworks main/plugin context", combined)
         self.assertIn('"cad_api_safe":false', combined)
         self.assertIn('"transport_only":true', combined)
+        self.assertIn('"native_phase":0', combined)
+        self.assertIn('"implemented_actions":["ping","stop"]', combined)
 
         for name in scaffold_files:
             text = (src / name).read_text(encoding="utf-8")
@@ -557,6 +559,7 @@ class AgentReadinessTests(unittest.TestCase):
         native_readme = (ROOT / "native_bridge/README.md").read_text(encoding="utf-8")
         protocol = (ROOT / "native_bridge/PROTOCOL.md").read_text(encoding="utf-8")
         root_readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
 
         self.assertIn("native_bridge\\smoke.py", smoke_script)
         self.assertIn("--ping-count", smoke_script)
@@ -574,8 +577,13 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("success` must be boolean", protocol)
         self.assertIn('dispatch_mode: "native_sdk"', protocol)
         self.assertIn("cross-checks", native_readme)
+        self.assertIn("implemented_actions", native_readme)
+        self.assertIn("selection.get", native_readme)
+        self.assertIn("native_phase >= 1", native_readme)
         self.assertIn("get_document_info", protocol)
         self.assertIn("get_objects", protocol)
+        self.assertIn("implemented_actions", protocol)
+        self.assertIn("selection` with `action=get`", protocol)
         self.assertIn(
             "powershell -ExecutionPolicy Bypass -File .\\scripts\\doctor-native-bridge.ps1 -BuiltArtifact C:\\path\\to\\VectorworksMCPBridge.vwlibrary -Install -WhatIf",
             root_readme,
@@ -586,6 +594,16 @@ class AgentReadinessTests(unittest.TestCase):
         )
         self.assertIn("enable/load the native VectorworksMCPBridge plug-in", root_readme)
         self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", root_readme)
+        self.assertIn(
+            "doctor-native-bridge.ps1 -BuiltArtifact C:\\path\\to\\VectorworksMCPBridge.vwlibrary -Install -WhatIf",
+            agents,
+        )
+        self.assertIn(
+            "doctor-native-bridge.ps1 -BuiltArtifact C:\\path\\to\\VectorworksMCPBridge.vwlibrary -Install",
+            agents,
+        )
+        self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", agents)
+        self.assertIn("Do not run the default native smoke against the copied", agents)
 
     def test_native_doctor_can_plan_and_install_explicit_artifact(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")

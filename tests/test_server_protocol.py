@@ -615,6 +615,35 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertTrue(preflight["transport_only"])
         self.assertEqual(preflight["reason"], "transport_only_bridge")
 
+    def test_cad_preflight_blocks_native_bridge_missing_capabilities(self):
+        original_send = server._send
+        try:
+            server._send = lambda action, params=None: json.dumps(
+                {
+                    "pong": True,
+                    "cad_api_safe": True,
+                    "transport_only": False,
+                    "native_bridge": True,
+                    "native_phase": 0,
+                    "implemented_actions": ["ping", "stop"],
+                    "bridge_kind": "native_sdk_bridge_scaffold",
+                    "dispatch_mode": "native_sdk",
+                    "handlers": 2,
+                    "version": "native-scaffold-phase0",
+                }
+            )
+            result = server.vw_preflight_for_cad()
+        finally:
+            server._send = original_send
+
+        preflight = json.loads(result)
+        self.assertFalse(preflight["ok"])
+        self.assertFalse(preflight["cad_api_safe"])
+        self.assertTrue(preflight["native_bridge"])
+        self.assertEqual(preflight["reason"], "native_bridge_not_phase1_ready")
+        self.assertIn("native_phase is not >= 1", preflight["native_readiness_errors"])
+        self.assertIn("implemented_actions missing", "\n".join(preflight["native_readiness_errors"]))
+
     def test_cad_preflight_blocks_legacy_foreground_bridge(self):
         original_send = server._send
         try:

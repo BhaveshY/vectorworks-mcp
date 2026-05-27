@@ -1,5 +1,11 @@
 [CmdletBinding()]
 param(
+    [string]$RepoPath = "",
+    [string]$ListenHost = "",
+    [ValidateRange(0, 65535)]
+    [int]$Port = 0,
+    [ValidateRange(0, 3600)]
+    [int]$TimeoutSeconds = 0,
     [switch]$SkipVerify,
     [switch]$SkipContract,
     [switch]$SkipClipboard
@@ -11,7 +17,11 @@ $ErrorActionPreference = "Stop"
 
 $Resolver = Join-Path $PSScriptRoot "resolve-vectorworks-mcp-repo.ps1"
 $ResolverArgs = @("-InstallIfMissing", "-RequireContract")
-if ($env:VW_MCP_REPO) { $ResolverArgs += @("-RepoPath", $env:VW_MCP_REPO) }
+if ($RepoPath) {
+    $ResolverArgs += @("-RepoPath", $RepoPath)
+} elseif ($env:VW_MCP_REPO) {
+    $ResolverArgs += @("-RepoPath", $env:VW_MCP_REPO)
+}
 $RepoRoot = Resolve-VectorworksMcpCompanionRepo -ResolverArgs $ResolverArgs
 
 Write-Host "Vectorworks MCP repo: $RepoRoot"
@@ -32,7 +42,24 @@ if (-not $SkipContract) {
 & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $Runner -SetupOnly
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $Register -SkipInstall -NoClaudeConfig -LauncherPath $Launcher -LoaderPath $Loader
+$RegisterArgs = @("-SkipInstall", "-NoClaudeConfig", "-LauncherPath", $Launcher, "-LoaderPath", $Loader)
+if ($ListenHost) {
+    $RegisterArgs += @("-ListenHost", $ListenHost)
+} elseif ($env:VW_MCP_HOST) {
+    $RegisterArgs += @("-ListenHost", $env:VW_MCP_HOST)
+}
+if ($Port -gt 0) {
+    $RegisterArgs += @("-Port", $Port)
+} elseif ($env:VW_MCP_PORT) {
+    $RegisterArgs += @("-Port", $env:VW_MCP_PORT)
+}
+if ($TimeoutSeconds -gt 0) {
+    $RegisterArgs += @("-TimeoutSeconds", $TimeoutSeconds)
+} elseif ($env:VW_MCP_TIMEOUT) {
+    $RegisterArgs += @("-TimeoutSeconds", $env:VW_MCP_TIMEOUT)
+}
+
+& powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $Register @RegisterArgs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 if (-not $SkipVerify) {

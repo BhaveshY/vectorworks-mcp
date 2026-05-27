@@ -60,6 +60,8 @@ class MockNativeBridge:
             "cad_api_safe": True,
             "transport_only": False,
             "native_bridge": True,
+            "native_phase": 1,
+            "implemented_actions": sorted(IMPLEMENTED_ACTIONS),
         }
         self.layers = layers if layers is not None else [{"name": "Design Layer-1", "visible": True}]
         self.objects = objects if objects is not None else [
@@ -183,7 +185,10 @@ class MockNativeBridge:
                     params = request.get("params", {})
                     selection_action = params.get("action", "get")
                     if selection_action == "get":
-                        selected = [obj for obj in self.objects if obj["handle"] in self.selection]
+                        selected = [
+                            obj for obj in self.objects
+                            if isinstance(obj, dict) and obj.get("handle") in self.selection
+                        ]
                         _write_json_frame(conn, {"id": request_id, "success": True, "result": selected})
                     elif selection_action == "clear":
                         self.selection = []

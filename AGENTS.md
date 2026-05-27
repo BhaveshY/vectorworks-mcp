@@ -107,12 +107,17 @@ powershell -ExecutionPolicy Bypass -File .\scripts\prepare-native-bridge-source.
 powershell -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\copy-native-bridge-scaffold.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
-powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -Json
-powershell -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Json
+powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\VectorworksMCPBridge.vwlibrary -Install -WhatIf
+powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\VectorworksMCPBridge.vwlibrary -Install
+# Restart Vectorworks, enable/load the native bridge plug-in, then prove phase-0 stop/release first.
+powershell -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Phase 0 -Stop -Json
 ```
 
 The installer flags are opt-in because they can download large SDK files and
 launch the Visual Studio Build Tools installer.
+After phase 0 passes, load the native bridge again before running the default
+phase-1 read smoke. Do not run the default native smoke against the copied
+transport scaffold; it is only valid after real SDK CAD handlers are wired.
 
 If `.venv` does not exist yet, run:
 

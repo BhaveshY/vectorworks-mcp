@@ -44,6 +44,15 @@ DEFAULT_TIMEOUT = 60.0
 DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024
 DEFAULT_PREFLIGHT_CACHE_MS = 750
 MAX_PREFLIGHT_CACHE_MS = 5_000
+NATIVE_PHASE_ONE_REQUIRED_ACTIONS = {
+    "ping",
+    "stop",
+    "get_document_info",
+    "get_layers",
+    "get_objects",
+    "selection",
+    "create_object",
+}
 
 
 class ConfigError(ValueError):
@@ -716,6 +725,33 @@ def _cad_preflight_ping_error_payload(raw_status: Any, blocked_action: Optional[
     )
 
 
+def _native_readiness_errors(status: dict[str, Any]) -> list[str]:
+    if status.get("native_bridge") is not True:
+        return []
+
+    errors: list[str] = []
+    dispatch_mode = str(status.get("dispatch_mode", "") or "").strip().lower()
+    bridge_kind = str(status.get("bridge_kind", "") or "").strip().lower()
+    if dispatch_mode != "native_sdk":
+        errors.append("dispatch_mode is not native_sdk")
+    if not bridge_kind.startswith("native_sdk_bridge"):
+        errors.append("bridge_kind does not start with native_sdk_bridge")
+
+    native_phase = status.get("native_phase")
+    if not isinstance(native_phase, int) or isinstance(native_phase, bool) or native_phase < 1:
+        errors.append("native_phase is not >= 1")
+
+    implemented_actions = status.get("implemented_actions")
+    if not isinstance(implemented_actions, list) or not all(isinstance(action, str) for action in implemented_actions):
+        errors.append("implemented_actions is not a list of strings")
+    else:
+        missing_actions = sorted(NATIVE_PHASE_ONE_REQUIRED_ACTIONS - set(implemented_actions))
+        if missing_actions:
+            errors.append("implemented_actions missing: {0}".format(", ".join(missing_actions)))
+
+    return errors
+
+
 def _evaluate_cad_preflight_status(status: Any, blocked_action: Optional[str] = None) -> dict[str, Any]:
     if not isinstance(status, dict):
         return _with_block_context(
@@ -742,6 +778,26 @@ def _evaluate_cad_preflight_status(status: Any, blocked_action: Optional[str] = 
                 "native_bridge": bool(status.get("native_bridge")),
                 "reason": "foreground_diagnostic_bridge",
                 "next_action": "Do not call CAD handlers. Replace the old foreground script with vw_load_listener_2024.py or use a compiled native SDK bridge.",
+                "raw_status": status,
+            },
+            blocked_action,
+        )
+
+    native_errors = _native_readiness_errors(status)
+    if native_errors:
+        return _with_block_context(
+            {
+                "ok": False,
+                "cad_api_safe": False,
+                "bridge_kind": status.get("bridge_kind", "unknown"),
+                "dispatch_mode": status.get("dispatch_mode", "unknown"),
+                "transport_only": bool(status.get("transport_only")),
+                "native_bridge": True,
+                "handlers": status.get("handlers"),
+                "version": status.get("version"),
+                "reason": "native_bridge_not_phase1_ready",
+                "next_action": "Do not call CAD handlers. Run scripts\\smoke-native-bridge.ps1 -Json and fix native bridge capabilities.",
+                "native_readiness_errors": native_errors,
                 "raw_status": status,
             },
             blocked_action,

@@ -95,7 +95,8 @@ cleanly. It does not prove CAD handler safety.
   boolean `cad_api_safe` / `transport_only` fields that agree with each other.
   A scaffold bridge may report `cad_api_safe: false` and `transport_only: true`
   while `bridge_kind` still begins with `native_sdk_bridge` and
-  `dispatch_mode` is `native_sdk`.
+  `dispatch_mode` is `native_sdk`. It should also report `native_phase: 0` and
+  `implemented_actions` containing `ping` and `stop`.
 - `stop`: when requested with `--stop`, the bridge must acknowledge `stop` and
   release the listening port.
 
@@ -110,7 +111,10 @@ responses must satisfy these minimum shapes:
   count, `cad_api_safe: true`, `transport_only: false`, and `native_bridge:
   true` unless the harness is explicitly run with `--allow-non-native`. Native
   mode must report `dispatch_mode: "native_sdk"` and a `bridge_kind` beginning
-  with `native_sdk_bridge`; known Python diagnostic modes are rejected.
+  with `native_sdk_bridge`; known Python diagnostic modes are rejected. It must
+  also report `native_phase >= 1` and `implemented_actions` containing `ping`,
+  `stop`, `get_document_info`, `get_layers`, `get_objects`, `selection`, and
+  `create_object`.
 - `get_document_info`: object with non-empty string `filename`, string
   `filepath` when present, `layers` as a list of strings, non-negative integer
   `layer_count` matching `layers.length`, and non-negative integer
@@ -121,6 +125,8 @@ responses must satisfy these minimum shapes:
   `handle` and `type`; optional `type_id` must be a non-negative integer;
   optional `name` must be a string; optional `bounds` must be `null` or contain
   `top_left` and `bottom_right` as two-number lists.
+- `selection` with `action=get`: list of selected-object records using the same
+  object shape as `get_objects`. An empty list is valid.
 
 The harness also cross-checks the first successful phase-1 read snapshots:
 

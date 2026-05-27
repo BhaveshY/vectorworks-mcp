@@ -10,6 +10,8 @@ from typing import Any
 
 PHASE_ZERO_MIN_HANDLER_COUNT = 2
 PHASE_ONE_MIN_HANDLER_COUNT = 7
+PHASE_ONE_REQUIRED_ACTIONS = {"ping", "stop", "get_document_info", "get_layers", "get_objects", "selection", "create_object"}
+PHASE_ONE_READ_ACTIONS = ("get_document_info", "get_layers", "get_objects", "selection")
 UNSAFE_DISPATCH_MODES = {"background", "foreground", "win_timer"}
 UNSAFE_BRIDGE_KINDS = {"python_foreground_diagnostic", "python_transport_only"}
 NATIVE_DISPATCH_MODES = {"native_sdk"}
@@ -139,6 +141,19 @@ def _validate_ping(report: dict[str, Any], result: Any, require_native: bool, ph
         report["failures"].append(
             "ping handlers was not an integer >= {0}".format(min_handlers)
         )
+    if phase >= 1:
+        implemented_actions = result.get("implemented_actions")
+        if not isinstance(implemented_actions, list) or not all(isinstance(action, str) for action in implemented_actions):
+            report["failures"].append("ping implemented_actions was not a list of strings")
+        else:
+            missing_actions = sorted(PHASE_ONE_REQUIRED_ACTIONS - set(implemented_actions))
+            if missing_actions:
+                report["failures"].append(
+                    "ping implemented_actions missing phase-1 action(s): {0}".format(", ".join(missing_actions))
+                )
+        native_phase = result.get("native_phase")
+        if not isinstance(native_phase, int) or isinstance(native_phase, bool) or native_phase < 1:
+            report["failures"].append("ping native_phase was not an integer >= 1")
     cad_api_safe = result.get("cad_api_safe")
     transport_only = result.get("transport_only")
     if phase >= 1:
@@ -282,6 +297,13 @@ def _validate_read_result(
 
     if action == "get_objects":
         _validate_object_list(report, action, result, params=params)
+        return
+
+    if action == "selection":
+        if not isinstance(params, dict) or params.get("action") != "get":
+            report["failures"].append("selection read smoke must use action=get")
+            return
+        _validate_object_list(report, "selection get", result)
 
 
 def _object_matches_fixture(obj: Any, fixture_name: str, fixture_handle: str | None = None) -> bool:
@@ -543,13 +565,18 @@ def run_smoke(
 
             read_actions = []
             if phase >= 1:
-                read_actions = ["get_document_info", "get_layers", "get_objects"]
+                read_actions = list(PHASE_ONE_READ_ACTIONS)
             elif include_objects:
                 read_actions.append("get_objects")
 
             for action in read_actions:
                 for index in range(1, read_count + 1):
-                    params = {"limit": 10} if action == "get_objects" else None
+                    if action == "get_objects":
+                        params = {"limit": 10}
+                    elif action == "selection":
+                        params = {"action": "get"}
+                    else:
+                        params = None
                     response = _record_call(sock, report, action, index, params=params)
                     if response is not None:
                         result = response.get("result")

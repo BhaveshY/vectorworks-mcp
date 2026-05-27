@@ -9,7 +9,7 @@ Use the plugin scripts from `${CLAUDE_PLUGIN_ROOT}` when available. If that vari
 
 ## Workflow
 
-1. Resolve the `vectorworks-mcp` repo. Prefer, in order: plugin user config `vectorworks_repo`, `VW_MCP_REPO`, `CLAUDE_PROJECT_DIR`, current directory, then `~/repos/vectorworks-mcp`. If it is missing, the bootstrap wrapper clones `BhaveshY/vectorworks-mcp` into `~/repos/vectorworks-mcp`.
+1. Resolve the `vectorworks-mcp` repo. For shell setup wrappers, prefer an explicit `-RepoPath` or `VW_MCP_REPO`; the MCP server also receives plugin user config `vectorworks_repo` as `VW_MCP_REPO` at runtime. If the repo is missing, the bootstrap wrapper clones `BhaveshY/vectorworks-mcp` into `~/repos/vectorworks-mcp`.
 2. Run the plugin bootstrap wrapper:
 
 ```powershell
