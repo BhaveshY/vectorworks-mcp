@@ -119,6 +119,18 @@ class ListenerProtocolTests(unittest.TestCase):
         unknown = listener.dispatch({"id": "2", "action": "missing", "params": {}})
         self.assertEqual(unknown, {"id": "2", "success": False, "error": "Unknown action: missing"})
 
+    def test_transport_only_modes_reject_cad_handlers(self):
+        listener, _alerts = self.load_listener()
+        listener._DISPATCH_MODE = "win_timer"
+
+        ping = listener.dispatch({"id": "1", "action": "ping", "params": {}})
+        self.assertTrue(ping["success"])
+
+        result = listener.dispatch({"id": "2", "action": "get_layers", "params": {}})
+        self.assertEqual(result["id"], "2")
+        self.assertFalse(result["success"])
+        self.assertIn("transport-only", result["error"])
+
     def test_listener_main_serves_ping_and_graceful_stop(self):
         listener, alerts = self.load_listener()
         port = _free_port()

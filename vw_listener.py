@@ -2,11 +2,11 @@
 Vectorworks 2024/2025 MCP Listener - runs inside Vectorworks.
 
 Opens a TCP socket (default 127.0.0.1:9877) and serves MCP requests using
-non-blocking I/O via selectors. On Windows, the generated launcher starts the
-listener in win_timer mode so Vectorworks pumps the socket from its normal UI
-message loop without a modal dialog. This avoids the Vectorworks 2024
-embedded-Python background-thread pause that can leave the port open but
-unresponsive.
+non-blocking I/O via selectors. The generated launcher starts the listener in
+dialog mode, which is modal but runs inside a normal Vectorworks script context
+that can safely call the `vs` API. Background and Windows timer modes are kept
+as transport-only diagnostics because real CAD handlers can deadlock outside
+that script context.
 
 INSTALL OPTIONS
   A) Quick in Vectorworks 2024 - Resource Manager > New Resource > Script,
@@ -77,6 +77,7 @@ STOP_DIR = os.environ.get("VW_MCP_STOP_DIR") or os.path.join(
 STOP_FILE = os.path.join(STOP_DIR, "STOP")
 SCREENSHOT_DIR = STOP_DIR
 _SHOULD_STOP = False
+_DISPATCH_MODE = None
 _STATE_MODULE = "_vw_mcp_listener_state"
 _STATE = sys.modules.get(_STATE_MODULE)
 if _STATE is None:
@@ -567,6 +568,19 @@ HANDLERS["ping"] = lambda p: _ok({"pong": True, "handlers": len(HANDLERS), "vers
 def dispatch(req):
     if not isinstance(req, dict):
         return {"id": "", "success": False, "error": "Request must be a JSON object"}
+    action = req.get("action", "")
+    if _DISPATCH_MODE in ("background", "win_timer") and action not in ("ping", "stop"):
+        return {
+            "id": req.get("id", ""),
+            "success": False,
+            "error": (
+                "VW_MCP_MODE={mode} is transport-only. It can answer ping/stop, "
+                "but Vectorworks API calls deadlock outside a normal foreground "
+                "Vectorworks script context. Use foreground/dialog mode only for "
+                "temporary agent-controlled CAD operations, or build the native "
+                "Vectorworks SDK bridge for non-modal long-running control."
+            ).format(mode=_DISPATCH_MODE),
+        }
     handler = HANDLERS.get(req.get("action", ""))
     if not handler:
         return {"id": req.get("id", ""), "success": False, "error": f"Unknown action: {req.get('action')}"}
@@ -675,8 +689,10 @@ class _ListenerServer:
         self.closed = False
 
     def start(self):
-        global _SHOULD_STOP
+        global _SHOULD_STOP, _DISPATCH_MODE
         _SHOULD_STOP = False
+        if _DISPATCH_MODE is None:
+            _DISPATCH_MODE = "foreground"
 
         if vs is None:
             if self.show_alerts:
@@ -845,6 +861,9 @@ class _ListenerServer:
             pass
         if getattr(_STATE, "listener_server", None) is self:
             _STATE.listener_server = None
+        global _DISPATCH_MODE
+        if _DISPATCH_MODE in ("foreground", "dialog"):
+            _DISPATCH_MODE = None
         if self.show_alerts:
             _alert("VW MCP Listener STOPPED.")
 
@@ -931,6 +950,7 @@ def _report_existing_or_stale_listener():
 
 
 def start_background():
+    global _DISPATCH_MODE
     thread = getattr(_STATE, "listener_thread", None)
     if thread is not None and thread.is_alive():
         _message("VW MCP Listener is already running on {h}:{p}".format(h=HOST, p=PORT))
@@ -939,6 +959,7 @@ def start_background():
     if _report_existing_or_stale_listener():
         return
 
+    _DISPATCH_MODE = "background"
     thread = threading.Thread(
         target=main,
         kwargs={"show_alerts": False},
@@ -954,6 +975,7 @@ def start_background():
 
 
 def _stop_win_timer(show_message=True):
+    global _DISPATCH_MODE
     timer_id = getattr(_STATE, "win_timer_id", None)
     user32 = getattr(_STATE, "win_timer_user32", None)
     server = getattr(_STATE, "win_timer_server", None)
@@ -974,12 +996,15 @@ def _stop_win_timer(show_message=True):
     _STATE.win_timer_server = None
     _STATE.win_timer_user32 = None
     _STATE.win_timer_busy = False
+    if _DISPATCH_MODE == "win_timer":
+        _DISPATCH_MODE = None
 
     if show_message:
         _message("VW MCP Listener stopped.")
 
 
 def start_win_timer():
+    global _DISPATCH_MODE
     if getattr(_STATE, "win_timer_id", None):
         if _existing_listener_healthy():
             _message("VW MCP Listener is already running on {h}:{p}".format(h=HOST, p=PORT))
@@ -1000,8 +1025,10 @@ def start_win_timer():
         _alert("VW MCP could not import ctypes for Windows timer mode:\n{e}".format(e=e))
         return
 
+    _DISPATCH_MODE = "win_timer"
     server = _ListenerServer(show_alerts=False)
     if not server.start():
+        _DISPATCH_MODE = None
         _alert("VW MCP Listener could not start on {h}:{p}.".format(h=HOST, p=PORT))
         return
 
@@ -1040,6 +1067,7 @@ def start_win_timer():
     timer_id = user32.SetTimer(None, 0, DIALOG_TIMER_MS, callback)
     if not timer_id:
         server.close()
+        _DISPATCH_MODE = None
         _alert("VW MCP could not create a Windows timer for listener pumping.")
         return
 
@@ -1066,6 +1094,7 @@ def _set_dialog_text(dialog_id, item_id, text):
 
 
 def start_dialog():
+    global _DISPATCH_MODE
     if getattr(_STATE, "dialog_running", False):
         _message("VW MCP Listener dialog is already running.")
         return
@@ -1090,8 +1119,10 @@ def start_dialog():
         )
         return
 
+    _DISPATCH_MODE = "dialog"
     server = _ListenerServer(show_alerts=False)
     if not server.start():
+        _DISPATCH_MODE = None
         _alert("VW MCP Listener could not start on {h}:{p}.".format(h=HOST, p=PORT))
         return
 
@@ -1161,8 +1192,8 @@ def _autostart_mode():
     if mode:
         return mode
     if os.environ.get("VW_MCP_BACKGROUND", "").lower() in ("1", "true", "yes"):
-        return "win_timer"
-    return "win_timer" if os.name == "nt" else "foreground"
+        return "dialog"
+    return "foreground"
 
 
 if os.environ.get("VW_MCP_NO_AUTOSTART", "").lower() not in ("1", "true", "yes"):

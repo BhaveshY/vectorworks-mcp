@@ -65,7 +65,7 @@ import runpy
 os.environ["VW_MCP_HOST"] = "$HostName"
 os.environ["VW_MCP_PORT"] = "$ListenPort"
 os.environ["VW_MCP_STOP_DIR"] = $StopDirLiteral
-os.environ["VW_MCP_MODE"] = "win_timer"
+os.environ["VW_MCP_MODE"] = "dialog"
 os.environ["VW_MCP_DIALOG_TIMER_MS"] = "50"
 
 runpy.run_path($ListenerLiteral, run_name="__main__")
