@@ -95,6 +95,7 @@ class AgentReadinessTests(unittest.TestCase):
             "native_bridge/PROTOCOL.md",
             "native_bridge/ACCEPTANCE.md",
             "native_bridge/HANDLER_MATRIX.md",
+            "native_bridge/SDK_REQUIREMENTS.json",
             "native_bridge/mock/mock_bridge.py",
             "native_bridge/src/README.md",
         )
@@ -116,19 +117,35 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("main/plugin event context", matrix)
 
     def test_native_bridge_scripts_point_to_official_sdk_and_ignore_downloads(self):
+        requirements = json.loads((ROOT / "native_bridge/SDK_REQUIREMENTS.json").read_text(encoding="utf-8"))
         checker = (ROOT / "scripts/check-native-bridge-prereqs.ps1").read_text(encoding="utf-8")
         bootstrap = (ROOT / "scripts/bootstrap-native-bridge.ps1").read_text(encoding="utf-8")
         gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
 
-        self.assertIn("https://www.vectorworks.net/en-US/support/custom/sdk/sdkdown", checker)
-        self.assertIn("https://github.com/VectorworksDeveloper/SDKExamples", checker)
-        self.assertIn("2024-NNA-eng-win-SDK", checker)
-        self.assertIn("17.6.3", checker)
-        self.assertIn("v143", checker)
+        self.assertEqual(requirements["officialSdkPage"], "https://www.vectorworks.net/en-US/support/custom/sdk/sdkdown")
+        self.assertEqual(requirements["officialSdkExamples"], "https://github.com/VectorworksDeveloper/SDKExamples")
+        self.assertIn("2024-NNA-eng-win-SDK", requirements["versions"]["2024"]["winSdkDownload"])
+        self.assertEqual(requirements["versions"]["2024"]["visualStudioMinimumVersion"], "17.6.3")
+        self.assertEqual(requirements["versions"]["2024"]["toolset"], "v143")
+        self.assertIn("SDK_REQUIREMENTS.json", checker)
+        self.assertIn("SDK_REQUIREMENTS.json", bootstrap)
         self.assertIn("Invoke-WebRequest", bootstrap)
         self.assertIn("-DownloadSdk", bootstrap)
         self.assertIn(".cache/", gitignore)
         self.assertIn("third_party/", gitignore)
+
+        for version, data in requirements["versions"].items():
+            self.assertRegex(version, r"^20\d{2}$")
+            self.assertTrue(data["winSdkDownload"].startswith("https://"))
+            self.assertRegex(data["visualStudioMinimumVersion"], r"^\d+\.\d+")
+            self.assertRegex(data["toolset"], r"^v\d+")
+
+        self.assertNotIn("[ValidateSet(\"2024\", \"2025\", \"2026\")]", checker)
+        self.assertNotIn("[ValidateSet(\"2024\", \"2025\", \"2026\")]", bootstrap)
+        self.assertNotIn("2025-NNA-eng-win-SDK.zip", checker)
+        self.assertNotIn("2026-NNA-eng-win-SDK.zip", checker)
+        self.assertIn("Supported versions", checker)
+        self.assertIn("Supported versions", bootstrap)
 
     def test_doctor_script_reports_next_actions_and_cad_safety(self):
         doctor = (ROOT / "scripts/doctor-vectorworks-mcp.ps1").read_text(encoding="utf-8")
@@ -138,6 +155,37 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("cad_api_safe", doctor)
         self.assertIn("transport_only", doctor)
         self.assertIn("check-native-bridge-prereqs.ps1", doctor)
+
+    def test_native_prereq_checker_reports_supported_versions_for_unknown_version(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise the native prerequisite checker")
+
+        result = subprocess.run(
+            [
+                powershell,
+                "-NoLogo",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(ROOT / "scripts/check-native-bridge-prereqs.ps1"),
+                "-VectorworksVersion",
+                "2099",
+                "-Advisory",
+                "-Json",
+            ],
+            cwd=str(ROOT),
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        report = json.loads(result.stdout)
+        self.assertFalse(report["ready"])
+        self.assertIn("Supported versions", report["error"])
+        self.assertIn("2024", report["supportedVersions"])
 
 
 if __name__ == "__main__":

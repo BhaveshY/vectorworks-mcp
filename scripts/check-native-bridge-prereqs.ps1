@@ -1,6 +1,5 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("2024", "2025", "2026")]
     [string]$VectorworksVersion = "2024",
     [string]$SdkDir = "",
     [switch]$Advisory,
@@ -10,17 +9,35 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$OfficialSdkPage = "https://www.vectorworks.net/en-US/support/custom/sdk/sdkdown"
-$OfficialSdkExamples = "https://github.com/VectorworksDeveloper/SDKExamples"
-$SdkDownloadUrls = @{
-    "2024" = "https://release.vectorworks.net/latest/Vectorworks/2024-NNA-eng-win-SDK"
-    "2025" = "https://release.vectorworks.net/latest/Vectorworks/2025-NNA-eng-win-SDK.zip"
-    "2026" = "https://release.vectorworks.net/latest/Vectorworks/2026-NNA-eng-win-SDK.zip"
+$SdkRequirementsPath = Join-Path $RepoRoot "native_bridge\SDK_REQUIREMENTS.json"
+if (-not (Test-Path -LiteralPath $SdkRequirementsPath)) {
+    throw "Native bridge SDK requirements file was not found at $SdkRequirementsPath"
 }
-$VisualStudioRequirements = @{
-    "2024" = @{ MinimumVersion = "17.6.3"; Toolset = "v143" }
-    "2025" = @{ MinimumVersion = "17.8"; Toolset = "v143" }
-    "2026" = @{ MinimumVersion = "17.12"; Toolset = "v143" }
+$SdkRequirements = Get-Content -Raw -LiteralPath $SdkRequirementsPath | ConvertFrom-Json
+$OfficialSdkPage = [string]$SdkRequirements.officialSdkPage
+$OfficialSdkExamples = [string]$SdkRequirements.officialSdkExamples
+$VersionRequirements = $SdkRequirements.versions.$VectorworksVersion
+if (-not $VersionRequirements) {
+    $SupportedVersions = ($SdkRequirements.versions.PSObject.Properties.Name | Sort-Object) -join ", "
+    $Message = "SDK requirements do not contain Vectorworks $VectorworksVersion. Supported versions: $SupportedVersions"
+    if ($Json) {
+        [pscustomobject]@{
+            vectorworksVersion = $VectorworksVersion
+            officialSdkPage = $OfficialSdkPage
+            officialSdkExamples = $OfficialSdkExamples
+            supportedVersions = @($SdkRequirements.versions.PSObject.Properties.Name | Sort-Object)
+            ready = $false
+            error = $Message
+        } | ConvertTo-Json -Depth 5
+    } else {
+        if ($Advisory) {
+            Write-Warning $Message
+        } else {
+            Write-Error $Message
+        }
+    }
+    if ($Advisory) { exit 0 }
+    exit 2
 }
 
 function New-CheckResult {
@@ -223,8 +240,9 @@ $VectorworksPath = Find-VectorworksInstall -Version $VectorworksVersion
 $SdkPath = Find-SdkInstall -Version $VectorworksVersion -RequestedPath $SdkDir
 $VisualStudio = Find-VisualStudioCpp
 $VisualStudioPath = $VisualStudio.path
-$RequiredVs = $VisualStudioRequirements[$VectorworksVersion]
-$VisualStudioVersionOk = Test-VersionAtLeast -Actual $VisualStudio.version -Minimum $RequiredVs.MinimumVersion
+$VisualStudioMinimumVersion = [string]$VersionRequirements.visualStudioMinimumVersion
+$VisualStudioToolset = [string]$VersionRequirements.toolset
+$VisualStudioVersionOk = Test-VersionAtLeast -Actual $VisualStudio.version -Minimum $VisualStudioMinimumVersion
 $VisualStudioOk = [bool]$VisualStudioPath -and $VisualStudioVersionOk
 $MSBuildPath = Find-MSBuild -VisualStudioPath $VisualStudioPath
 $CMake = Get-Command cmake.exe -ErrorAction SilentlyContinue
@@ -248,8 +266,8 @@ $Checks += New-CheckResult `
     -Name "Visual Studio C++ tools for Vectorworks $VectorworksVersion" `
     -Required $true `
     -Ok $VisualStudioOk `
-    -Detail $(if ($VisualStudioPath) { "$($VisualStudio.detail); required >= $($RequiredVs.MinimumVersion) ($($RequiredVs.Toolset))" } else { $VisualStudio.detail }) `
-    -Fix "Install Visual Studio 2022 Build Tools with Desktop development with C++; Vectorworks $VectorworksVersion SDK examples require VS >= $($RequiredVs.MinimumVersion) and toolset $($RequiredVs.Toolset)."
+    -Detail $(if ($VisualStudioPath) { "$($VisualStudio.detail); required >= $VisualStudioMinimumVersion ($VisualStudioToolset)" } else { $VisualStudio.detail }) `
+    -Fix "Install Visual Studio 2022 Build Tools with Desktop development with C++; Vectorworks $VectorworksVersion SDK examples require VS >= $VisualStudioMinimumVersion and toolset $VisualStudioToolset."
 
 $Checks += New-CheckResult `
     -Name "MSBuild" `
@@ -272,9 +290,9 @@ if ($Json) {
         vectorworksVersion = $VectorworksVersion
         officialSdkPage = $OfficialSdkPage
         officialSdkExamples = $OfficialSdkExamples
-        officialWinSdkDownload = $SdkDownloadUrls[$VectorworksVersion]
-        requiredVisualStudioVersion = $RequiredVs.MinimumVersion
-        requiredToolset = $RequiredVs.Toolset
+        officialWinSdkDownload = [string]$VersionRequirements.winSdkDownload
+        requiredVisualStudioVersion = $VisualStudioMinimumVersion
+        requiredToolset = $VisualStudioToolset
         repoRoot = $RepoRoot
         checks = $Checks
         ready = ($RequiredFailures.Count -eq 0)
@@ -283,8 +301,8 @@ if ($Json) {
     Write-Host "Vectorworks native bridge prerequisite check ($VectorworksVersion)"
     Write-Host "SDK page: $OfficialSdkPage"
     Write-Host "SDK examples/build requirements: $OfficialSdkExamples"
-    Write-Host "Win SDK:  $($SdkDownloadUrls[$VectorworksVersion])"
-    Write-Host "VS tools: >= $($RequiredVs.MinimumVersion) ($($RequiredVs.Toolset))"
+    Write-Host "Win SDK:  $($VersionRequirements.winSdkDownload)"
+    Write-Host "VS tools: >= $VisualStudioMinimumVersion ($VisualStudioToolset)"
     Write-Host ""
     foreach ($Check in $Checks) {
         $Status = if ($Check.ok) { "OK" } elseif ($Check.required) { "MISSING" } else { "OPTIONAL" }

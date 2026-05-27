@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -7,6 +8,16 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins" / "vectorworks"
+
+
+def _server_tool_names():
+    text = (ROOT / "server.py").read_text(encoding="utf-8")
+    return set(re.findall(r"def (vw_[a-zA-Z0-9_]+)\(", text))
+
+
+def _tool_map_names():
+    text = (PLUGIN / "references" / "tool-map.md").read_text(encoding="utf-8")
+    return set(re.findall(r"`(vw_[a-zA-Z0-9_]+)`", text))
 
 
 class ClaudePluginTests(unittest.TestCase):
@@ -73,6 +84,9 @@ class ClaudePluginTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(Path(result.stdout.strip()).resolve(), ROOT.resolve())
+
+    def test_plugin_tool_map_covers_server_tools(self):
+        self.assertEqual(_tool_map_names(), _server_tool_names())
 
 
 if __name__ == "__main__":

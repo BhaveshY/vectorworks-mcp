@@ -1,6 +1,5 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("2024", "2025", "2026")]
     [string]$VectorworksVersion = "2024",
     [string]$SdkDir = "",
     [switch]$DownloadSdk,
@@ -11,11 +10,16 @@ $ErrorActionPreference = "Stop"
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $CheckerPath = Join-Path $PSScriptRoot "check-native-bridge-prereqs.ps1"
-$OfficialSdkPage = "https://www.vectorworks.net/en-US/support/custom/sdk/sdkdown"
-$SdkDownloadUrls = @{
-    "2024" = "https://release.vectorworks.net/latest/Vectorworks/2024-NNA-eng-win-SDK"
-    "2025" = "https://release.vectorworks.net/latest/Vectorworks/2025-NNA-eng-win-SDK.zip"
-    "2026" = "https://release.vectorworks.net/latest/Vectorworks/2026-NNA-eng-win-SDK.zip"
+$SdkRequirementsPath = Join-Path $RepoRoot "native_bridge\SDK_REQUIREMENTS.json"
+if (-not (Test-Path -LiteralPath $SdkRequirementsPath)) {
+    throw "Native bridge SDK requirements file was not found at $SdkRequirementsPath"
+}
+$SdkRequirements = Get-Content -Raw -LiteralPath $SdkRequirementsPath | ConvertFrom-Json
+$OfficialSdkPage = [string]$SdkRequirements.officialSdkPage
+$VersionRequirements = $SdkRequirements.versions.$VectorworksVersion
+if (-not $VersionRequirements) {
+    $SupportedVersions = ($SdkRequirements.versions.PSObject.Properties.Name | Sort-Object) -join ", "
+    throw "SDK requirements do not contain Vectorworks $VectorworksVersion. Supported versions: $SupportedVersions"
 }
 
 if (-not $SdkDir) {
@@ -33,7 +37,7 @@ Write-Host "SDK directory: $SdkDir"
 if ($DownloadSdk) {
     $CacheDir = Join-Path $RepoRoot ".cache\vectorworks-sdk"
     $ArchivePath = Join-Path $CacheDir "VectorworksSDK-$VectorworksVersion-win64.zip"
-    $DownloadUrl = $SdkDownloadUrls[$VectorworksVersion]
+    $DownloadUrl = [string]$VersionRequirements.winSdkDownload
 
     New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
     New-Item -ItemType Directory -Force -Path $SdkDir | Out-Null

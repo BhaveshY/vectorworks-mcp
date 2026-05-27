@@ -1,0 +1,21 @@
+{
+  "officialSdkPage": "https://www.vectorworks.net/en-US/support/custom/sdk/sdkdown",
+  "officialSdkExamples": "https://github.com/VectorworksDeveloper/SDKExamples",
+  "versions": {
+    "2024": {
+      "winSdkDownload": "https://release.vectorworks.net/latest/Vectorworks/2024-NNA-eng-win-SDK",
+      "visualStudioMinimumVersion": "17.6.3",
+      "toolset": "v143"
+    },
+    "2025": {
+      "winSdkDownload": "https://release.vectorworks.net/latest/Vectorworks/2025-NNA-eng-win-SDK.zip",
+      "visualStudioMinimumVersion": "17.8",
+      "toolset": "v143"
+    },
+    "2026": {
+      "winSdkDownload": "https://release.vectorworks.net/latest/Vectorworks/2026-NNA-eng-win-SDK.zip",
+      "visualStudioMinimumVersion": "17.12",
+      "toolset": "v143"
+    }
+  }
+}
