@@ -1,5 +1,6 @@
 import argparse
 import json
+import re
 import socket
 import struct
 import sys
@@ -42,7 +43,7 @@ def _record_call(
     sock: socket.socket,
     report: dict[str, Any],
     action: str,
-    iteration: int,
+    iteration: int | str,
     params: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     started = time.perf_counter()
@@ -99,6 +100,116 @@ def _validate_read_result(report: dict[str, Any], action: str, result: Any) -> N
         report["failures"].append("{0} result was not a list".format(action))
 
 
+def _object_matches_fixture(obj: Any, fixture_name: str, fixture_handle: str | None = None) -> bool:
+    if not isinstance(obj, dict):
+        return False
+    if fixture_handle and obj.get("handle") == fixture_handle:
+        return True
+    return obj.get("name") == fixture_name
+
+
+def _validate_fixture_present(
+    report: dict[str, Any],
+    result: Any,
+    fixture_name: str,
+    fixture_handle: str | None = None,
+) -> None:
+    if not isinstance(result, list):
+        report["failures"].append("fixture object check did not return a list")
+        return
+    if not any(_object_matches_fixture(obj, fixture_name, fixture_handle) for obj in result):
+        report["failures"].append("created fixture object was not visible in get_objects")
+
+
+def _validate_fixture_absent(
+    report: dict[str, Any],
+    result: Any,
+    fixture_name: str,
+    fixture_handle: str | None = None,
+) -> None:
+    if not isinstance(result, list):
+        report["failures"].append("fixture cleanup check did not return a list")
+        return
+    if any(_object_matches_fixture(obj, fixture_name, fixture_handle) for obj in result):
+        report["failures"].append("created fixture object remained after cleanup")
+
+
+def _validate_fixture_selected(
+    report: dict[str, Any],
+    result: Any,
+    fixture_name: str,
+    fixture_handle: str | None = None,
+) -> None:
+    if not isinstance(result, list):
+        report["failures"].append("selection get did not return a list")
+        return
+    if not any(_object_matches_fixture(obj, fixture_name, fixture_handle) for obj in result):
+        report["failures"].append("fixture object was not selected")
+
+
+def _extract_created_handle(result: Any) -> str | None:
+    if isinstance(result, dict):
+        handle = result.get("handle")
+        return str(handle) if handle else None
+    if isinstance(result, str):
+        match = re.search(r"handle:\s*([^\s,;]+)", result)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _run_phase_one_write_fixture(sock: socket.socket, report: dict[str, Any]) -> None:
+    fixture_name = "VW_MCP_NATIVE_SMOKE_{0}".format(int(time.time() * 1000))
+    create_response = _record_call(
+        sock,
+        report,
+        "create_object",
+        "fixture",
+        params={
+            "object_type": "rect",
+            "x1": 0,
+            "y1": 0,
+            "x2": 100,
+            "y2": 100,
+            "name": fixture_name,
+        },
+    )
+    fixture_handle = _extract_created_handle(create_response.get("result")) if create_response else None
+
+    objects_response = _record_call(
+        sock,
+        report,
+        "get_objects",
+        "fixture-present",
+        params={"limit": 200, "object_type": "rect"},
+    )
+    if objects_response is not None:
+        _validate_fixture_present(report, objects_response.get("result"), fixture_name, fixture_handle)
+
+    _record_call(sock, report, "selection", "fixture-clear", params={"action": "clear"})
+    _record_call(
+        sock,
+        report,
+        "selection",
+        "fixture-select",
+        params={"action": "select", "criteria": "((N='{0}'))".format(fixture_name)},
+    )
+    selection_response = _record_call(sock, report, "selection", "fixture-get", params={"action": "get"})
+    if selection_response is not None:
+        _validate_fixture_selected(report, selection_response.get("result"), fixture_name, fixture_handle)
+    _record_call(sock, report, "selection", "fixture-delete", params={"action": "delete"})
+
+    cleanup_response = _record_call(
+        sock,
+        report,
+        "get_objects",
+        "fixture-cleanup",
+        params={"limit": 200, "object_type": "rect"},
+    )
+    if cleanup_response is not None:
+        _validate_fixture_absent(report, cleanup_response.get("result"), fixture_name, fixture_handle)
+
+
 def run_smoke(
     host: str = "127.0.0.1",
     port: int = 9877,
@@ -107,6 +218,8 @@ def run_smoke(
     read_count: int = 10,
     require_native: bool = True,
     include_objects: bool = False,
+    phase: int = 1,
+    allow_write_fixture: bool = False,
     stop: bool = False,
 ) -> dict[str, Any]:
     report: dict[str, Any] = {
@@ -118,6 +231,8 @@ def run_smoke(
         "read_count": read_count,
         "require_native": require_native,
         "include_objects": include_objects,
+        "phase": phase,
+        "allow_write_fixture": allow_write_fixture,
         "stop_requested": stop,
         "checks": [],
         "failures": [],
@@ -131,8 +246,10 @@ def run_smoke(
                 if response is not None:
                     _validate_ping(report, response.get("result"), require_native=require_native)
 
-            read_actions = ["get_document_info", "get_layers"]
-            if include_objects:
+            read_actions = []
+            if phase >= 1:
+                read_actions = ["get_document_info", "get_layers", "get_objects"]
+            elif include_objects:
                 read_actions.append("get_objects")
 
             for action in read_actions:
@@ -141,6 +258,9 @@ def run_smoke(
                     response = _record_call(sock, report, action, index, params=params)
                     if response is not None:
                         _validate_read_result(report, action, response.get("result"))
+
+            if phase >= 1 and allow_write_fixture:
+                _run_phase_one_write_fixture(sock, report)
 
             if stop:
                 _record_call(sock, report, "stop", 1)
@@ -160,6 +280,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--read-count", type=int, default=10)
     parser.add_argument("--allow-non-native", action="store_true")
     parser.add_argument("--include-objects", action="store_true")
+    parser.add_argument("--phase", type=int, choices=(0, 1), default=1)
+    parser.add_argument("--allow-write-fixture", action="store_true")
     parser.add_argument("--stop", action="store_true")
     parser.add_argument("--json", action="store_true")
     return parser.parse_args(argv)
@@ -175,6 +297,8 @@ def main(argv: list[str] | None = None) -> int:
         read_count=args.read_count,
         require_native=not args.allow_non_native,
         include_objects=args.include_objects,
+        phase=args.phase,
+        allow_write_fixture=args.allow_write_fixture,
         stop=args.stop,
     )
 
@@ -184,6 +308,7 @@ def main(argv: list[str] | None = None) -> int:
         status = "OK" if report["ok"] else "FAILED"
         print("Native bridge smoke test: {0}".format(status))
         print("Target: {0}:{1}".format(report["host"], report["port"]))
+        print("Phase: {0}; write_fixture={1}".format(report["phase"], report["allow_write_fixture"]))
         print("Checks: {0}".format(len(report["checks"])))
         if report.get("last_ping"):
             ping = report["last_ping"]

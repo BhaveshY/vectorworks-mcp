@@ -175,15 +175,19 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("native_bridge\\worktree", prepare)
         self.assertIn("SDKExamples", prepare)
         self.assertIn("VectorworksMCPBridge", prepare)
+        self.assertIn("[string]$SdkDir", prepare)
 
         self.assertIn("check-native-bridge-prereqs.ps1", build)
         self.assertIn("MSBuild", build)
         self.assertIn("*$VectorworksVersion.sln", build)
         self.assertIn("/p:Platform=x64", build)
+        self.assertIn("[string]$SdkDir", build)
+        self.assertIn('"-SdkDir", $SdkDir', build)
         self.assertIn("Microsoft.VisualStudio.2022.BuildTools", bootstrap)
         self.assertIn("Microsoft.VisualStudio.Workload.VCTools", bootstrap)
         self.assertIn("[switch]$PrepareSource", bootstrap)
         self.assertIn("[switch]$Build", bootstrap)
+        self.assertIn('"-SdkDir", $SdkDir', bootstrap)
         self.assertIn("third_party\\VectorworksSDKExamples\\VectorworksSDK\\SDK$Version", checker)
         self.assertIn("native_bridge/worktree/", gitignore)
 
@@ -228,6 +232,50 @@ class AgentReadinessTests(unittest.TestCase):
                 self.assertTrue((bridge / "VECTORWORKS_MCP_BRIDGE_NOTES.md").exists())
                 self.assertTrue((root / "VectorworksSDK" / "SDK2024" / "SDKLib").exists())
                 self.assertTrue((root / "ThirdPartySource" / "libcurl").exists())
+            finally:
+                if worktree.exists():
+                    shutil.rmtree(worktree)
+
+    def test_prepare_native_bridge_source_accepts_sdk_dir(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise native source preparation")
+
+        worktree = ROOT / "native_bridge" / "worktree"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sdk_root = Path(temp_dir) / "ExtractedSDK"
+            examples = sdk_root / "SDKExamples"
+            source = examples / "Examples2024" / "ObjectExample"
+            (source / "Source").mkdir(parents=True)
+            (examples / "VectorworksSDK" / "SDK2024" / "SDKLib").mkdir(parents=True)
+            (examples / "ThirdPartySource" / "libcurl").mkdir(parents=True)
+            (source / "ObjectExample2024.sln").write_text("fake solution\n", encoding="utf-8")
+
+            try:
+                subprocess.run(
+                    [
+                        powershell,
+                        "-NoLogo",
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(ROOT / "scripts/prepare-native-bridge-source.ps1"),
+                        "-SdkDir",
+                        str(sdk_root),
+                        "-Force",
+                    ],
+                    cwd=str(ROOT),
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+
+                root = worktree / "SDKExamples"
+                bridge = root / "Examples2024" / "VectorworksMCPBridge"
+                self.assertTrue((bridge / "ObjectExample2024.sln").exists())
+                self.assertTrue((root / "VectorworksSDK" / "SDK2024" / "SDKLib").exists())
             finally:
                 if worktree.exists():
                     shutil.rmtree(worktree)
@@ -282,6 +330,8 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("native_bridge\\smoke.py", smoke_script)
         self.assertIn("--ping-count", smoke_script)
         self.assertIn("--read-count", smoke_script)
+        self.assertIn("--phase", smoke_script)
+        self.assertIn("--allow-write-fixture", smoke_script)
         self.assertIn("smoke-native-bridge.ps1", acceptance)
         self.assertIn("smoke-native-bridge.ps1", native_readme)
 

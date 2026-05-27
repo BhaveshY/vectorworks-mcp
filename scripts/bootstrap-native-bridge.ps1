@@ -97,6 +97,7 @@ if ($PrepareRequested) {
     }
 
     $PrepareArgs = @("-VectorworksVersion", $VectorworksVersion)
+    if ($SdkDir) { $PrepareArgs += @("-SdkDir", $SdkDir) }
     if ($SdkExamplesDir) { $PrepareArgs += @("-SdkExamplesDir", $SdkExamplesDir) }
     if ($CloneSdkExamples) { $PrepareArgs += "-CloneSdkExamples" }
     if ($Force) { $PrepareArgs += "-Force" }
@@ -115,7 +116,9 @@ if ($Build) {
     if (-not (Test-Path -LiteralPath $BuildPath)) {
         throw "Native build script not found at $BuildPath"
     }
-    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $BuildPath -VectorworksVersion $VectorworksVersion -Configuration $Configuration
+    $BuildArgs = @("-VectorworksVersion", $VectorworksVersion, "-Configuration", $Configuration)
+    if ($SdkDir) { $BuildArgs += @("-SdkDir", $SdkDir) }
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $BuildPath @BuildArgs
     exit $LASTEXITCODE
 }
 

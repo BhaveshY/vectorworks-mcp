@@ -24,10 +24,25 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke-
 ```
 
 Expected result: `ok: true`, `native_bridge: true`, `cad_api_safe: true`, and
-no read-handler timeouts.
+no phase-1 read-handler timeouts. The default smoke phase covers `ping`,
+`get_document_info`, `get_layers`, and `get_objects`.
 
-5. Create and delete a simple rectangle in a test document.
-6. Stop the bridge and confirm port `9877` is released.
+5. In a disposable test document, run the explicit write fixture:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -AllowWriteFixture -Json
+```
+
+Expected result: the bridge creates a uniquely named rectangle, finds it,
+selects it, deletes it, and verifies cleanup.
+
+6. For phase-0 transport shutdown, run:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Phase 0 -Stop -Json
+```
+
+7. Confirm port `9877` is released.
 
 Record:
 

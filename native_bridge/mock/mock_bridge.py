@@ -52,6 +52,19 @@ class MockNativeBridge:
             "transport_only": False,
             "native_bridge": True,
         }
+        self.objects = [
+            {
+                "handle": "mock-rect-1",
+                "type": "rect",
+                "name": "Mock Rect",
+                "bounds": {
+                    "top_left": [0, 0],
+                    "bottom_right": [100, 100],
+                },
+            }
+        ]
+        self.selection = []
+        self.created_count = 0
         self.requests = []
         self.ready = threading.Event()
         self.stop_event = threading.Event()
@@ -115,7 +128,7 @@ class MockNativeBridge:
                                 "filepath": "",
                                 "layers": ["Design Layer-1"],
                                 "layer_count": 1,
-                                "total_objects": 1,
+                                "total_objects": len(self.objects),
                             },
                         },
                     )
@@ -129,45 +142,79 @@ class MockNativeBridge:
                         },
                     )
                 elif action == "get_objects":
+                    params = request.get("params", {})
+                    limit = int(params.get("limit", 100))
+                    object_type = str(params.get("object_type", "")).lower()
+                    objects = [
+                        obj for obj in self.objects
+                        if not object_type or obj.get("type") == object_type
+                    ][:limit]
                     _write_json_frame(
                         conn,
                         {
                             "id": request_id,
                             "success": True,
-                            "result": [
-                                {
-                                    "handle": "mock-rect-1",
-                                    "type": "rect",
-                                    "name": "Mock Rect",
-                                    "bounds": {
-                                        "top_left": [0, 0],
-                                        "bottom_right": [100, 100],
-                                    },
-                                }
-                            ],
+                            "result": objects,
                         },
                     )
                 elif action == "selection":
-                    selection_action = request.get("params", {}).get("action", "get")
-                    if selection_action in ("get", "clear"):
-                        result = [] if selection_action == "get" else "Selection cleared"
+                    params = request.get("params", {})
+                    selection_action = params.get("action", "get")
+                    if selection_action == "get":
+                        selected = [obj for obj in self.objects if obj["handle"] in self.selection]
+                        _write_json_frame(conn, {"id": request_id, "success": True, "result": selected})
+                    elif selection_action == "clear":
+                        self.selection = []
+                        _write_json_frame(conn, {"id": request_id, "success": True, "result": "Selection cleared"})
+                    elif selection_action == "select":
+                        criteria = str(params.get("criteria", ""))
+                        self.selection = [
+                            obj["handle"] for obj in self.objects
+                            if obj["handle"] in criteria or obj["name"] in criteria
+                        ]
+                        result = "Selected {0} objects".format(len(self.selection))
                         _write_json_frame(conn, {"id": request_id, "success": True, "result": result})
+                    elif selection_action == "delete":
+                        selected = set(self.selection)
+                        deleted = len(selected)
+                        self.objects = [obj for obj in self.objects if obj["handle"] not in selected]
+                        self.selection = []
+                        _write_json_frame(
+                            conn,
+                            {"id": request_id, "success": True, "result": "Deleted {0} objects".format(deleted)},
+                        )
                     else:
                         _write_json_frame(
                             conn,
                             {
                                 "id": request_id,
                                 "success": False,
-                                "error": "Mock bridge only implements selection get/clear",
+                                "error": "Mock bridge only implements selection get/clear/select/delete",
                             },
                         )
                 elif action == "create_object":
+                    params = request.get("params", {})
+                    self.created_count += 1
+                    handle = "mock-created-{0}".format(self.created_count)
+                    name = params.get("name") or "Mock Created {0}".format(self.created_count)
+                    object_type = params.get("object_type") or params.get("type") or "rect"
+                    self.objects.append(
+                        {
+                            "handle": handle,
+                            "type": object_type,
+                            "name": name,
+                            "bounds": {
+                                "top_left": [params.get("x1", 0), params.get("y1", 0)],
+                                "bottom_right": [params.get("x2", 100), params.get("y2", 100)],
+                            },
+                        }
+                    )
                     _write_json_frame(
                         conn,
                         {
                             "id": request_id,
                             "success": True,
-                            "result": "Created mock object, handle: mock-created-1",
+                            "result": "Created {0}, handle: {1}".format(object_type, handle),
                         },
                     )
                 elif action == "stop":

@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$VectorworksVersion = "2024",
+    [string]$SdkDir = "",
     [string]$SdkExamplesDir = "",
     [switch]$CloneSdkExamples,
     [switch]$Force
@@ -41,11 +42,23 @@ function Test-SdkExamplesLayout {
 }
 
 function Get-FirstSdkExamplesLayout {
-    param([string]$Version)
+    param(
+        [string]$Version,
+        [string]$RequestedSdkDir
+    )
 
     $Candidates = @()
     if ($env:VECTORWORKS_SDK_EXAMPLES_DIR) {
         $Candidates += $env:VECTORWORKS_SDK_EXAMPLES_DIR
+    }
+    if ($RequestedSdkDir) {
+        $Candidates += $RequestedSdkDir
+        $Candidates += Join-Path $RequestedSdkDir "SDKExamples"
+        if (Test-Path -LiteralPath $RequestedSdkDir -PathType Container) {
+            $ChildDirs = Get-ChildItem -LiteralPath $RequestedSdkDir -Directory -ErrorAction SilentlyContinue |
+                ForEach-Object { $_.FullName }
+            $Candidates += $ChildDirs
+        }
     }
     $Candidates += Join-Path $RepoRoot "third_party\VectorworksSDKExamples"
     $Candidates += Join-Path $RepoRoot ".cache\VectorworksSDKExamples"
@@ -87,7 +100,7 @@ function New-DirectoryLinkOrCopy {
 }
 
 if (-not $SdkExamplesDir) {
-    $SdkExamplesDir = Get-FirstSdkExamplesLayout -Version $VectorworksVersion
+    $SdkExamplesDir = Get-FirstSdkExamplesLayout -Version $VectorworksVersion -RequestedSdkDir $SdkDir
 }
 
 if (-not $SdkExamplesDir -and $CloneSdkExamples) {
@@ -120,6 +133,7 @@ Vectorworks SDK examples were not found for $VectorworksVersion.
 
 Fix one of these:
 - Set VECTORWORKS_SDK_EXAMPLES_DIR to a clone of $($SdkRequirements.officialSdkExamples)
+- Pass -SdkDir C:\path\to\extracted\VectorworksSDK if that folder contains SDK examples
 - Pass -SdkExamplesDir C:\path\to\SDKExamples
 - Rerun with -CloneSdkExamples to clone the official examples into third_party\VectorworksSDKExamples
 "@

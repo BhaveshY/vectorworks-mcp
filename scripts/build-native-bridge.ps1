@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$VectorworksVersion = "2024",
+    [string]$SdkDir = "",
     [string]$SourceDir = "",
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Debug",
@@ -38,7 +39,10 @@ if (-not $SkipPrereqCheck) {
         throw "Native bridge prerequisite checker was not found at $CheckerPath"
     }
 
-    $Json = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $CheckerPath -VectorworksVersion $VectorworksVersion -Advisory -Json
+    $CheckerArgs = @("-VectorworksVersion", $VectorworksVersion, "-Advisory", "-Json")
+    if ($SdkDir) { $CheckerArgs += @("-SdkDir", $SdkDir) }
+
+    $Json = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $CheckerPath @CheckerArgs
     if ($LASTEXITCODE -ne 0) {
         throw "Native prerequisite checker failed with exit code $LASTEXITCODE"
     }

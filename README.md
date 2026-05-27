@@ -83,6 +83,13 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Json
 ```
 
+The default native smoke is the phase-1 read gate. In a disposable test
+document, add `-AllowWriteFixture` to prove create/select/delete cleanup too.
+
+If an agent or user has already extracted the Vectorworks SDK somewhere else,
+pass the same `-SdkDir C:\path\to\sdk` to bootstrap, prepare, and build; the
+scripts preserve that custom SDK path end-to-end.
+
 ## Agent-Ready Setup
 
 Fresh Windows 11 checkout:

@@ -9,8 +9,11 @@ param(
     [int]$PingCount = 10,
     [ValidateRange(1, 100)]
     [int]$ReadCount = 10,
+    [ValidateRange(0, 1)]
+    [int]$Phase = 1,
     [switch]$AllowNonNative,
     [switch]$IncludeObjects,
+    [switch]$AllowWriteFixture,
     [switch]$Stop,
     [switch]$Json
 )
@@ -51,10 +54,12 @@ $Args = @(
     "--port", $Port,
     "--timeout", $TimeoutSeconds,
     "--ping-count", $PingCount,
-    "--read-count", $ReadCount
+    "--read-count", $ReadCount,
+    "--phase", $Phase
 )
 if ($AllowNonNative) { $Args += "--allow-non-native" }
 if ($IncludeObjects) { $Args += "--include-objects" }
+if ($AllowWriteFixture) { $Args += "--allow-write-fixture" }
 if ($Stop) { $Args += "--stop" }
 if ($Json) { $Args += "--json" }
 

@@ -102,6 +102,15 @@ local source worktree from Vectorworks' official `ObjectExample`:
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\prepare-native-bridge-source.ps1 -CloneSdkExamples
 ```
 
+If the SDK was extracted outside the repo-local `third_party` folder, pass the
+same custom SDK root through the native flow:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-native-bridge.ps1 -SdkDir C:\VectorworksSDK\2024 -PrepareSource -Build
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\prepare-native-bridge-source.ps1 -SdkDir C:\VectorworksSDK\2024
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1 -SdkDir C:\VectorworksSDK\2024
+```
+
 Then verify that the unmodified SDK example builds before replacing its example
 extension code with the MCP bridge:
 
@@ -117,7 +126,11 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke-
 ```
 
 It speaks the raw bridge protocol directly, requires a native CAD-safe bridge by
-default, and repeats `ping`, `get_document_info`, and `get_layers`.
+default, and runs the phase-1 read gate: `ping`, `get_document_info`,
+`get_layers`, and `get_objects`. Add `-AllowWriteFixture` only in a disposable
+test document; it creates, selects, deletes, and verifies cleanup for a uniquely
+named rectangle. Use `-Phase 0 -Stop` for transport-only shutdown/port-release
+verification.
 
 The generated worktree lives under `native_bridge/worktree/SDKExamples/` and is
 ignored by git. It preserves the official examples' relative layout so the

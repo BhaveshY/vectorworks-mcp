@@ -129,10 +129,70 @@ class NativeBridgeContractTests(unittest.TestCase):
             report = run_smoke(port=bridge.port, ping_count=3, read_count=2, timeout=1)
 
         self.assertTrue(report["ok"], report["failures"])
-        self.assertEqual(len(report["checks"]), 7)
+        self.assertEqual(report["phase"], 1)
+        self.assertEqual(len(report["checks"]), 9)
         self.assertEqual(
             [request["action"] for request in bridge.requests],
-            ["ping", "ping", "ping", "get_document_info", "get_document_info", "get_layers", "get_layers"],
+            [
+                "ping",
+                "ping",
+                "ping",
+                "get_document_info",
+                "get_document_info",
+                "get_layers",
+                "get_layers",
+                "get_objects",
+                "get_objects",
+            ],
+        )
+
+    def test_native_smoke_harness_accepts_phase_one_write_fixture(self):
+        with MockNativeBridge() as bridge:
+            report = run_smoke(
+                port=bridge.port,
+                ping_count=1,
+                read_count=1,
+                timeout=1,
+                allow_write_fixture=True,
+            )
+
+        self.assertTrue(report["ok"], report["failures"])
+        self.assertTrue(report["allow_write_fixture"])
+        self.assertEqual(
+            [request["action"] for request in bridge.requests],
+            [
+                "ping",
+                "get_document_info",
+                "get_layers",
+                "get_objects",
+                "create_object",
+                "get_objects",
+                "selection",
+                "selection",
+                "selection",
+                "selection",
+                "get_objects",
+            ],
+        )
+
+    def test_native_smoke_harness_phase_zero_can_stop_bridge(self):
+        with MockNativeBridge() as bridge:
+            port = bridge.port
+            report = run_smoke(port=port, ping_count=1, read_count=1, timeout=1, phase=0, stop=True)
+
+        self.assertTrue(report["ok"], report["failures"])
+        self.assertEqual(report["phase"], 0)
+        self.assertEqual([request["action"] for request in bridge.requests], ["ping", "stop"])
+        self.assertTrue(_wait_for_port_released(port))
+
+    def test_native_smoke_harness_requires_write_fixture_flag_for_writes(self):
+        with MockNativeBridge() as bridge:
+            report = run_smoke(port=bridge.port, ping_count=1, read_count=1, timeout=1)
+
+        self.assertTrue(report["ok"], report["failures"])
+        self.assertNotIn(
+            "create_object",
+            [request["action"] for request in bridge.requests],
         )
 
     def test_native_smoke_harness_rejects_transport_only_bridge(self):
