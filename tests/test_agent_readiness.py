@@ -38,6 +38,7 @@ class AgentReadinessTests(unittest.TestCase):
             "loader-clipboard-copy",
             "native-bridge-scaffold",
             "native-bridge-scaffold-copy",
+            "native-doctor-next-command",
         ):
             self.assertIn(feature, marker["requiredFeatures"])
 
@@ -146,6 +147,9 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("Generated Vectorworks loader", verifier)
         self.assertIn("test-native-bridge-scaffold.ps1", verifier)
         self.assertIn("native bridge scaffold compile smoke", verifier)
+        self.assertIn("doctor-native-bridge.ps1", verifier)
+        self.assertIn("native bridge doctor next command", verifier)
+        self.assertIn("nextCommandReason", verifier)
 
     def test_native_bridge_scaffold_compile_smoke_script_exercises_protocol(self):
         smoke = (ROOT / "scripts/test-native-bridge-scaffold.ps1").read_text(encoding="utf-8")
@@ -219,8 +223,9 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIn("runpy.run_path", loader_text)
             self.assertIn(str(launcher_path).replace("\\", "\\\\"), loader_text)
             self.assertIn("VW_MCP_LOADER_METADATA", loader_text)
-            self.assertIn('"contractVersion": 5', loader_text)
+            self.assertIn('"contractVersion": 6', loader_text)
             self.assertIn('"native-bridge-scaffold-copy"', loader_text)
+            self.assertIn('"native-doctor-next-command"', loader_text)
 
     def test_native_bridge_scaffold_is_explicitly_not_default(self):
         expected_files = (
@@ -387,7 +392,11 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("Microsoft.VisualStudio.Workload.VCTools", bootstrap)
         self.assertIn("[switch]$PrepareSource", bootstrap)
         self.assertIn("[switch]$Build", bootstrap)
+        self.assertIn("[string]$WorktreeRoot", bootstrap)
         self.assertIn('"-SdkDir", $SdkDir', bootstrap)
+        self.assertIn('"-WorktreeRoot", $WorktreeRoot', bootstrap)
+        self.assertIn('"-SourceDir", $WorktreeRoot', bootstrap)
+        self.assertIn("[string]$WorktreeRoot", prepare)
         self.assertIn("third_party\\VectorworksSDKExamples\\VectorworksSDK\\SDK$Version", checker)
         self.assertIn("native_bridge/worktree/", gitignore)
 
@@ -562,6 +571,50 @@ class AgentReadinessTests(unittest.TestCase):
                 if worktree.exists():
                     shutil.rmtree(worktree)
 
+    def test_prepare_native_bridge_source_accepts_custom_worktree_root(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise native source preparation")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            examples = temp_root / "SDKExamples Source"
+            source = examples / "Examples2024" / "ObjectExample"
+            custom_worktree = temp_root / "Custom SDKExamples"
+            (source / "Source").mkdir(parents=True)
+            (examples / "VectorworksSDK" / "SDK2024" / "SDKLib").mkdir(parents=True)
+            (examples / "ThirdPartySource" / "libcurl").mkdir(parents=True)
+            (source / "ObjectExample2024.sln").write_text("fake solution\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/prepare-native-bridge-source.ps1"),
+                    "-SdkExamplesDir",
+                    str(examples),
+                    "-WorktreeRoot",
+                    str(custom_worktree),
+                    "-Force",
+                ],
+                cwd=str(ROOT),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            bridge = custom_worktree / "Examples2024" / "VectorworksMCPBridge"
+            self.assertTrue((bridge / "ObjectExample2024.sln").exists())
+            self.assertTrue((bridge / "VECTORWORKS_MCP_BRIDGE_NOTES.md").exists())
+            self.assertIn(str(custom_worktree), result.stdout)
+            self.assertIn("-SourceDir", result.stdout)
+            self.assertIn(str(custom_worktree), (bridge / "VECTORWORKS_MCP_BRIDGE_NOTES.md").read_text(encoding="utf-8"))
+
     def test_powershell_scripts_parse(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
         if not powershell:
@@ -658,6 +711,8 @@ class AgentReadinessTests(unittest.TestCase):
         )
         self.assertIn("enable/load the native VectorworksMCPBridge plug-in", root_readme)
         self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", root_readme)
+        self.assertIn("nextCommand", root_readme)
+        self.assertIn("nextCommandReason", root_readme)
         self.assertIn(
             "doctor-native-bridge.ps1 -BuiltArtifact C:\\path\\to\\VectorworksMCPBridge.vwlibrary -Install -WhatIf",
             agents,
@@ -667,6 +722,8 @@ class AgentReadinessTests(unittest.TestCase):
             agents,
         )
         self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", agents)
+        self.assertIn("nextCommand", agents)
+        self.assertIn("nextCommandReason", agents)
         self.assertIn("Do not run the default native smoke against the copied", agents)
 
     def test_native_doctor_exposes_stage_aware_next_command(self):
@@ -692,6 +749,7 @@ class AgentReadinessTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
+            worktree = temp_root / "SDKExamples With Spaces"
             result = subprocess.run(
                 [
                     powershell,
@@ -702,7 +760,7 @@ class AgentReadinessTests(unittest.TestCase):
                     "-File",
                     str(ROOT / "scripts/doctor-native-bridge.ps1"),
                     "-WorktreeRoot",
-                    str(temp_root / "SDKExamples"),
+                    str(worktree),
                     "-InstallDir",
                     str(temp_root / "Plug-ins"),
                     "-Json",
@@ -718,6 +776,10 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIsInstance(report["nextActions"], list)
             self.assertTrue(report["nextCommand"])
             self.assertTrue(report["nextCommandReason"])
+            self.assertIn(str(worktree), report["nextCommand"])
+            self.assertIn("-WorktreeRoot", report["nextCommand"])
+            self.assertIn(str(ROOT / "scripts"), report["nextCommand"])
+            self.assertNotIn("-File .\\scripts", report["nextCommand"])
             if report["prereqsReady"]:
                 self.assertIn("prepare-native-bridge-source.ps1", report["nextCommand"])
             else:
@@ -733,7 +795,7 @@ class AgentReadinessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             artifact = temp_root / "VectorworksMCPBridge.vwlibrary"
-            install_dir = temp_root / "Plug-ins"
+            install_dir = temp_root / "Plug-ins With Spaces"
             artifact.write_text("fake native bridge artifact\n", encoding="utf-8")
 
             result = subprocess.run(
@@ -745,6 +807,8 @@ class AgentReadinessTests(unittest.TestCase):
                     "Bypass",
                     "-File",
                     str(ROOT / "scripts/doctor-native-bridge.ps1"),
+                    "-VectorworksVersion",
+                    "2025",
                     "-BuiltArtifact",
                     str(artifact),
                     "-InstallDir",
@@ -781,7 +845,7 @@ class AgentReadinessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
             artifact = temp_root / "VectorworksMCPBridge.vwlibrary"
-            install_dir = temp_root / "Plug-ins"
+            install_dir = temp_root / "Plug-ins With Spaces"
             artifact.write_text("fake native bridge artifact\n", encoding="utf-8")
 
             result = subprocess.run(
@@ -793,6 +857,8 @@ class AgentReadinessTests(unittest.TestCase):
                     "Bypass",
                     "-File",
                     str(ROOT / "scripts/doctor-native-bridge.ps1"),
+                    "-VectorworksVersion",
+                    "2025",
                     "-BuiltArtifact",
                     str(artifact),
                     "-InstallDir",
@@ -820,7 +886,9 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertNotIn("Restart Vectorworks", "\n".join(report["nextActions"]))
             self.assertIn("without -WhatIf", "\n".join(report["nextActions"]))
             self.assertIn("doctor-native-bridge.ps1", report["nextCommand"])
+            self.assertIn("-VectorworksVersion 2025", report["nextCommand"])
             self.assertIn(str(artifact), report["nextCommand"])
+            self.assertIn(str(install_dir), report["nextCommand"])
             self.assertIn("-Install", report["nextCommand"])
             self.assertNotIn("-WhatIf", report["nextCommand"])
             self.assertIn("without -WhatIf", report["nextCommandReason"])
@@ -835,7 +903,7 @@ class AgentReadinessTests(unittest.TestCase):
             worktree = temp_root / "SDKExamples"
             bridge_source = worktree / "Examples2024" / "VectorworksMCPBridge"
             artifact = bridge_source / "Build" / "VectorworksMCPBridge.vwlibrary"
-            install_dir = temp_root / "Plug-ins"
+            install_dir = temp_root / "Plug-ins With Spaces"
             artifact.parent.mkdir(parents=True)
             artifact.write_text("fake native bridge artifact\n", encoding="utf-8")
 
@@ -867,6 +935,7 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertEqual(report["builtArtifactCandidate"], str(artifact))
             self.assertIn(str(artifact), "\n".join(report["nextActions"]))
             self.assertIn(str(artifact), report["nextCommand"])
+            self.assertIn(str(install_dir), report["nextCommand"])
             self.assertIn("-Install -WhatIf", report["nextCommand"])
             self.assertIn("Dry-run", report["nextCommandReason"])
 
@@ -940,6 +1009,8 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIn("VectorworksMCPBridge.cpp", report["missingScaffoldFiles"])
             self.assertIn("copy-native-bridge-scaffold.ps1 -VectorworksVersion 2024 -Force", "\n".join(report["nextActions"]))
             self.assertIn("copy-native-bridge-scaffold.ps1 -VectorworksVersion 2024 -Force", report["nextCommand"])
+            self.assertIn(str(worktree), report["nextCommand"])
+            self.assertIn("-WorktreeRoot", report["nextCommand"])
             self.assertIn("partially copied", report["nextCommandReason"])
 
     def test_native_prereq_checker_reports_supported_versions_for_unknown_version(self):

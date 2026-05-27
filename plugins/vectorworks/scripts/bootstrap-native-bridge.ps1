@@ -3,6 +3,7 @@ param(
     [string]$VectorworksVersion = "2024",
     [string]$SdkDir = "",
     [string]$SdkExamplesDir = "",
+    [string]$WorktreeRoot = "",
     [switch]$DownloadSdk,
     [switch]$InstallVisualStudioBuildTools,
     [switch]$CloneSdkExamples,
@@ -30,6 +31,7 @@ if (-not (Test-Path -LiteralPath $Bootstrap)) {
 $Args = @("-VectorworksVersion", $VectorworksVersion, "-Configuration", $Configuration)
 if ($SdkDir) { $Args += @("-SdkDir", $SdkDir) }
 if ($SdkExamplesDir) { $Args += @("-SdkExamplesDir", $SdkExamplesDir) }
+if ($WorktreeRoot) { $Args += @("-WorktreeRoot", $WorktreeRoot) }
 if ($DownloadSdk) { $Args += "-DownloadSdk" }
 if ($InstallVisualStudioBuildTools) { $Args += "-InstallVisualStudioBuildTools" }
 if ($CloneSdkExamples) { $Args += "-CloneSdkExamples" }

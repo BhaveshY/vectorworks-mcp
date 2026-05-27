@@ -3,6 +3,7 @@ param(
     [string]$VectorworksVersion = "2024",
     [string]$SdkDir = "",
     [string]$SdkExamplesDir = "",
+    [string]$WorktreeRoot = "",
     [switch]$CloneSdkExamples,
     [switch]$Force
 )
@@ -24,6 +25,7 @@ if (-not (Test-Path -LiteralPath $Prepare)) {
 $Args = @("-VectorworksVersion", $VectorworksVersion)
 if ($SdkDir) { $Args += @("-SdkDir", $SdkDir) }
 if ($SdkExamplesDir) { $Args += @("-SdkExamplesDir", $SdkExamplesDir) }
+if ($WorktreeRoot) { $Args += @("-WorktreeRoot", $WorktreeRoot) }
 if ($CloneSdkExamples) { $Args += "-CloneSdkExamples" }
 if ($Force) { $Args += "-Force" }
 

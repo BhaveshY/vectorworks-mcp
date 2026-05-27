@@ -15,6 +15,7 @@ $ListenerPath = Join-Path $RepoRoot "vw_listener.py"
 $VenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 $ProjectMcpPath = Join-Path $RepoRoot ".mcp.json"
 $NativePrereqPath = Join-Path $RepoRoot "scripts\check-native-bridge-prereqs.ps1"
+$NativeDoctorPath = Join-Path $RepoRoot "scripts\doctor-native-bridge.ps1"
 $NativeScaffoldTestPath = Join-Path $RepoRoot "scripts\test-native-bridge-scaffold.ps1"
 $FreshLauncher = $false
 $FreshLoader = $false
@@ -56,6 +57,7 @@ Assert-Path $ServerPath "MCP server"
 Assert-Path $ListenerPath "Vectorworks listener"
 Assert-Path $ProjectMcpPath "Project MCP config"
 Assert-Path $NativePrereqPath "Native bridge prerequisite checker"
+Assert-Path $NativeDoctorPath "Native bridge doctor"
 Assert-Path $NativeScaffoldTestPath "Native bridge scaffold smoke test"
 
 Invoke-Checked "bootstrap venv/dependencies" {
@@ -111,6 +113,17 @@ Invoke-Checked "native bridge scaffold compile smoke" {
 
 Invoke-Checked "native bridge prereq advisory" {
     & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $NativePrereqPath -Advisory
+}
+
+Invoke-Checked "native bridge doctor next command" {
+    $ProbeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("vectorworks-mcp-verify-native-doctor-{0}" -f $PID)
+    $DoctorJson = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $NativeDoctorPath -WorktreeRoot (Join-Path $ProbeRoot "SDKExamples") -InstallDir (Join-Path $ProbeRoot "Plug-ins") -Json
+    $DoctorReport = $DoctorJson | ConvertFrom-Json
+    if ([string]::IsNullOrWhiteSpace([string]$DoctorReport.nextCommand) -or
+        [string]::IsNullOrWhiteSpace([string]$DoctorReport.nextCommandReason) -or
+        @($DoctorReport.nextActions).Count -eq 0) {
+        throw "Native bridge doctor JSON did not include nextCommand, nextCommandReason, and nextActions."
+    }
 }
 
 try {

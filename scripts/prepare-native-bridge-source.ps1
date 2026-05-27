@@ -3,6 +3,7 @@ param(
     [string]$VectorworksVersion = "2024",
     [string]$SdkDir = "",
     [string]$SdkExamplesDir = "",
+    [string]$WorktreeRoot = "",
     [switch]$CloneSdkExamples,
     [switch]$Force
 )
@@ -12,7 +13,9 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $SdkRequirementsPath = Join-Path $RepoRoot "native_bridge\SDK_REQUIREMENTS.json"
 $WorkRoot = Join-Path $RepoRoot "native_bridge\worktree"
-$WorktreeRoot = Join-Path $WorkRoot "SDKExamples"
+if (-not $WorktreeRoot) {
+    $WorktreeRoot = Join-Path $WorkRoot "SDKExamples"
+}
 $TargetDir = Join-Path $WorktreeRoot "Examples$VectorworksVersion\VectorworksMCPBridge"
 
 if (-not (Test-Path -LiteralPath $SdkRequirementsPath)) {
@@ -99,6 +102,22 @@ function New-DirectoryLinkOrCopy {
     }
 }
 
+function Assert-SafeWorktreeRemovalTarget {
+    param([string]$Path)
+
+    $TrimChars = [char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $Resolved = (Resolve-Path -LiteralPath $Path).Path.TrimEnd($TrimChars)
+    $Root = [System.IO.Path]::GetPathRoot($Resolved).TrimEnd($TrimChars)
+    if (-not $Resolved -or $Resolved -eq $Root) {
+        throw "Refusing to remove unsafe native bridge worktree target: $Resolved"
+    }
+    $LeafName = Split-Path -Leaf $Resolved
+    if ($LeafName -notmatch '(?i)(sdkexamples|native|worktree|vectorworks)') {
+        throw "Refusing to remove native bridge worktree target without an SDK/native/worktree-style leaf name: $Resolved"
+    }
+    return $Resolved
+}
+
 if (-not $SdkExamplesDir) {
     $SdkExamplesDir = Get-FirstSdkExamplesLayout -Version $VectorworksVersion -RequestedSdkDir $SdkDir
 }
@@ -147,9 +166,9 @@ if ((Test-Path -LiteralPath $WorktreeRoot) -and -not $Force) {
 }
 
 if (Test-Path -LiteralPath $WorktreeRoot) {
-    $ResolvedWorktree = (Resolve-Path -LiteralPath $WorktreeRoot).Path
+    $ResolvedWorktree = Assert-SafeWorktreeRemovalTarget -Path $WorktreeRoot
     if (-not $ResolvedWorktree.StartsWith($WorkRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "Refusing to remove target outside native_bridge\worktree: $ResolvedWorktree"
+        Write-Warning "Removing explicitly requested native bridge worktree outside native_bridge\worktree: $ResolvedWorktree"
     }
     Remove-Item -LiteralPath $WorktreeRoot -Recurse -Force
 }
@@ -198,4 +217,4 @@ Write-Host "Bridge project:"
 Write-Host $TargetDir
 Write-Host ""
 Write-Host "Next build command:"
-Write-Host "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1 -VectorworksVersion $VectorworksVersion"
+Write-Host "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1 -VectorworksVersion $VectorworksVersion -SourceDir `"$WorktreeRoot`""

@@ -87,6 +87,11 @@ Native bridge doctor/deploy planner:
 powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -Json
 ```
 
+For agent-driven native setup, treat the JSON `nextCommand` as the single
+primary next step and show `nextCommandReason` before running it. The older
+manual sequence below is reference material; the doctor preserves custom
+version, worktree, and install paths in its generated command.
+
 Optional SDK bootstrap helper:
 
 ```powershell

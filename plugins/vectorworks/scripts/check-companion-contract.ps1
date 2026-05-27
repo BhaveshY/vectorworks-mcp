@@ -43,7 +43,7 @@ $RequiredScripts = @(
     "scripts\test-native-bridge-scaffold.ps1"
 )
 
-$RequiredFeatures = @("stable-loader", "loader-clipboard-copy", "native-bridge-scaffold", "native-bridge-scaffold-copy")
+$RequiredFeatures = @("stable-loader", "loader-clipboard-copy", "native-bridge-scaffold", "native-bridge-scaffold-copy", "native-doctor-next-command")
 
 $ContractMarker = Join-Path $RepoRoot ".vectorworks-mcp-contract.json"
 if (-not (Test-Path -LiteralPath $ContractMarker)) {
@@ -57,10 +57,10 @@ try {
 try {
     $ContractVersion = [int]$Contract.contractVersion
 } catch {
-    throw "Companion repo contract marker is incompatible. Expected numeric contractVersion >= 5."
+    throw "Companion repo contract marker is incompatible. Expected numeric contractVersion >= 6."
 }
-if ($Contract.name -ne "vectorworks-mcp" -or $ContractVersion -lt 5) {
-    throw "Companion repo contract marker is incompatible. Expected vectorworks-mcp contractVersion >= 5."
+if ($Contract.name -ne "vectorworks-mcp" -or $ContractVersion -lt 6) {
+    throw "Companion repo contract marker is incompatible. Expected vectorworks-mcp contractVersion >= 6."
 }
 $ContractFeatures = @($Contract.requiredFeatures | ForEach-Object { [string]$_ })
 foreach ($RequiredFeature in $RequiredFeatures) {
@@ -138,6 +138,27 @@ foreach ($RequiredParam in @("LauncherPath", "LoaderPath")) {
     if ($RequiredParam -notin $VerifyParams) {
         throw "Companion verify-no-vectorworks.ps1 does not expose required parameter: $RequiredParam"
     }
+}
+$NativeDoctorPath = Join-Path $RepoRoot "scripts\doctor-native-bridge.ps1"
+$NativeDoctorProbeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("vectorworks-mcp-contract-native-doctor-{0}" -f $PID)
+$NativeDoctorJson = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $NativeDoctorPath -WorktreeRoot (Join-Path $NativeDoctorProbeRoot "SDKExamples") -InstallDir (Join-Path $NativeDoctorProbeRoot "Plug-ins") -Json
+if ($LASTEXITCODE -ne 0) {
+    throw "Companion native doctor JSON probe failed with exit code $LASTEXITCODE."
+}
+try {
+    $NativeDoctorReport = $NativeDoctorJson | ConvertFrom-Json
+} catch {
+    throw "Companion native doctor did not emit valid JSON."
+}
+foreach ($RequiredNativeDoctorField in @("nextCommand", "nextCommandReason", "nextActions")) {
+    if ($NativeDoctorReport.PSObject.Properties.Name -notcontains $RequiredNativeDoctorField) {
+        throw "Companion native doctor JSON is missing required field: $RequiredNativeDoctorField"
+    }
+}
+if ([string]::IsNullOrWhiteSpace([string]$NativeDoctorReport.nextCommand) -or
+    [string]::IsNullOrWhiteSpace([string]$NativeDoctorReport.nextCommandReason) -or
+    @($NativeDoctorReport.nextActions).Count -eq 0) {
+    throw "Companion native doctor JSON did not include an actionable nextCommand, nextCommandReason, and nextActions."
 }
 
 $Python = Get-FirstPythonCommand

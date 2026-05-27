@@ -15,6 +15,7 @@ $PrereqPath = Join-Path $PSScriptRoot "check-native-bridge-prereqs.ps1"
 $PreparePath = Join-Path $PSScriptRoot "prepare-native-bridge-source.ps1"
 $BuildPath = Join-Path $PSScriptRoot "build-native-bridge.ps1"
 $SmokePath = Join-Path $PSScriptRoot "smoke-native-bridge.ps1"
+$WorktreeRootWasExplicit = -not [string]::IsNullOrWhiteSpace($WorktreeRoot)
 if (-not $WorktreeRoot) {
     $WorktreeRoot = Join-Path $RepoRoot "native_bridge\worktree\SDKExamples"
 }
@@ -28,6 +29,7 @@ $RequiredScaffoldFiles = @(
     "VectorworksMCPBridge.cpp"
 )
 $BuiltArtifactWasExplicit = -not [string]::IsNullOrWhiteSpace($BuiltArtifact)
+$InstallDirWasExplicit = -not [string]::IsNullOrWhiteSpace($InstallDir)
 
 if (-not $InstallDir) {
     if (-not $env:APPDATA) {
@@ -67,6 +69,53 @@ function Add-NextAction {
 function Quote-PowerShellArgument {
     param([string]$Value)
     return "'$($Value -replace "'", "''")'"
+}
+
+function Format-PowerShellArgument {
+    param([string]$Value)
+    if ($Value -match '^[A-Za-z0-9_./:\\-]+$') {
+        return $Value
+    }
+    return (Quote-PowerShellArgument $Value)
+}
+
+function New-RepoScriptCommand {
+    param(
+        [string]$ScriptName,
+        [string[]]$Arguments = @()
+    )
+    $ScriptPath = Join-Path $PSScriptRoot $ScriptName
+    $Parts = [System.Collections.Generic.List[string]]::new()
+    foreach ($Part in @("powershell.exe", "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Format-PowerShellArgument $ScriptPath))) {
+        $Parts.Add($Part)
+    }
+    foreach ($Argument in $Arguments) {
+        $Parts.Add($Argument)
+    }
+    return ($Parts -join " ")
+}
+
+function Add-NamedCommandArgument {
+    param(
+        [System.Collections.Generic.List[string]]$Arguments,
+        [string]$Name,
+        [string]$Value
+    )
+    if (-not [string]::IsNullOrWhiteSpace($Value)) {
+        $Arguments.Add("-$Name")
+        $Arguments.Add((Format-PowerShellArgument $Value))
+    }
+}
+
+function Add-SwitchCommandArgument {
+    param(
+        [System.Collections.Generic.List[string]]$Arguments,
+        [string]$Name,
+        [bool]$Present
+    )
+    if ($Present) {
+        $Arguments.Add("-$Name")
+    }
 }
 
 if (-not (Test-Path -LiteralPath $PrereqPath)) {
@@ -149,37 +198,86 @@ $ScaffoldAbsent = $MissingScaffoldFiles.Count -eq $RequiredScaffoldFiles.Count
 $ScaffoldPartiallyCopied = $MissingScaffoldFiles.Count -gt 0 -and $MissingScaffoldFiles.Count -lt $RequiredScaffoldFiles.Count
 
 if ($InstallPerformed) {
-    $NextCommand = "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Phase 0 -Stop -Json"
+    $SmokeArgs = [System.Collections.Generic.List[string]]::new()
+    Add-NamedCommandArgument $SmokeArgs "Phase" "0"
+    Add-SwitchCommandArgument $SmokeArgs "Stop" $true
+    Add-SwitchCommandArgument $SmokeArgs "Json" $true
+    $NextCommand = New-RepoScriptCommand "smoke-native-bridge.ps1" $SmokeArgs
     $NextCommandReason = "The native bridge artifact was installed. Restart Vectorworks, load the plug-in, then run the phase-0 transport smoke."
 } elseif ($Install -and $InstallArtifact -and -not $InstallPerformed) {
-    $NextCommand = "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact $(Quote-PowerShellArgument $InstallArtifact) -Install"
+    $DoctorArgs = [System.Collections.Generic.List[string]]::new()
+    Add-NamedCommandArgument $DoctorArgs "VectorworksVersion" $VectorworksVersion
+    Add-NamedCommandArgument $DoctorArgs "BuiltArtifact" $InstallArtifact
+    if ($InstallDirWasExplicit) { Add-NamedCommandArgument $DoctorArgs "InstallDir" $InstallDir }
+    Add-SwitchCommandArgument $DoctorArgs "Install" $true
+    $NextCommand = New-RepoScriptCommand "doctor-native-bridge.ps1" $DoctorArgs
     $NextCommandReason = "The install was only simulated. Rerun without -WhatIf to copy the bridge artifact."
 } elseif ($InstallCandidate -and -not $Install) {
-    $NextCommand = "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact $(Quote-PowerShellArgument $InstallCandidate) -Install -WhatIf"
+    $DoctorArgs = [System.Collections.Generic.List[string]]::new()
+    Add-NamedCommandArgument $DoctorArgs "VectorworksVersion" $VectorworksVersion
+    Add-NamedCommandArgument $DoctorArgs "BuiltArtifact" $InstallCandidate
+    if ($InstallDirWasExplicit) { Add-NamedCommandArgument $DoctorArgs "InstallDir" $InstallDir }
+    Add-SwitchCommandArgument $DoctorArgs "Install" $true
+    Add-SwitchCommandArgument $DoctorArgs "WhatIf" $true
+    $NextCommand = New-RepoScriptCommand "doctor-native-bridge.ps1" $DoctorArgs
     $NextCommandReason = "A native artifact is available. Dry-run the install before copying it into the Vectorworks user Plug-ins folder."
 } elseif ($ScaffoldPartiallyCopied) {
-    $NextCommand = "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\copy-native-bridge-scaffold.ps1 -VectorworksVersion $VectorworksVersion -Force"
+    $CopyArgs = [System.Collections.Generic.List[string]]::new()
+    Add-NamedCommandArgument $CopyArgs "VectorworksVersion" $VectorworksVersion
+    Add-SwitchCommandArgument $CopyArgs "Force" $true
+    if ($WorktreeRootWasExplicit) { Add-NamedCommandArgument $CopyArgs "WorktreeRoot" $WorktreeRoot }
+    $NextCommand = New-RepoScriptCommand "copy-native-bridge-scaffold.ps1" $CopyArgs
     $NextCommandReason = "The reviewed bridge scaffold is partially copied; force-copy it to restore a consistent source tree before building."
 } elseif (-not $Prereqs.ready) {
-    $NextCommand = "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-native-bridge.ps1 -VectorworksVersion $VectorworksVersion -InstallVisualStudioBuildTools -DownloadSdk -CloneSdkExamples -PrepareSource"
+    $BootstrapArgs = [System.Collections.Generic.List[string]]::new()
+    Add-NamedCommandArgument $BootstrapArgs "VectorworksVersion" $VectorworksVersion
+    if ($WorktreeRootWasExplicit) { Add-NamedCommandArgument $BootstrapArgs "WorktreeRoot" $WorktreeRoot }
+    Add-SwitchCommandArgument $BootstrapArgs "InstallVisualStudioBuildTools" $true
+    Add-SwitchCommandArgument $BootstrapArgs "DownloadSdk" $true
+    Add-SwitchCommandArgument $BootstrapArgs "CloneSdkExamples" $true
+    Add-SwitchCommandArgument $BootstrapArgs "PrepareSource" $true
+    $NextCommand = New-RepoScriptCommand "bootstrap-native-bridge.ps1" $BootstrapArgs
     $NextCommandReason = "Native prerequisites are missing. Run the opt-in bootstrap, then rerun doctor-native-bridge.ps1 -Json after installer completion or reboot."
 } elseif (-not $SourcePrepared) {
-    $NextCommand = "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\prepare-native-bridge-source.ps1 -VectorworksVersion $VectorworksVersion -CloneSdkExamples"
+    $PrepareArgs = [System.Collections.Generic.List[string]]::new()
+    Add-NamedCommandArgument $PrepareArgs "VectorworksVersion" $VectorworksVersion
+    if ($WorktreeRootWasExplicit) { Add-NamedCommandArgument $PrepareArgs "WorktreeRoot" $WorktreeRoot }
+    Add-SwitchCommandArgument $PrepareArgs "CloneSdkExamples" $true
+    $NextCommand = New-RepoScriptCommand "prepare-native-bridge-source.ps1" $PrepareArgs
     $NextCommandReason = "The SDK example worktree is not prepared yet."
 } elseif (-not $SolutionPath) {
-    $NextCommand = "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\prepare-native-bridge-source.ps1 -VectorworksVersion $VectorworksVersion -CloneSdkExamples -Force"
+    $PrepareArgs = [System.Collections.Generic.List[string]]::new()
+    Add-NamedCommandArgument $PrepareArgs "VectorworksVersion" $VectorworksVersion
+    if ($WorktreeRootWasExplicit) { Add-NamedCommandArgument $PrepareArgs "WorktreeRoot" $WorktreeRoot }
+    Add-SwitchCommandArgument $PrepareArgs "CloneSdkExamples" $true
+    Add-SwitchCommandArgument $PrepareArgs "Force" $true
+    $NextCommand = New-RepoScriptCommand "prepare-native-bridge-source.ps1" $PrepareArgs
     $NextCommandReason = "The native bridge source folder exists, but the expected Vectorworks solution was not found."
 } elseif ($ScaffoldAbsent -and -not $BuiltArtifact -and -not $BuiltArtifactCandidate) {
-    $NextCommand = "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1 -VectorworksVersion $VectorworksVersion"
+    $BuildArgs = [System.Collections.Generic.List[string]]::new()
+    Add-NamedCommandArgument $BuildArgs "VectorworksVersion" $VectorworksVersion
+    if ($WorktreeRootWasExplicit) { Add-NamedCommandArgument $BuildArgs "SourceDir" $WorktreeRoot }
+    $NextCommand = New-RepoScriptCommand "build-native-bridge.ps1" $BuildArgs
     $NextCommandReason = "The unmodified SDK example should build once before copying the reviewed bridge scaffold."
 } elseif (-not $ScaffoldCopied) {
-    $NextCommand = "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\copy-native-bridge-scaffold.ps1 -VectorworksVersion $VectorworksVersion"
+    $CopyArgs = [System.Collections.Generic.List[string]]::new()
+    Add-NamedCommandArgument $CopyArgs "VectorworksVersion" $VectorworksVersion
+    if ($WorktreeRootWasExplicit) { Add-NamedCommandArgument $CopyArgs "WorktreeRoot" $WorktreeRoot }
+    $NextCommand = New-RepoScriptCommand "copy-native-bridge-scaffold.ps1" $CopyArgs
     $NextCommandReason = "A native artifact candidate exists, so the next step is copying the reviewed bridge scaffold into the SDK example."
 } elseif (-not $BuiltArtifact -and -not $BuiltArtifactCandidate) {
-    $NextCommand = "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1 -VectorworksVersion $VectorworksVersion"
+    $BuildArgs = [System.Collections.Generic.List[string]]::new()
+    Add-NamedCommandArgument $BuildArgs "VectorworksVersion" $VectorworksVersion
+    if ($WorktreeRootWasExplicit) { Add-NamedCommandArgument $BuildArgs "SourceDir" $WorktreeRoot }
+    $NextCommand = New-RepoScriptCommand "build-native-bridge.ps1" $BuildArgs
     $NextCommandReason = "The bridge scaffold is copied; build the native bridge artifact next."
 } else {
-    $NextCommand = "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -Json"
+    $DoctorArgs = [System.Collections.Generic.List[string]]::new()
+    Add-NamedCommandArgument $DoctorArgs "VectorworksVersion" $VectorworksVersion
+    if ($WorktreeRootWasExplicit) { Add-NamedCommandArgument $DoctorArgs "WorktreeRoot" $WorktreeRoot }
+    if ($InstallDirWasExplicit) { Add-NamedCommandArgument $DoctorArgs "InstallDir" $InstallDir }
+    Add-SwitchCommandArgument $DoctorArgs "Json" $true
+    $NextCommand = New-RepoScriptCommand "doctor-native-bridge.ps1" $DoctorArgs
     $NextCommandReason = "The current state needs another doctor pass after completing the source or build step."
 }
 

@@ -3,6 +3,7 @@ param(
     [string]$VectorworksVersion = "2024",
     [string]$SdkDir = "",
     [string]$SdkExamplesDir = "",
+    [string]$WorktreeRoot = "",
     [switch]$DownloadSdk,
     [switch]$InstallVisualStudioBuildTools,
     [switch]$CloneSdkExamples,
@@ -42,6 +43,9 @@ if (-not (Test-Path -LiteralPath $CheckerPath)) {
 Write-Host "Vectorworks native bridge bootstrap ($VectorworksVersion)"
 Write-Host "Repo: $RepoRoot"
 Write-Host "SDK directory: $SdkDir"
+if ($WorktreeRoot) {
+    Write-Host "Worktree root: $WorktreeRoot"
+}
 
 if ($InstallVisualStudioBuildTools) {
     $Winget = Get-Command winget.exe -ErrorAction SilentlyContinue
@@ -99,6 +103,7 @@ if ($PrepareRequested) {
     $PrepareArgs = @("-VectorworksVersion", $VectorworksVersion)
     if ($SdkDir) { $PrepareArgs += @("-SdkDir", $SdkDir) }
     if ($SdkExamplesDir) { $PrepareArgs += @("-SdkExamplesDir", $SdkExamplesDir) }
+    if ($WorktreeRoot) { $PrepareArgs += @("-WorktreeRoot", $WorktreeRoot) }
     if ($CloneSdkExamples) { $PrepareArgs += "-CloneSdkExamples" }
     if ($Force) { $PrepareArgs += "-Force" }
 
@@ -118,6 +123,7 @@ if ($Build) {
     }
     $BuildArgs = @("-VectorworksVersion", $VectorworksVersion, "-Configuration", $Configuration)
     if ($SdkDir) { $BuildArgs += @("-SdkDir", $SdkDir) }
+    if ($WorktreeRoot) { $BuildArgs += @("-SourceDir", $WorktreeRoot) }
     & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $BuildPath @BuildArgs
     exit $LASTEXITCODE
 }

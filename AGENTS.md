@@ -96,10 +96,13 @@ specifically working on the native bridge:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\check-native-bridge-prereqs.ps1 -Advisory
+powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -Json
 ```
 
-For native bridge implementation work, first prepare an ignored SDK example
-worktree and prove the unmodified Vectorworks example builds:
+For native bridge implementation work, prefer the native doctor's JSON
+`nextCommand` and report its `nextCommandReason`; it is the agent-ready staged
+path and preserves custom version, worktree, and install paths. The manual
+sequence below is only a fallback/reference:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-native-bridge.ps1 -InstallVisualStudioBuildTools -DownloadSdk -CloneSdkExamples -PrepareSource
