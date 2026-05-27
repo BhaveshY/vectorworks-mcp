@@ -108,6 +108,27 @@ class ListenerProtocolTests(unittest.TestCase):
         with self.assertRaises(listener.ProtocolError):
             state.pop_frame()
 
+    def test_client_state_rejects_pending_read_buffer_over_limit(self):
+        listener, _alerts = self.load_listener()
+        state = listener._ClientState(max_frame_bytes=64, max_pending_read_bytes=8)
+
+        with self.assertRaises(listener.ProtocolError):
+            state.feed(b"x" * 9)
+
+    def test_client_state_rejects_pending_write_buffer_over_limit(self):
+        listener, _alerts = self.load_listener()
+        state = listener._ClientState(max_frame_bytes=64, max_pending_write_bytes=12)
+
+        with self.assertRaises(listener.ProtocolError):
+            state.enqueue(b"x" * 9)
+
+    def test_client_with_pending_write_is_write_only(self):
+        listener, _alerts = self.load_listener()
+        state = listener._ClientState(max_frame_bytes=64, max_pending_write_bytes=128)
+        state.enqueue(b"{}")
+
+        self.assertEqual(listener._client_events(state), listener.selectors.EVENT_WRITE)
+
     def test_dispatch_handles_ping_and_unknown_action(self):
         listener, _alerts = self.load_listener()
 
@@ -121,6 +142,85 @@ class ListenerProtocolTests(unittest.TestCase):
 
         unknown = listener.dispatch({"id": "2", "action": "missing", "params": {}})
         self.assertEqual(unknown, {"id": "2", "success": False, "error": "Unknown action: missing"})
+
+    def test_dispatch_rejects_invalid_action_and_params(self):
+        listener, _alerts = self.load_listener()
+
+        missing_action = listener.dispatch({"id": "missing", "params": {}})
+        self.assertFalse(missing_action["success"])
+        self.assertIn("action", missing_action["error"])
+
+        non_string_action = listener.dispatch({"id": "bad-action", "action": 12, "params": {}})
+        self.assertFalse(non_string_action["success"])
+        self.assertIn("action", non_string_action["error"])
+
+        array_params = listener.dispatch({"id": "bad-params", "action": "ping", "params": []})
+        self.assertFalse(array_params["success"])
+        self.assertIn("params", array_params["error"])
+
+        null_params = listener.dispatch({"id": "null-params", "action": "ping", "params": None})
+        self.assertFalse(null_params["success"])
+        self.assertIn("params", null_params["error"])
+
+    def test_listener_drops_idle_clients(self):
+        listener, _alerts = self.load_listener()
+        port = _free_port()
+        listener.CLIENT_IDLE_SECONDS = 1
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind(("127.0.0.1", port))
+        server.listen(1)
+        client = socket.create_connection(("127.0.0.1", port), timeout=1)
+        conn, _addr = server.accept()
+        sel = listener.selectors.DefaultSelector()
+        try:
+            state = listener._ClientState()
+            state.last_activity = time.time() - 2
+            sel.register(conn, listener.selectors.EVENT_READ, data=state)
+
+            listener._drop_idle_clients(sel)
+
+            self.assertEqual(len(sel.get_map()), 0)
+        finally:
+            sel.close()
+            try: conn.close()
+            except OSError: pass
+            client.close()
+            server.close()
+
+    def test_listener_enforces_max_clients(self):
+        listener, _alerts = self.load_listener()
+        port = _free_port()
+        listener.HOST = "127.0.0.1"
+        listener.PORT = port
+        listener.STOP_DIR = str(self.tmp_path())
+        listener.STOP_FILE = str(Path(listener.STOP_DIR) / "STOP")
+        listener.SCREENSHOT_DIR = listener.STOP_DIR
+        listener.MAX_CLIENTS = 1
+        listener.CLIENT_IDLE_SECONDS = 600
+
+        thread = threading.Thread(target=listener.main, kwargs={"show_alerts": False}, daemon=True)
+        thread.start()
+
+        with _connect_with_retry(port) as first:
+            _write_json_frame(first, {"id": "first", "action": "ping", "params": {}})
+            ping = _read_json_frame(first)
+            self.assertTrue(ping["success"])
+
+            second = socket.create_connection(("127.0.0.1", port), timeout=1)
+            try:
+                second.settimeout(1)
+                _write_json_frame(second, {"id": "second", "action": "ping", "params": {}})
+                time.sleep(0.2)
+                self.assertEqual(second.recv(1), b"")
+            finally:
+                second.close()
+
+            _write_json_frame(first, {"id": "stop", "action": "stop", "params": {}})
+            stop = _read_json_frame(first)
+            self.assertTrue(stop["success"])
+
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
 
     def test_transport_only_modes_reject_cad_handlers(self):
         listener, _alerts = self.load_listener()

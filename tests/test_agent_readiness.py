@@ -28,6 +28,12 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertTrue((ROOT / "CLAUDE.md").exists())
         self.assertIn("@AGENTS.md", (ROOT / "CLAUDE.md").read_text(encoding="utf-8"))
 
+    def test_companion_contract_marker_exists(self):
+        marker = json.loads((ROOT / ".vectorworks-mcp-contract.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(marker["name"], "vectorworks-mcp")
+        self.assertGreaterEqual(marker["contractVersion"], 2)
+
     def test_bootstrap_scripts_exist(self):
         for relative_path in (
             "scripts/bootstrap-agent.ps1",

@@ -24,6 +24,10 @@ CONFIG (env vars, all optional):
   VW_MCP_PORT       default 9877
   VW_MCP_STOP_DIR   default ~/.vectorworks-mcp
   VW_MCP_MAX_FRAME_BYTES default 16777216
+  VW_MCP_MAX_PENDING_READ_BYTES default VW_MCP_MAX_FRAME_BYTES + 4096
+  VW_MCP_MAX_PENDING_WRITE_BYTES default VW_MCP_MAX_FRAME_BYTES + 4096
+  VW_MCP_MAX_CLIENTS default 8
+  VW_MCP_CLIENT_IDLE_SECONDS default 600
   VW_MCP_MODE       win_timer | dialog | foreground | background; default dialog
   VW_MCP_DIALOG_TIMER_MS default 50
 """
@@ -40,6 +44,9 @@ __VERSION__ = "0.3.0-socket"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9877
 DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024
+DEFAULT_MAX_PENDING_BUFFER_SLACK_BYTES = 4096
+DEFAULT_MAX_CLIENTS = 8
+DEFAULT_CLIENT_IDLE_SECONDS = 600
 DEFAULT_DIALOG_TIMER_MS = 50
 
 
@@ -63,12 +70,30 @@ try:
     HOST = os.environ.get("VW_MCP_HOST", DEFAULT_HOST).strip() or DEFAULT_HOST
     PORT = _env_int("VW_MCP_PORT", DEFAULT_PORT, 1, 65535)
     MAX_FRAME_BYTES = _env_int("VW_MCP_MAX_FRAME_BYTES", DEFAULT_MAX_FRAME_BYTES, 1024, 128 * 1024 * 1024)
+    MAX_PENDING_READ_BYTES = _env_int(
+        "VW_MCP_MAX_PENDING_READ_BYTES",
+        MAX_FRAME_BYTES + DEFAULT_MAX_PENDING_BUFFER_SLACK_BYTES,
+        4096,
+        256 * 1024 * 1024,
+    )
+    MAX_PENDING_WRITE_BYTES = _env_int(
+        "VW_MCP_MAX_PENDING_WRITE_BYTES",
+        MAX_FRAME_BYTES + DEFAULT_MAX_PENDING_BUFFER_SLACK_BYTES,
+        4096,
+        256 * 1024 * 1024,
+    )
+    MAX_CLIENTS = _env_int("VW_MCP_MAX_CLIENTS", DEFAULT_MAX_CLIENTS, 1, 64)
+    CLIENT_IDLE_SECONDS = _env_int("VW_MCP_CLIENT_IDLE_SECONDS", DEFAULT_CLIENT_IDLE_SECONDS, 30, 86400)
     DIALOG_TIMER_MS = _env_int("VW_MCP_DIALOG_TIMER_MS", DEFAULT_DIALOG_TIMER_MS, 20, 5000)
 except ValueError as e:
     _CONFIG_ERROR = str(e)
     HOST = DEFAULT_HOST
     PORT = DEFAULT_PORT
     MAX_FRAME_BYTES = DEFAULT_MAX_FRAME_BYTES
+    MAX_PENDING_READ_BYTES = DEFAULT_MAX_FRAME_BYTES + DEFAULT_MAX_PENDING_BUFFER_SLACK_BYTES
+    MAX_PENDING_WRITE_BYTES = DEFAULT_MAX_FRAME_BYTES + DEFAULT_MAX_PENDING_BUFFER_SLACK_BYTES
+    MAX_CLIENTS = DEFAULT_MAX_CLIENTS
+    CLIENT_IDLE_SECONDS = DEFAULT_CLIENT_IDLE_SECONDS
     DIALOG_TIMER_MS = DEFAULT_DIALOG_TIMER_MS
 
 STOP_DIR = os.environ.get("VW_MCP_STOP_DIR") or os.path.join(
@@ -130,6 +155,45 @@ TYPE_NAMES = {
     18: "locus", 21: "extrude", 24: "mesh", 34: "wall", 38: "roof", 40: "floor",
     63: "roof_face", 68: "nurbs_curve", 71: "viewport", 85: "slab",
 }
+
+MAX_OBJECT_QUERY_LIMIT = 1000
+MAX_WORKSHEET_ROWS = 500
+MAX_POINT_LIST_LENGTH = 1000
+
+
+def _bounded_int(value, default, min_value, max_value, name):
+    if value is None or value == "":
+        value = default
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("{name} must be an integer".format(name=name))
+    if value < min_value:
+        raise ValueError("{name} must be >= {min}".format(name=name, min=min_value))
+    if value > max_value:
+        return max_value
+    return value
+
+
+def _point_pairs(value, name="points", min_points=0, max_points=MAX_POINT_LIST_LENGTH):
+    if value is None:
+        value = []
+    if not isinstance(value, (list, tuple)):
+        raise ValueError("{name} must be a list of [x, y] points".format(name=name))
+    if len(value) < min_points:
+        raise ValueError("{name} requires at least {count} points".format(name=name, count=min_points))
+    if len(value) > max_points:
+        raise ValueError("{name} cannot contain more than {count} points".format(name=name, count=max_points))
+    points = []
+    for index, point in enumerate(value):
+        if not isinstance(point, (list, tuple)) or len(point) < 2:
+            raise ValueError("{name}[{index}] must be [x, y]".format(name=name, index=index))
+        try:
+            points.append((float(point[0]), float(point[1])))
+        except (TypeError, ValueError):
+            raise ValueError("{name}[{index}] must contain numeric x/y values".format(name=name, index=index))
+    return points
+
 
 def _obj_info(h):
     try:
@@ -227,11 +291,10 @@ def handle_create_object(p):
         elif t == "line": vs.MoveTo(x1, y1); vs.LineTo(x2, y2)
         elif t == "arc": vs.ArcByCenter(x1, y1, p.get("radius", 50), p.get("start_angle", 0), p.get("sweep_angle", 90))
         elif t == "polygon":
-            pts = p.get("points", [])
-            if len(pts) < 2: return _err("Polygon requires at least 2 points")
+            pts = _point_pairs(p.get("points", []), min_points=2)
             (vs.ClosePoly if p.get("closed", True) else vs.OpenPoly)()
             vs.BeginPoly()
-            for pt in pts: vs.AddPoint(pt[0], pt[1])
+            for x, y in pts: vs.AddPoint(x, y)
             vs.EndPoly()
         else: return _err(f"Unknown type: {t}. Use: rect, circle, oval, line, arc, polygon")
         h = vs.LNewObj()
@@ -250,7 +313,11 @@ def handle_get_layers(p):
     return _ok(layers)
 
 def handle_get_objects(p):
-    target_layer, target_type, limit = p.get("layer", ""), p.get("object_type", "").lower(), p.get("limit", 100)
+    try:
+        limit = _bounded_int(p.get("limit", 100), 100, 1, MAX_OBJECT_QUERY_LIMIT, "limit")
+    except ValueError as e:
+        return _err(str(e))
+    target_layer, target_type = p.get("layer", ""), p.get("object_type", "").lower()
     objs = []
     def collect(lh):
         obj = vs.FInLayer(lh)
@@ -287,7 +354,11 @@ def handle_set_property(p):
     except Exception: return _err(traceback.format_exc())
 
 def handle_find_objects(p):
-    results, limit = [], p.get("limit", 100)
+    try:
+        limit = _bounded_int(p.get("limit", 100), 100, 1, MAX_OBJECT_QUERY_LIMIT, "limit")
+    except ValueError as e:
+        return _err(str(e))
+    results = []
     def collect(h):
         if len(results) < limit: results.append(_obj_info(h))
     try:
@@ -309,8 +380,10 @@ def handle_manage_classes(p):
 
 def handle_worksheet(p):
     action, ws_name = p.get("action", "list").lower(), p.get("worksheet_name", "")
-    row, col, num_rows = p.get("row", 1), p.get("col", 1), p.get("num_rows", 10)
     try:
+        row = _bounded_int(p.get("row", 1), 1, 1, 1048576, "row")
+        col = _bounded_int(p.get("col", 1), 1, 1, 16384, "col")
+        num_rows = _bounded_int(p.get("num_rows", 10), 10, 1, MAX_WORKSHEET_ROWS, "num_rows")
         if action == "list":
             ws = []
             vs.ForEachObject(lambda h: ws.append(vs.GetName(h)), "T=WORKSHEET")
@@ -486,21 +559,26 @@ def handle_insert_window(p):
     except Exception: return _err(traceback.format_exc())
 
 def handle_create_slab(p):
-    pts, thickness, elev = p.get("points", []), p.get("thickness", 200), p.get("elevation", 0)
-    if len(pts) < 3: return _err("Slab requires at least 3 points")
+    try:
+        pts = _point_pairs(p.get("points", []), min_points=3)
+    except ValueError as e:
+        return _err(str(e))
+    thickness, elev = p.get("thickness", 200), p.get("elevation", 0)
     try:
         vs.BeginXtrd(elev, elev + thickness)
         vs.ClosePoly(); vs.BeginPoly()
-        for pt in pts: vs.AddPoint(pt[0], pt[1])
+        for x, y in pts: vs.AddPoint(x, y)
         vs.EndPoly(); vs.EndXtrd()
         h = vs.LNewObj(); vs.ReDrawAll()
         return _ok(f"Created slab, {len(pts)} pts, t={thickness}, handle: {_reg(h)}")
     except Exception: return _err(traceback.format_exc())
 
 def handle_create_roof(p):
-    pts = p.get("points", [])
+    try:
+        pts = _point_pairs(p.get("points", []), min_points=3)
+    except ValueError as e:
+        return _err(str(e))
     bh, slope, oh, thick = p.get("bearing_height", 3000), p.get("slope", 30), p.get("overhang", 500), p.get("thickness", 200)
-    if len(pts) < 3: return _err("Roof requires at least 3 points")
     try:
         cx, cy = sum(x[0] for x in pts)/len(pts), sum(x[1] for x in pts)/len(pts)
         h = vs.CreateCustomObjectN('Roof', (cx, cy), 0, False)
@@ -512,7 +590,7 @@ def handle_create_roof(p):
         # Fallback: flat extrusion
         vs.BeginXtrd(bh, bh + thick)
         vs.ClosePoly(); vs.BeginPoly()
-        for pt in pts: vs.AddPoint(pt[0], pt[1])
+        for x, y in pts: vs.AddPoint(x, y)
         vs.EndPoly(); vs.EndXtrd()
         vs.ReDrawAll()
         return _ok(f"Created flat roof at z={bh}, handle: {_reg(vs.LNewObj())}")
@@ -592,13 +670,33 @@ def _bridge_status():
 
 HANDLERS["ping"] = lambda p: _ok(_bridge_status())
 
+def _request_id(req):
+    if not isinstance(req, dict):
+        return ""
+    rid = req.get("id", "")
+    if rid is None:
+        return ""
+    if isinstance(rid, (str, int, float, bool)):
+        return rid
+    return str(rid)
+
+
+def _request_error(req, message):
+    return {"id": _request_id(req), "success": False, "error": message}
+
+
 def dispatch(req):
     if not isinstance(req, dict):
-        return {"id": "", "success": False, "error": "Request must be a JSON object"}
+        return _request_error(req, "Request must be a JSON object")
     action = req.get("action", "")
+    if not isinstance(action, str) or not action:
+        return _request_error(req, "Request action must be a non-empty string")
+    params = req.get("params", {}) if "params" in req else {}
+    if not isinstance(params, dict):
+        return _request_error(req, "Request params must be a JSON object")
     if _DISPATCH_MODE in ("background", "win_timer") and action not in ("ping", "stop"):
         return {
-            "id": req.get("id", ""),
+            "id": _request_id(req),
             "success": False,
             "error": (
                 "VW_MCP_MODE={mode} is transport-only. It can answer ping/stop, "
@@ -608,14 +706,14 @@ def dispatch(req):
                 "non-modal long-running control."
             ).format(mode=_DISPATCH_MODE),
         }
-    handler = HANDLERS.get(req.get("action", ""))
+    handler = HANDLERS.get(action)
     if not handler:
-        return {"id": req.get("id", ""), "success": False, "error": f"Unknown action: {req.get('action')}"}
+        return _request_error(req, f"Unknown action: {action}")
     try:
-        result = handler(req.get("params", {}))
+        result = handler(params)
     except Exception:
         result = {"success": False, "error": traceback.format_exc()}
-    result["id"] = req.get("id", "")
+    result["id"] = _request_id(req)
     return result
 
 
@@ -625,15 +723,36 @@ def dispatch(req):
 # listener thread, then queue the response.
 
 class _ClientState:
-    __slots__ = ("rbuf", "wbuf", "need", "max_frame_bytes")
-    def __init__(self, max_frame_bytes=None):
+    __slots__ = (
+        "rbuf",
+        "wbuf",
+        "need",
+        "max_frame_bytes",
+        "max_pending_read_bytes",
+        "max_pending_write_bytes",
+        "last_activity",
+    )
+    def __init__(self, max_frame_bytes=None, max_pending_read_bytes=None, max_pending_write_bytes=None):
         self.rbuf = bytearray()
         self.wbuf = bytearray()
         self.need = None  # current frame body length, or None if waiting for header
         self.max_frame_bytes = max_frame_bytes or MAX_FRAME_BYTES
+        self.max_pending_read_bytes = max_pending_read_bytes or MAX_PENDING_READ_BYTES
+        self.max_pending_write_bytes = max_pending_write_bytes or MAX_PENDING_WRITE_BYTES
+        self.last_activity = time.time()
+
+    def touch(self):
+        self.last_activity = time.time()
 
     def feed(self, chunk):
+        if len(self.rbuf) + len(chunk) > self.max_pending_read_bytes:
+            raise ProtocolError(
+                "pending read buffer exceeds VW_MCP_MAX_PENDING_READ_BYTES={m}".format(
+                    m=self.max_pending_read_bytes
+                )
+            )
         self.rbuf.extend(chunk)
+        self.touch()
 
     def pop_frame(self):
         if self.need is None:
@@ -659,8 +778,14 @@ class _ClientState:
     def enqueue(self, payload: bytes):
         if len(payload) > self.max_frame_bytes:
             payload = _response_bytes(_err("response exceeded max frame size"))
-        self.wbuf.extend(struct.pack(">I", len(payload)))
-        self.wbuf.extend(payload)
+        frame = struct.pack(">I", len(payload)) + payload
+        if len(self.wbuf) + len(frame) > self.max_pending_write_bytes:
+            raise ProtocolError(
+                "pending write buffer exceeds VW_MCP_MAX_PENDING_WRITE_BYTES={m}".format(
+                    m=self.max_pending_write_bytes
+                )
+            )
+        self.wbuf.extend(frame)
 
 
 def _stop_requested():
@@ -684,10 +809,9 @@ def _drop(sel, fileobj):
 
 
 def _client_events(state):
-    events = selectors.EVENT_READ
     if state.wbuf:
-        events |= selectors.EVENT_WRITE
-    return events
+        return selectors.EVENT_WRITE
+    return selectors.EVENT_READ
 
 
 def _set_client_events(sel, fileobj, state):
@@ -706,6 +830,29 @@ def _has_pending_writes(sel):
     except Exception:
         return False
     return False
+
+
+def _client_count(sel):
+    try:
+        return sum(1 for key in sel.get_map().values() if key.data is not None)
+    except Exception:
+        return 0
+
+
+def _drop_idle_clients(sel):
+    if CLIENT_IDLE_SECONDS <= 0:
+        return
+    now = time.time()
+    try:
+        keys = list(sel.get_map().values())
+    except Exception:
+        return
+    for key in keys:
+        state = key.data
+        if state is None:
+            continue
+        if now - state.last_activity > CLIENT_IDLE_SECONDS:
+            _drop(sel, key.fileobj)
 
 
 class _ListenerServer:
@@ -752,7 +899,7 @@ class _ListenerServer:
                 )
             server_sock.close()
             return False
-        server_sock.listen(8)
+        server_sock.listen(MAX_CLIENTS)
         server_sock.setblocking(False)
 
         sel = selectors.DefaultSelector()
@@ -780,8 +927,21 @@ class _ListenerServer:
                 conn, _addr = fileobj.accept()
             except BlockingIOError:
                 return
+            _drop_idle_clients(self.sel)
+            if _client_count(self.sel) >= MAX_CLIENTS:
+                try: conn.close()
+                except OSError: pass
+                return
             conn.setblocking(False)
-            self.sel.register(conn, selectors.EVENT_READ, data=_ClientState())
+            self.sel.register(
+                conn,
+                selectors.EVENT_READ,
+                data=_ClientState(
+                    max_frame_bytes=MAX_FRAME_BYTES,
+                    max_pending_read_bytes=MAX_PENDING_READ_BYTES,
+                    max_pending_write_bytes=MAX_PENDING_WRITE_BYTES,
+                ),
+            )
             return
 
         state = key.data
@@ -798,7 +958,11 @@ class _ListenerServer:
                 if chunk == b"":
                     _drop(self.sel, fileobj)
                     return
-                state.feed(chunk)
+                try:
+                    state.feed(chunk)
+                except ProtocolError:
+                    _drop(self.sel, fileobj)
+                    return
                 while True:
                     try:
                         frame = state.pop_frame()
@@ -814,8 +978,14 @@ class _ListenerServer:
                         resp = dispatch(req)
                     except Exception as e:
                         resp = {"id": rid, "success": False, "error": "bad JSON: {}".format(e)}
-                    state.enqueue(_response_bytes(resp))
+                    try:
+                        state.enqueue(_response_bytes(resp))
+                    except ProtocolError:
+                        _drop(self.sel, fileobj)
+                        return
                     _set_client_events(self.sel, fileobj, state)
+                    if state.wbuf:
+                        break
 
         if mask & selectors.EVENT_WRITE and state.wbuf:
             try:
@@ -824,6 +994,7 @@ class _ListenerServer:
                     _drop(self.sel, fileobj)
                     return
                 del state.wbuf[:sent]
+                state.touch()
                 _set_client_events(self.sel, fileobj, state)
             except (BlockingIOError, InterruptedError):
                 pass
@@ -833,6 +1004,7 @@ class _ListenerServer:
     def pump_once(self, timeout=0.0):
         if self.closed or self.sel is None:
             return False
+        _drop_idle_clients(self.sel)
         if _stop_requested() and not _has_pending_writes(self.sel):
             self.close()
             return False
@@ -843,6 +1015,7 @@ class _ListenerServer:
             return False
         for key, mask in events:
             self._handle_key(key, mask)
+        _drop_idle_clients(self.sel)
         if _stop_requested() and not _has_pending_writes(self.sel):
             self.close()
             return False

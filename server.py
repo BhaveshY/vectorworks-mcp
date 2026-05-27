@@ -524,7 +524,8 @@ def _action_safe_to_retry(action: str) -> bool:
     )
 
 
-def _unknown_commit_state_help(action: str, error: RequestTransportError) -> str:
+def _unknown_commit_state_help(action: str, error: BaseException) -> str:
+    original = getattr(error, "original", error)
     return (
         "Unknown commit state after sending non-idempotent Vectorworks action "
         "'{action}': {err}\n\n"
@@ -532,7 +533,7 @@ def _unknown_commit_state_help(action: str, error: RequestTransportError) -> str
         "host did not retry it, because retrying could duplicate or compound CAD "
         "changes. Check the Vectorworks document state, then rerun only the exact "
         "follow-up action you still need."
-    ).format(action=action, err=error.original)
+    ).format(action=action, err=original)
 
 
 def _with_block_context(payload: dict[str, Any], blocked_action: Optional[str]) -> dict[str, Any]:
@@ -667,7 +668,11 @@ def _send(action: str, params: Optional[dict[str, Any]] = None, require_cad_safe
         for attempt in (0, 1):
             try:
                 if require_cad_safe:
-                    blocked = _cad_preflight_block(action)
+                    try:
+                        blocked = _cad_preflight_block(action)
+                    except ProtocolError as exc:
+                        _close()
+                        return f"Protocol error: {exc}. Restart the Vectorworks listener if this persists."
                     if blocked:
                         return blocked
                 response = _request_once(action, params)
@@ -676,6 +681,8 @@ def _send(action: str, params: Optional[dict[str, Any]] = None, require_cad_safe
                 return f"VW Error ({action}): {response.get('error', 'Unknown listener error')}"
             except ProtocolError as exc:
                 _close()
+                if not _action_safe_to_retry(action):
+                    return _unknown_commit_state_help(action, exc)
                 return f"Protocol error: {exc}. Restart the Vectorworks listener if this persists."
             except RequestTransportError as exc:
                 _close()

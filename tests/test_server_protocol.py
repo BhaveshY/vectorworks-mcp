@@ -367,6 +367,35 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertIn("did not retry", result)
         self.assertEqual([request["action"] for request in listener.requests], ["ping", "create_object"])
 
+    def test_send_tool_reports_unknown_commit_state_for_non_idempotent_protocol_error(self):
+        bad_payload = b"not json"
+        bad_frame = struct.pack(">I", len(bad_payload)) + bad_payload
+
+        def handler(request):
+            if request["action"] == "ping":
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {
+                        "pong": True,
+                        "cad_api_safe": True,
+                        "transport_only": False,
+                        "bridge_kind": "native_sdk_bridge",
+                        "dispatch_mode": "native_sdk",
+                    },
+                }
+            if request["action"] == "create_object":
+                return bad_frame
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=2) as listener:
+            _configure_server(listener.port)
+            result = server.vw_create_object("rect")
+
+        self.assertIn("Unknown commit state", result)
+        self.assertIn("did not retry", result)
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "create_object"])
+
     def test_action_retry_policy_uses_tool_safety_metadata(self):
         self.assertTrue(server._action_safe_to_retry("get_layers"))
         self.assertTrue(server._action_safe_to_retry("ping"))

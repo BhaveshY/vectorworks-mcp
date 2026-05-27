@@ -87,6 +87,10 @@ The default native smoke is the phase-1 read gate. In a disposable test
 document, add `-AllowWriteFixture` to prove create/select/delete cleanup; the
 delete runs only after the fixture identity and exact selection are verified.
 
+The Python listener also applies conservative resource guards for long agent
+sessions: `VW_MCP_MAX_CLIENTS`, `VW_MCP_CLIENT_IDLE_SECONDS`,
+`VW_MCP_MAX_PENDING_READ_BYTES`, and `VW_MCP_MAX_PENDING_WRITE_BYTES`.
+
 If an agent or user has already extracted the Vectorworks SDK somewhere else,
 pass the same `-SdkDir C:\path\to\sdk` to bootstrap, prepare, and build; the
 scripts preserve that custom SDK path end-to-end.
