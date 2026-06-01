@@ -8,20 +8,30 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $ServerPath = Join-Path $RepoRoot "server.py"
 $RequirementsPath = Join-Path $RepoRoot "requirements.txt"
-$VenvDir = Join-Path $RepoRoot ".venv"
-$VenvPython = Join-Path $VenvDir "Scripts\python.exe"
+$RepoVenvDir = Join-Path $RepoRoot ".venv"
 
-$BaseLogDir = if ($env:LOCALAPPDATA) {
-    Join-Path $env:LOCALAPPDATA "vectorworks-mcp\logs"
+$StateDir = if ($env:LOCALAPPDATA) {
+    Join-Path $env:LOCALAPPDATA "vectorworks-mcp"
 } else {
-    Join-Path $env:TEMP "vectorworks-mcp\logs"
+    Join-Path $env:TEMP "vectorworks-mcp"
 }
+$BaseLogDir = Join-Path $StateDir "logs"
 $LogPath = Join-Path $BaseLogDir "mcp-server-bootstrap.log"
+$FallbackVenvDir = Join-Path $StateDir "venv"
+$VenvDir = $RepoVenvDir
+$VenvPython = Join-Path $VenvDir "Scripts\python.exe"
 New-Item -ItemType Directory -Force -Path $BaseLogDir *> $null
 
 function Write-BootstrapLog {
     param([string]$Message)
     Add-Content -Path $LogPath -Value ("{0} {1}" -f (Get-Date -Format "s"), $Message)
+}
+
+function Use-VenvDir {
+    param([string]$Path)
+
+    $script:VenvDir = $Path
+    $script:VenvPython = Join-Path $script:VenvDir "Scripts\python.exe"
 }
 
 function Invoke-Logged {
@@ -53,17 +63,63 @@ function Get-HostPythonCommand {
     throw "Python 3 was not found. Install Python 3.10+ and rerun setup. See $LogPath"
 }
 
+function Test-PythonExecutable {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $false
+    }
+
+    try {
+        & $Path -c "import sys; sys.exit(0)" *> $null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
+}
+
 function Ensure-Venv {
-    if (-not (Test-Path $VenvPython)) {
-        Write-BootstrapLog "Creating virtual environment at $VenvDir"
-        $HostPython = Get-HostPythonCommand
+    if (Test-Path -LiteralPath $VenvPython -PathType Leaf) {
+        if (Test-PythonExecutable -Path $VenvPython) {
+            return
+        }
+
+        Write-BootstrapLog "Existing virtual environment python could not run; recreating $VenvDir"
+        try {
+            Remove-Item -LiteralPath $VenvDir -Recurse -Force
+        } catch {
+            if ($VenvDir -ne $FallbackVenvDir) {
+                Write-BootstrapLog "Could not remove stale repo virtual environment: $($_.Exception.Message). Using fallback virtual environment at $FallbackVenvDir"
+                Use-VenvDir -Path $FallbackVenvDir
+                Ensure-Venv
+                return
+            }
+            throw
+        }
+    }
+
+    Write-BootstrapLog "Creating virtual environment at $VenvDir"
+    $HostPython = Get-HostPythonCommand
+    try {
         Invoke-Logged { & $HostPython["Command"] @($HostPython["Args"] + @("-m", "venv", $VenvDir)) }
+    } catch {
+        if ($VenvDir -ne $FallbackVenvDir) {
+            Write-BootstrapLog "Could not create repo virtual environment: $($_.Exception.Message). Using fallback virtual environment at $FallbackVenvDir"
+            Use-VenvDir -Path $FallbackVenvDir
+            Ensure-Venv
+            return
+        }
+        throw
     }
 }
 
 function Test-FastMcpImport {
-    & $VenvPython -c "import fastmcp" *> $null
-    return ($LASTEXITCODE -eq 0)
+    try {
+        & $VenvPython -c "import fastmcp" *> $null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
 }
 
 function Ensure-Requirements {

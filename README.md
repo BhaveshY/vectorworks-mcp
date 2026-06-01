@@ -150,6 +150,9 @@ persistent command socket.
 If an agent or user has already extracted the Vectorworks SDK somewhere else,
 pass the same `-SdkDir C:\path\to\sdk` to the native doctor, bootstrap,
 prepare, and build; the scripts preserve that custom SDK path end-to-end.
+If the official SDK ZIP is already downloaded, the prerequisite checker reports
+it in `sdkArchiveCandidates`, and the guarded doctor/runner will prefer
+`-SdkArchivePath C:\path\to\SDK.zip` instead of downloading the archive again.
 
 ## Agent-Ready Setup
 

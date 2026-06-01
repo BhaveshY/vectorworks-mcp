@@ -3,6 +3,7 @@ param(
     [string]$VectorworksVersion = "2024",
     [string]$BuiltArtifact = "",
     [string]$SdkDir = "",
+    [string]$SdkArchivePath = "",
     [string]$SdkExamplesDir = "",
     [string]$WorktreeRoot = "",
     [string]$InstallDir = "",
@@ -81,6 +82,7 @@ function Invoke-NativeBridgeDoctor {
     Add-NamedArgument $DoctorArgs "VectorworksVersion" $VectorworksVersion
     Add-NamedArgument $DoctorArgs "BuiltArtifact" $BuiltArtifact
     Add-NamedArgument $DoctorArgs "SdkDir" $SdkDir
+    Add-NamedArgument $DoctorArgs "SdkArchivePath" $SdkArchivePath
     Add-NamedArgument $DoctorArgs "SdkExamplesDir" $SdkExamplesDir
     Add-NamedArgument $DoctorArgs "WorktreeRoot" $WorktreeRoot
     Add-NamedArgument $DoctorArgs "InstallDir" $InstallDir

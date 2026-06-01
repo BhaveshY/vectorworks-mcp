@@ -2,6 +2,7 @@
 param(
     [string]$VectorworksVersion = "2024",
     [string]$SdkDir = "",
+    [string]$SdkArchivePath = "",
     [string]$SdkExamplesDir = "",
     [string]$WorktreeRoot = "",
     [switch]$DownloadSdk,
@@ -30,6 +31,7 @@ if (-not (Test-Path -LiteralPath $Bootstrap)) {
 
 $Args = @("-VectorworksVersion", $VectorworksVersion, "-Configuration", $Configuration)
 if ($SdkDir) { $Args += @("-SdkDir", $SdkDir) }
+if ($SdkArchivePath) { $Args += @("-SdkArchivePath", $SdkArchivePath) }
 if ($SdkExamplesDir) { $Args += @("-SdkExamplesDir", $SdkExamplesDir) }
 if ($WorktreeRoot) { $Args += @("-WorktreeRoot", $WorktreeRoot) }
 if ($DownloadSdk) { $Args += "-DownloadSdk" }

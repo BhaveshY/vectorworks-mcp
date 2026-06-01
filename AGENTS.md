@@ -125,6 +125,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Phas
 
 The installer flags are opt-in because they can download large SDK files and
 launch the Visual Studio Build Tools installer.
+If `check-native-bridge-prereqs.ps1 -Json` reports `sdkArchiveCandidates`, pass
+the candidate through `-SdkArchivePath` so setup reuses the downloaded SDK ZIP
+instead of downloading it again.
 After phase 0 passes, load the native bridge again before running the default
 phase-1 read smoke. Do not run the default native smoke against the copied
 transport scaffold; it is only valid after real SDK CAD handlers are wired.

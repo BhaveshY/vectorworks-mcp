@@ -175,6 +175,91 @@ function Find-SdkInstall {
     return ""
 }
 
+function Find-SdkArchiveCandidates {
+    param(
+        [string]$Version,
+        [object]$VersionRequirements
+    )
+
+    $DownloadUrl = [string]$VersionRequirements.winSdkDownload
+    $DownloadLeaf = if ($DownloadUrl) { Split-Path -Leaf $DownloadUrl } else { "" }
+    $Names = [System.Collections.Generic.List[string]]::new()
+    foreach ($Name in @(
+        "VectorworksSDK-$Version-win64.zip",
+        "$Version-NNA-eng-win-SDK.zip",
+        "$Version-NNA-eng-win-SDK",
+        $DownloadLeaf
+    )) {
+        if ($Name -and -not $Names.Contains($Name)) {
+            $Names.Add($Name)
+        }
+        if ($Name -and -not $Name.EndsWith(".zip", [System.StringComparison]::OrdinalIgnoreCase)) {
+            $ZipName = "$Name.zip"
+            if (-not $Names.Contains($ZipName)) {
+                $Names.Add($ZipName)
+            }
+        }
+    }
+
+    $Roots = [System.Collections.Generic.List[string]]::new()
+    foreach ($Root in @(
+        (Join-Path $RepoRoot ".cache\vectorworks-sdk"),
+        (Join-Path $RepoRoot ".cache"),
+        (Join-Path $RepoRoot "third_party")
+    )) {
+        if ($Root -and -not $Roots.Contains($Root)) {
+            $Roots.Add($Root)
+        }
+    }
+    if ($env:USERPROFILE) {
+        foreach ($Root in @(
+            (Join-Path $env:USERPROFILE "Downloads"),
+            (Join-Path $env:USERPROFILE "Desktop")
+        )) {
+            if ($Root -and -not $Roots.Contains($Root)) {
+                $Roots.Add($Root)
+            }
+        }
+    }
+
+    $Candidates = [System.Collections.Generic.List[object]]::new()
+    foreach ($Root in $Roots) {
+        if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+            continue
+        }
+        foreach ($Name in $Names) {
+            $Candidate = Join-Path $Root $Name
+            if (Test-Path -LiteralPath $Candidate -PathType Leaf) {
+                $Item = Get-Item -LiteralPath $Candidate
+                $Candidates.Add([pscustomobject]@{
+                    path = $Item.FullName
+                    name = $Item.Name
+                    source = $Root
+                    sizeBytes = [int64]$Item.Length
+                })
+            }
+        }
+        try {
+            Get-ChildItem -LiteralPath $Root -File -Filter "*.zip" -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like "*$Version*" -and $_.Name -like "*SDK*" -and $_.Name -like "*NNA*" } |
+                ForEach-Object {
+                    if ($_.FullName -notin @($Candidates | ForEach-Object { $_.path })) {
+                        $Candidates.Add([pscustomobject]@{
+                            path = $_.FullName
+                            name = $_.Name
+                            source = $Root
+                            sizeBytes = [int64]$_.Length
+                        })
+                    }
+                }
+        } catch {
+            # Best-effort archive discovery only.
+        }
+    }
+
+    return @($Candidates | Sort-Object -Property path -Unique)
+}
+
 function Find-VisualStudioCpp {
     $VsWhereCandidates = @()
     if (${env:ProgramFiles(x86)}) {
@@ -240,6 +325,7 @@ function Find-MSBuild {
 
 $VectorworksPath = Find-VectorworksInstall -Version $VectorworksVersion
 $SdkPath = Find-SdkInstall -Version $VectorworksVersion -RequestedPath $SdkDir
+$SdkArchiveCandidates = @(Find-SdkArchiveCandidates -Version $VectorworksVersion -VersionRequirements $VersionRequirements)
 $VisualStudio = Find-VisualStudioCpp
 $VisualStudioPath = $VisualStudio.path
 $VisualStudioMinimumVersion = [string]$VersionRequirements.visualStudioMinimumVersion
@@ -261,8 +347,8 @@ $Checks += New-CheckResult `
     -Name "Vectorworks $VectorworksVersion SDK" `
     -Required $true `
     -Ok ([bool]$SdkPath) `
-    -Detail $(if ($SdkPath) { $SdkPath } else { "not found. Checked VECTORWORKS_SDK_DIR, third_party\VectorworksSDK\$VectorworksVersion, and Downloads." }) `
-    -Fix "Download the SDK from $OfficialSdkPage, extract it, then rerun with -SdkDir or set VECTORWORKS_SDK_DIR."
+    -Detail $(if ($SdkPath) { $SdkPath } elseif ($SdkArchiveCandidates.Count -gt 0) { "SDK layout not found, but archive candidate found: $($SdkArchiveCandidates[0].path)" } else { "not found. Checked VECTORWORKS_SDK_DIR, third_party\VectorworksSDK\$VectorworksVersion, and Downloads." }) `
+    -Fix $(if ($SdkArchiveCandidates.Count -gt 0) { "Extract the detected SDK archive with scripts\bootstrap-native-bridge.ps1 -SdkArchivePath `"$($SdkArchiveCandidates[0].path)`", then rerun with -SdkDir or set VECTORWORKS_SDK_DIR." } else { "Download the SDK from $OfficialSdkPage, extract it, then rerun with -SdkDir or set VECTORWORKS_SDK_DIR." })
 
 $Checks += New-CheckResult `
     -Name "Visual Studio C++ tools for Vectorworks $VectorworksVersion" `
@@ -296,6 +382,7 @@ if ($Json) {
         requiredVisualStudioVersion = $VisualStudioMinimumVersion
         requiredToolset = $VisualStudioToolset
         repoRoot = $RepoRoot
+        sdkArchiveCandidates = @($SdkArchiveCandidates)
         checks = $Checks
         ready = ($RequiredFailures.Count -eq 0)
     } | ConvertTo-Json -Depth 8

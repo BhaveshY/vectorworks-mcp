@@ -12,7 +12,7 @@ $RunnerPath = Join-Path $RepoRoot "scripts\run-mcp-server.ps1"
 $RegisterPath = Join-Path $RepoRoot "scripts\register-claude-code.ps1"
 $ServerPath = Join-Path $RepoRoot "server.py"
 $ListenerPath = Join-Path $RepoRoot "vw_listener.py"
-$VenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+$RepoVenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 $ProjectMcpPath = Join-Path $RepoRoot ".mcp.json"
 $NativePrereqPath = Join-Path $RepoRoot "scripts\check-native-bridge-prereqs.ps1"
 $NativeDoctorPath = Join-Path $RepoRoot "scripts\doctor-native-bridge.ps1"
@@ -20,6 +20,7 @@ $NativeNextRunnerPath = Join-Path $RepoRoot "scripts\invoke-native-bridge-next.p
 $NativeScaffoldTestPath = Join-Path $RepoRoot "scripts\test-native-bridge-scaffold.ps1"
 $FreshLauncher = $false
 $FreshLoader = $false
+$PyCacheRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("vectorworks-mcp-verify-pycache-{0}" -f $PID)
 
 if (-not $LauncherPath) {
     $LauncherPath = Join-Path ([System.IO.Path]::GetTempPath()) ("vectorworks-mcp-verify-launcher-{0}.py" -f $PID)
@@ -52,6 +53,39 @@ function Invoke-Checked {
     }
 }
 
+function Test-PythonExecutable {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $false
+    }
+    try {
+        & $Path -c "import sys; sys.exit(0)" *> $null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
+}
+
+function Resolve-ActiveVenvPython {
+    $Candidates = [System.Collections.Generic.List[string]]::new()
+    $Candidates.Add($RepoVenvPython)
+    if ($env:LOCALAPPDATA) {
+        $Candidates.Add((Join-Path $env:LOCALAPPDATA "vectorworks-mcp\venv\Scripts\python.exe"))
+    }
+    if ($env:TEMP) {
+        $Candidates.Add((Join-Path $env:TEMP "vectorworks-mcp\venv\Scripts\python.exe"))
+    }
+
+    foreach ($Candidate in ($Candidates | Select-Object -Unique)) {
+        if (Test-PythonExecutable -Path $Candidate) {
+            return $Candidate
+        }
+    }
+
+    throw "Usable virtualenv Python was not found after bootstrap. Checked: $($Candidates -join ', ')"
+}
+
 Assert-Path $RunnerPath "MCP runner"
 Assert-Path $RegisterPath "Claude Code registration script"
 Assert-Path $ServerPath "MCP server"
@@ -66,7 +100,9 @@ Invoke-Checked "bootstrap venv/dependencies" {
     & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $RunnerPath -SetupOnly
 }
 
-Assert-Path $VenvPython "Virtualenv Python"
+$VenvPython = Resolve-ActiveVenvPython
+New-Item -ItemType Directory -Force -Path $PyCacheRoot *> $null
+$env:PYTHONPYCACHEPREFIX = $PyCacheRoot
 
 if ($FreshLauncher -or $FreshLoader -or -not (Test-Path $LauncherPath) -or -not (Test-Path $LoaderPath)) {
     Invoke-Checked "generate Vectorworks launcher" {
@@ -192,6 +228,9 @@ if ($FreshLauncher -and (Test-Path -LiteralPath $LauncherPath)) {
 }
 if ($FreshLoader -and (Test-Path -LiteralPath $LoaderPath)) {
     Remove-Item -LiteralPath $LoaderPath -Force -ErrorAction SilentlyContinue
+}
+if (Test-Path -LiteralPath $PyCacheRoot) {
+    Remove-Item -LiteralPath $PyCacheRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "OK: no-Vectorworks verification passed."

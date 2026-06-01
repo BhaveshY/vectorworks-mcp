@@ -32,7 +32,7 @@ class AgentReadinessTests(unittest.TestCase):
         marker = json.loads((ROOT / ".vectorworks-mcp-contract.json").read_text(encoding="utf-8"))
 
         self.assertEqual(marker["name"], "vectorworks-mcp")
-        self.assertGreaterEqual(marker["contractVersion"], 10)
+        self.assertGreaterEqual(marker["contractVersion"], 11)
         for feature in (
             "stable-loader",
             "loader-clipboard-copy",
@@ -43,6 +43,7 @@ class AgentReadinessTests(unittest.TestCase):
             "native-bridge-project-wire",
             "native-doctor-next-runner",
             "native-runner-spec-validation",
+            "native-sdk-archive-reuse",
         ):
             self.assertIn(feature, marker["requiredFeatures"])
 
@@ -69,6 +70,20 @@ class AgentReadinessTests(unittest.TestCase):
             ".github/workflows/verify.yml",
         ):
             self.assertTrue((ROOT / relative_path).exists(), relative_path)
+
+    def test_mcp_runner_recovers_stale_virtualenv_python(self):
+        runner = (ROOT / "scripts" / "run-mcp-server.ps1").read_text(encoding="utf-8")
+
+        self.assertIn("function Test-PythonExecutable", runner)
+        self.assertIn("Existing virtual environment python could not run; recreating", runner)
+        self.assertIn("$FallbackVenvDir", runner)
+        self.assertIn("Using fallback virtual environment", runner)
+        self.assertIn("Remove-Item -LiteralPath $VenvDir -Recurse -Force", runner)
+
+        verifier = (ROOT / "scripts" / "verify-no-vectorworks.ps1").read_text(encoding="utf-8")
+        self.assertIn("Resolve-ActiveVenvPython", verifier)
+        self.assertIn("vectorworks-mcp\\venv\\Scripts\\python.exe", verifier)
+        self.assertIn("PYTHONPYCACHEPREFIX", verifier)
 
     def test_connector_ci_checks_standalone_plugin_contract(self):
         workflow = (ROOT / ".github" / "workflows" / "verify.yml").read_text(encoding="utf-8")
@@ -236,13 +251,14 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIn("runpy.run_path", loader_text)
             self.assertIn(str(launcher_path).replace("\\", "\\\\"), loader_text)
             self.assertIn("VW_MCP_LOADER_METADATA", loader_text)
-            self.assertIn('"contractVersion": 10', loader_text)
+            self.assertIn('"contractVersion": 11', loader_text)
             self.assertIn('"native-bridge-scaffold-copy"', loader_text)
             self.assertIn('"native-doctor-next-command"', loader_text)
             self.assertIn('"native-doctor-command-spec"', loader_text)
             self.assertIn('"native-bridge-project-wire"', loader_text)
             self.assertIn('"native-doctor-next-runner"', loader_text)
             self.assertIn('"native-runner-spec-validation"', loader_text)
+            self.assertIn('"native-sdk-archive-reuse"', loader_text)
 
     def test_native_bridge_scaffold_is_explicitly_not_default(self):
         expected_files = (
@@ -365,6 +381,8 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("SDK_REQUIREMENTS.json", bootstrap)
         self.assertIn("Invoke-WebRequest", bootstrap)
         self.assertIn("-DownloadSdk", bootstrap)
+        self.assertIn("SdkArchivePath", bootstrap)
+        self.assertIn("sdkArchiveCandidates", checker)
         self.assertIn(".cache/", gitignore)
         self.assertIn("third_party/", gitignore)
         self.assertIn("vw_load_listener_2024.py", gitignore)
@@ -909,8 +927,8 @@ if ($Json) {
         if not powershell:
             self.skipTest("PowerShell is required to exercise native source preparation")
 
-        worktree = ROOT / "native_bridge" / "worktree"
         with tempfile.TemporaryDirectory() as temp_dir:
+            worktree = Path(temp_dir) / "SDKExamples Worktree"
             examples = Path(temp_dir) / "SDKExamples"
             source = examples / "Examples2024" / "ObjectExample"
             (source / "Source").mkdir(parents=True)
@@ -918,44 +936,42 @@ if ($Json) {
             (examples / "ThirdPartySource" / "libcurl").mkdir(parents=True)
             (source / "ObjectExample2024.sln").write_text("fake solution\n", encoding="utf-8")
 
-            try:
-                subprocess.run(
-                    [
-                        powershell,
-                        "-NoLogo",
-                        "-NoProfile",
-                        "-ExecutionPolicy",
-                        "Bypass",
-                        "-File",
-                        str(ROOT / "scripts/prepare-native-bridge-source.ps1"),
-                        "-SdkExamplesDir",
-                        str(examples),
-                        "-Force",
-                    ],
-                    cwd=str(ROOT),
-                    check=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
+            subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/prepare-native-bridge-source.ps1"),
+                    "-SdkExamplesDir",
+                    str(examples),
+                    "-WorktreeRoot",
+                    str(worktree),
+                    "-Force",
+                ],
+                cwd=str(ROOT),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
 
-                root = worktree / "SDKExamples"
-                bridge = root / "Examples2024" / "VectorworksMCPBridge"
-                self.assertTrue((bridge / "ObjectExample2024.sln").exists())
-                self.assertTrue((bridge / "VECTORWORKS_MCP_BRIDGE_NOTES.md").exists())
-                self.assertTrue((root / "VectorworksSDK" / "SDK2024" / "SDKLib").exists())
-                self.assertTrue((root / "ThirdPartySource" / "libcurl").exists())
-            finally:
-                if worktree.exists():
-                    shutil.rmtree(worktree)
+            root = worktree
+            bridge = root / "Examples2024" / "VectorworksMCPBridge"
+            self.assertTrue((bridge / "ObjectExample2024.sln").exists())
+            self.assertTrue((bridge / "VECTORWORKS_MCP_BRIDGE_NOTES.md").exists())
+            self.assertTrue((root / "VectorworksSDK" / "SDK2024" / "SDKLib").exists())
+            self.assertTrue((root / "ThirdPartySource" / "libcurl").exists())
 
     def test_prepare_native_bridge_source_accepts_sdk_dir(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
         if not powershell:
             self.skipTest("PowerShell is required to exercise native source preparation")
 
-        worktree = ROOT / "native_bridge" / "worktree"
         with tempfile.TemporaryDirectory() as temp_dir:
+            worktree = Path(temp_dir) / "SDKExamples Worktree"
             sdk_root = Path(temp_dir) / "ExtractedSDK"
             examples = sdk_root / "SDKExamples"
             source = examples / "Examples2024" / "ObjectExample"
@@ -964,34 +980,32 @@ if ($Json) {
             (examples / "ThirdPartySource" / "libcurl").mkdir(parents=True)
             (source / "ObjectExample2024.sln").write_text("fake solution\n", encoding="utf-8")
 
-            try:
-                subprocess.run(
-                    [
-                        powershell,
-                        "-NoLogo",
-                        "-NoProfile",
-                        "-ExecutionPolicy",
-                        "Bypass",
-                        "-File",
-                        str(ROOT / "scripts/prepare-native-bridge-source.ps1"),
-                        "-SdkDir",
-                        str(sdk_root),
-                        "-Force",
-                    ],
-                    cwd=str(ROOT),
-                    check=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                )
+            subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/prepare-native-bridge-source.ps1"),
+                    "-SdkDir",
+                    str(sdk_root),
+                    "-WorktreeRoot",
+                    str(worktree),
+                    "-Force",
+                ],
+                cwd=str(ROOT),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
 
-                root = worktree / "SDKExamples"
-                bridge = root / "Examples2024" / "VectorworksMCPBridge"
-                self.assertTrue((bridge / "ObjectExample2024.sln").exists())
-                self.assertTrue((root / "VectorworksSDK" / "SDK2024" / "SDKLib").exists())
-            finally:
-                if worktree.exists():
-                    shutil.rmtree(worktree)
+            root = worktree
+            bridge = root / "Examples2024" / "VectorworksMCPBridge"
+            self.assertTrue((bridge / "ObjectExample2024.sln").exists())
+            self.assertTrue((root / "VectorworksSDK" / "SDK2024" / "SDKLib").exists())
 
     def test_prepare_native_bridge_source_accepts_custom_worktree_root(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
@@ -1170,6 +1184,7 @@ if ($Json) {
         self.assertIn("bootstrap-native-bridge.ps1", doctor)
         self.assertIn("-InstallVisualStudioBuildTools", doctor)
         self.assertIn("-DownloadSdk", doctor)
+        self.assertIn("SdkArchivePath", doctor)
         self.assertIn("-PrepareSource", doctor)
         self.assertIn("prepare-native-bridge-source.ps1", doctor)
         self.assertIn("build-native-bridge.ps1", doctor)
@@ -1259,7 +1274,10 @@ if ($Json) {
                 self.assertTrue(spec["mayRequireReboot"])
                 self.assertIn("bootstrap-native-bridge.ps1", report["nextCommand"])
                 self.assertIn("-InstallVisualStudioBuildTools", report["nextCommand"])
-                self.assertIn("-DownloadSdk", report["nextCommand"])
+                if "-SdkArchivePath" in spec["arguments"]:
+                    self.assertNotIn("-DownloadSdk", spec["arguments"])
+                else:
+                    self.assertIn("-DownloadSdk", report["nextCommand"])
 
     def test_native_doctor_can_plan_and_install_explicit_artifact(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
@@ -1564,6 +1582,80 @@ if ($Json) {
             self.assertEqual(report["nextCommandSpec"]["stage"], "wire-native-project")
             self.assertIn("wire-native-bridge-project.ps1", report["nextCommand"])
             self.assertIn(str(worktree), report["nextCommandSpec"]["arguments"])
+
+    def test_native_prereq_checker_and_doctor_reuse_downloaded_sdk_archive(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise the native prerequisite checker")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            downloads = temp_root / "Downloads"
+            downloads.mkdir()
+            archive = downloads / "2024-NNA-eng-win-SDK.zip"
+            archive.write_text("fake archive marker\n", encoding="utf-8")
+            env = os.environ.copy()
+            env["USERPROFILE"] = str(temp_root)
+
+            prereq_result = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/check-native-bridge-prereqs.ps1"),
+                    "-SdkDir",
+                    str(temp_root / "Missing SDK"),
+                    "-Advisory",
+                    "-Json",
+                ],
+                cwd=str(ROOT),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            prereqs = json.loads(prereq_result.stdout)
+            self.assertFalse(prereqs["ready"])
+            self.assertIn(str(archive), [candidate["path"] for candidate in prereqs["sdkArchiveCandidates"]])
+            sdk_check = next(check for check in prereqs["checks"] if check["name"] == "Vectorworks 2024 SDK")
+            self.assertIn("-SdkArchivePath", sdk_check["fix"])
+
+            doctor_result = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/doctor-native-bridge.ps1"),
+                    "-SdkDir",
+                    str(temp_root / "Missing SDK"),
+                    "-SdkArchivePath",
+                    str(archive),
+                    "-WorktreeRoot",
+                    str(temp_root / "Worktree"),
+                    "-InstallDir",
+                    str(temp_root / "Plug-ins"),
+                    "-Json",
+                ],
+                cwd=str(ROOT),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+            report = json.loads(doctor_result.stdout)
+            self.assertEqual(report["sdkArchivePath"], str(archive))
+            self.assertIn(str(archive), [candidate["path"] for candidate in report["sdkArchiveCandidates"]])
+            self.assertIn("-SdkArchivePath", report["nextCommand"])
+            self.assertIn(str(archive), report["nextCommandSpec"]["arguments"])
+            self.assertNotIn("-DownloadSdk", report["nextCommandSpec"]["arguments"])
 
     def test_native_prereq_checker_reports_supported_versions_for_unknown_version(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")

@@ -3,6 +3,7 @@ param(
     [string]$VectorworksVersion = "2024",
     [string]$BuiltArtifact = "",
     [string]$SdkDir = "",
+    [string]$SdkArchivePath = "",
     [string]$SdkExamplesDir = "",
     [string]$WorktreeRoot = "",
     [string]$InstallDir = "",
@@ -35,6 +36,7 @@ $RequiredScaffoldFiles = @(
 )
 $BuiltArtifactWasExplicit = -not [string]::IsNullOrWhiteSpace($BuiltArtifact)
 $SdkDirWasExplicit = -not [string]::IsNullOrWhiteSpace($SdkDir)
+$SdkArchivePathWasExplicit = -not [string]::IsNullOrWhiteSpace($SdkArchivePath)
 $SdkExamplesDirWasExplicit = -not [string]::IsNullOrWhiteSpace($SdkExamplesDir)
 $InstallDirWasExplicit = -not [string]::IsNullOrWhiteSpace($InstallDir)
 $ConfigurationWasExplicit = $PSBoundParameters.ContainsKey("Configuration")
@@ -202,6 +204,13 @@ $PrereqArgs = @("-VectorworksVersion", $VectorworksVersion, "-Advisory", "-Json"
 if ($SdkDirWasExplicit) { $PrereqArgs += @("-SdkDir", $SdkDir) }
 $PrereqRaw = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $PrereqPath @PrereqArgs | Out-String
 $Prereqs = $PrereqRaw | ConvertFrom-Json
+$SdkArchiveCandidates = @()
+if ($Prereqs.PSObject.Properties.Name -contains "sdkArchiveCandidates") {
+    $SdkArchiveCandidates = @($Prereqs.sdkArchiveCandidates)
+}
+if (-not $SdkArchivePath -and $SdkArchiveCandidates.Count -gt 0) {
+    $SdkArchivePath = [string]$SdkArchiveCandidates[0].path
+}
 $SourcePrepared = Test-Path -LiteralPath $BridgeSourceDir -PathType Container
 $SolutionPath = Get-FirstFile -Root $BridgeSourceDir -Patterns @("*$VectorworksVersion.sln")
 $MissingScaffoldFiles = @($RequiredScaffoldFiles | Where-Object {
@@ -257,7 +266,8 @@ if ($Install) {
 
 $NextActions = [System.Collections.Generic.List[string]]::new()
 if (-not $Prereqs.ready) {
-    Add-NextAction $NextActions "Run scripts\bootstrap-native-bridge.ps1 -InstallVisualStudioBuildTools -DownloadSdk -CloneSdkExamples -PrepareSource"
+    $ArchiveHint = if ($SdkArchivePath) { " -SdkArchivePath `"$SdkArchivePath`"" } else { " -DownloadSdk" }
+    Add-NextAction $NextActions "Run scripts\bootstrap-native-bridge.ps1 -InstallVisualStudioBuildTools$ArchiveHint -CloneSdkExamples -PrepareSource"
 }
 if (-not $SourcePrepared) {
     Add-NextAction $NextActions "Run scripts\prepare-native-bridge-source.ps1 -CloneSdkExamples"
@@ -332,11 +342,15 @@ if ($InstallPerformed) {
     $BootstrapArgs = [System.Collections.Generic.List[string]]::new()
     Add-NamedCommandArgument $BootstrapArgs "VectorworksVersion" $VectorworksVersion
     if ($SdkDirWasExplicit) { Add-NamedCommandArgument $BootstrapArgs "SdkDir" $SdkDir }
+    if ($SdkArchivePathWasExplicit -or $SdkArchivePath) {
+        Add-NamedCommandArgument $BootstrapArgs "SdkArchivePath" $SdkArchivePath
+    } else {
+        Add-SwitchCommandArgument $BootstrapArgs "DownloadSdk" $true
+    }
     if ($SdkExamplesDirWasExplicit) { Add-NamedCommandArgument $BootstrapArgs "SdkExamplesDir" $SdkExamplesDir }
     if ($WorktreeRootWasExplicit) { Add-NamedCommandArgument $BootstrapArgs "WorktreeRoot" $WorktreeRoot }
     if ($ConfigurationWasExplicit) { Add-NamedCommandArgument $BootstrapArgs "Configuration" $Configuration }
     Add-SwitchCommandArgument $BootstrapArgs "InstallVisualStudioBuildTools" $true
-    Add-SwitchCommandArgument $BootstrapArgs "DownloadSdk" $true
     Add-SwitchCommandArgument $BootstrapArgs "CloneSdkExamples" $true
     Add-SwitchCommandArgument $BootstrapArgs "PrepareSource" $true
     Set-NextCommandPlan -ScriptName "bootstrap-native-bridge.ps1" -Arguments $BootstrapArgs -Stage "bootstrap-native-prereqs" -Reason "Native prerequisites are missing. Run the opt-in bootstrap, then rerun doctor-native-bridge.ps1 -Json after installer completion or reboot." -RequiresNetwork $true -MayInstallSoftware $true -MayDownloadLargeFiles $true -MayRequireReboot $true -RerunDoctorAfter $true
@@ -407,6 +421,8 @@ $Report = [pscustomobject]@{
     sourcePrepared = [bool]$SourcePrepared
     solutionPath = $SolutionPath
     sdkDir = $SdkDir
+    sdkArchivePath = $SdkArchivePath
+    sdkArchiveCandidates = @($SdkArchiveCandidates)
     sdkExamplesDir = $SdkExamplesDir
     configuration = $Configuration
     builtArtifact = $BuiltArtifact

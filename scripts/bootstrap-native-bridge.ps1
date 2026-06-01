@@ -2,6 +2,7 @@
 param(
     [string]$VectorworksVersion = "2024",
     [string]$SdkDir = "",
+    [string]$SdkArchivePath = "",
     [string]$SdkExamplesDir = "",
     [string]$WorktreeRoot = "",
     [switch]$DownloadSdk,
@@ -43,6 +44,9 @@ if (-not (Test-Path -LiteralPath $CheckerPath)) {
 Write-Host "Vectorworks native bridge bootstrap ($VectorworksVersion)"
 Write-Host "Repo: $RepoRoot"
 Write-Host "SDK directory: $SdkDir"
+if ($SdkArchivePath) {
+    Write-Host "SDK archive: $SdkArchivePath"
+}
 if ($WorktreeRoot) {
     Write-Host "Worktree root: $WorktreeRoot"
 }
@@ -70,7 +74,8 @@ if ($InstallVisualStudioBuildTools) {
     Write-Host "Visual Studio Build Tools install skipped. Pass -InstallVisualStudioBuildTools to install the C++ workload with winget."
 }
 
-if ($DownloadSdk) {
+$AcquireSdk = $DownloadSdk -or -not [string]::IsNullOrWhiteSpace($SdkArchivePath)
+if ($AcquireSdk) {
     $CacheDir = Join-Path $RepoRoot ".cache\vectorworks-sdk"
     $ArchivePath = Join-Path $CacheDir "VectorworksSDK-$VectorworksVersion-win64.zip"
     $DownloadUrl = [string]$VersionRequirements.winSdkDownload
@@ -78,7 +83,13 @@ if ($DownloadSdk) {
     New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
     New-Item -ItemType Directory -Force -Path $SdkDir | Out-Null
 
-    if ((Test-Path -LiteralPath $ArchivePath) -and -not $Force) {
+    if ($SdkArchivePath) {
+        if (-not (Test-Path -LiteralPath $SdkArchivePath -PathType Leaf)) {
+            throw "SDK archive was not found at $SdkArchivePath"
+        }
+        $ArchivePath = (Resolve-Path -LiteralPath $SdkArchivePath).Path
+        Write-Host "Using provided SDK archive: $ArchivePath"
+    } elseif ((Test-Path -LiteralPath $ArchivePath) -and -not $Force) {
         Write-Host "Using cached SDK archive: $ArchivePath"
     } else {
         Write-Host "Downloading SDK from official Vectorworks URL:"
@@ -90,7 +101,7 @@ if ($DownloadSdk) {
     Write-Host "Extracting SDK archive to $SdkDir"
     Expand-Archive -Path $ArchivePath -DestinationPath $SdkDir -Force
 } else {
-    Write-Host "SDK download skipped. Pass -DownloadSdk to fetch the official Windows SDK archive."
+    Write-Host "SDK download/extract skipped. Pass -DownloadSdk to fetch the official Windows SDK archive or -SdkArchivePath to reuse a downloaded archive."
     Write-Host "Official SDK page: $OfficialSdkPage"
 }
 
