@@ -1,0 +1,334 @@
+#!/usr/bin/env python3
+"""Deterministic local helper for the Vectorworks Claude Code plugin.
+
+This mirrors the RADAR `radarctl` pattern: expose one stable, plugin-packaged
+command for setup, doctor, native next-step planning, and ping checks. The
+PowerShell scripts remain implementation details.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+
+def plugin_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def script_path(name: str) -> Path:
+    return plugin_root() / "scripts" / name
+
+
+def powershell() -> str:
+    for name in ("powershell.exe", "powershell", "pwsh"):
+        found = shutil.which(name)
+        if found:
+            return found
+    raise RuntimeError("PowerShell was not found on PATH")
+
+
+def run_script(name: str, args: list[str], *, capture: bool = False) -> subprocess.CompletedProcess[str]:
+    script = script_path(name)
+    if not script.exists():
+        raise RuntimeError(f"Plugin script was not found: {script}")
+    command = [
+        powershell(),
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script),
+        *args,
+    ]
+    return subprocess.run(
+        command,
+        cwd=str(plugin_root()),
+        text=True,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE if capture else None,
+    )
+
+
+def add_repo_path(args: list[str], repo_path: str) -> list[str]:
+    if repo_path:
+        return [*args, "-RepoPath", repo_path]
+    return args
+
+
+def parse_json_stdout(result: subprocess.CompletedProcess[str]) -> Any:
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or result.stdout or f"command failed with exit code {result.returncode}").strip())
+    text = (result.stdout or "").strip()
+    if not text:
+        return None
+    return json.loads(text)
+
+
+def native_plan_namespace(args: argparse.Namespace, *, json_output: bool) -> argparse.Namespace:
+    return argparse.Namespace(
+        repo_path=getattr(args, "repo_path", ""),
+        vectorworks_version=getattr(args, "vectorworks_version", "2024"),
+        configuration=getattr(args, "configuration", "Debug"),
+        built_artifact=getattr(args, "built_artifact", ""),
+        sdk_dir=getattr(args, "sdk_dir", ""),
+        sdk_archive_path=getattr(args, "sdk_archive_path", ""),
+        sdk_examples_dir=getattr(args, "sdk_examples_dir", ""),
+        worktree_root=getattr(args, "worktree_root", ""),
+        install_dir=getattr(args, "install_dir", ""),
+        max_steps=getattr(args, "max_steps", 1),
+        plan_only=True,
+        json=json_output,
+        install=False,
+        allow_network=False,
+        allow_install_software=False,
+        allow_download_large_files=False,
+        allow_modify_vectorworks_plugins=False,
+        allow_vectorworks_restart=False,
+        allow_reboot_risk=False,
+    )
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    ps_args = ["-TimeoutMilliseconds", str(args.timeout_ms)]
+    ps_args = add_repo_path(ps_args, args.repo_path)
+    if args.json:
+        ps_args.append("-Json")
+
+        listener_result = run_script("doctor-vectorworks-mcp.ps1", ps_args, capture=True)
+        native_result = run_script(
+            "invoke-native-bridge-next.ps1",
+            native_next_args(native_plan_namespace(args, json_output=True)),
+            capture=True,
+        )
+        listener_doctor: Any = None
+        native_plan: Any = None
+        listener_error = ""
+        native_error = ""
+        try:
+            listener_doctor = parse_json_stdout(listener_result)
+        except Exception as exc:  # noqa: BLE001 - CLI diagnostics boundary
+            listener_error = str(exc)
+        try:
+            native_plan = parse_json_stdout(native_result)
+        except Exception as exc:  # noqa: BLE001 - CLI diagnostics boundary
+            native_error = str(exc)
+
+        payload = {
+            "ok": listener_result.returncode == 0 and native_result.returncode == 0 and not listener_error and not native_error,
+            "mode": "native-first",
+            "listener_doctor": listener_doctor,
+            "native_plan": native_plan,
+            "listener_error": listener_error,
+            "native_error": native_error,
+            "next_action": "Use native_plan.nextCommandSpec for long-term setup. Treat Python listener findings as fallback diagnostics.",
+        }
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    listener_result = run_script("doctor-vectorworks-mcp.ps1", ps_args)
+    native_result = run_script(
+        "invoke-native-bridge-next.ps1",
+        native_next_args(native_plan_namespace(args, json_output=False)),
+    )
+    return listener_result.returncode or native_result.returncode
+
+
+def cmd_ping(args: argparse.Namespace) -> int:
+    ps_args: list[str] = []
+    ps_args = add_repo_path(ps_args, args.repo_path)
+    if args.host:
+        ps_args.extend(["-HostName", args.host])
+    if args.port:
+        ps_args.extend(["-Port", str(args.port)])
+    if args.timeout_seconds:
+        ps_args.extend(["-TimeoutSeconds", str(args.timeout_seconds)])
+    result = run_script("test-vectorworks-listener.ps1", ps_args)
+    return result.returncode
+
+
+def native_next_args(args: argparse.Namespace, extra: list[str] | None = None) -> list[str]:
+    ps_args = [
+        "-VectorworksVersion",
+        args.vectorworks_version,
+        "-Configuration",
+        args.configuration,
+        "-MaxSteps",
+        str(args.max_steps),
+    ]
+    for attr, switch in (
+        ("built_artifact", "-BuiltArtifact"),
+        ("sdk_dir", "-SdkDir"),
+        ("sdk_archive_path", "-SdkArchivePath"),
+        ("sdk_examples_dir", "-SdkExamplesDir"),
+        ("worktree_root", "-WorktreeRoot"),
+        ("install_dir", "-InstallDir"),
+    ):
+        value = getattr(args, attr, "")
+        if value:
+            ps_args.extend([switch, value])
+    ps_args = add_repo_path(ps_args, args.repo_path)
+    if args.plan_only:
+        ps_args.append("-PlanOnly")
+    if args.json:
+        ps_args.append("-Json")
+    if args.allow_network:
+        ps_args.append("-AllowNetwork")
+    if args.allow_install_software:
+        ps_args.append("-AllowInstallSoftware")
+    if args.allow_download_large_files:
+        ps_args.append("-AllowDownloadLargeFiles")
+    if args.allow_modify_vectorworks_plugins:
+        ps_args.append("-AllowModifyVectorworksUserPlugins")
+    if args.allow_vectorworks_restart:
+        ps_args.append("-AllowVectorworksRestartStep")
+    if args.allow_reboot_risk:
+        ps_args.append("-AllowRebootRisk")
+    if args.install:
+        ps_args.append("-Install")
+    if extra:
+        ps_args.extend(extra)
+    return ps_args
+
+
+def cmd_native_next(args: argparse.Namespace) -> int:
+    result = run_script("invoke-native-bridge-next.ps1", native_next_args(args))
+    return result.returncode
+
+
+def cmd_setup_runtime(args: argparse.Namespace) -> int:
+    native_args = argparse.Namespace(**vars(args))
+    native_args.plan_only = True
+    native_args.json = True
+    native_args.max_steps = 1
+    native_result = run_script("invoke-native-bridge-next.ps1", native_next_args(native_args), capture=True)
+    native_plan: Any = None
+    native_error = ""
+    try:
+        native_plan = parse_json_stdout(native_result)
+    except Exception as exc:  # noqa: BLE001 - printed as deterministic setup diagnostics
+        native_error = str(exc)
+
+    fallback_result: subprocess.CompletedProcess[str] | None = None
+    if args.include_python_fallback:
+        fallback_args = ["-SkipClipboard"]
+        if args.skip_verify:
+            fallback_args.append("-SkipVerify")
+        fallback_args = add_repo_path(fallback_args, args.repo_path)
+        fallback_result = run_script("bootstrap-vectorworks-mcp.ps1", fallback_args, capture=args.json)
+
+    if args.json:
+        payload = {
+            "ok": bool((native_plan and not native_error) or (fallback_result and fallback_result.returncode == 0)),
+            "mode": "native-first",
+            "native_plan": native_plan,
+            "native_error": native_error,
+            "python_fallback_setup": None
+            if fallback_result is None
+            else {
+                "returncode": fallback_result.returncode,
+                "stdout": fallback_result.stdout,
+                "stderr": fallback_result.stderr,
+            },
+            "next_action": "Follow native_plan.nextCommandSpec. Use --include-python-fallback only as a temporary compatibility path.",
+        }
+        print(json.dumps(payload, indent=2))
+        return 0 if payload["ok"] else 1
+
+    print("Vectorworks runtime setup")
+    print("mode: native-first")
+    if native_error:
+        print(f"native plan: failed - {native_error}")
+    elif native_plan:
+        print(f"native plan status: {native_plan.get('status', 'planned')}")
+        next_command = native_plan.get("nextCommand") or native_plan.get("steps", [{}])[0].get("command", "")
+        if next_command:
+            print(f"next native command: {next_command}")
+    else:
+        print("native plan: unavailable")
+    if fallback_result is not None:
+        print(f"python fallback setup: exit {fallback_result.returncode}")
+    print("Normal daily use should not run setup-runtime; use doctor only for troubleshooting.")
+    return 0 if (native_plan or (fallback_result and fallback_result.returncode == 0)) else 1
+
+
+def add_native_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--repo-path", default=os.environ.get("VW_MCP_REPO", ""))
+    parser.add_argument("--vectorworks-version", default="2024")
+    parser.add_argument("--configuration", choices=("Debug", "Release"), default="Debug")
+    parser.add_argument("--built-artifact", default="")
+    parser.add_argument("--sdk-dir", default="")
+    parser.add_argument("--sdk-archive-path", default="")
+    parser.add_argument("--sdk-examples-dir", default="")
+    parser.add_argument("--worktree-root", default="")
+    parser.add_argument("--install-dir", default="")
+    parser.add_argument("--max-steps", type=int, default=1)
+    parser.add_argument("--plan-only", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--install", action="store_true")
+    parser.add_argument("--allow-network", action="store_true")
+    parser.add_argument("--allow-install-software", action="store_true")
+    parser.add_argument("--allow-download-large-files", action="store_true")
+    parser.add_argument("--allow-modify-vectorworks-plugins", action="store_true")
+    parser.add_argument("--allow-vectorworks-restart", action="store_true")
+    parser.add_argument("--allow-reboot-risk", action="store_true")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="vectorworksctl")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    doctor = sub.add_parser("doctor")
+    doctor.add_argument("--repo-path", default=os.environ.get("VW_MCP_REPO", ""))
+    doctor.add_argument("--timeout-ms", type=int, default=1200)
+    doctor.add_argument("--vectorworks-version", default="2024")
+    doctor.add_argument("--configuration", choices=("Debug", "Release"), default="Debug")
+    doctor.add_argument("--built-artifact", default="")
+    doctor.add_argument("--sdk-dir", default="")
+    doctor.add_argument("--sdk-archive-path", default="")
+    doctor.add_argument("--sdk-examples-dir", default="")
+    doctor.add_argument("--worktree-root", default="")
+    doctor.add_argument("--install-dir", default="")
+    doctor.add_argument("--max-steps", type=int, default=1)
+    doctor.add_argument("--json", action="store_true")
+    doctor.set_defaults(func=cmd_doctor)
+
+    setup = sub.add_parser("setup-runtime")
+    add_native_options(setup)
+    setup.add_argument("--include-python-fallback", action="store_true")
+    setup.add_argument("--skip-verify", action="store_true")
+    setup.set_defaults(func=cmd_setup_runtime)
+
+    native = sub.add_parser("native-next")
+    add_native_options(native)
+    native.set_defaults(func=cmd_native_next)
+
+    ping = sub.add_parser("ping")
+    ping.add_argument("--repo-path", default=os.environ.get("VW_MCP_REPO", ""))
+    ping.add_argument("--host", default="")
+    ping.add_argument("--port", type=int, default=0)
+    ping.add_argument("--timeout-seconds", type=int, default=0)
+    ping.set_defaults(func=cmd_ping)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return int(args.func(args))
+    except Exception as exc:  # noqa: BLE001 - CLI boundary
+        print(f"Vectorworks error: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -29,6 +29,8 @@ if (-not (Test-Path -LiteralPath $SourceParent -PathType Container)) {
 $Files = @(
     "BridgeProtocol.hpp",
     "BridgeProtocol.cpp",
+    "NativeTransport.hpp",
+    "NativeTransport.cpp",
     "BridgeDispatcher.hpp",
     "CadRequestQueue.hpp",
     "VectorworksMCPBridge.cpp"

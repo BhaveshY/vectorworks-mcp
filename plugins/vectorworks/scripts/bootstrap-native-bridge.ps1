@@ -1,5 +1,6 @@
 [CmdletBinding()]
 param(
+    [string]$RepoPath = "",
     [string]$VectorworksVersion = "2024",
     [string]$SdkDir = "",
     [string]$SdkArchivePath = "",
@@ -21,7 +22,8 @@ $ErrorActionPreference = "Stop"
 
 $Resolver = Join-Path $PSScriptRoot "resolve-vectorworks-mcp-repo.ps1"
 $ResolverArgs = @("-RequireContract")
-if ($env:VW_MCP_REPO) { $ResolverArgs += @("-RepoPath", $env:VW_MCP_REPO) }
+if ($RepoPath) { $ResolverArgs += @("-RepoPath", $RepoPath) }
+elseif ($env:VW_MCP_REPO) { $ResolverArgs += @("-RepoPath", $env:VW_MCP_REPO) }
 $RepoRoot = Resolve-VectorworksMcpCompanionRepo -ResolverArgs $ResolverArgs
 $Bootstrap = Join-Path $RepoRoot "scripts\bootstrap-native-bridge.ps1"
 

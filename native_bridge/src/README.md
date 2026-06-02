@@ -17,8 +17,12 @@ Files:
   call Vectorworks document APIs directly. The queue rejects duplicate request
   ids and applies bounded backpressure before work reaches the Vectorworks
   main/plugin event context.
+- `NativeTransport.hpp` / `NativeTransport.cpp`: SDK-agnostic loopback TCP
+  transport. It owns the length-prefixed socket service, answers phase-0
+  requests through the dispatcher, and releases the port on stop/unload.
 - `VectorworksMCPBridge.cpp`: SDK hook placeholders for plugin load/unload,
-  socket dispatch, stop, and main/plugin event pumping.
+  native transport startup/shutdown, socket dispatch, stop, and main/plugin
+  event pumping.
 
 The copied scaffold is phase-0 only. Its `ping` response intentionally reports
 `transport_only: true` and `cad_api_safe: false` until real Vectorworks SDK

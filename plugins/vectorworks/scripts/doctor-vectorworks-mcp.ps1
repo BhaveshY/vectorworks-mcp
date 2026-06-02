@@ -1,5 +1,6 @@
 [CmdletBinding()]
 param(
+    [string]$RepoPath = "",
     [string]$HostName = "",
     [ValidateRange(1, 65535)]
     [int]$Port = 0,
@@ -90,7 +91,8 @@ if (-not $Json) {
     Write-PluginIdentityDiagnostics
     try {
         $SoftResolverArgs = @()
-        if ($env:VW_MCP_REPO) { $SoftResolverArgs += @("-RepoPath", $env:VW_MCP_REPO) }
+        if ($RepoPath) { $SoftResolverArgs += @("-RepoPath", $RepoPath) }
+        elseif ($env:VW_MCP_REPO) { $SoftResolverArgs += @("-RepoPath", $env:VW_MCP_REPO) }
         $SoftRepoRoot = Resolve-VectorworksMcpCompanionRepo -ResolverArgs $SoftResolverArgs
         if ($SoftRepoRoot) {
             Write-Host "Repo: $SoftRepoRoot"
@@ -104,7 +106,8 @@ if (-not $Json) {
 }
 
 $ResolverArgs = @("-RequireContract")
-if ($env:VW_MCP_REPO) { $ResolverArgs += @("-RepoPath", $env:VW_MCP_REPO) }
+if ($RepoPath) { $ResolverArgs += @("-RepoPath", $RepoPath) }
+elseif ($env:VW_MCP_REPO) { $ResolverArgs += @("-RepoPath", $env:VW_MCP_REPO) }
 $RepoRoot = Resolve-VectorworksMcpCompanionRepo -ResolverArgs $ResolverArgs
 $Doctor = Join-Path $RepoRoot "scripts\doctor-vectorworks-mcp.ps1"
 

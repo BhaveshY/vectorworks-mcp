@@ -1,5 +1,6 @@
 [CmdletBinding()]
 param(
+    [string]$RepoPath = "",
     [string]$HostName = "",
     [ValidateRange(1, 65535)]
     [int]$Port = 0,
@@ -28,7 +29,8 @@ $ErrorActionPreference = "Stop"
 
 $Resolver = Join-Path $PSScriptRoot "resolve-vectorworks-mcp-repo.ps1"
 $ResolverArgs = @("-RequireContract")
-if ($env:VW_MCP_REPO) { $ResolverArgs += @("-RepoPath", $env:VW_MCP_REPO) }
+if ($RepoPath) { $ResolverArgs += @("-RepoPath", $RepoPath) }
+elseif ($env:VW_MCP_REPO) { $ResolverArgs += @("-RepoPath", $env:VW_MCP_REPO) }
 $RepoRoot = Resolve-VectorworksMcpCompanionRepo -ResolverArgs $ResolverArgs
 $Smoke = Join-Path $RepoRoot "scripts\smoke-native-bridge.ps1"
 

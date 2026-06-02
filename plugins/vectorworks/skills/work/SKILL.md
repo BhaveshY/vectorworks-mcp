@@ -8,8 +8,8 @@ description: Work with Vectorworks through MCP tools for CAD/BIM tasks. Use when
 Before changing the drawing, confirm the connection:
 
 1. Call `vw_preflight_for_cad` when available; otherwise call `vw_ping`.
-2. If `vw_ping` is unavailable, use `/vectorworks:ping` or the raw listener ping script.
-3. Confirm the ping/status payload reports `dispatch_mode=dialog`, `bridge_kind=python_dialog_agent_session`, `cad_api_safe=true`, and `transport_only=false` for the Python listener. A transport-only ping is not enough for CAD work.
+2. If `vw_ping` is unavailable, use `/vectorworks:ping` or `vectorworksctl ping`.
+3. Confirm the ping/status payload reports `cad_api_safe=true` and `transport_only=false`. Native bridge status is preferred when it is compiled and smoke-tested; the Python dialog listener is an acceptable fallback only when it is CAD-safe.
 4. Call `vw_tool_safety` as a normal planning step and prefer read-only tools before write/destructive tools.
 5. Get context with `vw_get_document_info` and `vw_get_layers` for non-trivial work.
 
@@ -24,6 +24,7 @@ Use the MCP tools deliberately:
 Safety habits:
 
 - If a tool returns `blocked: true`, stop and fix the listener/bridge status before retrying CAD work.
+- If ping reports `native_phase: 0` or `transport_only: true`, do not call CAD handlers; run `vectorworksctl native-next --plan-only --json`.
 - Ask before destructive edits such as delete, class-wide changes, overwrites, or exports over existing files.
 - If an operation reports unknown commit state, do not retry non-idempotent or destructive tools. Stabilize the connection, then inspect with read-only tools.
 - State the assumed units when the user gives dimensions. Default to the document/user context; if unknown, use millimeters for architectural dimensions.

@@ -32,7 +32,7 @@ class AgentReadinessTests(unittest.TestCase):
         marker = json.loads((ROOT / ".vectorworks-mcp-contract.json").read_text(encoding="utf-8"))
 
         self.assertEqual(marker["name"], "vectorworks-mcp")
-        self.assertGreaterEqual(marker["contractVersion"], 11)
+        self.assertGreaterEqual(marker["contractVersion"], 12)
         for feature in (
             "stable-loader",
             "loader-clipboard-copy",
@@ -44,6 +44,7 @@ class AgentReadinessTests(unittest.TestCase):
             "native-doctor-next-runner",
             "native-runner-spec-validation",
             "native-sdk-archive-reuse",
+            "native-phase0-transport",
         ):
             self.assertIn(feature, marker["requiredFeatures"])
 
@@ -188,6 +189,8 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("g++.exe", smoke)
         self.assertIn("c++.exe", smoke)
         self.assertIn("BridgeProtocol.cpp", smoke)
+        self.assertIn("NativeTransport.cpp", smoke)
+        self.assertIn("Ws2_32.lib", smoke)
         self.assertIn("VectorworksMCPBridge.cpp", smoke)
         self.assertIn("BridgeDispatcher.hpp", smoke)
         self.assertIn("CadRequestQueue.hpp", smoke)
@@ -199,6 +202,11 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("FindActionSpec", harness)
         self.assertIn("RequiresCadMainContext", harness)
         self.assertIn("CadRequestQueue", harness)
+        self.assertIn("NativeTransport", harness)
+        self.assertIn("TestNativeTransportRoundTrip", harness)
+        self.assertIn("transport ping should succeed", harness)
+        self.assertIn("malformed frame should fail without killing transport", harness)
+        self.assertIn("transport ping after malformed frame should succeed", harness)
         self.assertIn("DispatchFromSocketWorker", harness)
         self.assertIn("missing params should default to object", harness)
         self.assertIn("array params should fail", harness)
@@ -251,7 +259,7 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIn("runpy.run_path", loader_text)
             self.assertIn(str(launcher_path).replace("\\", "\\\\"), loader_text)
             self.assertIn("VW_MCP_LOADER_METADATA", loader_text)
-            self.assertIn('"contractVersion": 11', loader_text)
+            self.assertIn('"contractVersion": 12', loader_text)
             self.assertIn('"native-bridge-scaffold-copy"', loader_text)
             self.assertIn('"native-doctor-next-command"', loader_text)
             self.assertIn('"native-doctor-command-spec"', loader_text)
@@ -259,6 +267,7 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIn('"native-doctor-next-runner"', loader_text)
             self.assertIn('"native-runner-spec-validation"', loader_text)
             self.assertIn('"native-sdk-archive-reuse"', loader_text)
+            self.assertIn('"native-phase0-transport"', loader_text)
 
     def test_native_bridge_scaffold_is_explicitly_not_default(self):
         expected_files = (
@@ -272,6 +281,8 @@ class AgentReadinessTests(unittest.TestCase):
             "native_bridge/src/README.md",
             "native_bridge/src/BridgeProtocol.hpp",
             "native_bridge/src/BridgeProtocol.cpp",
+            "native_bridge/src/NativeTransport.hpp",
+            "native_bridge/src/NativeTransport.cpp",
             "native_bridge/src/BridgeDispatcher.hpp",
             "native_bridge/src/CadRequestQueue.hpp",
             "native_bridge/src/VectorworksMCPBridge.cpp",
@@ -304,6 +315,8 @@ class AgentReadinessTests(unittest.TestCase):
         scaffold_files = (
             "BridgeProtocol.hpp",
             "BridgeProtocol.cpp",
+            "NativeTransport.hpp",
+            "NativeTransport.cpp",
             "BridgeDispatcher.hpp",
             "CadRequestQueue.hpp",
             "VectorworksMCPBridge.cpp",
@@ -469,10 +482,14 @@ class AgentReadinessTests(unittest.TestCase):
             destination = source_dir / "VectorworksMCPBridge"
             self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", copy_result.stdout)
             self.assertTrue((destination / "BridgeProtocol.hpp").exists())
+            self.assertTrue((destination / "NativeTransport.hpp").exists())
+            self.assertTrue((destination / "NativeTransport.cpp").exists())
             self.assertTrue((destination / "CadRequestQueue.hpp").exists())
             self.assertTrue((destination / "VectorworksMCPBridge.cpp").exists())
             self.assertIn("ParseRequestEnvelope", (destination / "BridgeProtocol.hpp").read_text(encoding="utf-8"))
             self.assertIn("SerializeResponseEnvelope", (destination / "BridgeProtocol.cpp").read_text(encoding="utf-8"))
+            self.assertIn("class NativeTransport", (destination / "NativeTransport.hpp").read_text(encoding="utf-8"))
+            self.assertIn("AcceptLoop", (destination / "NativeTransport.cpp").read_text(encoding="utf-8"))
             self.assertIn("native_sdk_bridge_scaffold", (destination / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8"))
             self.assertIn("CancelAll", (destination / "CadRequestQueue.hpp").read_text(encoding="utf-8"))
             self.assertIn("duplicate native bridge request id", (destination / "CadRequestQueue.hpp").read_text(encoding="utf-8"))
@@ -595,14 +612,18 @@ class AgentReadinessTests(unittest.TestCase):
             first_report = json.loads(first.stdout)
             self.assertFalse(first_report["projectWired"])
             self.assertGreaterEqual(len(first_report["addedProjectItems"]), 5)
+            self.assertIn("Ws2_32.lib", "\n".join(first_report["addedLinkDependencies"]))
             project_text = project.read_text(encoding="utf-8")
             filters_text = filters.read_text(encoding="utf-8")
+            self.assertIn("Ws2_32.lib;%(AdditionalDependencies)", project_text)
             for include in (
                 "Source\\VectorworksMCPBridge\\BridgeProtocol.cpp",
+                "Source\\VectorworksMCPBridge\\NativeTransport.cpp",
                 "Source\\VectorworksMCPBridge\\VectorworksMCPBridge.cpp",
                 "Source\\VectorworksMCPBridge\\BridgeProtocol.hpp",
                 "Source\\VectorworksMCPBridge\\BridgeDispatcher.hpp",
                 "Source\\VectorworksMCPBridge\\CadRequestQueue.hpp",
+                "Source\\VectorworksMCPBridge\\NativeTransport.hpp",
             ):
                 self.assertIn(include, project_text)
                 self.assertEqual(project_text.count(include), 1)
@@ -630,7 +651,9 @@ class AgentReadinessTests(unittest.TestCase):
             second_report = json.loads(second.stdout)
             self.assertTrue(second_report["projectWired"])
             self.assertEqual(second_report["addedProjectItems"], [])
+            self.assertEqual(second_report["addedLinkDependencies"], [])
             self.assertEqual(project.read_text(encoding="utf-8").count("Source\\VectorworksMCPBridge\\BridgeProtocol.cpp"), 1)
+            self.assertEqual(project.read_text(encoding="utf-8").count("Ws2_32.lib"), 1)
 
     def test_invoke_native_bridge_next_blocks_unsafe_bootstrap_by_default(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
@@ -1505,6 +1528,7 @@ if ($Json) {
             self.assertFalse(report["scaffoldCopied"])
             self.assertEqual(report["worktreeRoot"], str(worktree))
             self.assertIn("CadRequestQueue.hpp", report["missingScaffoldFiles"])
+            self.assertIn("NativeTransport.cpp", report["missingScaffoldFiles"])
             self.assertIn("VectorworksMCPBridge.cpp", report["missingScaffoldFiles"])
             self.assertIn("copy-native-bridge-scaffold.ps1 -VectorworksVersion 2024 -Force", "\n".join(report["nextActions"]))
             self.assertIn("copy-native-bridge-scaffold.ps1 -VectorworksVersion 2024 -Force", report["nextCommand"])
@@ -1579,6 +1603,8 @@ if ($Json) {
             self.assertTrue(report["scaffoldCopied"])
             self.assertFalse(report["projectWired"])
             self.assertIn("BridgeProtocol.cpp", "\n".join(report["missingProjectItems"]))
+            self.assertIn("NativeTransport.cpp", "\n".join(report["missingProjectItems"]))
+            self.assertIn("Ws2_32.lib", "\n".join(report["missingLinkDependencies"]))
             self.assertEqual(report["nextCommandSpec"]["stage"], "wire-native-project")
             self.assertIn("wire-native-bridge-project.ps1", report["nextCommand"])
             self.assertIn(str(worktree), report["nextCommandSpec"]["arguments"])

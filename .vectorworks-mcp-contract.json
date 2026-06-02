@@ -1,6 +1,6 @@
 {
   "name": "vectorworks-mcp",
-  "contractVersion": 11,
+  "contractVersion": 12,
   "requiredFeatures": [
     "stable-loader",
     "loader-clipboard-copy",
@@ -11,7 +11,8 @@
     "native-bridge-project-wire",
     "native-doctor-next-runner",
     "native-runner-spec-validation",
-    "native-sdk-archive-reuse"
+    "native-sdk-archive-reuse",
+    "native-phase0-transport"
   ],
   "description": "Companion connector contract marker used by the standalone Claude Code plugin before accepting this checkout."
 }

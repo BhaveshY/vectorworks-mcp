@@ -22,12 +22,17 @@ if (-not $SourceDir) {
 
 $CompileFiles = @(
     "BridgeProtocol.cpp",
+    "NativeTransport.cpp",
     "VectorworksMCPBridge.cpp"
 )
 $HeaderFiles = @(
     "BridgeProtocol.hpp",
     "BridgeDispatcher.hpp",
-    "CadRequestQueue.hpp"
+    "CadRequestQueue.hpp",
+    "NativeTransport.hpp"
+)
+$RequiredLinkDependencies = @(
+    "Ws2_32.lib"
 )
 
 function Get-FirstProjectFile {
@@ -73,6 +78,19 @@ function New-MsbuildElement {
         return $Document.CreateElement($Name, $Namespace)
     }
     return $Document.CreateElement($Name)
+}
+
+function Get-MsbuildChildElement {
+    param(
+        [System.Xml.XmlElement]$Parent,
+        [string]$Name
+    )
+    foreach ($Child in @($Parent.ChildNodes)) {
+        if ($Child -is [System.Xml.XmlElement] -and $Child.LocalName -eq $Name) {
+            return $Child
+        }
+    }
+    return $null
 }
 
 function Get-MsbuildNodes {
@@ -130,6 +148,102 @@ function Ensure-ProjectItems {
     }
     if ($ItemGroupHasItems) {
         [void]$Document.DocumentElement.AppendChild($ItemGroup)
+    }
+    return @($Added)
+}
+
+function Get-ProjectLinkDependencyEntries {
+    param(
+        [xml]$Document,
+        [string[]]$Dependencies
+    )
+    $Missing = [System.Collections.Generic.List[string]]::new()
+    $LinkNodes = @(Get-MsbuildNodes -Document $Document -Name "Link")
+    if ($LinkNodes.Count -eq 0) {
+        foreach ($Dependency in $Dependencies) {
+            $Missing.Add("Link|$Dependency")
+        }
+        return @($Missing)
+    }
+
+    $Index = 0
+    foreach ($Link in $LinkNodes) {
+        $Index += 1
+        $Additional = Get-MsbuildChildElement -Parent $Link -Name "AdditionalDependencies"
+        $Values = @()
+        if ($Additional) {
+            $Values = @(([string]$Additional.InnerText).Split(";") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        }
+        foreach ($Dependency in $Dependencies) {
+            if ($Dependency -notin $Values) {
+                $Missing.Add("Link[$Index]|$Dependency")
+            }
+        }
+    }
+    return @($Missing)
+}
+
+function Set-LinkDependencyText {
+    param(
+        [System.Xml.XmlElement]$AdditionalDependencies,
+        [string[]]$Dependencies
+    )
+    $Values = @(([string]$AdditionalDependencies.InnerText).Split(";") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($Values.Count -eq 0) {
+        $Values = @("%(AdditionalDependencies)")
+    }
+    foreach ($Dependency in $Dependencies) {
+        if ($Dependency -notin $Values) {
+            $MacroIndex = [Array]::IndexOf($Values, "%(AdditionalDependencies)")
+            if ($MacroIndex -ge 0) {
+                $Before = if ($MacroIndex -gt 0) { @($Values[0..($MacroIndex - 1)]) } else { @() }
+                $After = @($Values[$MacroIndex..($Values.Count - 1)])
+                $Values = @($Before + $Dependency + $After)
+            } else {
+                $Values = @($Values + $Dependency)
+            }
+        }
+    }
+    $AdditionalDependencies.InnerText = ($Values -join ";")
+}
+
+function Ensure-ProjectLinkDependencies {
+    param(
+        [xml]$Document,
+        [string[]]$Dependencies
+    )
+    $Added = [System.Collections.Generic.List[string]]::new()
+    $LinkNodes = @(Get-MsbuildNodes -Document $Document -Name "Link")
+    if ($LinkNodes.Count -eq 0) {
+        $ItemDefinitionGroup = New-MsbuildElement -Document $Document -Name "ItemDefinitionGroup"
+        $Link = New-MsbuildElement -Document $Document -Name "Link"
+        $Additional = New-MsbuildElement -Document $Document -Name "AdditionalDependencies"
+        $Additional.InnerText = (($Dependencies + "%(AdditionalDependencies)") -join ";")
+        [void]$Link.AppendChild($Additional)
+        [void]$ItemDefinitionGroup.AppendChild($Link)
+        [void]$Document.DocumentElement.AppendChild($ItemDefinitionGroup)
+        foreach ($Dependency in $Dependencies) {
+            $Added.Add("Link|$Dependency")
+        }
+        return @($Added)
+    }
+
+    $Index = 0
+    foreach ($Link in $LinkNodes) {
+        $Index += 1
+        $Additional = Get-MsbuildChildElement -Parent $Link -Name "AdditionalDependencies"
+        if (-not $Additional) {
+            $Additional = New-MsbuildElement -Document $Document -Name "AdditionalDependencies"
+            [void]$Link.AppendChild($Additional)
+        }
+        $Before = @(([string]$Additional.InnerText).Split(";") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        Set-LinkDependencyText -AdditionalDependencies $Additional -Dependencies $Dependencies
+        $After = @(([string]$Additional.InnerText).Split(";") | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        foreach ($Dependency in $Dependencies) {
+            if ($Dependency -notin $Before -and $Dependency -in $After) {
+                $Added.Add("Link[$Index]|$Dependency")
+            }
+        }
     }
     return @($Added)
 }
@@ -256,12 +370,15 @@ foreach ($ItemName in ($ExpectedItems.Keys | Sort-Object)) {
         }
     }
 }
+$MissingLinkDependenciesBefore = @(Get-ProjectLinkDependencyEntries -Document $ProjectDocument -Dependencies $RequiredLinkDependencies)
 
 $AddedProjectItems = @()
+$AddedLinkDependencies = @()
 $ProjectChanged = $false
 if (-not $CheckOnly) {
     $AddedProjectItems = @(Ensure-ProjectItems -Document $ProjectDocument -ExpectedItems $ExpectedItems)
-    $ProjectChanged = @($AddedProjectItems).Count -gt 0
+    $AddedLinkDependencies = @(Ensure-ProjectLinkDependencies -Document $ProjectDocument -Dependencies $RequiredLinkDependencies)
+    $ProjectChanged = (@($AddedProjectItems).Count -gt 0) -or (@($AddedLinkDependencies).Count -gt 0)
     if ($ProjectChanged -and $PSCmdlet.ShouldProcess($ProjectPath, "Wire native bridge source files into SDK project")) {
         $ProjectDocument.Save($ProjectPath)
     }
@@ -298,12 +415,16 @@ $Report = [pscustomobject]@{
         ClCompile = @($ExpectedItems.ClCompile)
         ClInclude = @($ExpectedItems.ClInclude)
     }
+    requiredLinkDependencies = @($RequiredLinkDependencies)
     missingProjectItems = @($MissingBefore)
-    projectWired = @($MissingBefore).Count -eq 0
+    missingLinkDependencies = @($MissingLinkDependenciesBefore)
+    linkDependenciesWired = @($MissingLinkDependenciesBefore).Count -eq 0
+    projectWired = (@($MissingBefore).Count -eq 0) -and (@($MissingLinkDependenciesBefore).Count -eq 0)
     checkOnly = [bool]$CheckOnly
     projectChanged = [bool]$ProjectChanged
     filtersChanged = [bool]$FiltersChanged
     addedProjectItems = @($AddedProjectItems)
+    addedLinkDependencies = @($AddedLinkDependencies)
     addedFilterItems = @($AddedFilterItems)
 }
 
@@ -320,8 +441,15 @@ if ($Json) {
             Write-Host "- $Missing"
         }
     }
+    if (@($MissingLinkDependenciesBefore).Count -gt 0) {
+        Write-Host "Missing linker dependencies:"
+        foreach ($Missing in $MissingLinkDependenciesBefore) {
+            Write-Host "- $Missing"
+        }
+    }
     if (-not $CheckOnly) {
         Write-Host "Added project items: $(@($AddedProjectItems).Count)"
+        Write-Host "Added linker dependencies: $(@($AddedLinkDependencies).Count)"
         Write-Host "Added filter items: $(@($AddedFilterItems).Count)"
     }
     Write-Host ""

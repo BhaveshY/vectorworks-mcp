@@ -1,9 +1,11 @@
 #include "BridgeDispatcher.hpp"
 #include "BridgeProtocol.hpp"
 #include "CadRequestQueue.hpp"
+#include "NativeTransport.hpp"
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <string>
 
 namespace VectorworksMCP {
@@ -11,9 +13,30 @@ namespace VectorworksMCP {
 namespace {
 
 CadRequestQueue gCadQueue;
+NativeTransport gTransport;
 std::atomic_bool gStopRequested{false};
 constexpr auto kCadRequestTimeout = std::chrono::seconds(30);
 constexpr bool kCadHandlersImplemented = false;
+
+NativeTransportOptions GetTransportOptionsFromEnvironment() {
+    NativeTransportOptions options;
+    if (const char* host = std::getenv("VW_MCP_HOST")) {
+        if (host[0] != '\0') {
+            options.host = host;
+        }
+    }
+    if (const char* port = std::getenv("VW_MCP_PORT")) {
+        try {
+            const auto parsed = std::stoul(port);
+            if (parsed <= 65535u) {
+                options.port = static_cast<std::uint16_t>(parsed);
+            }
+        } catch (...) {
+            // Keep the default port when the environment is malformed.
+        }
+    }
+    return options;
+}
 
 Protocol::ResponseEnvelope HandlePingOnTransportThread(const Protocol::RequestEnvelope& request) {
     return {
@@ -39,17 +62,15 @@ Protocol::ResponseEnvelope DispatchCadRequestOnVectorworksMainContext(const Prot
 }  // namespace
 
 void OnPluginLoadStartTransport() {
-    // SDK hook placeholder: start the local socket worker here.
-    // The worker may parse frames and answer ping, but any action listed in
-    // kPhaseOneActions must be enqueued with gCadQueue instead of touching CAD.
     gStopRequested.store(false);
     gCadQueue.ResetCancellation();
+    gTransport.Start(GetTransportOptionsFromEnvironment(), DispatchFromSocketWorker);
 }
 
 void OnPluginUnloadStopTransport() {
-    // SDK hook placeholder: stop the socket worker and release port 9877.
     gStopRequested.store(true);
     gCadQueue.CancelAll("native bridge is unloading");
+    gTransport.Stop();
 }
 
 void OnVectorworksMainPluginEvent() {
@@ -86,6 +107,10 @@ Protocol::ResponseEnvelope DispatchFromSocketWorker(const Protocol::RequestEnvel
 
 bool StopRequested() {
     return gStopRequested.load();
+}
+
+std::uint16_t NativeTransportPortForDiagnostics() {
+    return gTransport.Port();
 }
 
 }  // namespace VectorworksMCP

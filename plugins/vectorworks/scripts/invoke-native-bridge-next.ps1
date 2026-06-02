@@ -1,5 +1,6 @@
 [CmdletBinding()]
 param(
+    [string]$RepoPath = "",
     [string]$VectorworksVersion = "2024",
     [string]$BuiltArtifact = "",
     [string]$SdkDir = "",
@@ -32,7 +33,8 @@ $ErrorActionPreference = "Stop"
 
 $Resolver = Join-Path $PSScriptRoot "resolve-vectorworks-mcp-repo.ps1"
 $ResolverArgs = @("-InstallIfMissing", "-RequireContract")
-if ($env:VW_MCP_REPO) { $ResolverArgs += @("-RepoPath", $env:VW_MCP_REPO) }
+if ($RepoPath) { $ResolverArgs += @("-RepoPath", $RepoPath) }
+elseif ($env:VW_MCP_REPO) { $ResolverArgs += @("-RepoPath", $env:VW_MCP_REPO) }
 $RepoRoot = Resolve-VectorworksMcpCompanionRepo -ResolverArgs $ResolverArgs
 $Runner = Join-Path $RepoRoot "scripts\invoke-native-bridge-next.ps1"
 if (-not (Test-Path -LiteralPath $Runner)) {

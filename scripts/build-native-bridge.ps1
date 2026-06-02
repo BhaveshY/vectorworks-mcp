@@ -82,6 +82,8 @@ $ScaffoldSourceDir = Join-Path $Solution.DirectoryName "Source\VectorworksMCPBri
 $RequiredScaffoldFiles = @(
     "BridgeProtocol.hpp",
     "BridgeProtocol.cpp",
+    "NativeTransport.hpp",
+    "NativeTransport.cpp",
     "BridgeDispatcher.hpp",
     "CadRequestQueue.hpp",
     "VectorworksMCPBridge.cpp"

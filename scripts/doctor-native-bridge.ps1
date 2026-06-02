@@ -30,6 +30,8 @@ $ScaffoldDestinationDir = Join-Path $BridgeSourceDir "Source\VectorworksMCPBridg
 $RequiredScaffoldFiles = @(
     "BridgeProtocol.hpp",
     "BridgeProtocol.cpp",
+    "NativeTransport.hpp",
+    "NativeTransport.cpp",
     "BridgeDispatcher.hpp",
     "CadRequestQueue.hpp",
     "VectorworksMCPBridge.cpp"
@@ -222,6 +224,7 @@ $ProjectWiringError = ""
 $ProjectWired = $false
 $ProjectPath = ""
 $MissingProjectItems = @()
+$MissingLinkDependencies = @()
 if ($SourcePrepared -and $SolutionPath -and $ScaffoldCopied) {
     try {
         $WireArgs = @("-VectorworksVersion", $VectorworksVersion, "-WorktreeRoot", $WorktreeRoot, "-CheckOnly", "-Json")
@@ -230,6 +233,7 @@ if ($SourcePrepared -and $SolutionPath -and $ScaffoldCopied) {
         $ProjectWired = [bool]$ProjectWiringReport.projectWired
         $ProjectPath = [string]$ProjectWiringReport.projectPath
         $MissingProjectItems = @($ProjectWiringReport.missingProjectItems | ForEach-Object { [string]$_ })
+        $MissingLinkDependencies = @($ProjectWiringReport.missingLinkDependencies | ForEach-Object { [string]$_ })
     } catch {
         $ProjectWiringError = $_.Exception.Message
     }
@@ -417,6 +421,7 @@ $Report = [pscustomobject]@{
     projectPath = $ProjectPath
     projectWiringError = $ProjectWiringError
     missingProjectItems = @($MissingProjectItems)
+    missingLinkDependencies = @($MissingLinkDependencies)
     projectWiring = $ProjectWiringReport
     sourcePrepared = [bool]$SourcePrepared
     solutionPath = $SolutionPath
@@ -460,6 +465,9 @@ if ($Json) {
     }
     if ($MissingProjectItems.Count -gt 0) {
         Write-Host "Missing project items: $($MissingProjectItems -join ', ')"
+    }
+    if ($MissingLinkDependencies.Count -gt 0) {
+        Write-Host "Missing linker dependencies: $($MissingLinkDependencies -join ', ')"
     }
     if ($ProjectWiringError) {
         Write-Host "Project wiring check error: $ProjectWiringError"

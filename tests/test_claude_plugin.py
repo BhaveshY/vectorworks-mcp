@@ -56,6 +56,9 @@ class ClaudePluginTests(unittest.TestCase):
 
     def test_plugin_scripts_exist(self):
         for relative_path in (
+            "bin/vectorworksctl",
+            "bin/vectorworksctl.cmd",
+            "bin/vectorworksctl.ps1",
             "scripts/resolve-companion-repo.ps1",
             "scripts/resolve-vectorworks-mcp-repo.ps1",
             "scripts/run-vectorworks-mcp.ps1",
@@ -75,6 +78,13 @@ class ClaudePluginTests(unittest.TestCase):
             "scripts/smoke-native-bridge.ps1",
         ):
             self.assertTrue((PLUGIN / relative_path).exists(), relative_path)
+
+        helper = (PLUGIN / "bin" / "vectorworksctl").read_text(encoding="utf-8")
+        self.assertIn("setup-runtime", helper)
+        self.assertIn("native-next", helper)
+        self.assertIn("listener_doctor", helper)
+        self.assertIn("native_plan", helper)
+        self.assertIn("vectorworksctl", (PLUGIN / "bin" / "vectorworksctl.ps1").read_text(encoding="utf-8"))
 
         self.assertTrue((ROOT / "scripts" / "check-bundled-plugin-contract.ps1").exists())
 
@@ -184,19 +194,18 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("vw_tool_safety", work)
         self.assertIn("unknown commit state", work)
         self.assertIn("blocked: true", diagnose)
-        self.assertIn("host-side safety guard", diagnose)
+        self.assertIn("vectorworksctl doctor --json", diagnose)
+        self.assertIn("native-next", diagnose)
         self.assertIn("unknown commit state", diagnose)
-        self.assertIn("nextCommand", diagnose)
-        self.assertIn("nextCommandReason", diagnose)
         self.assertIn("nextCommandSpec", diagnose)
-        self.assertIn("vw_load_listener_2024.py", setup)
-        self.assertIn("nextCommand", setup)
-        self.assertIn("nextCommandReason", setup)
+        self.assertIn("vectorworksctl setup-runtime --json", setup)
+        self.assertIn("include-python-fallback", setup)
         self.assertIn("nextCommandSpec", setup)
-        self.assertIn("vw_load_listener_2024.py", ping)
-        self.assertIn("bridge_kind=python_dialog_agent_session", setup)
-        self.assertIn("bridge_kind=python_dialog_agent_session", ping)
-        self.assertIn("transport-only ping is not enough", work)
+        self.assertIn("vectorworksctl ping", ping)
+        self.assertIn("cad_api_safe", ping)
+        self.assertIn("transport_only", ping)
+        self.assertIn("transport_only=false", work)
+        self.assertIn("native-next", work)
 
     def test_plugin_tool_map_documents_safety_metadata_and_mixed_actions(self):
         tool_map = (PLUGIN / "references" / "tool-map.md").read_text(encoding="utf-8")
@@ -240,6 +249,7 @@ class ClaudePluginTests(unittest.TestCase):
             text = (PLUGIN / relative_path).read_text(encoding="utf-8")
             self.assertIn("-RequireContract", text, relative_path)
             self.assertIn("Resolve-VectorworksMcpCompanionRepo", text, relative_path)
+            self.assertIn("RepoPath", text, relative_path)
 
         bootstrap = (PLUGIN / "scripts" / "bootstrap-vectorworks-mcp.ps1").read_text(encoding="utf-8")
         resolver = (PLUGIN / "scripts" / "resolve-vectorworks-mcp-repo.ps1").read_text(encoding="utf-8")
@@ -251,9 +261,9 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("-LoaderPath", bootstrap)
         self.assertIn("copy-vectorworks-loader.ps1", bootstrap)
         self.assertIn("SkipClipboard", bootstrap)
-        self.assertIn("[int]$MinimumContractVersion = 11", resolver)
+        self.assertIn("[int]$MinimumContractVersion = 12", resolver)
         self.assertIn("requiredFeatures", resolver)
-        self.assertIn("contractVersion >= 11", contract)
+        self.assertIn("contractVersion >= 12", contract)
         self.assertIn("native-bridge-scaffold-copy", contract)
         self.assertIn("native-doctor-next-command", contract)
         self.assertIn("native-doctor-command-spec", contract)
@@ -261,6 +271,7 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("native-doctor-next-runner", contract)
         self.assertIn("native-runner-spec-validation", contract)
         self.assertIn("native-sdk-archive-reuse", contract)
+        self.assertIn("native-phase0-transport", contract)
         self.assertIn("wire-native-project", contract)
         self.assertIn("nextCommandReason", contract)
         self.assertIn("nextCommandSpec", contract)

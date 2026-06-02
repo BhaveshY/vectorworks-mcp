@@ -1,5 +1,6 @@
 [CmdletBinding()]
 param(
+    [string]$RepoPath = "",
     [string]$HostName = "",
     [ValidateRange(1, 65535)]
     [int]$Port = 0
@@ -248,7 +249,8 @@ $Resolver = Join-Path $PSScriptRoot "resolve-vectorworks-mcp-repo.ps1"
 $RepoRoot = $null
 try {
     $ResolverArgs = @()
-    if ($env:VW_MCP_REPO) { $ResolverArgs += @("-RepoPath", $env:VW_MCP_REPO) }
+    if ($RepoPath) { $ResolverArgs += @("-RepoPath", $RepoPath) }
+    elseif ($env:VW_MCP_REPO) { $ResolverArgs += @("-RepoPath", $env:VW_MCP_REPO) }
     $RepoRoot = Resolve-VectorworksMcpCompanionRepo -ResolverArgs $ResolverArgs
 } catch {
     Write-Host "Repo: NOT FOUND"
