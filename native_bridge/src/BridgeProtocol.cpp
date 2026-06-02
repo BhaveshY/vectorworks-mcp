@@ -1,3 +1,5 @@
+#include "StdAfx.h"
+
 #include "BridgeProtocol.hpp"
 
 #include <cctype>

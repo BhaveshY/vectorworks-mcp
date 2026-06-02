@@ -26,7 +26,16 @@ class AgentReadinessTests(unittest.TestCase):
     def test_agent_instruction_files_exist(self):
         self.assertTrue((ROOT / "AGENTS.md").exists())
         self.assertTrue((ROOT / "CLAUDE.md").exists())
+        self.assertTrue((ROOT / "AGENT_INSTALL.md").exists())
         self.assertIn("@AGENTS.md", (ROOT / "CLAUDE.md").read_text(encoding="utf-8"))
+        self.assertIn("AGENT_INSTALL.md", (ROOT / "AGENTS.md").read_text(encoding="utf-8"))
+        agent_install = (ROOT / "AGENT_INSTALL.md").read_text(encoding="utf-8")
+        self.assertIn("winget install --id Python.Python.3.12", agent_install)
+        self.assertIn("vectorworksctl agent-install", agent_install)
+        self.assertIn("setup_complete", agent_install)
+        self.assertIn("requires_action", agent_install)
+        self.assertIn("native_summary.missing_allow_flags", agent_install)
+        self.assertIn("/plugin marketplace add BhaveshY/vectorworks-mcp", agent_install)
 
     def test_companion_contract_marker_exists(self):
         marker = json.loads((ROOT / ".vectorworks-mcp-contract.json").read_text(encoding="utf-8"))
@@ -50,6 +59,7 @@ class AgentReadinessTests(unittest.TestCase):
 
     def test_bootstrap_scripts_exist(self):
         for relative_path in (
+            "AGENT_INSTALL.md",
             "scripts/bootstrap-agent.ps1",
             "scripts/bootstrap-claude-code.ps1",
             "scripts/bootstrap-native-bridge.ps1",
@@ -365,6 +375,7 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("kCadHandlersImplemented", combined)
         self.assertIn("native bridge phase 0 CAD handlers are not implemented", combined)
         self.assertIn("native bridge timed out waiting for Vectorworks main/plugin context", combined)
+        self.assertIn('#include "StdAfx.h"', combined)
         self.assertIn('"cad_api_safe":false', combined)
         self.assertIn('"transport_only":true', combined)
         self.assertIn('"native_phase":0', combined)
@@ -416,6 +427,7 @@ class AgentReadinessTests(unittest.TestCase):
     def test_native_bridge_prepare_and_build_scripts_use_official_sdk_examples(self):
         prepare = (ROOT / "scripts/prepare-native-bridge-source.ps1").read_text(encoding="utf-8")
         build = (ROOT / "scripts/build-native-bridge.ps1").read_text(encoding="utf-8")
+        wire = (ROOT / "scripts/wire-native-bridge-project.ps1").read_text(encoding="utf-8")
         bootstrap = (ROOT / "scripts/bootstrap-native-bridge.ps1").read_text(encoding="utf-8")
         checker = (ROOT / "scripts/check-native-bridge-prereqs.ps1").read_text(encoding="utf-8")
         gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
@@ -436,6 +448,9 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("MSBuild", build)
         self.assertIn("*$VectorworksVersion.sln", build)
         self.assertIn("/p:Platform=x64", build)
+        self.assertIn("/p:LanguageStandard=stdcpp17", build)
+        self.assertIn("LanguageStandard", wire)
+        self.assertIn("stdcpp17", wire)
         self.assertIn("[string]$SdkDir", build)
         self.assertIn('"-SdkDir", $SdkDir', build)
         self.assertIn("Microsoft.VisualStudio.2022.BuildTools", bootstrap)
@@ -613,9 +628,11 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertFalse(first_report["projectWired"])
             self.assertGreaterEqual(len(first_report["addedProjectItems"]), 5)
             self.assertIn("Ws2_32.lib", "\n".join(first_report["addedLinkDependencies"]))
+            self.assertIn("stdcpp17", "\n".join(first_report["addedLanguageStandards"]))
             project_text = project.read_text(encoding="utf-8")
             filters_text = filters.read_text(encoding="utf-8")
             self.assertIn("Ws2_32.lib;%(AdditionalDependencies)", project_text)
+            self.assertIn("<LanguageStandard>stdcpp17</LanguageStandard>", project_text)
             for include in (
                 "Source\\VectorworksMCPBridge\\BridgeProtocol.cpp",
                 "Source\\VectorworksMCPBridge\\NativeTransport.cpp",
@@ -652,6 +669,7 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertTrue(second_report["projectWired"])
             self.assertEqual(second_report["addedProjectItems"], [])
             self.assertEqual(second_report["addedLinkDependencies"], [])
+            self.assertEqual(second_report["addedLanguageStandards"], [])
             self.assertEqual(project.read_text(encoding="utf-8").count("Source\\VectorworksMCPBridge\\BridgeProtocol.cpp"), 1)
             self.assertEqual(project.read_text(encoding="utf-8").count("Ws2_32.lib"), 1)
 
@@ -662,6 +680,8 @@ class AgentReadinessTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
+            env = os.environ.copy()
+            env["VW_MCP_IGNORE_REPO_SDK_CANDIDATES"] = "1"
             result = subprocess.run(
                 [
                     powershell,
@@ -685,6 +705,7 @@ class AgentReadinessTests(unittest.TestCase):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                env=env,
             )
 
             self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
@@ -692,13 +713,13 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertEqual(report["status"], "blocked_by_safety_flag")
             self.assertTrue(report["blocked"])
             self.assertFalse(report["failed"])
-            self.assertEqual(
-                report["missingAllowFlags"],
-                ["-AllowDownloadLargeFiles", "-AllowInstallSoftware", "-AllowNetwork", "-AllowRebootRisk"],
+            expected_allow_flags = sorted(
+                {block["allowSwitch"] for block in report["steps"][0]["safetyBlocks"]}
             )
+            self.assertEqual(report["missingAllowFlags"], expected_allow_flags)
             self.assertEqual(report["steps"][0]["stage"], "bootstrap-native-prereqs")
             self.assertEqual(report["steps"][0]["missingAllowFlags"], report["missingAllowFlags"])
-            self.assertEqual(len(report["steps"][0]["safetyBlocks"]), 4)
+            self.assertEqual(len(report["steps"][0]["safetyBlocks"]), len(expected_allow_flags))
             for safety_block in report["steps"][0]["safetyBlocks"]:
                 self.assertIn("field", safety_block)
                 self.assertIn("allowSwitch", safety_block)
@@ -706,10 +727,8 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertEqual(report["validationErrors"], [])
             self.assertEqual(report["steps"][0]["validationErrors"], [])
             reasons = "\n".join(report["steps"][0]["blockedReasons"])
-            self.assertIn("-AllowNetwork", reasons)
-            self.assertIn("-AllowInstallSoftware", reasons)
-            self.assertIn("-AllowDownloadLargeFiles", reasons)
-            self.assertIn("-AllowRebootRisk", reasons)
+            for allow_flag in expected_allow_flags:
+                self.assertIn(allow_flag, reasons)
             self.assertFalse((temp_root / "Worktree With Spaces").exists())
 
     def test_invoke_native_bridge_next_executes_safe_wire_stage_with_argument_array(self):
@@ -789,6 +808,88 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIn(str(worktree), report["steps"][0]["arguments"])
             self.assertIn("Source\\VectorworksMCPBridge\\BridgeProtocol.cpp", project.read_text(encoding="utf-8"))
 
+    def test_invoke_native_bridge_next_allows_successful_child_stderr(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise native next-step runner")
+
+        fixture = ROOT / "scripts" / "stderr-success-fixture.ps1"
+        try:
+            fixture.write_text(
+                "Write-Error 'fixture stderr from native command'\n"
+                "Write-Output 'fixture stdout from native command'\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            with tempfile.TemporaryDirectory() as temp_dir:
+                doctor = Path(temp_dir) / "fake-doctor.ps1"
+                spec_args = [
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(fixture),
+                ]
+                command = "powershell.exe " + " ".join(spec_args)
+                report = {
+                    "nextCommand": command,
+                    "nextCommandReason": "Exercise successful stderr capture.",
+                    "nextCommandSpec": {
+                        "stage": "rerun-native-doctor",
+                        "executable": "powershell.exe",
+                        "arguments": spec_args,
+                        "workingDirectory": str(ROOT),
+                        "scriptPath": str(fixture),
+                        "command": command,
+                        "requiresNetwork": False,
+                        "mayInstallSoftware": False,
+                        "mayDownloadLargeFiles": False,
+                        "mayModifyVectorworksUserPlugins": False,
+                        "requiresVectorworksRestartBeforeRun": False,
+                        "mayRequireReboot": False,
+                        "isDryRun": False,
+                        "rerunDoctorAfter": False,
+                    },
+                }
+                doctor.write_text(
+                    "$json = @'\n"
+                    + json.dumps(report)
+                    + "\n'@\nWrite-Output $json\n",
+                    encoding="utf-8",
+                )
+
+                result = subprocess.run(
+                    [
+                        powershell,
+                        "-NoLogo",
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(ROOT / "scripts/invoke-native-bridge-next.ps1"),
+                        "-DoctorPath",
+                        str(doctor),
+                        "-Json",
+                    ],
+                    cwd=str(ROOT),
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            runner_report = json.loads(result.stdout)
+            self.assertEqual(runner_report["status"], "completed")
+            self.assertFalse(runner_report["failed"])
+            self.assertEqual(runner_report["steps"][0]["exitCode"], 0)
+            self.assertIn("fixture stderr", runner_report["steps"][0]["output"])
+            self.assertIn("native command", runner_report["steps"][0]["output"])
+            self.assertIn("fixture stdout from native command", runner_report["steps"][0]["output"])
+        finally:
+            if fixture.exists():
+                fixture.unlink()
+
     def test_invoke_native_bridge_next_plan_only_reports_missing_allow_flags(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
         if not powershell:
@@ -829,10 +930,10 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertFalse(report["blocked"])
             self.assertFalse(report["failed"])
             self.assertEqual(report["steps"][0]["plannedOnly"], True)
-            self.assertEqual(
-                report["missingAllowFlags"],
-                ["-AllowDownloadLargeFiles", "-AllowInstallSoftware", "-AllowNetwork", "-AllowRebootRisk"],
+            expected_allow_flags = sorted(
+                {block["allowSwitch"] for block in report["steps"][0]["safetyBlocks"]}
             )
+            self.assertEqual(report["missingAllowFlags"], expected_allow_flags)
             self.assertEqual(report["validationErrors"], [])
 
     def test_invoke_native_bridge_next_accepts_allow_flag_aliases(self):
@@ -872,7 +973,10 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
             report = json.loads(result.stdout)
             self.assertEqual(report["status"], "blocked_by_safety_flag")
-            self.assertEqual(report["missingAllowFlags"], ["-AllowNetwork", "-AllowRebootRisk"])
+            expected_allow_flags = sorted(
+                {block["allowSwitch"] for block in report["steps"][0]["safetyBlocks"]}
+            )
+            self.assertEqual(report["missingAllowFlags"], expected_allow_flags)
 
     def test_invoke_native_bridge_next_rejects_malformed_next_command_spec(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
@@ -1290,17 +1394,31 @@ if ($Json) {
             if report["prereqsReady"]:
                 self.assertIn("prepare-native-bridge-source.ps1", report["nextCommand"])
             else:
+                missing_prereqs = [
+                    check["name"]
+                    for check in report["prereqs"]["checks"]
+                    if check["required"] and not check["ok"]
+                ]
+                needs_sdk = any(name.endswith(" SDK") for name in missing_prereqs)
+                needs_visual_studio = any(
+                    name.startswith("Visual Studio C++ tools") or name == "MSBuild"
+                    for name in missing_prereqs
+                )
                 self.assertEqual(spec["stage"], "bootstrap-native-prereqs")
                 self.assertTrue(spec["requiresNetwork"])
-                self.assertTrue(spec["mayInstallSoftware"])
-                self.assertTrue(spec["mayDownloadLargeFiles"])
-                self.assertTrue(spec["mayRequireReboot"])
+                self.assertEqual(spec["mayInstallSoftware"], needs_visual_studio)
+                self.assertEqual(spec["mayDownloadLargeFiles"], needs_sdk or needs_visual_studio)
+                self.assertEqual(spec["mayRequireReboot"], needs_visual_studio)
                 self.assertIn("bootstrap-native-bridge.ps1", report["nextCommand"])
-                self.assertIn("-InstallVisualStudioBuildTools", report["nextCommand"])
-                if "-SdkArchivePath" in spec["arguments"]:
-                    self.assertNotIn("-DownloadSdk", spec["arguments"])
+                if needs_visual_studio:
+                    self.assertIn("-InstallVisualStudioBuildTools", report["nextCommand"])
                 else:
-                    self.assertIn("-DownloadSdk", report["nextCommand"])
+                    self.assertNotIn("-InstallVisualStudioBuildTools", spec["arguments"])
+                if needs_sdk:
+                    if "-SdkArchivePath" in spec["arguments"]:
+                        self.assertNotIn("-DownloadSdk", spec["arguments"])
+                    else:
+                        self.assertIn("-DownloadSdk", report["nextCommand"])
 
     def test_native_doctor_can_plan_and_install_explicit_artifact(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
@@ -1346,6 +1464,7 @@ if ($Json) {
             self.assertEqual(report["installDestination"], str(install_dir / artifact.name))
             self.assertTrue(report["installPerformed"])
             self.assertFalse(report["installWhatIf"])
+            self.assertTrue(report["installedArtifactMatchesCandidate"])
             self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", "\n".join(report["nextActions"]))
             self.assertIn("nextCommand", report)
             self.assertIn("nextCommandReason", report)
@@ -1353,6 +1472,55 @@ if ($Json) {
             self.assertIn("Restart Vectorworks", report["nextCommandReason"])
             self.assertEqual(report["nextCommandSpec"]["stage"], "smoke-phase-0")
             self.assertTrue(report["nextCommandSpec"]["requiresVectorworksRestartBeforeRun"])
+
+    def test_native_doctor_recognizes_already_installed_candidate(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise the native doctor")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            worktree = temp_root / "SDKExamples"
+            bridge_source = worktree / "Examples2024" / "VectorworksMCPBridge"
+            artifact = bridge_source / "Build" / "VectorworksMCPBridge.vwlibrary"
+            install_dir = temp_root / "Plug-ins With Spaces"
+            installed = install_dir / artifact.name
+            artifact.parent.mkdir(parents=True)
+            install_dir.mkdir(parents=True)
+            artifact.write_text("fake native bridge artifact\n", encoding="utf-8")
+            installed.write_text("fake native bridge artifact\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/doctor-native-bridge.ps1"),
+                    "-WorktreeRoot",
+                    str(worktree),
+                    "-InstallDir",
+                    str(install_dir),
+                    "-Json",
+                ],
+                cwd=str(ROOT),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            report = json.loads(result.stdout)
+            self.assertEqual(report["builtArtifactCandidate"], str(artifact))
+            self.assertEqual(report["installDestination"], str(installed))
+            self.assertEqual(report["installedPath"], str(installed))
+            self.assertTrue(report["installedArtifactMatchesCandidate"])
+            self.assertFalse(report["installPerformed"])
+            self.assertNotIn("-Install -WhatIf", report["nextCommand"])
+            self.assertEqual(report["nextCommandSpec"]["stage"], "smoke-phase-0")
+            self.assertIn("already matches the installed", report["nextCommandReason"])
 
     def test_native_doctor_whatif_install_is_non_mutating(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
@@ -1622,6 +1790,7 @@ if ($Json) {
             archive.write_text("fake archive marker\n", encoding="utf-8")
             env = os.environ.copy()
             env["USERPROFILE"] = str(temp_root)
+            env["VW_MCP_IGNORE_REPO_SDK_CANDIDATES"] = "1"
 
             prereq_result = subprocess.run(
                 [

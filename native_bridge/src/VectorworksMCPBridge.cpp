@@ -1,3 +1,5 @@
+#include "StdAfx.h"
+
 #include "BridgeDispatcher.hpp"
 #include "BridgeProtocol.hpp"
 #include "CadRequestQueue.hpp"
@@ -60,6 +62,8 @@ Protocol::ResponseEnvelope DispatchCadRequestOnVectorworksMainContext(const Prot
 }
 
 }  // namespace
+
+Protocol::ResponseEnvelope DispatchFromSocketWorker(const Protocol::RequestEnvelope& request);
 
 void OnPluginLoadStartTransport() {
     gStopRequested.store(false);

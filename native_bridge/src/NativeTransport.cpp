@@ -1,3 +1,5 @@
+#include "StdAfx.h"
+
 #include "NativeTransport.hpp"
 
 #include <array>

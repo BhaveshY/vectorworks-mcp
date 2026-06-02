@@ -96,6 +96,55 @@ def native_plan_namespace(args: argparse.Namespace, *, json_output: bool) -> arg
     )
 
 
+def first_native_step(native_plan: Any) -> dict[str, Any]:
+    if not isinstance(native_plan, dict):
+        return {}
+    steps = native_plan.get("steps")
+    if isinstance(steps, list) and steps and isinstance(steps[0], dict):
+        return steps[0]
+    spec = native_plan.get("nextCommandSpec")
+    if isinstance(spec, dict):
+        step = dict(spec)
+        if "nextCommand" not in step:
+            step["nextCommand"] = native_plan.get("nextCommand", "")
+        if "nextCommandReason" not in step:
+            step["nextCommandReason"] = native_plan.get("nextCommandReason", "")
+        return step
+    return {}
+
+
+def native_summary(native_plan: Any) -> dict[str, Any]:
+    if not isinstance(native_plan, dict):
+        return {
+            "status": "",
+            "ready": False,
+            "next_stage": "",
+            "next_command": "",
+            "missing_allow_flags": [],
+            "blocked": False,
+            "failed": False,
+        }
+    step = first_native_step(native_plan)
+    missing_allow_flags = native_plan.get("missingAllowFlags")
+    if not isinstance(missing_allow_flags, list):
+        missing_allow_flags = step.get("missingAllowFlags", []) if isinstance(step, dict) else []
+    status = str(native_plan.get("status", ""))
+    return {
+        "status": status,
+        "ready": status == "completed" and not bool(native_plan.get("blocked")) and not bool(native_plan.get("failed")),
+        "next_stage": str(step.get("stage", "")),
+        "next_command": str(step.get("nextCommand", native_plan.get("nextCommand", ""))),
+        "next_reason": str(step.get("nextCommandReason", native_plan.get("nextCommandReason", ""))),
+        "missing_allow_flags": [str(flag) for flag in missing_allow_flags],
+        "blocked": bool(native_plan.get("blocked")),
+        "failed": bool(native_plan.get("failed")),
+    }
+
+
+def listener_cad_ready(listener_doctor: Any) -> bool:
+    return isinstance(listener_doctor, dict) and listener_doctor.get("overall") == "cad-ready"
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     ps_args = ["-TimeoutMilliseconds", str(args.timeout_ms)]
     ps_args = add_repo_path(ps_args, args.repo_path)
@@ -124,6 +173,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         payload = {
             "ok": listener_result.returncode == 0 and native_result.returncode == 0 and not listener_error and not native_error,
             "mode": "native-first",
+            "cad_ready": listener_cad_ready(listener_doctor),
+            "native_ready": native_summary(native_plan)["ready"],
+            "native_summary": native_summary(native_plan),
             "listener_doctor": listener_doctor,
             "native_plan": native_plan,
             "listener_error": listener_error,
@@ -225,9 +277,18 @@ def cmd_setup_runtime(args: argparse.Namespace) -> int:
         fallback_result = run_script("bootstrap-vectorworks-mcp.ps1", fallback_args, capture=args.json)
 
     if args.json:
+        summary = native_summary(native_plan)
+        python_fallback_ready = bool(fallback_result and fallback_result.returncode == 0)
+        setup_complete = bool(summary["ready"])
         payload = {
             "ok": bool((native_plan and not native_error) or (fallback_result and fallback_result.returncode == 0)),
             "mode": "native-first",
+            "setup_complete": setup_complete,
+            "requires_action": not setup_complete,
+            "cad_ready": False,
+            "native_ready": summary["ready"],
+            "python_fallback_ready": python_fallback_ready,
+            "native_summary": summary,
             "native_plan": native_plan,
             "native_error": native_error,
             "python_fallback_setup": None
@@ -237,7 +298,7 @@ def cmd_setup_runtime(args: argparse.Namespace) -> int:
                 "stdout": fallback_result.stdout,
                 "stderr": fallback_result.stderr,
             },
-            "next_action": "Follow native_plan.nextCommandSpec. Use --include-python-fallback only as a temporary compatibility path.",
+            "next_action": "If setup_complete is false, follow native_summary.next_command and native_summary.missing_allow_flags. Use python_fallback_ready only as a temporary compatibility path.",
         }
         print(json.dumps(payload, indent=2))
         return 0 if payload["ok"] else 1
@@ -257,6 +318,13 @@ def cmd_setup_runtime(args: argparse.Namespace) -> int:
         print(f"python fallback setup: exit {fallback_result.returncode}")
     print("Normal daily use should not run setup-runtime; use doctor only for troubleshooting.")
     return 0 if (native_plan or (fallback_result and fallback_result.returncode == 0)) else 1
+
+
+def cmd_agent_install(args: argparse.Namespace) -> int:
+    setup_args = argparse.Namespace(**vars(args))
+    setup_args.include_python_fallback = not args.skip_python_fallback
+    setup_args.skip_verify = args.skip_verify
+    return cmd_setup_runtime(setup_args)
 
 
 def add_native_options(parser: argparse.ArgumentParser) -> None:
@@ -305,6 +373,12 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--include-python-fallback", action="store_true")
     setup.add_argument("--skip-verify", action="store_true")
     setup.set_defaults(func=cmd_setup_runtime)
+
+    agent = sub.add_parser("agent-install")
+    add_native_options(agent)
+    agent.add_argument("--skip-python-fallback", action="store_true")
+    agent.add_argument("--skip-verify", action="store_true")
+    agent.set_defaults(func=cmd_agent_install)
 
     native = sub.add_parser("native-next")
     add_native_options(native)

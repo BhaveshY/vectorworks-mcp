@@ -1,5 +1,7 @@
 # Agent Instructions
 
+For fresh Windows PC onboarding, follow `AGENT_INSTALL.md` first.
+
 ## Project Shape
 
 - `server.py` is the host-side stdio MCP server used by Claude Code.
@@ -11,6 +13,10 @@
 - `scripts/run-mcp-server.ps1` is the self-bootstrapping MCP entrypoint. It creates `.venv`, installs `requirements.txt`, then launches `server.py`.
 - `scripts/register-claude-code.ps1` is the primary Windows setup command. It is idempotent: it refreshes dependencies, generates `vw_start_listener_2024.py` plus the stable `vw_load_listener_2024.py` Vectorworks loader, can copy the loader text to the clipboard, and updates the `vectorworks` MCP server entry.
 - `scripts/copy-vectorworks-loader.ps1` is the first-class Vectorworks handoff helper. Use it whenever the user or an agent is unsure what to paste into Vectorworks.
+- `plugins/vectorworks/bin/vectorworksctl` is the stable RADAR-style helper.
+  Prefer `py -3 .\plugins\vectorworks\bin\vectorworksctl agent-install --repo-path $PWD --json`
+  for fresh-PC setup and `py -3 .\plugins\vectorworks\bin\vectorworksctl doctor --repo-path $PWD --json`
+  for diagnosis.
 - `plugins/vectorworks/` is the Claude Code plugin. Keep its manifest, skills, scripts, and `.mcp.json` aligned with the repo scripts.
 
 ## Windows Baseline
@@ -22,10 +28,17 @@
 
 ## Bootstrap
 
-Use this when an agent is pointed at a fresh checkout:
+Use this when an agent is pointed at a fresh checkout and only the connector is
+being installed:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-agent.ps1 -Verify
+```
+
+Use this when the bundled plugin helper is available:
+
+```powershell
+py -3 .\plugins\vectorworks\bin\vectorworksctl agent-install --repo-path $PWD --json
 ```
 
 Equivalent Claude Code-specific command:
@@ -85,7 +98,14 @@ Run these before handing work back:
 powershell -ExecutionPolicy Bypass -File .\scripts\verify-no-vectorworks.ps1
 ```
 
-For fast diagnosis during setup or while Vectorworks is open, prefer:
+For fast diagnosis during setup or while Vectorworks is open, prefer the
+structured helper:
+
+```powershell
+py -3 .\plugins\vectorworks\bin\vectorworksctl doctor --repo-path $PWD --json
+```
+
+Lower-level fallback:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\doctor-vectorworks-mcp.ps1

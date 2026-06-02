@@ -498,12 +498,17 @@ def _validate_phase_one_consistency(report: dict[str, Any], snapshots: dict[str,
 
 def _wait_for_port_closed(host: str, port: int, timeout: float) -> bool:
     deadline = time.time() + max(timeout, 0.1)
+    closed_probe_count = 0
     while time.time() < deadline:
         probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
             probe.settimeout(min(0.2, max(deadline - time.time(), 0.01)))
             if probe.connect_ex((host, port)) != 0:
-                return True
+                closed_probe_count += 1
+                if closed_probe_count >= 2:
+                    return True
+            else:
+                closed_probe_count = 0
         finally:
             probe.close()
         time.sleep(0.05)

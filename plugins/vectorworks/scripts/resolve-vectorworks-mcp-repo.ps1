@@ -122,7 +122,10 @@ if ($RejectedRepos.Count -gt 0) {
 if ($InstallIfMissing) {
     $Git = Get-Command git.exe -ErrorAction SilentlyContinue
     if (-not $Git) {
-        throw "Could not find the vectorworks-mcp repo and git.exe is not available to clone it. Install Git, set plugin user config 'vectorworks_repo', or set VW_MCP_REPO."
+        $Git = Get-Command git -ErrorAction SilentlyContinue
+    }
+    if (-not $Git) {
+        throw "Could not find the vectorworks-mcp repo and Git is not available to clone it. Install Git, set plugin user config 'vectorworks_repo', or set VW_MCP_REPO."
     }
     if (-not $InstallRoot) {
         if (-not $env:USERPROFILE) {

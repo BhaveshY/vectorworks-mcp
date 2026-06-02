@@ -117,5 +117,5 @@ Write-Host "Solution: $($Solution.FullName)"
 Write-Host "Configuration: $Configuration|x64"
 Write-Host "MSBuild: $MSBuildPath"
 
-& $MSBuildPath $Solution.FullName /m /p:Configuration=$Configuration /p:Platform=x64
+& $MSBuildPath $Solution.FullName /m /p:Configuration=$Configuration /p:Platform=x64 /p:LanguageStandard=stdcpp17
 exit $LASTEXITCODE

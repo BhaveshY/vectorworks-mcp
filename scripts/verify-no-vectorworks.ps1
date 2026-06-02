@@ -53,6 +53,17 @@ function Invoke-Checked {
     }
 }
 
+function Invoke-InRepo {
+    param([scriptblock]$Command)
+
+    Push-Location $RepoRoot
+    try {
+        & $Command
+    } finally {
+        Pop-Location
+    }
+}
+
 function Test-PythonExecutable {
     param([string]$Path)
 
@@ -134,7 +145,9 @@ Invoke-Checked "fastmcp import" {
 }
 
 Invoke-Checked "server import" {
-    & $VenvPython -c "import server"
+    Invoke-InRepo {
+        & $VenvPython -c "import server"
+    }
 }
 
 Invoke-Checked "Python compilation" {
@@ -142,7 +155,9 @@ Invoke-Checked "Python compilation" {
 }
 
 Invoke-Checked "unit tests" {
-    & $VenvPython -m unittest discover -v
+    Invoke-InRepo {
+        & $VenvPython -m unittest discover -v
+    }
 }
 
 Invoke-Checked "native bridge scaffold compile smoke" {

@@ -25,6 +25,7 @@ class ClaudePluginTests(unittest.TestCase):
     def test_plugin_manifest_declares_mcp_config(self):
         manifest = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
         marketplace = json.loads((PLUGIN / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
+        root_marketplace = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
 
         self.assertEqual(manifest["name"], "vectorworks")
         self.assertEqual(manifest["version"], "0.3.0")
@@ -32,6 +33,9 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("vectorworks_repo", manifest["userConfig"])
         self.assertEqual(marketplace["name"], "vectorworks-claude-plugin")
         self.assertEqual(marketplace["plugins"][0]["name"], "vectorworks")
+        self.assertEqual(root_marketplace["name"], "vectorworks-mcp")
+        self.assertEqual(root_marketplace["plugins"][0]["name"], "vectorworks")
+        self.assertEqual(root_marketplace["plugins"][0]["source"], "./plugins/vectorworks")
 
     def test_plugin_mcp_config_uses_wrapper(self):
         config = json.loads((PLUGIN / ".mcp.json").read_text(encoding="utf-8"))
@@ -81,9 +85,13 @@ class ClaudePluginTests(unittest.TestCase):
 
         helper = (PLUGIN / "bin" / "vectorworksctl").read_text(encoding="utf-8")
         self.assertIn("setup-runtime", helper)
+        self.assertIn("agent-install", helper)
         self.assertIn("native-next", helper)
         self.assertIn("listener_doctor", helper)
         self.assertIn("native_plan", helper)
+        self.assertIn("native_summary", helper)
+        self.assertIn("setup_complete", helper)
+        self.assertIn("requires_action", helper)
         self.assertIn("vectorworksctl", (PLUGIN / "bin" / "vectorworksctl.ps1").read_text(encoding="utf-8"))
 
         self.assertTrue((ROOT / "scripts" / "check-bundled-plugin-contract.ps1").exists())
@@ -198,7 +206,7 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("native-next", diagnose)
         self.assertIn("unknown commit state", diagnose)
         self.assertIn("nextCommandSpec", diagnose)
-        self.assertIn("vectorworksctl setup-runtime --json", setup)
+        self.assertIn("vectorworksctl agent-install --json", setup)
         self.assertIn("include-python-fallback", setup)
         self.assertIn("nextCommandSpec", setup)
         self.assertIn("vectorworksctl ping", ping)

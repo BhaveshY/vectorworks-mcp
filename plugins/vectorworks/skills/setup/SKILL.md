@@ -13,13 +13,13 @@ PowerShell scripts unless `vectorworksctl` reports a specific next command.
 For setup or repair:
 
 ```powershell
-vectorworksctl setup-runtime --json
+vectorworksctl agent-install --json
 ```
 
 If `vectorworksctl` is not on PATH, use the plugin-local fallback:
 
 ```powershell
-python "${CLAUDE_PLUGIN_ROOT}\bin\vectorworksctl" setup-runtime --json
+py -3 "${CLAUDE_PLUGIN_ROOT}\bin\vectorworksctl" agent-install --json
 ```
 
 This command resolves or installs the companion `vectorworks-mcp` checkout,
@@ -29,7 +29,7 @@ Studio, or Vectorworks plug-in install commands.
 
 ## Temporary Python Fallback
 
-Use the Python dialog listener only when the user explicitly needs today’s
+Use the Python dialog listener only when the user explicitly needs today's
 compatibility path before the native SDK bridge is built/installed:
 
 ```powershell

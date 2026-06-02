@@ -315,6 +315,37 @@ function New-StepRecord {
     }
 }
 
+function Invoke-CommandSpec {
+    param(
+        [string]$Executable,
+        [string[]]$Arguments,
+        [string]$WorkingDirectory
+    )
+
+    Push-Location $WorkingDirectory
+    try {
+        $PreviousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            $Output = & $Executable @Arguments 2>&1 | Out-String
+            $CommandExitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $PreviousErrorActionPreference
+        }
+    } finally {
+        Pop-Location
+    }
+
+    if ($null -eq $CommandExitCode) {
+        $CommandExitCode = 0
+    }
+
+    return [pscustomobject]@{
+        output = [string]$Output
+        exitCode = [int]$CommandExitCode
+    }
+}
+
 $Steps = [System.Collections.Generic.List[object]]::new()
 $Blocked = $false
 $Failed = $false
@@ -369,13 +400,9 @@ for ($Index = 1; $Index -le $MaxSteps; $Index++) {
     $CommandArguments = @($Spec.arguments | ForEach-Object { [string]$_ })
     $WorkingDirectory = [string]$Spec.workingDirectory
 
-    Push-Location $WorkingDirectory
-    try {
-        $CommandOutput = & ([string]$Spec.executable) @CommandArguments 2>&1 | Out-String
-        $CommandExitCode = $LASTEXITCODE
-    } finally {
-        Pop-Location
-    }
+    $CommandResult = Invoke-CommandSpec -Executable ([string]$Spec.executable) -Arguments $CommandArguments -WorkingDirectory $WorkingDirectory
+    $CommandOutput = $CommandResult.output
+    $CommandExitCode = $CommandResult.exitCode
 
     $Step.executed = $true
     $Step.exitCode = $CommandExitCode

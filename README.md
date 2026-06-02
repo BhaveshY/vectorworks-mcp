@@ -54,6 +54,8 @@ Why this is not as simple as a Revit-style setup yet:
 - The repo cannot silently build that bridge on a fresh Windows machine until
   the official Vectorworks SDK and Visual Studio C++ build tools are installed.
 
+Fresh-PC agent instructions live in `AGENT_INSTALL.md`.
+
 Native bridge planning aids:
 
 - `native_bridge/HANDLER_MATRIX.md` maps every current listener action to native
@@ -163,6 +165,17 @@ cd C:\path\to\vectorworks-mcp
 powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-agent.ps1 -Verify
 ```
 
+Bundled plugin helper:
+
+```powershell
+py -3 .\plugins\vectorworks\bin\vectorworksctl agent-install --repo-path $PWD --json
+py -3 .\plugins\vectorworks\bin\vectorworksctl doctor --repo-path $PWD --json
+```
+
+`agent-install` prepares the Python dialog fallback and returns the guarded
+native SDK bridge plan in one JSON payload. See `AGENT_INSTALL.md` for the full
+fresh-PC flow.
+
 Claude Code-specific setup:
 
 ```powershell
@@ -198,21 +211,30 @@ The marketplace suffix is the Claude plugin marketplace name. The connector
 repo remains `BhaveshY/vectorworks-mcp` and is resolved or cloned separately by
 the plugin setup wrapper.
 
+If an agent is pointed at this connector repo directly, it can also install the
+bundled plugin through the connector marketplace metadata:
+
+```text
+/plugin marketplace add BhaveshY/vectorworks-mcp
+/plugin install vectorworks@vectorworks-mcp
+/reload-plugins
+```
+
 For local development of this connector repo, a bundled plugin mirror is also
 available. It is checked against the standalone marketplace plugin in CI, and
 its setup/runtime wrappers are contract-gated so agents do not silently bind to
 stale connector checkouts:
 
 ```powershell
-claude --plugin-dir C:\Users\Bhavesh\repos\vectorworks-mcp\plugins\vectorworks
+claude --plugin-dir $env:USERPROFILE\repos\vectorworks-mcp\plugins\vectorworks
 ```
 
 If you launch Claude Code outside this repo, configure the plugin option
 `vectorworks_repo` to this repo path, or set:
 
 ```powershell
-$env:VW_MCP_REPO = "C:\Users\Bhavesh\repos\vectorworks-mcp"
-claude --plugin-dir C:\Users\Bhavesh\repos\vectorworks-mcp\plugins\vectorworks
+$env:VW_MCP_REPO = "$env:USERPROFILE\repos\vectorworks-mcp"
+claude --plugin-dir $env:USERPROFILE\repos\vectorworks-mcp\plugins\vectorworks
 ```
 
 `VECTORWORKS_MCP_REPO` remains supported as a backward-compatible alias, but

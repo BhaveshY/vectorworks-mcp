@@ -5,6 +5,8 @@ param(
     [string]$SdkDir = "",
     [string]$SdkExamplesDir = "",
     [string]$WorktreeRoot = "",
+    [ValidateSet("Debug", "Release")]
+    [string]$Configuration = "Debug",
     [switch]$CloneSdkExamples,
     [switch]$Force
 )
@@ -28,6 +30,7 @@ $Args = @("-VectorworksVersion", $VectorworksVersion)
 if ($SdkDir) { $Args += @("-SdkDir", $SdkDir) }
 if ($SdkExamplesDir) { $Args += @("-SdkExamplesDir", $SdkExamplesDir) }
 if ($WorktreeRoot) { $Args += @("-WorktreeRoot", $WorktreeRoot) }
+if ($PSBoundParameters.ContainsKey("Configuration")) { $Args += @("-Configuration", $Configuration) }
 if ($CloneSdkExamples) { $Args += "-CloneSdkExamples" }
 if ($Force) { $Args += "-Force" }
 

@@ -1,0 +1,26 @@
+{
+  "name": "vectorworks-mcp",
+  "description": "Claude Code marketplace entry for the bundled Vectorworks MCP plugin.",
+  "owner": {
+    "name": "BhaveshY"
+  },
+  "plugins": [
+    {
+      "name": "vectorworks",
+      "source": "./plugins/vectorworks",
+      "description": "Connect Claude Code to Vectorworks 2024/2025 through the local vectorworks-mcp connector.",
+      "version": "0.3.0",
+      "author": {
+        "name": "BhaveshY"
+      },
+      "category": "Productivity",
+      "tags": [
+        "vectorworks",
+        "cad",
+        "bim",
+        "mcp",
+        "windows"
+      ]
+    }
+  ]
+}

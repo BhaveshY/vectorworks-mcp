@@ -68,6 +68,46 @@ function Get-FirstFile {
     return ""
 }
 
+function Get-LatestExistingFileWriteTimeUtc {
+    param([string[]]$Paths)
+
+    $Latest = $null
+    foreach ($Path in $Paths) {
+        if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+            continue
+        }
+        $Item = Get-Item -LiteralPath $Path
+        if ($null -eq $Latest -or $Item.LastWriteTimeUtc -gt $Latest) {
+            $Latest = $Item.LastWriteTimeUtc
+        }
+    }
+    return $Latest
+}
+
+function Test-SameFileContent {
+    param(
+        [string]$Left,
+        [string]$Right
+    )
+
+    if (-not $Left -or -not $Right) {
+        return $false
+    }
+    if (-not (Test-Path -LiteralPath $Left -PathType Leaf) -or -not (Test-Path -LiteralPath $Right -PathType Leaf)) {
+        return $false
+    }
+
+    $LeftItem = Get-Item -LiteralPath $Left
+    $RightItem = Get-Item -LiteralPath $Right
+    if ($LeftItem.Length -ne $RightItem.Length) {
+        return $false
+    }
+
+    $LeftHash = (Get-FileHash -LiteralPath $Left -Algorithm SHA256).Hash
+    $RightHash = (Get-FileHash -LiteralPath $Right -Algorithm SHA256).Hash
+    return $LeftHash -eq $RightHash
+}
+
 function Add-NextAction {
     param(
         [System.Collections.Generic.List[string]]$Actions,
@@ -206,6 +246,9 @@ $PrereqArgs = @("-VectorworksVersion", $VectorworksVersion, "-Advisory", "-Json"
 if ($SdkDirWasExplicit) { $PrereqArgs += @("-SdkDir", $SdkDir) }
 $PrereqRaw = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $PrereqPath @PrereqArgs | Out-String
 $Prereqs = $PrereqRaw | ConvertFrom-Json
+$MissingPrereqNames = @($Prereqs.checks | Where-Object { $_.required -and -not $_.ok } | ForEach-Object { [string]$_.name })
+$NeedsSdkBootstrap = @($MissingPrereqNames | Where-Object { $_ -like "* SDK" }).Count -gt 0
+$NeedsVisualStudioBootstrap = @($MissingPrereqNames | Where-Object { $_ -like "Visual Studio C++ tools*" -or $_ -eq "MSBuild" }).Count -gt 0
 $SdkArchiveCandidates = @()
 if ($Prereqs.PSObject.Properties.Name -contains "sdkArchiveCandidates") {
     $SdkArchiveCandidates = @($Prereqs.sdkArchiveCandidates)
@@ -247,13 +290,37 @@ if ($BuiltArtifactWasExplicit) {
 } else {
     $BuiltArtifact = ""
 }
+$UnmodifiedExampleArtifact = Get-FirstFile -Root $WorktreeRoot -Patterns @("ObjectExample.vlb", "ObjectExample*.vlb")
 $BuiltArtifactCandidate = Get-FirstFile -Root $BridgeSourceDir -Patterns @("*.vwlibrary", "*.vsm", "*.vst", "*.vso", "*.dll")
+if (-not $BuiltArtifactCandidate -and $ScaffoldCopied -and $ProjectWired) {
+    $VlbCandidate = Get-FirstFile -Root $WorktreeRoot -Patterns @("*.vlb")
+    $BridgeInputPaths = @($RequiredScaffoldFiles | ForEach-Object { Join-Path $ScaffoldDestinationDir $_ })
+    if ($ProjectPath) {
+        $BridgeInputPaths += $ProjectPath
+    }
+    $LatestBridgeInputWriteTimeUtc = Get-LatestExistingFileWriteTimeUtc -Paths $BridgeInputPaths
+    if ($VlbCandidate -and $LatestBridgeInputWriteTimeUtc) {
+        $VlbCandidateItem = Get-Item -LiteralPath $VlbCandidate
+        if ($VlbCandidateItem.LastWriteTimeUtc -ge $LatestBridgeInputWriteTimeUtc) {
+            $BuiltArtifactCandidate = $VlbCandidate
+        }
+    }
+}
 $InstallArtifact = if ($BuiltArtifactWasExplicit) { $BuiltArtifact } else { "" }
+$InstallCandidate = if ($BuiltArtifact) { $BuiltArtifact } else { $BuiltArtifactCandidate }
 
 $InstallDestination = ""
 $InstallPerformed = $false
 $InstallWhatIf = [bool]$WhatIfPreference
 $InstalledPath = ""
+$InstalledArtifactMatchesCandidate = $false
+if ($InstallCandidate) {
+    $InstallDestination = Join-Path $InstallDir (Split-Path -Leaf $InstallCandidate)
+    if (Test-SameFileContent -Left $InstallCandidate -Right $InstallDestination) {
+        $InstalledPath = (Resolve-Path -LiteralPath $InstallDestination).Path
+        $InstalledArtifactMatchesCandidate = $true
+    }
+}
 if ($Install) {
     if (-not $BuiltArtifactWasExplicit) {
         $CandidateHint = if ($BuiltArtifactCandidate) { " Candidate found: $BuiltArtifactCandidate" } else { "" }
@@ -265,13 +332,19 @@ if ($Install) {
         Copy-Item -LiteralPath $InstallArtifact -Destination $InstallDestination -Force
         $InstalledPath = (Resolve-Path -LiteralPath $InstallDestination).Path
         $InstallPerformed = $true
+        $InstalledArtifactMatchesCandidate = $true
     }
 }
 
 $NextActions = [System.Collections.Generic.List[string]]::new()
 if (-not $Prereqs.ready) {
-    $ArchiveHint = if ($SdkArchivePath) { " -SdkArchivePath `"$SdkArchivePath`"" } else { " -DownloadSdk" }
-    Add-NextAction $NextActions "Run scripts\bootstrap-native-bridge.ps1 -InstallVisualStudioBuildTools$ArchiveHint -CloneSdkExamples -PrepareSource"
+    $VsHint = if ($NeedsVisualStudioBootstrap) { " -InstallVisualStudioBuildTools" } else { "" }
+    $ArchiveHint = if ($NeedsSdkBootstrap) {
+        if ($SdkArchivePath) { " -SdkArchivePath `"$SdkArchivePath`"" } else { " -DownloadSdk" }
+    } else {
+        ""
+    }
+    Add-NextAction $NextActions "Run scripts\bootstrap-native-bridge.ps1$VsHint$ArchiveHint -CloneSdkExamples -PrepareSource"
 }
 if (-not $SourcePrepared) {
     Add-NextAction $NextActions "Run scripts\prepare-native-bridge-source.ps1 -CloneSdkExamples"
@@ -279,7 +352,7 @@ if (-not $SourcePrepared) {
 if ($SourcePrepared -and -not $SolutionPath) {
     Add-NextAction $NextActions "Recreate native_bridge\worktree with scripts\prepare-native-bridge-source.ps1 -CloneSdkExamples -Force"
 }
-if ($SourcePrepared -and $SolutionPath -and -not $BuiltArtifact -and -not $BuiltArtifactCandidate) {
+if ($SourcePrepared -and $SolutionPath -and $ScaffoldAbsent -and -not $UnmodifiedExampleArtifact) {
     Add-NextAction $NextActions "Run scripts\build-native-bridge.ps1 -VectorworksVersion $VectorworksVersion"
 }
 if ($SourcePrepared -and $SolutionPath -and -not $ScaffoldCopied) {
@@ -289,8 +362,10 @@ if ($SourcePrepared -and $SolutionPath -and -not $ScaffoldCopied) {
 if ($SourcePrepared -and $SolutionPath -and $ScaffoldCopied -and -not $ProjectWired) {
     Add-NextAction $NextActions "Run scripts\wire-native-bridge-project.ps1 -VectorworksVersion $VectorworksVersion"
 }
-$InstallCandidate = if ($BuiltArtifact) { $BuiltArtifact } else { $BuiltArtifactCandidate }
-if ($InstallCandidate -and -not $Install) {
+if ($InstallCandidate -and $InstalledArtifactMatchesCandidate -and -not $Install -and -not $InstallPerformed) {
+    Add-NextAction $NextActions "Restart Vectorworks $VectorworksVersion, enable/load the native bridge plug-in, then run scripts\smoke-native-bridge.ps1 -Phase 0 -Stop -Json first."
+}
+if ($InstallCandidate -and -not $Install -and -not $InstalledArtifactMatchesCandidate) {
     Add-NextAction $NextActions "Dry-run install: scripts\doctor-native-bridge.ps1 -BuiltArtifact `"$InstallCandidate`" -Install -WhatIf"
     Add-NextAction $NextActions "Install when ready: scripts\doctor-native-bridge.ps1 -BuiltArtifact `"$InstallCandidate`" -Install"
 }
@@ -310,12 +385,17 @@ $NextCommandSpec = $null
 $ScaffoldAbsent = $MissingScaffoldFiles.Count -eq $RequiredScaffoldFiles.Count
 $ScaffoldPartiallyCopied = $MissingScaffoldFiles.Count -gt 0 -and $MissingScaffoldFiles.Count -lt $RequiredScaffoldFiles.Count
 
-if ($InstallPerformed) {
+if ($InstallPerformed -or ($InstallCandidate -and $InstalledArtifactMatchesCandidate -and -not $Install)) {
     $SmokeArgs = [System.Collections.Generic.List[string]]::new()
     Add-NamedCommandArgument $SmokeArgs "Phase" "0"
     Add-SwitchCommandArgument $SmokeArgs "Stop" $true
     Add-SwitchCommandArgument $SmokeArgs "Json" $true
-    Set-NextCommandPlan -ScriptName "smoke-native-bridge.ps1" -Arguments $SmokeArgs -Stage "smoke-phase-0" -Reason "The native bridge artifact was installed. Restart Vectorworks, load the plug-in, then run the phase-0 transport smoke." -RequiresVectorworksRestartBeforeRun $true
+    $SmokeReason = if ($InstallPerformed) {
+        "The native bridge artifact was installed. Restart Vectorworks, load the plug-in, then run the phase-0 transport smoke."
+    } else {
+        "The native bridge artifact already matches the installed Vectorworks plug-in. Restart Vectorworks, load the plug-in, then run the phase-0 transport smoke."
+    }
+    Set-NextCommandPlan -ScriptName "smoke-native-bridge.ps1" -Arguments $SmokeArgs -Stage "smoke-phase-0" -Reason $SmokeReason -RequiresVectorworksRestartBeforeRun $true
 } elseif ($Install -and $InstallArtifact -and -not $InstallPerformed) {
     $DoctorArgs = [System.Collections.Generic.List[string]]::new()
     Add-NamedCommandArgument $DoctorArgs "VectorworksVersion" $VectorworksVersion
@@ -346,24 +426,27 @@ if ($InstallPerformed) {
     $BootstrapArgs = [System.Collections.Generic.List[string]]::new()
     Add-NamedCommandArgument $BootstrapArgs "VectorworksVersion" $VectorworksVersion
     if ($SdkDirWasExplicit) { Add-NamedCommandArgument $BootstrapArgs "SdkDir" $SdkDir }
-    if ($SdkArchivePathWasExplicit -or $SdkArchivePath) {
-        Add-NamedCommandArgument $BootstrapArgs "SdkArchivePath" $SdkArchivePath
-    } else {
-        Add-SwitchCommandArgument $BootstrapArgs "DownloadSdk" $true
+    if ($NeedsSdkBootstrap) {
+        if ($SdkArchivePathWasExplicit -or $SdkArchivePath) {
+            Add-NamedCommandArgument $BootstrapArgs "SdkArchivePath" $SdkArchivePath
+        } else {
+            Add-SwitchCommandArgument $BootstrapArgs "DownloadSdk" $true
+        }
     }
     if ($SdkExamplesDirWasExplicit) { Add-NamedCommandArgument $BootstrapArgs "SdkExamplesDir" $SdkExamplesDir }
     if ($WorktreeRootWasExplicit) { Add-NamedCommandArgument $BootstrapArgs "WorktreeRoot" $WorktreeRoot }
     if ($ConfigurationWasExplicit) { Add-NamedCommandArgument $BootstrapArgs "Configuration" $Configuration }
-    Add-SwitchCommandArgument $BootstrapArgs "InstallVisualStudioBuildTools" $true
+    Add-SwitchCommandArgument $BootstrapArgs "InstallVisualStudioBuildTools" $NeedsVisualStudioBootstrap
     Add-SwitchCommandArgument $BootstrapArgs "CloneSdkExamples" $true
     Add-SwitchCommandArgument $BootstrapArgs "PrepareSource" $true
-    Set-NextCommandPlan -ScriptName "bootstrap-native-bridge.ps1" -Arguments $BootstrapArgs -Stage "bootstrap-native-prereqs" -Reason "Native prerequisites are missing. Run the opt-in bootstrap, then rerun doctor-native-bridge.ps1 -Json after installer completion or reboot." -RequiresNetwork $true -MayInstallSoftware $true -MayDownloadLargeFiles $true -MayRequireReboot $true -RerunDoctorAfter $true
+    Set-NextCommandPlan -ScriptName "bootstrap-native-bridge.ps1" -Arguments $BootstrapArgs -Stage "bootstrap-native-prereqs" -Reason "Native prerequisites are missing. Run the opt-in bootstrap, then rerun doctor-native-bridge.ps1 -Json after installer completion or reboot." -RequiresNetwork $true -MayInstallSoftware $NeedsVisualStudioBootstrap -MayDownloadLargeFiles ($NeedsSdkBootstrap -or $NeedsVisualStudioBootstrap) -MayRequireReboot $NeedsVisualStudioBootstrap -RerunDoctorAfter $true
 } elseif (-not $SourcePrepared) {
     $PrepareArgs = [System.Collections.Generic.List[string]]::new()
     Add-NamedCommandArgument $PrepareArgs "VectorworksVersion" $VectorworksVersion
     if ($SdkDirWasExplicit) { Add-NamedCommandArgument $PrepareArgs "SdkDir" $SdkDir }
     if ($SdkExamplesDirWasExplicit) { Add-NamedCommandArgument $PrepareArgs "SdkExamplesDir" $SdkExamplesDir }
     if ($WorktreeRootWasExplicit) { Add-NamedCommandArgument $PrepareArgs "WorktreeRoot" $WorktreeRoot }
+    if ($ConfigurationWasExplicit) { Add-NamedCommandArgument $PrepareArgs "Configuration" $Configuration }
     Add-SwitchCommandArgument $PrepareArgs "CloneSdkExamples" $true
     Set-NextCommandPlan -ScriptName "prepare-native-bridge-source.ps1" -Arguments $PrepareArgs -Stage "prepare-native-source" -Reason "The SDK example worktree is not prepared yet." -RequiresNetwork $true -RerunDoctorAfter $true
 } elseif (-not $SolutionPath) {
@@ -372,10 +455,11 @@ if ($InstallPerformed) {
     if ($SdkDirWasExplicit) { Add-NamedCommandArgument $PrepareArgs "SdkDir" $SdkDir }
     if ($SdkExamplesDirWasExplicit) { Add-NamedCommandArgument $PrepareArgs "SdkExamplesDir" $SdkExamplesDir }
     if ($WorktreeRootWasExplicit) { Add-NamedCommandArgument $PrepareArgs "WorktreeRoot" $WorktreeRoot }
+    if ($ConfigurationWasExplicit) { Add-NamedCommandArgument $PrepareArgs "Configuration" $Configuration }
     Add-SwitchCommandArgument $PrepareArgs "CloneSdkExamples" $true
     Add-SwitchCommandArgument $PrepareArgs "Force" $true
     Set-NextCommandPlan -ScriptName "prepare-native-bridge-source.ps1" -Arguments $PrepareArgs -Stage "repair-native-source" -Reason "The native bridge source folder exists, but the expected Vectorworks solution was not found." -RequiresNetwork $true -RerunDoctorAfter $true
-} elseif ($ScaffoldAbsent -and -not $BuiltArtifact -and -not $BuiltArtifactCandidate) {
+} elseif ($ScaffoldAbsent -and -not $UnmodifiedExampleArtifact) {
     $BuildArgs = [System.Collections.Generic.List[string]]::new()
     Add-NamedCommandArgument $BuildArgs "VectorworksVersion" $VectorworksVersion
     if ($SdkDirWasExplicit) { Add-NamedCommandArgument $BuildArgs "SdkDir" $SdkDir }
@@ -386,7 +470,7 @@ if ($InstallPerformed) {
     $CopyArgs = [System.Collections.Generic.List[string]]::new()
     Add-NamedCommandArgument $CopyArgs "VectorworksVersion" $VectorworksVersion
     if ($WorktreeRootWasExplicit) { Add-NamedCommandArgument $CopyArgs "WorktreeRoot" $WorktreeRoot }
-    Set-NextCommandPlan -ScriptName "copy-native-bridge-scaffold.ps1" -Arguments $CopyArgs -Stage "copy-native-scaffold" -Reason "A native artifact candidate exists, so the next step is copying the reviewed bridge scaffold into the SDK example." -RerunDoctorAfter $true
+    Set-NextCommandPlan -ScriptName "copy-native-bridge-scaffold.ps1" -Arguments $CopyArgs -Stage "copy-native-scaffold" -Reason "The unmodified SDK example built successfully; copy the reviewed bridge scaffold into the SDK example next." -RerunDoctorAfter $true
 } elseif (-not $BuiltArtifact -and -not $BuiltArtifactCandidate) {
     $BuildArgs = [System.Collections.Generic.List[string]]::new()
     Add-NamedCommandArgument $BuildArgs "VectorworksVersion" $VectorworksVersion
@@ -433,12 +517,15 @@ $Report = [pscustomobject]@{
     builtArtifact = $BuiltArtifact
     builtArtifactWasExplicit = [bool]$BuiltArtifactWasExplicit
     builtArtifactCandidate = $BuiltArtifactCandidate
+    unmodifiedExampleArtifact = $UnmodifiedExampleArtifact
+    unmodifiedExampleBuilt = [bool]$UnmodifiedExampleArtifact
     installDir = $InstallDir
     installRequested = [bool]$Install
     installDestination = $InstallDestination
     installPerformed = [bool]$InstallPerformed
     installWhatIf = [bool]$InstallWhatIf
     installedPath = $InstalledPath
+    installedArtifactMatchesCandidate = [bool]$InstalledArtifactMatchesCandidate
     nextCommand = $NextCommand
     nextCommandReason = $NextCommandReason
     nextCommandSpec = $NextCommandSpec

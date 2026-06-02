@@ -248,6 +248,64 @@ function Ensure-ProjectLinkDependencies {
     return @($Added)
 }
 
+function Get-MissingLanguageStandardEntries {
+    param(
+        [xml]$Document,
+        [string]$Standard
+    )
+    $Missing = [System.Collections.Generic.List[string]]::new()
+    $CompileNodes = @(Get-MsbuildNodes -Document $Document -Name "ClCompile" | Where-Object { $_.ParentNode.LocalName -eq "ItemDefinitionGroup" })
+    if ($CompileNodes.Count -eq 0) {
+        $Missing.Add("ClCompile|LanguageStandard=$Standard")
+        return @($Missing)
+    }
+
+    $Index = 0
+    foreach ($CompileNode in $CompileNodes) {
+        $Index += 1
+        $LanguageStandard = Get-MsbuildChildElement -Parent $CompileNode -Name "LanguageStandard"
+        if (-not $LanguageStandard -or [string]$LanguageStandard.InnerText -ne $Standard) {
+            $Missing.Add("ClCompile[$Index]|LanguageStandard=$Standard")
+        }
+    }
+    return @($Missing)
+}
+
+function Ensure-LanguageStandard {
+    param(
+        [xml]$Document,
+        [string]$Standard
+    )
+    $Added = [System.Collections.Generic.List[string]]::new()
+    $CompileNodes = @(Get-MsbuildNodes -Document $Document -Name "ClCompile" | Where-Object { $_.ParentNode.LocalName -eq "ItemDefinitionGroup" })
+    if ($CompileNodes.Count -eq 0) {
+        $ItemDefinitionGroup = New-MsbuildElement -Document $Document -Name "ItemDefinitionGroup"
+        $CompileNode = New-MsbuildElement -Document $Document -Name "ClCompile"
+        $LanguageStandard = New-MsbuildElement -Document $Document -Name "LanguageStandard"
+        $LanguageStandard.InnerText = $Standard
+        [void]$CompileNode.AppendChild($LanguageStandard)
+        [void]$ItemDefinitionGroup.AppendChild($CompileNode)
+        [void]$Document.DocumentElement.AppendChild($ItemDefinitionGroup)
+        $Added.Add("ClCompile|LanguageStandard=$Standard")
+        return @($Added)
+    }
+
+    $Index = 0
+    foreach ($CompileNode in $CompileNodes) {
+        $Index += 1
+        $LanguageStandard = Get-MsbuildChildElement -Parent $CompileNode -Name "LanguageStandard"
+        if (-not $LanguageStandard) {
+            $LanguageStandard = New-MsbuildElement -Document $Document -Name "LanguageStandard"
+            [void]$CompileNode.AppendChild($LanguageStandard)
+        }
+        if ([string]$LanguageStandard.InnerText -ne $Standard) {
+            $LanguageStandard.InnerText = $Standard
+            $Added.Add("ClCompile[$Index]|LanguageStandard=$Standard")
+        }
+    }
+    return @($Added)
+}
+
 function New-FiltersDocument {
     $Document = [xml]'<?xml version="1.0" encoding="utf-8"?><Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003"></Project>'
     return $Document
@@ -371,14 +429,17 @@ foreach ($ItemName in ($ExpectedItems.Keys | Sort-Object)) {
     }
 }
 $MissingLinkDependenciesBefore = @(Get-ProjectLinkDependencyEntries -Document $ProjectDocument -Dependencies $RequiredLinkDependencies)
+$MissingLanguageStandardBefore = @(Get-MissingLanguageStandardEntries -Document $ProjectDocument -Standard "stdcpp17")
 
 $AddedProjectItems = @()
 $AddedLinkDependencies = @()
+$AddedLanguageStandards = @()
 $ProjectChanged = $false
 if (-not $CheckOnly) {
     $AddedProjectItems = @(Ensure-ProjectItems -Document $ProjectDocument -ExpectedItems $ExpectedItems)
     $AddedLinkDependencies = @(Ensure-ProjectLinkDependencies -Document $ProjectDocument -Dependencies $RequiredLinkDependencies)
-    $ProjectChanged = (@($AddedProjectItems).Count -gt 0) -or (@($AddedLinkDependencies).Count -gt 0)
+    $AddedLanguageStandards = @(Ensure-LanguageStandard -Document $ProjectDocument -Standard "stdcpp17")
+    $ProjectChanged = (@($AddedProjectItems).Count -gt 0) -or (@($AddedLinkDependencies).Count -gt 0) -or (@($AddedLanguageStandards).Count -gt 0)
     if ($ProjectChanged -and $PSCmdlet.ShouldProcess($ProjectPath, "Wire native bridge source files into SDK project")) {
         $ProjectDocument.Save($ProjectPath)
     }
@@ -418,13 +479,16 @@ $Report = [pscustomobject]@{
     requiredLinkDependencies = @($RequiredLinkDependencies)
     missingProjectItems = @($MissingBefore)
     missingLinkDependencies = @($MissingLinkDependenciesBefore)
+    missingLanguageStandards = @($MissingLanguageStandardBefore)
     linkDependenciesWired = @($MissingLinkDependenciesBefore).Count -eq 0
-    projectWired = (@($MissingBefore).Count -eq 0) -and (@($MissingLinkDependenciesBefore).Count -eq 0)
+    languageStandardWired = @($MissingLanguageStandardBefore).Count -eq 0
+    projectWired = (@($MissingBefore).Count -eq 0) -and (@($MissingLinkDependenciesBefore).Count -eq 0) -and (@($MissingLanguageStandardBefore).Count -eq 0)
     checkOnly = [bool]$CheckOnly
     projectChanged = [bool]$ProjectChanged
     filtersChanged = [bool]$FiltersChanged
     addedProjectItems = @($AddedProjectItems)
     addedLinkDependencies = @($AddedLinkDependencies)
+    addedLanguageStandards = @($AddedLanguageStandards)
     addedFilterItems = @($AddedFilterItems)
 }
 
@@ -447,9 +511,16 @@ if ($Json) {
             Write-Host "- $Missing"
         }
     }
+    if (@($MissingLanguageStandardBefore).Count -gt 0) {
+        Write-Host "Missing C++ language standard settings:"
+        foreach ($Missing in $MissingLanguageStandardBefore) {
+            Write-Host "- $Missing"
+        }
+    }
     if (-not $CheckOnly) {
         Write-Host "Added project items: $(@($AddedProjectItems).Count)"
         Write-Host "Added linker dependencies: $(@($AddedLinkDependencies).Count)"
+        Write-Host "Added C++ language standard settings: $(@($AddedLanguageStandards).Count)"
         Write-Host "Added filter items: $(@($AddedFilterItems).Count)"
     }
     Write-Host ""

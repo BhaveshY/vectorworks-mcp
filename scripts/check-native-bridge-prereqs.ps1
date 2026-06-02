@@ -2,6 +2,7 @@
 param(
     [string]$VectorworksVersion = "2024",
     [string]$SdkDir = "",
+    [switch]$IgnoreRepoSdkCandidates,
     [switch]$Advisory,
     [switch]$Json
 )
@@ -9,6 +10,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$IgnoreRepoSdkCandidatesEffective = [bool]($IgnoreRepoSdkCandidates -or $env:VW_MCP_IGNORE_REPO_SDK_CANDIDATES)
 $SdkRequirementsPath = Join-Path $RepoRoot "native_bridge\SDK_REQUIREMENTS.json"
 if (-not (Test-Path -LiteralPath $SdkRequirementsPath)) {
     throw "Native bridge SDK requirements file was not found at $SdkRequirementsPath"
@@ -157,10 +159,12 @@ function Find-SdkInstall {
     $Candidates = @()
     if ($RequestedPath) { $Candidates += $RequestedPath }
     if ($env:VECTORWORKS_SDK_DIR) { $Candidates += $env:VECTORWORKS_SDK_DIR }
-    $Candidates += Join-Path $RepoRoot "third_party\VectorworksSDK\$Version"
-    $Candidates += Join-Path $RepoRoot "third_party\VectorworksSDK"
-    $Candidates += Join-Path $RepoRoot "third_party\VectorworksSDKExamples\VectorworksSDK\SDK$Version"
-    $Candidates += Join-Path $RepoRoot ".cache\VectorworksSDKExamples\VectorworksSDK\SDK$Version"
+    if (-not $IgnoreRepoSdkCandidatesEffective) {
+        $Candidates += Join-Path $RepoRoot "third_party\VectorworksSDK\$Version"
+        $Candidates += Join-Path $RepoRoot "third_party\VectorworksSDK"
+        $Candidates += Join-Path $RepoRoot "third_party\VectorworksSDKExamples\VectorworksSDK\SDK$Version"
+        $Candidates += Join-Path $RepoRoot ".cache\VectorworksSDKExamples\VectorworksSDK\SDK$Version"
+    }
     if ($env:USERPROFILE) {
         $Candidates += Join-Path $env:USERPROFILE "Downloads\Vectorworks SDK $Version"
         $Candidates += Join-Path $env:USERPROFILE "Downloads\$Version-NNA-eng-win-SDK"
@@ -202,13 +206,15 @@ function Find-SdkArchiveCandidates {
     }
 
     $Roots = [System.Collections.Generic.List[string]]::new()
-    foreach ($Root in @(
-        (Join-Path $RepoRoot ".cache\vectorworks-sdk"),
-        (Join-Path $RepoRoot ".cache"),
-        (Join-Path $RepoRoot "third_party")
-    )) {
-        if ($Root -and -not $Roots.Contains($Root)) {
-            $Roots.Add($Root)
+    if (-not $IgnoreRepoSdkCandidatesEffective) {
+        foreach ($Root in @(
+            (Join-Path $RepoRoot ".cache\vectorworks-sdk"),
+            (Join-Path $RepoRoot ".cache"),
+            (Join-Path $RepoRoot "third_party")
+        )) {
+            if ($Root -and -not $Roots.Contains($Root)) {
+                $Roots.Add($Root)
+            }
         }
     }
     if ($env:USERPROFILE) {
