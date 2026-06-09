@@ -148,8 +148,11 @@ class AgentReadinessTests(unittest.TestCase):
 
         self.assertIn("repository: BhaveshY/vectorworks-claude-plugin", workflow)
         self.assertIn("id: checkout-standalone-plugin", workflow)
-        self.assertIn("continue-on-error: true", workflow)
+        self.assertIn("STANDALONE_PLUGIN_TOKEN: ${{ secrets.VECTORWORKS_CLAUDE_PLUGIN_TOKEN }}", workflow)
+        self.assertIn("env.STANDALONE_PLUGIN_TOKEN != ''", workflow)
+        self.assertIn("token: ${{ env.STANDALONE_PLUGIN_TOKEN }}", workflow)
         self.assertIn("steps.checkout-standalone-plugin.outcome == 'success'", workflow)
+        self.assertIn("VECTORWORKS_CLAUDE_PLUGIN_TOKEN is not configured", workflow)
         self.assertIn("Standalone plugin companion unavailable", workflow)
         self.assertIn("check-companion-contract.ps1", workflow)
         self.assertIn("Standalone plugin companion contract", workflow)

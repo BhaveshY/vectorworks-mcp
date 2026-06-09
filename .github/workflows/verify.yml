@@ -16,6 +16,8 @@ jobs:
   no-vectorworks:
     runs-on: windows-latest
     timeout-minutes: 15
+    env:
+      STANDALONE_PLUGIN_TOKEN: ${{ secrets.VECTORWORKS_CLAUDE_PLUGIN_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -27,10 +29,11 @@ jobs:
       - name: Checkout standalone plugin companion
         id: checkout-standalone-plugin
         uses: actions/checkout@v4
-        continue-on-error: true
+        if: ${{ env.STANDALONE_PLUGIN_TOKEN != '' }}
         with:
           repository: BhaveshY/vectorworks-claude-plugin
           path: vectorworks-claude-plugin
+          token: ${{ env.STANDALONE_PLUGIN_TOKEN }}
       - name: Standalone plugin companion contract
         if: steps.checkout-standalone-plugin.outcome == 'success'
         shell: powershell
@@ -38,7 +41,7 @@ jobs:
       - name: Standalone plugin companion unavailable
         if: steps.checkout-standalone-plugin.outcome != 'success'
         shell: powershell
-        run: Write-Warning "Skipping standalone plugin companion contract because this workflow token cannot read BhaveshY/vectorworks-claude-plugin. The standalone plugin repository validates the same companion contract in its own CI."
+        run: Write-Warning "Skipping standalone plugin companion contract because VECTORWORKS_CLAUDE_PLUGIN_TOKEN is not configured. The standalone plugin repository validates the same companion contract in its own CI."
       - name: Bundled plugin contract
         shell: powershell
         run: powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-bundled-plugin-contract.ps1
