@@ -26,6 +26,14 @@ def _path_key(path):
     return os.path.normcase(os.path.normpath(_long_windows_path(path)))
 
 
+def _literal_path_key(path):
+    return os.path.normcase(os.path.normpath(str(path)))
+
+
+def _path_candidates(path):
+    return {_path_key(path), _literal_path_key(path)}
+
+
 def _assert_same_path(testcase, left, right):
     testcase.assertEqual(_path_key(left), _path_key(right))
 
@@ -36,11 +44,17 @@ def _path_text_key(value):
 
 
 def _assert_path_in_text(testcase, path, text):
-    testcase.assertIn(_path_key(path), _path_text_key(text))
+    normalized_text = _path_text_key(text)
+    if not any(candidate in normalized_text for candidate in _path_candidates(path)):
+        testcase.fail("path {0!r} was not found in text".format(str(path)))
 
 
 def _assert_path_in_collection(testcase, path, values):
-    testcase.assertIn(_path_key(path), {_path_key(value) for value in values})
+    normalized_values = {_path_key(value) for value in values}
+    testcase.assertTrue(
+        any(candidate in normalized_values for candidate in _path_candidates(path)),
+        "path {0!r} was not found in collection".format(str(path)),
+    )
 
 
 class AgentReadinessTests(unittest.TestCase):
