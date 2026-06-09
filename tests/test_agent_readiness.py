@@ -1,3 +1,4 @@
+import ctypes
 import json
 import os
 import shutil
@@ -8,6 +9,38 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _long_windows_path(path):
+    value = str(path)
+    if os.name != "nt":
+        return value
+    buffer = ctypes.create_unicode_buffer(32768)
+    result = ctypes.windll.kernel32.GetLongPathNameW(value, buffer, len(buffer))
+    if result and result < len(buffer):
+        return buffer.value
+    return value
+
+
+def _path_key(path):
+    return os.path.normcase(os.path.normpath(_long_windows_path(path)))
+
+
+def _assert_same_path(testcase, left, right):
+    testcase.assertEqual(_path_key(left), _path_key(right))
+
+
+def _path_text_key(value):
+    text = str(value).replace("\\\\", "\\").replace("/", "\\")
+    return os.path.normcase(text)
+
+
+def _assert_path_in_text(testcase, path, text):
+    testcase.assertIn(_path_key(path), _path_text_key(text))
+
+
+def _assert_path_in_collection(testcase, path, values):
+    testcase.assertIn(_path_key(path), {_path_key(value) for value in values})
 
 
 class AgentReadinessTests(unittest.TestCase):
@@ -165,7 +198,7 @@ class AgentReadinessTests(unittest.TestCase):
 
             self.assertTrue(loader_path.exists())
             self.assertIn("runpy.run_path", result.stdout)
-            self.assertIn(str(launcher_path).replace("\\", "\\\\"), loader_path.read_text(encoding="utf-8"))
+            _assert_path_in_text(self, launcher_path, loader_path.read_text(encoding="utf-8"))
 
     def test_no_vectorworks_verifier_generates_fresh_launcher_by_default(self):
         verifier = (ROOT / "scripts/verify-no-vectorworks.ps1").read_text(encoding="utf-8")
@@ -267,7 +300,7 @@ class AgentReadinessTests(unittest.TestCase):
 
             loader_text = loader_path.read_text(encoding="utf-8")
             self.assertIn("runpy.run_path", loader_text)
-            self.assertIn(str(launcher_path).replace("\\", "\\\\"), loader_text)
+            _assert_path_in_text(self, launcher_path, loader_text)
             self.assertIn("VW_MCP_LOADER_METADATA", loader_text)
             self.assertIn('"contractVersion": 12', loader_text)
             self.assertIn('"native-bridge-scaffold-copy"', loader_text)
@@ -1387,7 +1420,7 @@ if ($Json) {
             self.assertIn(str(sdk_dir), spec["arguments"])
             self.assertIn(str(sdk_examples), spec["arguments"])
             self.assertIn("Release", spec["arguments"])
-            self.assertIn(str(worktree), report["nextCommand"])
+            _assert_path_in_text(self, worktree, report["nextCommand"])
             self.assertIn("-WorktreeRoot", report["nextCommand"])
             self.assertIn(str(ROOT / "scripts"), report["nextCommand"])
             self.assertNotIn("-File .\\scripts", report["nextCommand"])
@@ -1458,10 +1491,10 @@ if ($Json) {
 
             report = json.loads(result.stdout)
             installed_path = Path(report["installedPath"])
-            self.assertEqual(installed_path, install_dir / artifact.name)
+            _assert_same_path(self, installed_path, install_dir / artifact.name)
             self.assertTrue(installed_path.exists())
-            self.assertEqual(report["builtArtifact"], str(artifact))
-            self.assertEqual(report["installDestination"], str(install_dir / artifact.name))
+            _assert_same_path(self, report["builtArtifact"], artifact)
+            _assert_same_path(self, report["installDestination"], install_dir / artifact.name)
             self.assertTrue(report["installPerformed"])
             self.assertFalse(report["installWhatIf"])
             self.assertTrue(report["installedArtifactMatchesCandidate"])
@@ -1513,9 +1546,9 @@ if ($Json) {
             )
 
             report = json.loads(result.stdout)
-            self.assertEqual(report["builtArtifactCandidate"], str(artifact))
-            self.assertEqual(report["installDestination"], str(installed))
-            self.assertEqual(report["installedPath"], str(installed))
+            _assert_same_path(self, report["builtArtifactCandidate"], artifact)
+            _assert_same_path(self, report["installDestination"], installed)
+            _assert_same_path(self, report["installedPath"], installed)
             self.assertTrue(report["installedArtifactMatchesCandidate"])
             self.assertFalse(report["installPerformed"])
             self.assertNotIn("-Install -WhatIf", report["nextCommand"])
@@ -1566,14 +1599,14 @@ if ($Json) {
             self.assertTrue(report["installRequested"])
             self.assertTrue(report["installWhatIf"])
             self.assertFalse(report["installPerformed"])
-            self.assertEqual(report["installDestination"], str(destination))
+            _assert_same_path(self, report["installDestination"], destination)
             self.assertEqual(report["installedPath"], "")
             self.assertNotIn("Restart Vectorworks", "\n".join(report["nextActions"]))
             self.assertIn("without -WhatIf", "\n".join(report["nextActions"]))
             self.assertIn("doctor-native-bridge.ps1", report["nextCommand"])
             self.assertIn("-VectorworksVersion 2025", report["nextCommand"])
-            self.assertIn(str(artifact), report["nextCommand"])
-            self.assertIn(str(install_dir), report["nextCommand"])
+            _assert_path_in_text(self, artifact, report["nextCommand"])
+            _assert_path_in_text(self, install_dir, report["nextCommand"])
             self.assertIn("-Install", report["nextCommand"])
             self.assertNotIn("-WhatIf", report["nextCommand"])
             self.assertIn("without -WhatIf", report["nextCommandReason"])
@@ -1620,10 +1653,10 @@ if ($Json) {
             report = json.loads(plan_result.stdout)
             self.assertEqual(report["builtArtifact"], "")
             self.assertFalse(report["builtArtifactWasExplicit"])
-            self.assertEqual(report["builtArtifactCandidate"], str(artifact))
-            self.assertIn(str(artifact), "\n".join(report["nextActions"]))
-            self.assertIn(str(artifact), report["nextCommand"])
-            self.assertIn(str(install_dir), report["nextCommand"])
+            _assert_same_path(self, report["builtArtifactCandidate"], artifact)
+            _assert_path_in_text(self, artifact, "\n".join(report["nextActions"]))
+            _assert_path_in_text(self, artifact, report["nextCommand"])
+            _assert_path_in_text(self, install_dir, report["nextCommand"])
             self.assertIn("-Install -WhatIf", report["nextCommand"])
             self.assertIn("Dry-run", report["nextCommandReason"])
             self.assertEqual(report["nextCommandSpec"]["stage"], "dry-run-install-native-artifact")
@@ -1700,11 +1733,11 @@ if ($Json) {
             self.assertIn("VectorworksMCPBridge.cpp", report["missingScaffoldFiles"])
             self.assertIn("copy-native-bridge-scaffold.ps1 -VectorworksVersion 2024 -Force", "\n".join(report["nextActions"]))
             self.assertIn("copy-native-bridge-scaffold.ps1 -VectorworksVersion 2024 -Force", report["nextCommand"])
-            self.assertIn(str(worktree), report["nextCommand"])
+            _assert_path_in_text(self, worktree, report["nextCommand"])
             self.assertIn("-WorktreeRoot", report["nextCommand"])
             self.assertIn("partially copied", report["nextCommandReason"])
             self.assertEqual(report["nextCommandSpec"]["stage"], "copy-native-scaffold")
-            self.assertIn(str(worktree), report["nextCommandSpec"]["arguments"])
+            _assert_path_in_collection(self, worktree, report["nextCommandSpec"]["arguments"])
 
     def test_native_doctor_plans_project_wiring_after_scaffold_copy(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
@@ -1775,7 +1808,7 @@ if ($Json) {
             self.assertIn("Ws2_32.lib", "\n".join(report["missingLinkDependencies"]))
             self.assertEqual(report["nextCommandSpec"]["stage"], "wire-native-project")
             self.assertIn("wire-native-bridge-project.ps1", report["nextCommand"])
-            self.assertIn(str(worktree), report["nextCommandSpec"]["arguments"])
+            _assert_path_in_collection(self, worktree, report["nextCommandSpec"]["arguments"])
 
     def test_native_prereq_checker_and_doctor_reuse_downloaded_sdk_archive(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
@@ -1815,7 +1848,7 @@ if ($Json) {
             )
             prereqs = json.loads(prereq_result.stdout)
             self.assertFalse(prereqs["ready"])
-            self.assertIn(str(archive), [candidate["path"] for candidate in prereqs["sdkArchiveCandidates"]])
+            _assert_path_in_collection(self, archive, [candidate["path"] for candidate in prereqs["sdkArchiveCandidates"]])
             sdk_check = next(check for check in prereqs["checks"] if check["name"] == "Vectorworks 2024 SDK")
             self.assertIn("-SdkArchivePath", sdk_check["fix"])
 
@@ -1846,10 +1879,10 @@ if ($Json) {
                 env=env,
             )
             report = json.loads(doctor_result.stdout)
-            self.assertEqual(report["sdkArchivePath"], str(archive))
-            self.assertIn(str(archive), [candidate["path"] for candidate in report["sdkArchiveCandidates"]])
+            _assert_same_path(self, report["sdkArchivePath"], archive)
+            _assert_path_in_collection(self, archive, [candidate["path"] for candidate in report["sdkArchiveCandidates"]])
             self.assertIn("-SdkArchivePath", report["nextCommand"])
-            self.assertIn(str(archive), report["nextCommandSpec"]["arguments"])
+            _assert_path_in_collection(self, archive, report["nextCommandSpec"]["arguments"])
             self.assertNotIn("-DownloadSdk", report["nextCommandSpec"]["arguments"])
 
     def test_native_prereq_checker_reports_supported_versions_for_unknown_version(self):
