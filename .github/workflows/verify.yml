@@ -24,13 +24,25 @@ jobs:
       - name: No-Vectorworks verification
         shell: powershell
         run: powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-no-vectorworks.ps1
-      - uses: actions/checkout@v4
+      - name: Checkout standalone plugin companion
+        id: checkout-standalone-plugin
+        uses: actions/checkout@v4
+        continue-on-error: true
         with:
           repository: BhaveshY/vectorworks-claude-plugin
           path: vectorworks-claude-plugin
       - name: Standalone plugin companion contract
+        if: steps.checkout-standalone-plugin.outcome == 'success'
         shell: powershell
         run: powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\vectorworks-claude-plugin\scripts\check-companion-contract.ps1 -RepoPath "${{ github.workspace }}"
+      - name: Standalone plugin companion unavailable
+        if: steps.checkout-standalone-plugin.outcome != 'success'
+        shell: powershell
+        run: Write-Warning "Skipping standalone plugin companion contract because this workflow token cannot read BhaveshY/vectorworks-claude-plugin. The standalone plugin repository validates the same companion contract in its own CI."
       - name: Bundled plugin contract
+        shell: powershell
+        run: powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-bundled-plugin-contract.ps1
+      - name: Bundled plugin mirror drift
+        if: steps.checkout-standalone-plugin.outcome == 'success'
         shell: powershell
         run: powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-bundled-plugin-contract.ps1 -StandalonePluginPath .\vectorworks-claude-plugin

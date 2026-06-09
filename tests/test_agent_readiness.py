@@ -147,8 +147,13 @@ class AgentReadinessTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "verify.yml").read_text(encoding="utf-8")
 
         self.assertIn("repository: BhaveshY/vectorworks-claude-plugin", workflow)
+        self.assertIn("id: checkout-standalone-plugin", workflow)
+        self.assertIn("continue-on-error: true", workflow)
+        self.assertIn("steps.checkout-standalone-plugin.outcome == 'success'", workflow)
+        self.assertIn("Standalone plugin companion unavailable", workflow)
         self.assertIn("check-companion-contract.ps1", workflow)
         self.assertIn("Standalone plugin companion contract", workflow)
+        self.assertIn("Bundled plugin mirror drift", workflow)
 
     def test_generated_launcher_uses_dialog_agent_session_listener(self):
         register_script = (ROOT / "scripts/register-claude-code.ps1").read_text(encoding="utf-8")
