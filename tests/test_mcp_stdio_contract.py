@@ -43,7 +43,17 @@ class McpStdioContractTests(unittest.TestCase):
                         tools = await session.list_tools()
                         by_name = {tool.name: tool for tool in tools.tools}
                         self.assertGreaterEqual(len(by_name), 25)
-                        for name in ("vw_ping", "vw_preflight_for_cad", "vw_create_object", "vw_get_layers"):
+                        for name in (
+                            "vw_ping",
+                            "vw_preflight_for_cad",
+                            "vw_create_object",
+                            "vw_batch_create_objects",
+                            "vw_plan_schematic_floor_plan",
+                            "vw_create_schematic_floor_plan",
+                            "vw_drawing_summary",
+                            "vw_capabilities",
+                            "vw_get_layers",
+                        ):
                             self.assertIn(name, by_name)
 
                         get_objects_schema = by_name["vw_get_objects"].inputSchema
@@ -61,13 +71,20 @@ class McpStdioContractTests(unittest.TestCase):
                         self.assertEqual(slab_points_schema["items"]["minItems"], 2)
                         self.assertEqual(slab_points_schema["items"]["maxItems"], 2)
 
+                        batch_objects_schema = by_name["vw_batch_create_objects"].inputSchema["properties"]["objects"]
+                        self.assertEqual(batch_objects_schema["minItems"], 1)
+                        self.assertEqual(batch_objects_schema["maxItems"], 250)
+
+                        floor_plan_rooms_schema = by_name["vw_create_schematic_floor_plan"].inputSchema["properties"]["rooms"]
+                        self.assertEqual(floor_plan_rooms_schema["minItems"], 1)
+                        self.assertEqual(floor_plan_rooms_schema["maxItems"], 100)
+
+                        contract_completed = True
                         ping = await session.call_tool("vw_ping", {})
                         self.assertFalse(ping.isError)
                         ping_text = ping.content[0].text
                         self.assertIn("Connection error:", ping_text)
                         self.assertIn("127.0.0.1:1", ping_text)
-
-                        contract_completed = True
 
         try:
             anyio.run(run_contract)

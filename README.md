@@ -379,17 +379,22 @@ Core:
 | `vw_ping` | Health check, including bridge mode and CAD safety status |
 | `vw_bridge_status` | Same status payload as `vw_ping`, named for agent preflight checks |
 | `vw_preflight_for_cad` | Structured JSON go/no-go check before real CAD/API handlers |
+| `vw_capabilities` | Current bridge capabilities, native phase-1 support, and tool surface |
 | `vw_tool_safety` | Structured safety metadata for all tools |
-| `vw_run_script` | Execute trusted Python inside Vectorworks |
+| `vw_run_script` | Execute trusted Python inside Vectorworks; requires `confirm="RUN_TRUSTED_CODE"` |
 | `vw_create_object` | Create rect, circle, oval, line, arc; polygon is listener-dependent and blocked by native phase 1 |
+| `vw_batch_create_objects` | Create many native phase-1 primitives in one MCP call |
+| `vw_plan_schematic_floor_plan` | Dry-run a multi-room schematic floor plan and return the native primitives |
+| `vw_create_schematic_floor_plan` | Create a multi-room schematic floor plan from rooms, wall segments, doors, and windows |
 | `vw_create_schematic_room` | Create a rectangular schematic room from native 2D wall rectangles |
 | `vw_create_schematic_door` | Draw a schematic door leaf and swing arc from native 2D primitives |
 | `vw_create_schematic_window` | Draw a schematic double-line window marker from native 2D primitives |
 | `vw_get_layers` | List layers |
 | `vw_get_objects` | List objects filtered by layer/type |
+| `vw_drawing_summary` | Summarize document, layers, object counts, examples, and bounds |
 | `vw_set_object_property` | Change name, class, color, line weight, opacity |
 | `vw_find_objects` | Criteria-based search such as `T=WALL` |
-| `vw_manage_classes` | List, create, delete classes |
+| `vw_manage_classes` | List, create, delete classes; delete requires `confirm="DELETE_CLASS"` |
 | `vw_worksheet` | Read/write worksheet cells and ranges |
 | `vw_symbol` | List and insert symbols |
 | `vw_export` | Open the matching Vectorworks export dialog and report that manual save confirmation is required |
@@ -397,7 +402,7 @@ Core:
 | `vw_get_document_info` | Document metadata |
 | `vw_screenshot` | Open the Vectorworks Export Image File dialog with the requested path |
 | `vw_stop_listener` | Ask the listener to stop gracefully |
-| `vw_selection` | Get, select, clear, delete, move, or duplicate selected objects |
+| `vw_selection` | Get, select, clear, delete, move, or duplicate selected objects; delete requires `confirm="DELETE_SELECTED"` |
 
 Architectural:
 

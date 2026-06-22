@@ -219,6 +219,9 @@ PositiveLength = Annotated[float, Field(gt=0)]
 Point2D = Annotated[list[float], Field(min_length=2, max_length=2)]
 PointList = Annotated[list[Point2D], Field(max_length=1000)]
 PolygonPointList = Annotated[list[Point2D], Field(min_length=3, max_length=1000)]
+PrimitiveObjectList = Annotated[list[dict[str, Any]], Field(min_length=1, max_length=250)]
+FloorPlanRoomList = Annotated[list[dict[str, Any]], Field(min_length=1, max_length=100)]
+FloorPlanItemList = Annotated[list[dict[str, Any]], Field(max_length=250)]
 
 
 _ANNOTATION_KEYS = ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint")
@@ -231,6 +234,15 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
         "destructiveHint": False,
         "idempotentHint": True,
         "openWorldHint": False,
+        "requires_cad_preflight": False,
+    },
+    "vw_capabilities": {
+        "category": "metadata",
+        "wire_action": "ping",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
         "requires_cad_preflight": False,
     },
     "vw_ping": {
@@ -287,6 +299,16 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
         "openWorldHint": True,
         "requires_cad_preflight": True,
     },
+    "vw_drawing_summary": {
+        "category": "document-read",
+        "wire_action": None,
+        "composes_actions": ["get_document_info", "get_layers", "get_objects"],
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
     "vw_find_objects": {
         "category": "document-read",
         "wire_action": "find_objects",
@@ -332,9 +354,39 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
         "openWorldHint": True,
         "requires_cad_preflight": True,
     },
+    "vw_batch_create_objects": {
+        "category": "document-write",
+        "wire_action": None,
+        "composes_actions": ["create_object"],
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_plan_schematic_floor_plan": {
+        "category": "schematic-floor-plan",
+        "wire_action": None,
+        "composes_actions": [],
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+        "requires_cad_preflight": False,
+    },
+    "vw_create_schematic_floor_plan": {
+        "category": "schematic-floor-plan",
+        "wire_action": None,
+        "composes_actions": ["create_object"],
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
     "vw_create_schematic_room": {
         "category": "schematic-floor-plan",
-        "wire_action": "create_object",
+        "wire_action": None,
         "composes_actions": ["create_object"],
         "readOnlyHint": False,
         "destructiveHint": False,
@@ -344,7 +396,7 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
     },
     "vw_create_schematic_door": {
         "category": "schematic-floor-plan",
-        "wire_action": "create_object",
+        "wire_action": None,
         "composes_actions": ["create_object"],
         "readOnlyHint": False,
         "destructiveHint": False,
@@ -354,7 +406,7 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
     },
     "vw_create_schematic_window": {
         "category": "schematic-floor-plan",
-        "wire_action": "create_object",
+        "wire_action": None,
         "composes_actions": ["create_object"],
         "readOnlyHint": False,
         "destructiveHint": False,
@@ -622,11 +674,11 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
 }
 
 
-_ACTION_SAFETY = {
-    safety["wire_action"]: safety
-    for safety in TOOL_SAFETY.values()
-    if isinstance(safety.get("wire_action"), str) and safety.get("wire_action")
-}
+_ACTION_SAFETY: dict[str, dict[str, Any]] = {}
+for _tool_name, _safety in TOOL_SAFETY.items():
+    _wire_action = _safety.get("wire_action")
+    if isinstance(_wire_action, str) and _wire_action:
+        _ACTION_SAFETY.setdefault(_wire_action, _safety)
 
 
 def _operation_safety(action: str, params: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
@@ -1198,11 +1250,49 @@ def vw_tool_safety() -> str:
     return json.dumps(TOOL_SAFETY, indent=2, sort_keys=True)
 
 
+@_tool("vw_capabilities")
+def vw_capabilities(include_tools: bool = True) -> str:
+    """Return current bridge capabilities and the MCP tool surface agents can safely plan against."""
+    raw_status = _send_health("ping")
+    decoded_status = _decode_tool_result(raw_status)
+    status_ok = not _tool_result_failed(raw_status, decoded_status)
+    payload: dict[str, Any] = {
+        "ok": status_ok,
+        "tool": "vw_capabilities",
+        "bridge_status": decoded_status,
+        "native_phase_one_required_actions": sorted(NATIVE_PHASE_ONE_REQUIRED_ACTIONS),
+        "native_phase_one_create_object_types": sorted(NATIVE_PHASE_ONE_CREATE_OBJECT_TYPES),
+        "native_phase_one_selection_actions": sorted(NATIVE_PHASE_ONE_SELECTION_ACTIONS),
+        "host_capabilities": {
+            "batch_primitive_creation": True,
+            "schematic_floor_plan_planning": True,
+            "schematic_floor_plan_creation": True,
+            "drawing_summary": True,
+            "true_bim_objects": False,
+        },
+        "notes": [
+            "Native phase 1 supports 2D primitives, reads, and bounded selection operations.",
+            "Schematic floor-plan tools create drafting geometry, not BIM wall/door/window objects.",
+        ],
+    }
+    if include_tools:
+        payload["tools"] = sorted(TOOL_SAFETY)
+        payload["tool_safety"] = TOOL_SAFETY
+    return json.dumps(payload, indent=2, sort_keys=True)
+
+
 @_tool("vw_run_script")
-def vw_run_script(code: str) -> str:
+def vw_run_script(code: str, confirm: str = "") -> str:
     """Execute Python inside Vectorworks. The 'vs' module is available.
     Use print() to return output. Escape hatch for anything other tools do not cover.
-    Example: vw_run_script("h = vs.FSActLayer()\\nprint(vs.GetName(h))")"""
+    Requires confirm='RUN_TRUSTED_CODE'. Example:
+    vw_run_script("h = vs.FSActLayer()\\nprint(vs.GetName(h))", confirm="RUN_TRUSTED_CODE")"""
+    if confirm != "RUN_TRUSTED_CODE":
+        return _confirmation_error(
+            "vw_run_script",
+            "RUN_TRUSTED_CODE",
+            "vw_run_script executes trusted code inside Vectorworks and requires explicit confirmation",
+        )
     return _send_tool("vw_run_script", {"code": code})
 
 
@@ -1277,8 +1367,150 @@ def _send_create_primitive(params: dict[str, Any]) -> str:
     return _send_tool("vw_create_object", params)
 
 
-def _create_floor_plan_primitives(tool: str, primitives: list[dict[str, Any]], metadata: dict[str, Any]) -> str:
+_PRIMITIVE_COORD_KEYS = ("x1", "y1", "x2", "y2")
+_PRIMITIVE_ALLOWED_KEYS = {
+    "role",
+    "object_type",
+    "type",
+    "x1",
+    "y1",
+    "x2",
+    "y2",
+    "radius",
+    "start_angle",
+    "sweep_angle",
+    "name",
+    "class_name",
+}
+
+
+def _json_error(tool: str, message: str, **extra: Any) -> str:
+    return json.dumps({"ok": False, "tool": tool, "error": message, **extra}, indent=2, sort_keys=True)
+
+
+def _confirmation_error(tool: str, required_confirmation: str, reason: str) -> str:
+    return _json_error(
+        tool,
+        reason,
+        confirmation_required=True,
+        required_confirmation=required_confirmation,
+    )
+
+
+def _is_real_number(value: Any) -> bool:
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(float(value))
+
+
+def _coerce_number(
+    item: dict[str, Any],
+    key: str,
+    *,
+    default: Optional[float] = None,
+    required: bool = False,
+    min_value: Optional[float] = None,
+    label: str = "item",
+) -> float:
+    if key not in item or item.get(key) is None:
+        if required:
+            raise ValueError(f"{label}.{key} is required")
+        if default is None:
+            raise ValueError(f"{label}.{key} has no default")
+        return float(default)
+    value = item[key]
+    if not _is_real_number(value):
+        raise ValueError(f"{label}.{key} must be a finite number")
+    result = float(value)
+    if min_value is not None and result < min_value:
+        raise ValueError(f"{label}.{key} must be >= {min_value}")
+    return result
+
+
+def _coerce_positive_number(
+    item: dict[str, Any],
+    key: str,
+    *,
+    default: Optional[float] = None,
+    label: str = "item",
+) -> float:
+    result = _coerce_number(item, key, default=default, required=default is None, min_value=0, label=label)
+    if result <= 0:
+        raise ValueError(f"{label}.{key} must be > 0")
+    return result
+
+
+def _optional_text(item: dict[str, Any], key: str, default: str = "") -> str:
+    value = item.get(key, default)
+    if value is None:
+        return default
+    return str(value)
+
+
+def _normalise_create_primitive(
+    raw: dict[str, Any],
+    *,
+    label: str,
+    default_class_name: str = "",
+    name_prefix: str = "",
+) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ValueError(f"{label} must be an object")
+
+    unknown = sorted(set(raw) - _PRIMITIVE_ALLOWED_KEYS)
+    if unknown:
+        raise ValueError(f"{label} has unsupported key(s): {', '.join(unknown)}")
+
+    object_type = str(raw.get("object_type", raw.get("type", "")) or "").strip().lower()
+    if object_type == "rectangle" or object_type == "box":
+        object_type = "rect"
+    if object_type == "polygon":
+        raise ValueError(f"{label}.object_type polygon is not supported by the native phase-1 bridge")
+    if object_type not in NATIVE_PHASE_ONE_CREATE_OBJECT_TYPES:
+        raise ValueError(f"{label}.object_type must be one of: {', '.join(sorted(NATIVE_PHASE_ONE_CREATE_OBJECT_TYPES))}")
+
+    params: dict[str, Any] = {"object_type": object_type}
+    if object_type in {"rect", "oval", "line"}:
+        for key in _PRIMITIVE_COORD_KEYS:
+            params[key] = _coerce_number(raw, key, required=True, label=label)
+        if object_type == "line" and params["x1"] == params["x2"] and params["y1"] == params["y2"]:
+            raise ValueError(f"{label} line endpoints must not be identical")
+    elif object_type == "circle":
+        params["x1"] = _coerce_number(raw, "x1", required=True, label=label)
+        params["y1"] = _coerce_number(raw, "y1", required=True, label=label)
+        params["radius"] = _coerce_positive_number(raw, "radius", label=label)
+    elif object_type == "arc":
+        params["x1"] = _coerce_number(raw, "x1", required=True, label=label)
+        params["y1"] = _coerce_number(raw, "y1", required=True, label=label)
+        params["radius"] = _coerce_positive_number(raw, "radius", label=label)
+        params["start_angle"] = _coerce_number(raw, "start_angle", default=0, label=label)
+        params["sweep_angle"] = _coerce_number(raw, "sweep_angle", default=90, label=label)
+
+    name = _optional_text(raw, "name", "")
+    if name_prefix:
+        name = f"{name_prefix} {name}".strip() if name else name_prefix
+    if name:
+        params["name"] = name
+
+    class_name = _optional_text(raw, "class_name", default_class_name)
+    if class_name:
+        params["class_name"] = class_name
+
+    role = _optional_text(raw, "role", "primitive")
+    if role:
+        params["role"] = role
+    return params
+
+
+def _create_primitives(
+    tool: str,
+    primitives: list[dict[str, Any]],
+    metadata: dict[str, Any],
+    *,
+    schematic: bool = False,
+    bim_objects: bool = False,
+    stop_on_error: bool = True,
+) -> str:
     created: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
     for index, primitive in enumerate(primitives, start=1):
         params = dict(primitive)
         role = str(params.pop("role", "primitive"))
@@ -1292,29 +1524,38 @@ def _create_floor_plan_primitives(tool: str, primitives: list[dict[str, Any]], m
             "result": decoded,
         }
         if _tool_result_failed(raw, decoded):
-            return json.dumps(
-                {
-                    "ok": False,
-                    "tool": tool,
-                    "schematic": True,
-                    "bim_objects": False,
-                    "created_count": len(created),
-                    "created": created,
-                    "failed_step": entry,
-                    "warning": "Earlier primitives may already exist in the active Vectorworks document.",
-                    **metadata,
-                },
-                indent=2,
-                sort_keys=True,
-            )
+            failures.append(entry)
+            if stop_on_error:
+                break
+            continue
         created.append(entry)
+
+    if failures:
+        return json.dumps(
+            {
+                "ok": False,
+                "tool": tool,
+                "schematic": schematic,
+                "bim_objects": bim_objects,
+                "attempted_count": len(created) + len(failures),
+                "created_count": len(created),
+                "failed_count": len(failures),
+                "created": created,
+                "failures": failures,
+                "warning": "Primitive creation is not atomic; earlier successful primitives may already exist in the active Vectorworks document.",
+                **metadata,
+            },
+            indent=2,
+            sort_keys=True,
+        )
 
     return json.dumps(
         {
             "ok": True,
             "tool": tool,
-            "schematic": True,
-            "bim_objects": False,
+            "schematic": schematic,
+            "bim_objects": bim_objects,
+            "attempted_count": len(created),
             "created_count": len(created),
             "created": created,
             **metadata,
@@ -1322,6 +1563,10 @@ def _create_floor_plan_primitives(tool: str, primitives: list[dict[str, Any]], m
         indent=2,
         sort_keys=True,
     )
+
+
+def _create_floor_plan_primitives(tool: str, primitives: list[dict[str, Any]], metadata: dict[str, Any]) -> str:
+    return _create_primitives(tool, primitives, metadata, schematic=True, bim_objects=False)
 
 
 def _named(base: str, suffix: str) -> str:
@@ -1336,6 +1581,482 @@ def _line_endpoint(x: float, y: float, length: float, angle_degrees: float) -> t
     return (x + length * math.cos(radians), y + length * math.sin(radians))
 
 
+def _room_primitives(
+    x: float,
+    y: float,
+    width: float,
+    depth: float,
+    wall_thickness: float,
+    *,
+    name: str = "",
+    class_name: str = "A-FP-Schematic-Wall",
+    role_prefix: str = "",
+) -> list[dict[str, Any]]:
+    if width <= 0 or depth <= 0:
+        raise ValueError("room width and depth must be > 0")
+    if wall_thickness <= 0:
+        raise ValueError("wall_thickness must be > 0")
+    if wall_thickness * 2 >= min(width, depth):
+        raise ValueError("wall_thickness must be less than half of both width and depth")
+
+    x2 = x + width
+    y2 = y + depth
+    t = wall_thickness
+    prefix = f"{role_prefix}_" if role_prefix else ""
+    return [
+        {
+            "role": f"{prefix}south_wall",
+            "object_type": "rect",
+            "x1": x,
+            "y1": y,
+            "x2": x2,
+            "y2": y + t,
+            "name": _named(name, "south wall"),
+            "class_name": class_name,
+        },
+        {
+            "role": f"{prefix}north_wall",
+            "object_type": "rect",
+            "x1": x,
+            "y1": y2 - t,
+            "x2": x2,
+            "y2": y2,
+            "name": _named(name, "north wall"),
+            "class_name": class_name,
+        },
+        {
+            "role": f"{prefix}west_wall",
+            "object_type": "rect",
+            "x1": x,
+            "y1": y + t,
+            "x2": x + t,
+            "y2": y2 - t,
+            "name": _named(name, "west wall"),
+            "class_name": class_name,
+        },
+        {
+            "role": f"{prefix}east_wall",
+            "object_type": "rect",
+            "x1": x2 - t,
+            "y1": y + t,
+            "x2": x2,
+            "y2": y2 - t,
+            "name": _named(name, "east wall"),
+            "class_name": class_name,
+        },
+    ]
+
+
+def _door_primitives(
+    hinge_x: float,
+    hinge_y: float,
+    width: float,
+    rotation: float,
+    swing: DoorSwing,
+    *,
+    name: str = "",
+    class_name: str = "A-FP-Schematic-Door",
+    role_prefix: str = "",
+) -> list[dict[str, Any]]:
+    if width <= 0:
+        raise ValueError("door width must be > 0")
+    if swing not in ("left", "right"):
+        raise ValueError("door swing must be left or right")
+
+    sweep_angle = 90 if swing == "left" else -90
+    leaf_angle = rotation + sweep_angle
+    leaf_x, leaf_y = _line_endpoint(hinge_x, hinge_y, width, leaf_angle)
+    prefix = f"{role_prefix}_" if role_prefix else ""
+    return [
+        {
+            "role": f"{prefix}door_leaf",
+            "object_type": "line",
+            "x1": hinge_x,
+            "y1": hinge_y,
+            "x2": leaf_x,
+            "y2": leaf_y,
+            "name": _named(name, "leaf"),
+            "class_name": class_name,
+        },
+        {
+            "role": f"{prefix}door_swing",
+            "object_type": "arc",
+            "x1": hinge_x,
+            "y1": hinge_y,
+            "radius": width,
+            "start_angle": rotation,
+            "sweep_angle": sweep_angle,
+            "name": _named(name, "swing"),
+            "class_name": class_name,
+        },
+    ]
+
+
+def _window_primitives(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    marker_depth: float,
+    *,
+    name: str = "",
+    class_name: str = "A-FP-Schematic-Window",
+    role_prefix: str = "",
+) -> list[dict[str, Any]]:
+    if marker_depth <= 0:
+        raise ValueError("window marker_depth must be > 0")
+    dx = x2 - x1
+    dy = y2 - y1
+    length = math.hypot(dx, dy)
+    if length <= 0:
+        raise ValueError("window endpoints must not be identical")
+
+    offset_x = (-dy / length) * (marker_depth / 2)
+    offset_y = (dx / length) * (marker_depth / 2)
+    prefix = f"{role_prefix}_" if role_prefix else ""
+    return [
+        {
+            "role": f"{prefix}window_line_a",
+            "object_type": "line",
+            "x1": x1 + offset_x,
+            "y1": y1 + offset_y,
+            "x2": x2 + offset_x,
+            "y2": y2 + offset_y,
+            "name": _named(name, "line A"),
+            "class_name": class_name,
+        },
+        {
+            "role": f"{prefix}window_line_b",
+            "object_type": "line",
+            "x1": x1 - offset_x,
+            "y1": y1 - offset_y,
+            "x2": x2 - offset_x,
+            "y2": y2 - offset_y,
+            "name": _named(name, "line B"),
+            "class_name": class_name,
+        },
+    ]
+
+
+def _wall_segment_primitives(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    thickness: float,
+    *,
+    name: str = "",
+    class_name: str = "A-FP-Schematic-Wall",
+    role: str = "wall_segment",
+) -> tuple[list[dict[str, Any]], list[str]]:
+    if x1 == x2 and y1 == y2:
+        raise ValueError("wall segment endpoints must not be identical")
+    if thickness <= 0:
+        return (
+            [
+                {
+                    "role": role,
+                    "object_type": "line",
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                    "name": name,
+                    "class_name": class_name,
+                }
+            ],
+            [],
+        )
+
+    half = thickness / 2
+    if y1 == y2:
+        return (
+            [
+                {
+                    "role": role,
+                    "object_type": "rect",
+                    "x1": min(x1, x2),
+                    "y1": y1 - half,
+                    "x2": max(x1, x2),
+                    "y2": y1 + half,
+                    "name": name,
+                    "class_name": class_name,
+                }
+            ],
+            [],
+        )
+    if x1 == x2:
+        return (
+            [
+                {
+                    "role": role,
+                    "object_type": "rect",
+                    "x1": x1 - half,
+                    "y1": min(y1, y2),
+                    "x2": x1 + half,
+                    "y2": max(y1, y2),
+                    "name": name,
+                    "class_name": class_name,
+                }
+            ],
+            [],
+        )
+    return (
+        [
+            {
+                "role": role,
+                "object_type": "line",
+                "x1": x1,
+                "y1": y1,
+                "x2": x2,
+                "y2": y2,
+                "name": name,
+                "class_name": class_name,
+            }
+        ],
+        ["angled wall segment drawn as a centerline because native phase 1 has no polygon or rotated-rectangle primitive"],
+    )
+
+
+def _prefixed_name(prefix: str, name: str, fallback: str) -> str:
+    name = str(name or "").strip() or fallback
+    prefix = str(prefix or "").strip()
+    return f"{prefix} {name}".strip() if prefix else name
+
+
+def _build_schematic_floor_plan_primitives(
+    rooms: list[dict[str, Any]],
+    walls: Optional[list[dict[str, Any]]],
+    doors: Optional[list[dict[str, Any]]],
+    windows: Optional[list[dict[str, Any]]],
+    *,
+    wall_thickness: float,
+    name: str,
+    wall_class: str,
+    door_class: str,
+    window_class: str,
+) -> tuple[list[dict[str, Any]], list[str], dict[str, int]]:
+    if not rooms:
+        raise ValueError("at least one room is required")
+
+    primitives: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    counts = {
+        "rooms_count": len(rooms),
+        "wall_segments_count": len(walls or []),
+        "doors_count": len(doors or []),
+        "windows_count": len(windows or []),
+    }
+
+    for index, room in enumerate(rooms, start=1):
+        label = f"rooms[{index}]"
+        if not isinstance(room, dict):
+            raise ValueError(f"{label} must be an object")
+        room_name = _prefixed_name(name, _optional_text(room, "name"), f"room {index}")
+        room_class = _optional_text(room, "class_name", wall_class)
+        primitives.extend(
+            _room_primitives(
+                _coerce_number(room, "x", required=True, label=label),
+                _coerce_number(room, "y", required=True, label=label),
+                _coerce_positive_number(room, "width", label=label),
+                _coerce_positive_number(room, "depth", label=label),
+                _coerce_positive_number(room, "wall_thickness", default=wall_thickness, label=label),
+                name=room_name,
+                class_name=room_class,
+                role_prefix=f"room_{index}",
+            )
+        )
+
+    for index, wall in enumerate(walls or [], start=1):
+        label = f"walls[{index}]"
+        if not isinstance(wall, dict):
+            raise ValueError(f"{label} must be an object")
+        wall_name = _prefixed_name(name, _optional_text(wall, "name"), f"wall segment {index}")
+        wall_class_name = _optional_text(wall, "class_name", wall_class)
+        wall_primitives, wall_warnings = _wall_segment_primitives(
+            _coerce_number(wall, "x1", required=True, label=label),
+            _coerce_number(wall, "y1", required=True, label=label),
+            _coerce_number(wall, "x2", required=True, label=label),
+            _coerce_number(wall, "y2", required=True, label=label),
+            _coerce_number(wall, "thickness", default=wall_thickness, min_value=0, label=label),
+            name=wall_name,
+            class_name=wall_class_name,
+            role=f"wall_segment_{index}",
+        )
+        primitives.extend(wall_primitives)
+        warnings.extend([f"{label}: {warning}" for warning in wall_warnings])
+
+    for index, door in enumerate(doors or [], start=1):
+        label = f"doors[{index}]"
+        if not isinstance(door, dict):
+            raise ValueError(f"{label} must be an object")
+        swing = _optional_text(door, "swing", "left").lower()
+        if swing not in ("left", "right"):
+            raise ValueError(f"{label}.swing must be left or right")
+        typed_swing: DoorSwing = "left" if swing == "left" else "right"
+        door_name = _prefixed_name(name, _optional_text(door, "name"), f"door {index}")
+        door_class_name = _optional_text(door, "class_name", door_class)
+        primitives.extend(
+            _door_primitives(
+                _coerce_number(door, "hinge_x", required=True, label=label),
+                _coerce_number(door, "hinge_y", required=True, label=label),
+                _coerce_positive_number(door, "width", default=900, label=label),
+                _coerce_number(door, "rotation", default=0, label=label),
+                typed_swing,
+                name=door_name,
+                class_name=door_class_name,
+                role_prefix=f"door_{index}",
+            )
+        )
+
+    for index, window in enumerate(windows or [], start=1):
+        label = f"windows[{index}]"
+        if not isinstance(window, dict):
+            raise ValueError(f"{label} must be an object")
+        window_name = _prefixed_name(name, _optional_text(window, "name"), f"window {index}")
+        window_class_name = _optional_text(window, "class_name", window_class)
+        primitives.extend(
+            _window_primitives(
+                _coerce_number(window, "x1", required=True, label=label),
+                _coerce_number(window, "y1", required=True, label=label),
+                _coerce_number(window, "x2", required=True, label=label),
+                _coerce_number(window, "y2", required=True, label=label),
+                _coerce_positive_number(window, "marker_depth", default=150, label=label),
+                name=window_name,
+                class_name=window_class_name,
+                role_prefix=f"window_{index}",
+            )
+        )
+
+    return primitives, warnings, counts
+
+
+@_tool("vw_batch_create_objects")
+def vw_batch_create_objects(
+    objects: PrimitiveObjectList,
+    default_class_name: str = "",
+    name_prefix: str = "",
+    stop_on_error: bool = True,
+) -> str:
+    """Create many native phase-1 primitives in one MCP call.
+    Supported object_type values are rect/rectangle/box, circle, oval, line, and arc. Not atomic."""
+    try:
+        primitives = [
+            _normalise_create_primitive(
+                item,
+                label=f"objects[{index}]",
+                default_class_name=default_class_name,
+                name_prefix=name_prefix,
+            )
+            for index, item in enumerate(objects, start=1)
+        ]
+    except ValueError as exc:
+        return _json_error("vw_batch_create_objects", str(exc))
+
+    return _create_primitives(
+        "vw_batch_create_objects",
+        primitives,
+        {
+            "primitive_count": len(primitives),
+            "default_class_name": default_class_name,
+            "name_prefix": name_prefix,
+            "stop_on_error": stop_on_error,
+        },
+        schematic=False,
+        bim_objects=False,
+        stop_on_error=stop_on_error,
+    )
+
+
+@_tool("vw_plan_schematic_floor_plan")
+def vw_plan_schematic_floor_plan(
+    rooms: FloorPlanRoomList,
+    walls: Optional[FloorPlanItemList] = None,
+    doors: Optional[FloorPlanItemList] = None,
+    windows: Optional[FloorPlanItemList] = None,
+    wall_thickness: PositiveLength = 200,
+    name: str = "",
+    wall_class: str = "A-FP-Schematic-Wall",
+    door_class: str = "A-FP-Schematic-Door",
+    window_class: str = "A-FP-Schematic-Window",
+) -> str:
+    """Plan a schematic floor plan without touching Vectorworks. Use this before creating large layouts."""
+    try:
+        primitives, warnings, counts = _build_schematic_floor_plan_primitives(
+            rooms,
+            walls,
+            doors,
+            windows,
+            wall_thickness=wall_thickness,
+            name=name,
+            wall_class=wall_class,
+            door_class=door_class,
+            window_class=window_class,
+        )
+    except ValueError as exc:
+        return _json_error("vw_plan_schematic_floor_plan", str(exc), schematic=True, bim_objects=False)
+
+    return json.dumps(
+        {
+            "ok": True,
+            "tool": "vw_plan_schematic_floor_plan",
+            "schematic": True,
+            "bim_objects": False,
+            "primitive_count": len(primitives),
+            "primitives": primitives,
+            "warnings": warnings,
+            **counts,
+        },
+        indent=2,
+        sort_keys=True,
+    )
+
+
+@_tool("vw_create_schematic_floor_plan")
+def vw_create_schematic_floor_plan(
+    rooms: FloorPlanRoomList,
+    walls: Optional[FloorPlanItemList] = None,
+    doors: Optional[FloorPlanItemList] = None,
+    windows: Optional[FloorPlanItemList] = None,
+    wall_thickness: PositiveLength = 200,
+    name: str = "",
+    wall_class: str = "A-FP-Schematic-Wall",
+    door_class: str = "A-FP-Schematic-Door",
+    window_class: str = "A-FP-Schematic-Window",
+    stop_on_error: bool = True,
+) -> str:
+    """Create a multi-room schematic floor plan from structured rooms, wall segments, doors, and windows.
+    This creates 2D drafting primitives, not BIM wall/door/window objects."""
+    try:
+        primitives, warnings, counts = _build_schematic_floor_plan_primitives(
+            rooms,
+            walls,
+            doors,
+            windows,
+            wall_thickness=wall_thickness,
+            name=name,
+            wall_class=wall_class,
+            door_class=door_class,
+            window_class=window_class,
+        )
+    except ValueError as exc:
+        return _json_error("vw_create_schematic_floor_plan", str(exc), schematic=True, bim_objects=False)
+
+    return _create_primitives(
+        "vw_create_schematic_floor_plan",
+        primitives,
+        {
+            "primitive_count": len(primitives),
+            "warnings": warnings,
+            "stop_on_error": stop_on_error,
+            **counts,
+        },
+        schematic=True,
+        bim_objects=False,
+        stop_on_error=stop_on_error,
+    )
+
+
 @_tool("vw_create_schematic_room")
 def vw_create_schematic_room(
     x: float,
@@ -1348,54 +2069,11 @@ def vw_create_schematic_room(
 ) -> str:
     """Create a rectangular schematic room from four 2D wall rectangles.
     Coordinates use the active document units. This is drafting geometry, not BIM walls."""
-    if wall_thickness * 2 >= min(width, depth):
-        return _floor_plan_error("wall_thickness must be less than half of both width and depth")
+    try:
+        primitives = _room_primitives(x, y, width, depth, wall_thickness, name=name, class_name=class_name)
+    except ValueError as exc:
+        return _floor_plan_error(str(exc))
 
-    x2 = x + width
-    y2 = y + depth
-    t = wall_thickness
-    primitives = [
-        {
-            "role": "south_wall",
-            "object_type": "rect",
-            "x1": x,
-            "y1": y,
-            "x2": x2,
-            "y2": y + t,
-            "name": _named(name, "south wall"),
-            "class_name": class_name,
-        },
-        {
-            "role": "north_wall",
-            "object_type": "rect",
-            "x1": x,
-            "y1": y2 - t,
-            "x2": x2,
-            "y2": y2,
-            "name": _named(name, "north wall"),
-            "class_name": class_name,
-        },
-        {
-            "role": "west_wall",
-            "object_type": "rect",
-            "x1": x,
-            "y1": y + t,
-            "x2": x + t,
-            "y2": y2 - t,
-            "name": _named(name, "west wall"),
-            "class_name": class_name,
-        },
-        {
-            "role": "east_wall",
-            "object_type": "rect",
-            "x1": x2 - t,
-            "y1": y + t,
-            "x2": x2,
-            "y2": y2 - t,
-            "name": _named(name, "east wall"),
-            "class_name": class_name,
-        },
-    ]
     return _create_floor_plan_primitives(
         "vw_create_schematic_room",
         primitives,
@@ -1414,32 +2092,19 @@ def vw_create_schematic_door(
     class_name: str = "A-FP-Schematic-Door",
 ) -> str:
     """Draw a schematic door leaf and swing arc. This is drafting geometry, not a BIM door."""
-    sweep_angle = 90 if swing == "left" else -90
-    leaf_angle = rotation + sweep_angle
-    leaf_x, leaf_y = _line_endpoint(hinge_x, hinge_y, width, leaf_angle)
-    primitives = [
-        {
-            "role": "door_leaf",
-            "object_type": "line",
-            "x1": hinge_x,
-            "y1": hinge_y,
-            "x2": leaf_x,
-            "y2": leaf_y,
-            "name": _named(name, "leaf"),
-            "class_name": class_name,
-        },
-        {
-            "role": "door_swing",
-            "object_type": "arc",
-            "x1": hinge_x,
-            "y1": hinge_y,
-            "radius": width,
-            "start_angle": rotation,
-            "sweep_angle": sweep_angle,
-            "name": _named(name, "swing"),
-            "class_name": class_name,
-        },
-    ]
+    try:
+        primitives = _door_primitives(
+            hinge_x,
+            hinge_y,
+            width,
+            rotation,
+            swing,
+            name=name,
+            class_name=class_name,
+        )
+    except ValueError as exc:
+        return _floor_plan_error(str(exc))
+
     return _create_floor_plan_primitives(
         "vw_create_schematic_door",
         primitives,
@@ -1464,36 +2129,19 @@ def vw_create_schematic_window(
 ) -> str:
     """Draw a schematic double-line window marker between two points.
     This is drafting geometry, not a BIM window."""
-    dx = x2 - x1
-    dy = y2 - y1
-    length = math.hypot(dx, dy)
-    if length <= 0:
-        return _floor_plan_error("window endpoints must not be identical")
+    try:
+        primitives = _window_primitives(
+            x1,
+            y1,
+            x2,
+            y2,
+            marker_depth,
+            name=name,
+            class_name=class_name,
+        )
+    except ValueError as exc:
+        return _floor_plan_error(str(exc))
 
-    offset_x = (-dy / length) * (marker_depth / 2)
-    offset_y = (dx / length) * (marker_depth / 2)
-    primitives = [
-        {
-            "role": "window_line_a",
-            "object_type": "line",
-            "x1": x1 + offset_x,
-            "y1": y1 + offset_y,
-            "x2": x2 + offset_x,
-            "y2": y2 + offset_y,
-            "name": _named(name, "line A"),
-            "class_name": class_name,
-        },
-        {
-            "role": "window_line_b",
-            "object_type": "line",
-            "x1": x1 - offset_x,
-            "y1": y1 - offset_y,
-            "x2": x2 - offset_x,
-            "y2": y2 - offset_y,
-            "name": _named(name, "line B"),
-            "class_name": class_name,
-        },
-    ]
     return _create_floor_plan_primitives(
         "vw_create_schematic_window",
         primitives,
@@ -1517,6 +2165,111 @@ def vw_get_objects(layer: str = "", object_type: str = "", limit: ObjectQueryLim
     return _send_tool("vw_get_objects", {"layer": layer, "object_type": object_type, "limit": limit})
 
 
+@_tool("vw_drawing_summary")
+def vw_drawing_summary(layer: str = "", object_type: str = "", limit: ObjectQueryLimit = 1000) -> str:
+    """Summarize document, layers, and a bounded object inventory for production planning/verification."""
+    steps = [
+        ("document_info", lambda: _send_tool("vw_get_document_info")),
+        ("layers", lambda: _send_tool("vw_get_layers")),
+        ("objects", lambda: _send_tool("vw_get_objects", {"layer": layer, "object_type": object_type, "limit": limit})),
+    ]
+    decoded: dict[str, Any] = {}
+    for step, call in steps:
+        raw = call()
+        value = _decode_tool_result(raw)
+        if _tool_result_failed(raw, value):
+            return json.dumps(
+                {
+                    "ok": False,
+                    "tool": "vw_drawing_summary",
+                    "failed_step": step,
+                    "result": value,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        decoded[step] = value
+
+    document_info = decoded["document_info"] if isinstance(decoded["document_info"], dict) else {}
+    layers = decoded["layers"] if isinstance(decoded["layers"], list) else []
+    objects = decoded["objects"] if isinstance(decoded["objects"], list) else []
+
+    by_type: dict[str, int] = {}
+    by_layer: dict[str, int] = {}
+    by_layer_type: dict[str, dict[str, int]] = {}
+    named_count = 0
+    bounds: Optional[dict[str, float]] = None
+    examples: list[dict[str, Any]] = []
+
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        obj_type = str(obj.get("type") or "unknown")
+        obj_layer = str(obj.get("layer") or "unknown")
+        by_type[obj_type] = by_type.get(obj_type, 0) + 1
+        by_layer[obj_layer] = by_layer.get(obj_layer, 0) + 1
+        layer_counts = by_layer_type.setdefault(obj_layer, {})
+        layer_counts[obj_type] = layer_counts.get(obj_type, 0) + 1
+        if str(obj.get("name") or "").strip():
+            named_count += 1
+        if len(examples) < 20:
+            examples.append(
+                {
+                    key: obj.get(key)
+                    for key in ("handle", "type", "name", "layer", "bounds")
+                    if key in obj
+                }
+            )
+
+        obj_bounds = obj.get("bounds")
+        if isinstance(obj_bounds, dict):
+            top_left = obj_bounds.get("top_left")
+            bottom_right = obj_bounds.get("bottom_right")
+            if (
+                isinstance(top_left, list)
+                and isinstance(bottom_right, list)
+                and len(top_left) >= 2
+                and len(bottom_right) >= 2
+                and all(_is_real_number(value) for value in top_left[:2] + bottom_right[:2])
+            ):
+                x_values = [float(top_left[0]), float(bottom_right[0])]
+                y_values = [float(top_left[1]), float(bottom_right[1])]
+                left, right = min(x_values), max(x_values)
+                top, bottom = min(y_values), max(y_values)
+                if bounds is None:
+                    bounds = {"left": left, "top": top, "right": right, "bottom": bottom}
+                else:
+                    bounds["left"] = min(bounds["left"], left)
+                    bounds["top"] = min(bounds["top"], top)
+                    bounds["right"] = max(bounds["right"], right)
+                    bounds["bottom"] = max(bounds["bottom"], bottom)
+
+    return json.dumps(
+        {
+            "ok": True,
+            "tool": "vw_drawing_summary",
+            "query": {"layer": layer, "object_type": object_type, "limit": limit},
+            "document": document_info,
+            "layer_count": len(layers),
+            "layers": layers,
+            "objects_returned": len(objects),
+            "document_total_objects": document_info.get("total_objects"),
+            "possibly_truncated": len(objects) >= limit,
+            "named_objects_returned": named_count,
+            "counts_by_type": dict(sorted(by_type.items())),
+            "counts_by_layer": dict(sorted(by_layer.items())),
+            "counts_by_layer_type": {
+                layer_name: dict(sorted(type_counts.items()))
+                for layer_name, type_counts in sorted(by_layer_type.items())
+            },
+            "bounds": bounds,
+            "examples": examples,
+        },
+        indent=2,
+        sort_keys=True,
+    )
+
+
 @_tool("vw_set_object_property")
 def vw_set_object_property(handle: str, property_name: PropertyName, value: str) -> str:
     """Set an object property. Colors use 'r,g,b' values in Vectorworks 0-65535 color range."""
@@ -1530,8 +2283,14 @@ def vw_find_objects(criteria: str, limit: ObjectQueryLimit = 100) -> str:
 
 
 @_tool("vw_manage_classes")
-def vw_manage_classes(action: ClassAction, class_name: str = "") -> str:
-    """List, create, or delete classes. class_name is ignored for list."""
+def vw_manage_classes(action: ClassAction, class_name: str = "", confirm: str = "") -> str:
+    """List, create, or delete classes. class_name is ignored for list. Delete requires confirm='DELETE_CLASS'."""
+    if action == "delete" and confirm != "DELETE_CLASS":
+        return _confirmation_error(
+            "vw_manage_classes",
+            "DELETE_CLASS",
+            "class deletion is destructive and requires explicit confirmation",
+        )
     return _send_tool("vw_manage_classes", {"action": action, "class_name": class_name})
 
 
@@ -1626,9 +2385,15 @@ def vw_stop_listener() -> str:
 
 
 @_tool("vw_selection")
-def vw_selection(action: SelectionAction, criteria: str = "") -> str:
-    """Selection ops. For select, criteria is a VW criteria string. For move, criteria is 'dx,dy'."""
-    return _send_tool("vw_selection", {"action": action, "criteria": criteria})
+def vw_selection(action: SelectionAction, criteria: str = "", confirm: str = "", limit: ObjectQueryLimit = 1000) -> str:
+    """Selection ops. For select, criteria is a VW criteria string. Delete requires confirm='DELETE_SELECTED'."""
+    if action == "delete" and confirm != "DELETE_SELECTED":
+        return _confirmation_error(
+            "vw_selection",
+            "DELETE_SELECTED",
+            "selection delete is destructive and requires explicit confirmation",
+        )
+    return _send_tool("vw_selection", {"action": action, "criteria": criteria, "limit": limit})
 
 
 @_tool("vw_create_wall")
