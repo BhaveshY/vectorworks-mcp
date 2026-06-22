@@ -62,6 +62,8 @@ class MockNativeBridge:
             "native_bridge": True,
             "native_phase": 1,
             "implemented_actions": sorted(IMPLEMENTED_ACTIONS),
+            "main_context_pump": "win32_ui_timer",
+            "main_context_pump_ready": True,
         }
         self.layers = layers if layers is not None else [{"name": "Design Layer-1", "visible": True}]
         self.objects = objects if objects is not None else [

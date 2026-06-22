@@ -339,12 +339,43 @@ class NativeBridgeContractTests(unittest.TestCase):
             "native_bridge": True,
             "native_phase": 1,
             "implemented_actions": ["ping", "stop", "get_document_info", "get_layers", "get_objects", "create_object"],
+            "main_context_pump": "win32_ui_timer",
+            "main_context_pump_ready": True,
         }
         with MockNativeBridge(status=status) as bridge:
             report = run_smoke(port=bridge.port, ping_count=1, read_count=1, timeout=1, phase=1)
 
         self.assertFalse(report["ok"])
         self.assertIn("ping implemented_actions missing phase-1 action(s): selection", report["failures"])
+
+    def test_native_smoke_harness_rejects_phase_one_without_ready_pump(self):
+        status = {
+            "pong": True,
+            "handlers": 7,
+            "version": "mock-native-bridge",
+            "bridge_kind": "native_sdk_bridge_mock",
+            "dispatch_mode": "native_sdk",
+            "cad_api_safe": True,
+            "transport_only": False,
+            "native_bridge": True,
+            "native_phase": 1,
+            "implemented_actions": [
+                "ping",
+                "stop",
+                "get_document_info",
+                "get_layers",
+                "get_objects",
+                "selection",
+                "create_object",
+            ],
+            "main_context_pump": "win32_ui_timer",
+            "main_context_pump_ready": False,
+        }
+        with MockNativeBridge(status=status) as bridge:
+            report = run_smoke(port=bridge.port, ping_count=1, read_count=1, timeout=1, phase=1)
+
+        self.assertFalse(report["ok"])
+        self.assertIn("ping main_context_pump_ready was not true", report["failures"])
 
     def test_native_smoke_harness_rejects_phase_one_selection_failure(self):
         with MockNativeBridge(
@@ -402,6 +433,27 @@ class NativeBridgeContractTests(unittest.TestCase):
         self.assertIn("skipped fixture delete because fixture selection was not proven safe", report["failures"])
         self.assertNotIn(("selection", "fixture-delete", {"action": "delete"}), calls)
         self.assertIn(("selection", "fixture-clear-after-skip", {"action": "clear"}), calls)
+
+    def test_native_smoke_write_fixture_aborts_cleanup_when_create_fails(self):
+        calls = []
+        original_record_call = smoke_module._record_call
+
+        def fake_record_call(_sock, _report, action, iteration, params=None):
+            calls.append((action, iteration, params or {}))
+            if action == "create_object":
+                return None
+            return {"success": True, "result": "OK"}
+
+        try:
+            smoke_module._record_call = fake_record_call
+            report = {"checks": [], "failures": []}
+            smoke_module._run_phase_one_write_fixture(object(), report)
+        finally:
+            smoke_module._record_call = original_record_call
+
+        self.assertEqual([call[0] for call in calls], ["create_object"])
+        self.assertIn("skipped fixture cleanup because fixture creation did not succeed", report["failures"])
+        self.assertNotIn(("selection", "fixture-clear-after-skip", {"action": "clear"}), calls)
 
     def test_native_smoke_harness_requires_write_fixture_flag_for_writes(self):
         with MockNativeBridge() as bridge:

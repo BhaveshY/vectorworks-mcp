@@ -162,6 +162,10 @@ def _validate_ping(report: dict[str, Any], result: Any, require_native: bool, ph
         native_phase = result.get("native_phase")
         if not isinstance(native_phase, int) or isinstance(native_phase, bool) or native_phase < 1:
             report["failures"].append("ping native_phase was not an integer >= 1")
+        if result.get("main_context_pump") != "win32_ui_timer":
+            report["failures"].append("ping main_context_pump was not win32_ui_timer")
+        if result.get("main_context_pump_ready") is not True:
+            report["failures"].append("ping main_context_pump_ready was not true")
     cad_api_safe = result.get("cad_api_safe")
     transport_only = result.get("transport_only")
     if phase >= 1:
@@ -422,8 +426,13 @@ def _run_phase_one_write_fixture(sock: socket.socket, report: dict[str, Any]) ->
         },
     )
     fixture_handle = _extract_created_handle(create_response.get("result")) if create_response else None
-    if create_response is not None and not fixture_handle:
+    if create_response is None:
+        report["failures"].append("skipped fixture cleanup because fixture creation did not succeed")
+        return
+    if not fixture_handle:
         report["failures"].append("create_object fixture result did not include a handle")
+        report["failures"].append("skipped fixture cleanup because fixture creation did not return a handle")
+        return
     fixture_present = False
     fixture_selected = False
     selection_cleared = False
@@ -693,11 +702,13 @@ def main(argv: list[str] | None = None) -> int:
         if report.get("last_ping"):
             ping = report["last_ping"]
             print(
-                "Bridge: {0}; cad_api_safe={1}; native_bridge={2}; transport_only={3}".format(
+                "Bridge: {0}; cad_api_safe={1}; native_bridge={2}; transport_only={3}; pump={4}; pump_ready={5}".format(
                     ping.get("bridge_kind", "unknown"),
                     ping.get("cad_api_safe"),
                     ping.get("native_bridge"),
                     ping.get("transport_only"),
+                    ping.get("main_context_pump", "unknown"),
+                    ping.get("main_context_pump_ready"),
                 )
             )
         if report["stop_requested"]:

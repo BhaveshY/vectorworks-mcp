@@ -841,6 +841,38 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertIn("native_phase is not >= 1", preflight["native_readiness_errors"])
         self.assertIn("implemented_actions missing", "\n".join(preflight["native_readiness_errors"]))
 
+    def test_cad_preflight_blocks_native_bridge_without_ready_pump(self):
+        original_send = server._send_health
+        try:
+            server._send_health = lambda action, params=None: json.dumps(
+                {
+                    "pong": True,
+                    "cad_api_safe": True,
+                    "transport_only": False,
+                    "native_bridge": True,
+                    "native_phase": 1,
+                    "implemented_actions": sorted(server.NATIVE_PHASE_ONE_REQUIRED_ACTIONS),
+                    "bridge_kind": "native_sdk_bridge_phase1",
+                    "dispatch_mode": "native_sdk",
+                    "handlers": 7,
+                    "version": "native-sdk-bridge-phase1",
+                    "main_context_pump": "win32_ui_timer",
+                    "main_context_pump_ready": False,
+                }
+            )
+            result = server.vw_preflight_for_cad()
+        finally:
+            server._send_health = original_send
+
+        preflight = json.loads(result)
+        self.assertFalse(preflight["ok"])
+        self.assertFalse(preflight["cad_api_safe"])
+        self.assertTrue(preflight["native_bridge"])
+        self.assertEqual(preflight["reason"], "native_bridge_not_phase1_ready")
+        self.assertEqual(preflight["main_context_pump"], "win32_ui_timer")
+        self.assertFalse(preflight["main_context_pump_ready"])
+        self.assertIn("main_context_pump_ready is not true", preflight["native_readiness_errors"])
+
     def test_cad_preflight_blocks_legacy_foreground_bridge(self):
         original_send = server._send_health
         try:

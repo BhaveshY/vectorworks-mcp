@@ -823,6 +823,11 @@ def _native_readiness_errors(status: dict[str, Any]) -> list[str]:
         if missing_actions:
             errors.append("implemented_actions missing: {0}".format(", ".join(missing_actions)))
 
+    if status.get("main_context_pump") != "win32_ui_timer":
+        errors.append("main_context_pump is not win32_ui_timer")
+    if status.get("main_context_pump_ready") is not True:
+        errors.append("main_context_pump_ready is not true")
+
     return errors
 
 
@@ -869,6 +874,8 @@ def _evaluate_cad_preflight_status(status: Any, blocked_action: Optional[str] = 
                 "native_bridge": True,
                 "handlers": status.get("handlers"),
                 "version": status.get("version"),
+                "main_context_pump": status.get("main_context_pump"),
+                "main_context_pump_ready": status.get("main_context_pump_ready"),
                 "reason": "native_bridge_not_phase1_ready",
                 "next_action": "Do not call CAD handlers. Run scripts\\smoke-native-bridge.ps1 -Json and fix native bridge capabilities.",
                 "native_readiness_errors": native_errors,
@@ -887,6 +894,8 @@ def _evaluate_cad_preflight_status(status: Any, blocked_action: Optional[str] = 
             "native_bridge": bool(status.get("native_bridge")),
             "handlers": status.get("handlers"),
             "version": status.get("version"),
+            "main_context_pump": status.get("main_context_pump"),
+            "main_context_pump_ready": status.get("main_context_pump_ready"),
             "reason": "cad_api_safe",
             "next_action": "Call vw_get_document_info before non-trivial CAD work.",
             "raw_status": status,

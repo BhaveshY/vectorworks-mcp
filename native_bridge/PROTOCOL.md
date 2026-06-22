@@ -114,7 +114,10 @@ responses must satisfy these minimum shapes:
   with `native_sdk_bridge`; known Python diagnostic modes are rejected. It must
   also report `native_phase >= 1` and `implemented_actions` containing `ping`,
   `stop`, `get_document_info`, `get_layers`, `get_objects`, `selection`, and
-  `create_object`.
+  `create_object`. Windows SDK builds must also report
+  `main_context_pump: "win32_ui_timer"` and
+  `main_context_pump_ready: true`; otherwise CAD requests are not considered
+  safe even when the handler list is complete.
 - `get_document_info`: object with non-empty string `filename`, string
   `filepath` when present, `layers` as a list of strings, non-negative integer
   `layer_count` matching `layers.length`, and non-negative integer

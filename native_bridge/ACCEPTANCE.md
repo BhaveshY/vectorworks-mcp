@@ -46,10 +46,10 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke-
 ```
 
 Expected result: `ok: true`, `native_bridge: true`, `cad_api_safe: true`, and
-no phase-1 read-handler timeouts or schema failures. The default smoke phase
-covers `ping`, `get_document_info`, `get_layers`, `get_objects`, and read-only
-`selection.get`, and requires `implemented_actions` to list the phase-1 bridge
-capabilities.
+`main_context_pump_ready: true`, with no schema failures or phase-1
+read-handler timeouts. The default smoke phase covers `ping`, `get_document_info`,
+`get_layers`, `get_objects`, and read-only `selection.get`, and requires
+`implemented_actions` to list the phase-1 bridge capabilities.
 
 7. In a disposable test document, run the explicit write fixture:
 
