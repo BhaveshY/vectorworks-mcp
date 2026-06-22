@@ -28,7 +28,11 @@ import time
 import uuid
 from typing import Annotated, Any, Literal, Optional
 
-from pydantic import Field
+try:
+    from pydantic import Field
+except Exception:
+    def Field(*_args: Any, **_kwargs: Any) -> None:
+        return None
 
 try:
     from fastmcp import FastMCP
