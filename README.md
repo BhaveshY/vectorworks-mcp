@@ -185,7 +185,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-claude-code.ps1 -Ve
 The setup is idempotent and safe to rerun. It:
 
 - creates or refreshes `.venv`
-- installs pinned host dependencies
+- installs bounded host dependencies into the repo-local virtual environment
 - generates `vw_start_listener_2024.py` with machine-specific absolute paths and `VW_MCP_MODE=dialog`
 - generates `vw_load_listener_2024.py`, a tiny stable Vectorworks script/menu loader that runs the current launcher file
 - best-effort copies the exact loader script text to your clipboard

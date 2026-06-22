@@ -315,6 +315,53 @@ function New-StepRecord {
     }
 }
 
+function Join-ProcessArguments {
+    param([string[]]$ArgumentList)
+
+    $Quoted = foreach ($Argument in $ArgumentList) {
+        if ($null -eq $Argument) {
+            '""'
+            continue
+        }
+        if ($Argument -notmatch '[\s"]') {
+            $Argument
+            continue
+        }
+
+        $Builder = [System.Text.StringBuilder]::new()
+        [void]$Builder.Append('"')
+        $Backslashes = 0
+        foreach ($Character in $Argument.ToCharArray()) {
+            if ($Character -eq '\') {
+                $Backslashes += 1
+                continue
+            }
+            if ($Character -eq '"') {
+                if ($Backslashes -gt 0) {
+                    [void]$Builder.Append(('\' * ($Backslashes * 2 + 1)))
+                    $Backslashes = 0
+                } else {
+                    [void]$Builder.Append('\')
+                }
+                [void]$Builder.Append('"')
+                continue
+            }
+            if ($Backslashes -gt 0) {
+                [void]$Builder.Append(('\' * $Backslashes))
+                $Backslashes = 0
+            }
+            [void]$Builder.Append($Character)
+        }
+        if ($Backslashes -gt 0) {
+            [void]$Builder.Append(('\' * ($Backslashes * 2)))
+        }
+        [void]$Builder.Append('"')
+        $Builder.ToString()
+    }
+
+    return ($Quoted -join " ")
+}
+
 function Invoke-CommandSpec {
     param(
         [string]$Executable,
@@ -322,23 +369,26 @@ function Invoke-CommandSpec {
         [string]$WorkingDirectory
     )
 
-    Push-Location $WorkingDirectory
-    try {
-        $PreviousErrorActionPreference = $ErrorActionPreference
-        $ErrorActionPreference = "Continue"
-        try {
-            $Output = & $Executable @Arguments 2>&1 | Out-String
-            $CommandExitCode = $LASTEXITCODE
-        } finally {
-            $ErrorActionPreference = $PreviousErrorActionPreference
-        }
-    } finally {
-        Pop-Location
-    }
+    $ProcessInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $ProcessInfo.FileName = $Executable
+    $ProcessInfo.Arguments = Join-ProcessArguments -ArgumentList $Arguments
+    $ProcessInfo.WorkingDirectory = $WorkingDirectory
+    $ProcessInfo.UseShellExecute = $false
+    $ProcessInfo.RedirectStandardOutput = $true
+    $ProcessInfo.RedirectStandardError = $true
 
-    if ($null -eq $CommandExitCode) {
-        $CommandExitCode = 0
-    }
+    $Process = [System.Diagnostics.Process]::new()
+    $Process.StartInfo = $ProcessInfo
+    [void]$Process.Start()
+    $Stdout = $Process.StandardOutput.ReadToEnd()
+    $Stderr = $Process.StandardError.ReadToEnd()
+    $Process.WaitForExit()
+    $CommandExitCode = $Process.ExitCode
+
+    $OutputParts = @()
+    if (-not [string]::IsNullOrEmpty($Stderr)) { $OutputParts += $Stderr.TrimEnd() }
+    if (-not [string]::IsNullOrEmpty($Stdout)) { $OutputParts += $Stdout.TrimEnd() }
+    $Output = if ($OutputParts.Count -gt 0) { $OutputParts -join [Environment]::NewLine } else { "" }
 
     return [pscustomobject]@{
         output = [string]$Output

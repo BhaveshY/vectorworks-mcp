@@ -145,6 +145,28 @@ class ServerProtocolTests(unittest.TestCase):
     def tearDown(self):
         server._close()
 
+    def test_main_forces_stdio_transport(self):
+        class FakeMCP:
+            def __init__(self):
+                self.calls = []
+
+            def run(self, **kwargs):
+                self.calls.append(kwargs)
+
+        fake_mcp = FakeMCP()
+        original_mcp = server.mcp
+        original_config_error = server._CONFIG_ERROR
+        try:
+            server.mcp = fake_mcp
+            server._CONFIG_ERROR = None
+
+            self.assertEqual(server.main(), 0)
+        finally:
+            server.mcp = original_mcp
+            server._CONFIG_ERROR = original_config_error
+
+        self.assertEqual(fake_mcp.calls, [{"transport": "stdio", "show_banner": False}])
+
     def test_send_success_round_trips_length_prefixed_json(self):
         def handler(request):
             return {"id": request["id"], "success": True, "result": {"pong": True}}

@@ -1323,7 +1323,7 @@ def main() -> int:
         print(f"Vectorworks MCP configuration error: {_CONFIG_ERROR}", file=sys.stderr)
         return 2
     try:
-        mcp.run()
+        mcp.run(transport="stdio", show_banner=False)
         return 0
     except RuntimeError as exc:
         print(f"Vectorworks MCP startup error: {exc}", file=sys.stderr)
