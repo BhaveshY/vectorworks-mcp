@@ -5,8 +5,9 @@ Core health and escape hatch:
 - `vw_ping`: confirm the listener and MCP server are connected; check bridge mode and CAD safety before real work.
 - `vw_bridge_status`: same listener status payload as `vw_ping`, named for agent preflight checks.
 - `vw_preflight_for_cad`: structured JSON go/no-go check before real CAD/API handlers.
+- `vw_capabilities`: bridge capability report plus current native/tool support.
 - `vw_tool_safety`: structured read/write/destructive metadata for every tool.
-- `vw_run_script`: run trusted Python inside Vectorworks.
+- `vw_run_script`: run trusted Python inside Vectorworks; requires `confirm="RUN_TRUSTED_CODE"`.
 - `vw_stop_listener`: ask the Vectorworks listener to stop gracefully.
 
 Document context:
@@ -14,17 +15,21 @@ Document context:
 - `vw_get_document_info`: active document metadata and object counts.
 - `vw_get_layers`: list layers.
 - `vw_get_objects`: list objects filtered by layer/type.
+- `vw_drawing_summary`: bounded document/layer/object inventory for planning and verification.
 - `vw_find_objects`: Vectorworks criteria search, such as `T=WALL`.
 - `vw_inspect_object`: discover object/plugin parameters.
 
 Create and edit:
 
 - `vw_create_object`: rect, circle, oval, line, arc; polygon is listener-dependent and blocked by native phase 1.
+- `vw_batch_create_objects`: create many native phase-1 primitives in one MCP call.
+- `vw_plan_schematic_floor_plan`: dry-run a multi-room schematic floor plan and return the primitives.
+- `vw_create_schematic_floor_plan`: create a multi-room schematic floor plan from rooms, walls, doors, and windows.
 - `vw_create_schematic_room`: rectangular schematic room from native 2D wall rectangles.
 - `vw_create_schematic_door`: schematic door leaf and swing arc from native 2D primitives.
 - `vw_create_schematic_window`: schematic double-line window marker from native 2D primitives.
 - `vw_set_object_property`: name, class, color, line weight, opacity.
-- `vw_selection`: get, select, clear, delete, move, or duplicate selected objects.
+- `vw_selection`: get, select, clear, delete, move, or duplicate selected objects; delete requires `confirm="DELETE_SELECTED"`.
 
 Architecture:
 
@@ -36,7 +41,7 @@ Architecture:
 
 Resources and files:
 
-- `vw_manage_classes`: list/create/delete classes.
+- `vw_manage_classes`: list/create/delete classes; delete requires `confirm="DELETE_CLASS"`.
 - `vw_worksheet`: read/write worksheet cells and ranges.
 - `vw_symbol`: list and insert symbols.
 - `vw_export`: export PDF, DXF, DWG, or image where supported.
@@ -60,14 +65,18 @@ Rules:
 
 | Tool | Category | Wire action | Read-only | Destructive | Idempotent | Open-world | CAD preflight |
 |------|----------|-------------|-----------|-------------|------------|------------|---------------|
+| `vw_batch_create_objects` | `document-write` | `` | `false` | `false` | `false` | `true` | `true` |
 | `vw_bridge_status` | `health` | `ping` | `true` | `false` | `true` | `true` | `false` |
+| `vw_capabilities` | `metadata` | `ping` | `true` | `false` | `true` | `true` | `false` |
 | `vw_create_object` | `document-write` | `create_object` | `false` | `false` | `false` | `true` | `true` |
 | `vw_create_roof` | `document-write` | `create_roof` | `false` | `false` | `false` | `true` | `true` |
 | `vw_create_slab` | `document-write` | `create_slab` | `false` | `false` | `false` | `true` | `true` |
-| `vw_create_schematic_door` | `schematic-floor-plan` | `create_object` | `false` | `false` | `false` | `true` | `true` |
-| `vw_create_schematic_room` | `schematic-floor-plan` | `create_object` | `false` | `false` | `false` | `true` | `true` |
-| `vw_create_schematic_window` | `schematic-floor-plan` | `create_object` | `false` | `false` | `false` | `true` | `true` |
+| `vw_create_schematic_door` | `schematic-floor-plan` | `` | `false` | `false` | `false` | `true` | `true` |
+| `vw_create_schematic_floor_plan` | `schematic-floor-plan` | `` | `false` | `false` | `false` | `true` | `true` |
+| `vw_create_schematic_room` | `schematic-floor-plan` | `` | `false` | `false` | `false` | `true` | `true` |
+| `vw_create_schematic_window` | `schematic-floor-plan` | `` | `false` | `false` | `false` | `true` | `true` |
 | `vw_create_wall` | `document-write` | `create_wall` | `false` | `false` | `false` | `true` | `true` |
+| `vw_drawing_summary` | `document-read` | `` | `true` | `false` | `true` | `true` | `true` |
 | `vw_export` | `file-write` | `export` | `false` | `false` | `false` | `true` | `true` |
 | `vw_find_objects` | `document-read` | `find_objects` | `true` | `false` | `true` | `true` | `true` |
 | `vw_get_document_info` | `document-read` | `get_document_info` | `true` | `false` | `true` | `true` | `true` |
@@ -79,6 +88,7 @@ Rules:
 | `vw_inspect_object` | `document-read` | `inspect_object` | `true` | `false` | `true` | `true` | `true` |
 | `vw_manage_classes` | `mixed-destructive` | `manage_classes` | `false` | `true` | `false` | `true` | `true` |
 | `vw_ping` | `health` | `ping` | `true` | `false` | `true` | `true` | `false` |
+| `vw_plan_schematic_floor_plan` | `schematic-floor-plan` | `` | `true` | `false` | `true` | `false` | `false` |
 | `vw_preflight_for_cad` | `health` | `ping` | `true` | `false` | `true` | `true` | `false` |
 | `vw_run_script` | `trusted-code` | `run_script` | `false` | `true` | `false` | `true` | `true` |
 | `vw_screenshot` | `document-export` | `screenshot` | `false` | `false` | `false` | `true` | `true` |

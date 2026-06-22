@@ -836,11 +836,15 @@ std::string HandleGetDocumentInfo() {
 
     const auto layerNames = CollectLayerNames();
     int totalObjects = 0;
-    gSDK->ForEachObjectN(allObjects + descendIntoAll + descendIntoViewports + descendIntoAuxLists, [&](MCObjectHandle object) {
-        if (object && gSDK->GetObjectTypeN(object) != kTermNode) {
-            ++totalObjects;
+    for (MCObjectHandle layer : CollectLayerHandles()) {
+        for (MCObjectHandle object = gSDK->FirstMemberObj(layer);
+             object && gSDK->GetObjectTypeN(object) != kTermNode;
+             object = gSDK->NextObject(object)) {
+            if (IsUserVisibleObjectType(gSDK->GetObjectTypeN(object))) {
+                ++totalObjects;
+            }
         }
-    });
+    }
 
     std::string json = "{\"filename\":";
     json += JsonString(filename);
@@ -961,14 +965,22 @@ std::string HandleSelection(const Params& params) {
         if (criteria.empty()) {
             throw std::invalid_argument("criteria is required for selection select");
         }
+        const int limit = GetBoundedIntParam(params, "limit", 1000, 1, 1000);
+        int matchedCount = 0;
         int selectedCount = 0;
         gSDK->ForEachObjectInCriteria(TXString(criteria.c_str()), [&](MCObjectHandle object) {
-            if (object) {
+            if (object && IsUserVisibleObjectType(gSDK->GetObjectTypeN(object))) {
+                ++matchedCount;
+            }
+            if (object && IsUserVisibleObjectType(gSDK->GetObjectTypeN(object)) && selectedCount < limit) {
                 gSDK->SelectObject(object, true);
                 ++selectedCount;
             }
         });
-        return "{\"selected\":" + std::to_string(selectedCount) + "}";
+        return "{\"selected\":" + std::to_string(selectedCount)
+            + ",\"matched\":" + std::to_string(matchedCount)
+            + ",\"limit\":" + std::to_string(limit)
+            + ",\"truncated\":" + (matchedCount > selectedCount ? "true" : "false") + "}";
     }
     if (action == "delete") {
         const auto selected = CollectSelectedObjects();
