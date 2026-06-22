@@ -6,7 +6,7 @@ For fresh Windows PC onboarding, follow `AGENT_INSTALL.md` first.
 
 - `server.py` is the host-side stdio MCP server used by Claude Code.
 - `vw_listener.py` runs inside Vectorworks 2024/2025 and listens on TCP `127.0.0.1:9877` by default. Generated launchers normally run it with `VW_MCP_MODE=dialog`, the only pure-Python mode currently safe for real `vs.*` API calls. Background and Windows timer modes are transport-only diagnostics.
-- `native_bridge/` is the long-term native Vectorworks SDK bridge scaffold. It can be wired into an SDK example project for phase-0 ping/stop transport, but native CAD handlers are not implemented and it is not wired into `.mcp.json` by default.
+- `native_bridge/` is the native Vectorworks SDK bridge source. It can be wired into an SDK example project for phase-0 ping/stop transport and phase-1 CAD handlers (`get_document_info`, `get_layers`, `get_objects`, `selection` get/clear/select/delete, and `create_object` for rect/rectangle/box/circle/oval/line/arc). It is not wired into `.mcp.json` by default because it must be built and installed into Vectorworks.
 - `native_bridge/HANDLER_MATRIX.md` is the handler-by-handler implementation map for the native SDK bridge.
 - `native_bridge/mock/mock_bridge.py` is a no-SDK contract harness for host/native protocol compatibility.
 - `native_bridge/src/` contains SDK-agnostic native source scaffold files. They are not a standalone build and intentionally avoid Vectorworks SDK includes.
@@ -76,7 +76,7 @@ If the generated launcher does not set `VW_MCP_MODE=dialog`, rerun
 | Python `foreground` | Legacy diagnostic only; can block the UI | Must reject |
 | Python `background` | Transport diagnostics only | Must reject |
 | Python `win_timer` | Transport diagnostics only | Must reject |
-| Native SDK bridge | Long-term non-modal target | Phase-0 ping/stop only until native CAD handlers exist |
+| Native SDK bridge | Non-modal native target | Phase-1 implemented actions only |
 
 Do not route users to `background` or `win_timer` for real Vectorworks work.
 Host tools whose `TOOL_SAFETY` entry has `requires_cad_preflight: true`
@@ -84,8 +84,10 @@ auto-block when bridge status is missing or reports `cad_api_safe: false` /
 `transport_only: true`; treat that block as authoritative and fix the listener
 before retrying CAD work.
 Do not claim native non-modal CAD support is installed unless a compiled bridge
-has been built from the Vectorworks SDK and phase-1 CAD smoke tests pass in
-Vectorworks.
+has been built from the Vectorworks SDK and phase-0 stop plus phase-1 read/write
+smoke tests pass in Vectorworks. The host must block native actions or variants
+that are not present in the bridge `implemented_actions` surface instead of
+forwarding them as unknown bridge actions.
 Keep the native handler matrix in sync whenever `vw_listener.py` adds, removes,
 or renames a handler.
 
@@ -149,9 +151,11 @@ launch the Visual Studio Build Tools installer.
 If `check-native-bridge-prereqs.ps1 -Json` reports `sdkArchiveCandidates`, pass
 the candidate through `-SdkArchivePath` so setup reuses the downloaded SDK ZIP
 instead of downloading it again.
-After phase 0 passes, load the native bridge again before running the default
-phase-1 read smoke. Do not run the default native smoke against the copied
-transport scaffold; it is only valid after real SDK CAD handlers are wired.
+After phase 0 passes, load the native bridge again, run the default phase-1 read
+smoke, and run `-AllowWriteFixture` in a disposable document before claiming
+native write readiness. Do not run the default native smoke against a
+non-SDK/transport-only build; it is only valid after the SDK-backed project is
+wired and built.
 
 If `.venv` does not exist yet, run:
 

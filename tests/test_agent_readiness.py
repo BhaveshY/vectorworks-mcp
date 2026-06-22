@@ -101,6 +101,7 @@ class AgentReadinessTests(unittest.TestCase):
             "native-runner-spec-validation",
             "native-sdk-archive-reuse",
             "native-phase0-transport",
+            "native-phase1-cad-handlers",
         ):
             self.assertIn(feature, marker["requiredFeatures"])
 
@@ -362,8 +363,10 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("Revit-style connector", native_readme)
         root_readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("not compiled or installed by default", root_readme)
-        self.assertIn("phase-0 transport scaffold", root_readme)
-        self.assertIn("cad_handlers_implemented=false", root_readme)
+        self.assertIn("phase-1 SDK bridge", root_readme)
+        self.assertIn("native-sdk-bridge-phase1", root_readme)
+        self.assertIn("main_context_pump_ready=true", root_readme)
+        self.assertIn("Host preflight blocks broader MCP tools", root_readme)
         self.assertIn("Why this is not as simple as a Revit-style setup yet", root_readme)
         self.assertIn("bridge_kind=python_dialog_agent_session", root_readme)
         self.assertIn("Raw socket reachability is not enough", root_readme)
@@ -1407,7 +1410,8 @@ if ($Json) {
         self.assertIn("nextCommandSpec", agents)
         self.assertIn("safety flags", agents)
         self.assertIn("rerunDoctorAfter", agents)
-        self.assertIn("Do not run the default native smoke against the copied", agents)
+        self.assertIn("Do not run the default native smoke against a", agents)
+        self.assertIn("non-SDK/transport-only build", agents)
 
     def test_native_doctor_exposes_stage_aware_next_command(self):
         doctor = (ROOT / "scripts/doctor-native-bridge.ps1").read_text(encoding="utf-8")
