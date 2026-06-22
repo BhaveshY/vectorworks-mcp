@@ -31,17 +31,24 @@ transport-only or legacy listeners.
 | Python `foreground` listener | legacy diagnostic only | no, guarded | blocks UI |
 | Python `background` listener | diagnostic only | no, guarded | no reliable scheduling |
 | Python `win_timer` listener | diagnostic only | no, guarded | transport ping only |
-| Native SDK bridge | phase-0 transport scaffold | no, guarded | non-modal ping/stop only |
+| Native SDK bridge | phase-1 SDK bridge | yes, guarded to implemented actions | non-modal native plug-in |
 
 The proper long-term fix for non-modal, always-on control is a native
-Vectorworks SDK plug-in bridge. The current SDK bridge scaffold in
-`native_bridge/` can be copied into an SDK examples worktree, wired into the
-module lifecycle, built, installed, and smoke-tested for phase-0 `ping`/`stop`
-transport. It is not compiled or installed by default by the host MCP setup. It
-intentionally reports `cad_api_safe=false`,
-`transport_only=true`, and `cad_handlers_implemented=false` until phase-1 native
-CAD handlers are implemented. Use the generated dialog launcher for real CAD
-work.
+Vectorworks SDK plug-in bridge. The SDK bridge in `native_bridge/` can be copied
+into an SDK examples worktree, wired into the module lifecycle, built,
+installed, and smoke-tested. It is not compiled or installed by default by the
+host MCP setup, because fresh machines still need the official Vectorworks SDK
+and Visual Studio C++ build tools. When the compiled phase-1 bridge is loaded it
+reports `native-sdk-bridge-phase1`, `cad_api_safe=true`, `transport_only=false`,
+and `main_context_pump_ready=true`.
+
+Native phase 1 currently implements `get_document_info`, `get_layers`,
+`get_objects`, `selection` (`get`, `clear`, `select`, `delete`), and
+`create_object` for `rect`, `rectangle`, `box`, `circle`, `oval`, `line`, and
+`arc`. Host preflight blocks broader MCP tools or unsupported variants before
+dispatching them to the native bridge. Use the generated Python dialog launcher
+when you need broader legacy tool coverage that has not been ported to native
+yet.
 
 Why this is not as simple as a Revit-style setup yet:
 
@@ -66,7 +73,7 @@ Native bridge planning aids:
 - `native_bridge/HANDLER_MATRIX.md` maps every current listener action to native
   phase, safety, and smoke-test expectations.
 - `native_bridge/mock/mock_bridge.py` is a no-SDK protocol harness proving the
-  host MCP server and preflight logic can talk to a future native bridge.
+  host MCP server and preflight logic can talk to the native bridge contract.
 - `scripts/prepare-native-bridge-source.ps1` prepares an ignored SDK-backed
   source worktree from Vectorworks' official SDK examples.
 - `scripts/copy-native-bridge-scaffold.ps1` copies the reviewed no-SDK native
@@ -78,8 +85,9 @@ Native bridge planning aids:
 - `scripts/build-native-bridge.ps1` builds that worktree after native
   prerequisites are present.
 - `scripts/smoke-native-bridge.ps1` verifies a loaded native bridge with
-  repeated raw-protocol phase-0 ping/stop checks. Later native CAD phases remain
-  gated until their handlers are implemented.
+  repeated raw-protocol phase-1 read checks by default, optional
+  `-AllowWriteFixture` create/select/delete cleanup, and `-Phase 0 -Stop` port
+  release checks.
 
 Native bridge prerequisite check:
 
@@ -148,10 +156,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Phas
 The official SDK example scaffold currently emits `ObjectExample.vlb`; the
 doctor accepts the built artifact path explicitly and installs that candidate
 when requested. After the phase-0 stop smoke passes, load the native bridge
-plug-in again only when testing the still-gated phase-1 read path. In a
-disposable test document, add `-AllowWriteFixture` after native write handlers
-exist to prove create/select/delete cleanup; the delete runs only after the
-fixture identity and exact selection are verified.
+plug-in again and run the default phase-1 read smoke. In a disposable test
+document, add `-AllowWriteFixture` to prove create/select/delete cleanup; the
+delete runs only after the fixture identity and exact selection are verified.
 
 The Python listener also applies conservative resource guards for long agent
 sessions: `VW_MCP_MAX_CLIENTS`, `VW_MCP_CLIENT_IDLE_SECONDS`,

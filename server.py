@@ -61,6 +61,21 @@ NATIVE_PHASE_ONE_REQUIRED_ACTIONS = {
     "selection",
     "create_object",
 }
+NATIVE_PHASE_ONE_CREATE_OBJECT_TYPES = {
+    "arc",
+    "box",
+    "circle",
+    "line",
+    "oval",
+    "rect",
+    "rectangle",
+}
+NATIVE_PHASE_ONE_SELECTION_ACTIONS = {
+    "clear",
+    "delete",
+    "get",
+    "select",
+}
 
 
 class ConfigError(ValueError):
@@ -831,7 +846,38 @@ def _native_readiness_errors(status: dict[str, Any]) -> list[str]:
     return errors
 
 
-def _evaluate_cad_preflight_status(status: Any, blocked_action: Optional[str] = None) -> dict[str, Any]:
+def _native_action_readiness_errors(
+    status: dict[str, Any],
+    blocked_action: Optional[str],
+    blocked_params: Optional[dict[str, Any]] = None,
+) -> list[str]:
+    if status.get("native_bridge") is not True or not blocked_action:
+        return []
+
+    errors: list[str] = []
+    implemented_actions = status.get("implemented_actions")
+    if isinstance(implemented_actions, list) and all(isinstance(action, str) for action in implemented_actions):
+        if blocked_action not in set(implemented_actions):
+            errors.append("action is not implemented by native bridge: {0}".format(blocked_action))
+
+    params = blocked_params or {}
+    if blocked_action == "create_object":
+        object_type = str(params.get("object_type", "") or "").strip().lower()
+        if object_type and object_type not in NATIVE_PHASE_ONE_CREATE_OBJECT_TYPES:
+            errors.append("create_object object_type is not implemented by native bridge: {0}".format(object_type))
+    elif blocked_action == "selection":
+        selection_action = str(params.get("action", "") or "").strip().lower()
+        if selection_action and selection_action not in NATIVE_PHASE_ONE_SELECTION_ACTIONS:
+            errors.append("selection action is not implemented by native bridge: {0}".format(selection_action))
+
+    return errors
+
+
+def _evaluate_cad_preflight_status(
+    status: Any,
+    blocked_action: Optional[str] = None,
+    blocked_params: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
     if not isinstance(status, dict):
         return _with_block_context(
             {
@@ -879,6 +925,29 @@ def _evaluate_cad_preflight_status(status: Any, blocked_action: Optional[str] = 
                 "reason": "native_bridge_not_phase1_ready",
                 "next_action": "Do not call CAD handlers. Run scripts\\smoke-native-bridge.ps1 -Json and fix native bridge capabilities.",
                 "native_readiness_errors": native_errors,
+                "raw_status": status,
+            },
+            blocked_action,
+        )
+
+    native_action_errors = _native_action_readiness_errors(status, blocked_action, blocked_params)
+    if native_action_errors:
+        return _with_block_context(
+            {
+                "ok": False,
+                "cad_api_safe": False,
+                "bridge_kind": status.get("bridge_kind", "unknown"),
+                "dispatch_mode": status.get("dispatch_mode", "unknown"),
+                "transport_only": bool(status.get("transport_only")),
+                "native_bridge": True,
+                "handlers": status.get("handlers"),
+                "version": status.get("version"),
+                "main_context_pump": status.get("main_context_pump"),
+                "main_context_pump_ready": status.get("main_context_pump_ready"),
+                "implemented_actions": status.get("implemented_actions"),
+                "reason": "native_bridge_action_not_implemented",
+                "next_action": "Do not dispatch this CAD action to the native bridge. Use an implemented action, switch to the Python dialog listener for broader legacy coverage, or implement the native handler first.",
+                "native_readiness_errors": native_action_errors,
                 "raw_status": status,
             },
             blocked_action,
@@ -948,9 +1017,13 @@ def _cached_cad_safe_status() -> Optional[dict[str, Any]]:
     return None
 
 
-def _cad_preflight_block(action: str) -> Optional[str]:
-    if _cached_cad_safe_status() is not None:
-        return None
+def _cad_preflight_block(action: str, params: Optional[dict[str, Any]] = None) -> Optional[str]:
+    cached_status = _cached_cad_safe_status()
+    if cached_status is not None:
+        payload = _evaluate_cad_preflight_status(cached_status, blocked_action=action, blocked_params=params)
+        if payload["ok"]:
+            return None
+        return json.dumps(payload, indent=2, sort_keys=True)
 
     response = _request_once_health("ping", None)
     if response.get("success") is not True:
@@ -958,7 +1031,7 @@ def _cad_preflight_block(action: str) -> Optional[str]:
         return json.dumps(payload, indent=2, sort_keys=True)
 
     status = response.get("result")
-    payload = _evaluate_cad_preflight_status(status, blocked_action=action)
+    payload = _evaluate_cad_preflight_status(status, blocked_action=action, blocked_params=params)
     if payload["ok"] and isinstance(status, dict):
         _remember_cad_safe_status(status)
         return None
@@ -1038,7 +1111,7 @@ def _send(action: str, params: Optional[dict[str, Any]] = None, require_cad_safe
             try:
                 if require_cad_safe:
                     try:
-                        blocked = _cad_preflight_block(action)
+                        blocked = _cad_preflight_block(action, params)
                     except ProtocolError as exc:
                         _close()
                         return f"Protocol error: {exc}. Restart the Vectorworks listener if this persists."

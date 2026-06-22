@@ -12,7 +12,8 @@
     "native-doctor-next-runner",
     "native-runner-spec-validation",
     "native-sdk-archive-reuse",
-    "native-phase0-transport"
+    "native-phase0-transport",
+    "native-phase1-cad-handlers"
   ],
   "description": "Companion connector contract marker used by the standalone Claude Code plugin before accepting this checkout."
 }

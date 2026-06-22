@@ -281,6 +281,7 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("native-runner-spec-validation", contract)
         self.assertIn("native-sdk-archive-reuse", contract)
         self.assertIn("native-phase0-transport", contract)
+        self.assertIn("native-phase1-cad-handlers", contract)
         self.assertIn("wire-native-project", contract)
         self.assertIn("nextCommandReason", contract)
         self.assertIn("nextCommandSpec", contract)

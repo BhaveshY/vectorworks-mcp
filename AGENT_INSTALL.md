@@ -96,7 +96,10 @@ py -3 .\plugins\vectorworks\bin\vectorworksctl native-next --repo-path $PWD --js
 ```
 
 After a native artifact is built, install only through the guarded doctor/native
-runner, then restart/load Vectorworks and run phase-0 smoke before CAD work.
+runner, then restart/load Vectorworks, run phase-0 stop/port-release smoke, load
+the bridge again, run the default phase-1 read smoke, and run
+`-AllowWriteFixture` in a disposable document before claiming native write
+readiness.
 
 ## Result Fields
 
@@ -114,5 +117,6 @@ Agents should parse:
 
 Treat `ok: true` as "the control command ran and returned a plan", not as full
 CAD readiness. Do not call CAD tools unless `cad_ready` is true or a
-smoke-tested native bridge reports `cad_api_safe: true` and
-`transport_only: false`.
+smoke-tested native bridge reports `cad_api_safe: true`, `transport_only:
+false`, `main_context_pump_ready: true`, and supports the requested
+`implemented_actions` entry.

@@ -132,6 +132,7 @@ class ConcurrentFakeListener(FakeListener):
 
 def _configure_server(port, max_frame_bytes=1024 * 1024):
     server._close()
+    server._clear_cad_safe_cache()
     server.HOST = "127.0.0.1"
     server.PORT = port
     server.TIMEOUT = 1
@@ -405,6 +406,110 @@ class ServerProtocolTests(unittest.TestCase):
             result = server.vw_get_layers()
 
         self.assertEqual(json.loads(result), [{"name": "Layer 1"}])
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_layers"])
+
+    def test_send_tool_blocks_unimplemented_native_action_before_dispatch(self):
+        def handler(request):
+            self.assertEqual(request["action"], "ping")
+            return {
+                "id": request["id"],
+                "success": True,
+                "result": {
+                    "pong": True,
+                    "cad_api_safe": True,
+                    "transport_only": False,
+                    "native_bridge": True,
+                    "native_phase": 1,
+                    "implemented_actions": sorted(server.NATIVE_PHASE_ONE_REQUIRED_ACTIONS),
+                    "bridge_kind": "native_sdk_bridge_phase1",
+                    "dispatch_mode": "native_sdk",
+                    "handlers": 7,
+                    "version": "native-sdk-bridge-phase1",
+                    "main_context_pump": "win32_ui_timer",
+                    "main_context_pump_ready": True,
+                },
+            }
+
+        with FakeListener(handler, max_requests=1) as listener:
+            _configure_server(listener.port)
+            result = server.vw_find_objects("ALL", limit=1)
+
+        blocked = json.loads(result)
+        self.assertFalse(blocked["ok"])
+        self.assertTrue(blocked["blocked"])
+        self.assertEqual(blocked["blocked_action"], "find_objects")
+        self.assertEqual(blocked["reason"], "native_bridge_action_not_implemented")
+        self.assertIn("action is not implemented by native bridge: find_objects", blocked["native_readiness_errors"])
+        self.assertEqual([request["action"] for request in listener.requests], ["ping"])
+
+    def test_send_tool_blocks_unimplemented_native_create_variant_before_dispatch(self):
+        def handler(request):
+            self.assertEqual(request["action"], "ping")
+            return {
+                "id": request["id"],
+                "success": True,
+                "result": {
+                    "pong": True,
+                    "cad_api_safe": True,
+                    "transport_only": False,
+                    "native_bridge": True,
+                    "native_phase": 1,
+                    "implemented_actions": sorted(server.NATIVE_PHASE_ONE_REQUIRED_ACTIONS),
+                    "bridge_kind": "native_sdk_bridge_phase1",
+                    "dispatch_mode": "native_sdk",
+                    "handlers": 7,
+                    "version": "native-sdk-bridge-phase1",
+                    "main_context_pump": "win32_ui_timer",
+                    "main_context_pump_ready": True,
+                },
+            }
+
+        with FakeListener(handler, max_requests=1) as listener:
+            _configure_server(listener.port)
+            result = server.vw_create_object("polygon", points=[[0, 0], [10, 0], [10, 10]])
+
+        blocked = json.loads(result)
+        self.assertFalse(blocked["ok"])
+        self.assertEqual(blocked["reason"], "native_bridge_action_not_implemented")
+        self.assertIn("create_object object_type is not implemented by native bridge: polygon", blocked["native_readiness_errors"])
+        self.assertEqual([request["action"] for request in listener.requests], ["ping"])
+
+    def test_send_tool_blocks_unimplemented_native_selection_variant_from_cache(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {
+                        "pong": True,
+                        "cad_api_safe": True,
+                        "transport_only": False,
+                        "native_bridge": True,
+                        "native_phase": 1,
+                        "implemented_actions": sorted(server.NATIVE_PHASE_ONE_REQUIRED_ACTIONS),
+                        "bridge_kind": "native_sdk_bridge_phase1",
+                        "dispatch_mode": "native_sdk",
+                        "handlers": 7,
+                        "version": "native-sdk-bridge-phase1",
+                        "main_context_pump": "win32_ui_timer",
+                        "main_context_pump_ready": True,
+                    },
+                }
+            if request["action"] == "get_layers":
+                return {"id": request["id"], "success": True, "result": [{"name": "Layer 1"}]}
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=2) as listener:
+            _configure_server(listener.port)
+            layers = server.vw_get_layers()
+            result = server.vw_selection("move", "1,1")
+
+        blocked = json.loads(result)
+        self.assertEqual(json.loads(layers), [{"name": "Layer 1"}])
+        self.assertFalse(blocked["ok"])
+        self.assertEqual(blocked["blocked_action"], "selection")
+        self.assertEqual(blocked["reason"], "native_bridge_action_not_implemented")
+        self.assertIn("selection action is not implemented by native bridge: move", blocked["native_readiness_errors"])
         self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_layers"])
 
     def test_send_tool_reuses_recent_safe_preflight(self):
