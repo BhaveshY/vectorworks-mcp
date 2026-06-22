@@ -34,6 +34,7 @@ $HeaderFiles = @(
 $RequiredLinkDependencies = @(
     "Ws2_32.lib"
 )
+$LifecycleHookMarker = "Vectorworks MCP native bridge lifecycle hook"
 
 function Get-FirstProjectFile {
     param([string]$Root)
@@ -306,6 +307,101 @@ function Ensure-LanguageStandard {
     return @($Added)
 }
 
+function Get-ModuleMainLifecycleHookStatus {
+    param([string]$Path)
+
+    $Status = [ordered]@{
+        path = $Path
+        exists = $false
+        hooked = $false
+        missing = @()
+        error = ""
+    }
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        $Status.missing = @("Source\ModuleMain.cpp")
+        return [pscustomobject]$Status
+    }
+
+    $Status.exists = $true
+    try {
+        $Text = Get-Content -Raw -LiteralPath $Path
+        $RequiredTokens = @(
+            "VectorworksMCP::OnPluginLoadStartTransport",
+            "VectorworksMCP::OnPluginUnloadStopTransport",
+            "VectorworksMCP::OnVectorworksMainPluginEvent",
+            "kPluginModuleInit",
+            "kPluginModuleDeinit",
+            $LifecycleHookMarker
+        )
+        $Missing = @()
+        foreach ($Token in $RequiredTokens) {
+            if (-not $Text.Contains($Token)) {
+                $Missing += $Token
+            }
+        }
+        $Status.missing = @($Missing)
+        $Status.hooked = @($Missing).Count -eq 0
+    } catch {
+        $Status.error = $_.Exception.Message
+        $Status.missing = @("could not read Source\ModuleMain.cpp")
+    }
+
+    return [pscustomobject]$Status
+}
+
+function Ensure-ModuleMainLifecycleHook {
+    param([string]$Path)
+
+    $Before = Get-ModuleMainLifecycleHookStatus -Path $Path
+    if (-not $Before.exists -or $Before.hooked) {
+        return [pscustomobject]@{
+            changed = $false
+            status = $Before
+        }
+    }
+
+    $Text = Get-Content -Raw -LiteralPath $Path
+    $Declarations = @"
+namespace VectorworksMCP {
+void OnPluginLoadStartTransport();
+void OnPluginUnloadStopTransport();
+void OnVectorworksMainPluginEvent();
+}
+
+"@
+    if (-not $Text.Contains("namespace VectorworksMCP")) {
+        $IncludeMarker = '#include "Extensions/ExtTool.h"'
+        if ($Text.Contains($IncludeMarker)) {
+            $Text = $Text.Replace($IncludeMarker, "$IncludeMarker`r`n`r`n$Declarations")
+        } else {
+            $Text = "$Declarations$Text"
+        }
+    }
+
+    if (-not $Text.Contains($LifecycleHookMarker)) {
+        $HookBlock = @"
+::GS_InitializeVCOM( cbp );
+
+    // $LifecycleHookMarker.
+    if (action == kPluginModuleInit) {
+        VectorworksMCP::OnPluginLoadStartTransport();
+    } else if (action == kPluginModuleDeinit) {
+        VectorworksMCP::OnPluginUnloadStopTransport();
+    } else {
+        VectorworksMCP::OnVectorworksMainPluginEvent();
+    }
+
+"@
+        $Text = [regex]::Replace($Text, "::GS_InitializeVCOM\(\s*cbp\s*\);\s*", $HookBlock, 1)
+    }
+
+    Set-Content -LiteralPath $Path -Value $Text -Encoding UTF8
+    return [pscustomobject]@{
+        changed = $true
+        status = (Get-ModuleMainLifecycleHookStatus -Path $Path)
+    }
+}
+
 function New-FiltersDocument {
     $Document = [xml]'<?xml version="1.0" encoding="utf-8"?><Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003"></Project>'
     return $Document
@@ -393,6 +489,7 @@ if (-not $ProjectPath -or -not (Test-Path -LiteralPath $ProjectPath -PathType Le
 }
 $ProjectPath = (Resolve-Path -LiteralPath $ProjectPath).Path
 $ProjectDirectory = Split-Path -Parent $ProjectPath
+$ModuleMainPath = Join-Path $ProjectDirectory "Source\ModuleMain.cpp"
 
 if (-not (Test-Path -LiteralPath $SourceDir -PathType Container)) {
     throw "Native bridge scaffold source folder was not found at $SourceDir. Run scripts\copy-native-bridge-scaffold.ps1 first."
@@ -430,11 +527,14 @@ foreach ($ItemName in ($ExpectedItems.Keys | Sort-Object)) {
 }
 $MissingLinkDependenciesBefore = @(Get-ProjectLinkDependencyEntries -Document $ProjectDocument -Dependencies $RequiredLinkDependencies)
 $MissingLanguageStandardBefore = @(Get-MissingLanguageStandardEntries -Document $ProjectDocument -Standard "stdcpp17")
+$ModuleLifecycleHookBefore = Get-ModuleMainLifecycleHookStatus -Path $ModuleMainPath
 
 $AddedProjectItems = @()
 $AddedLinkDependencies = @()
 $AddedLanguageStandards = @()
 $ProjectChanged = $false
+$ModuleLifecycleHookChanged = $false
+$ModuleLifecycleHookAfter = $ModuleLifecycleHookBefore
 if (-not $CheckOnly) {
     $AddedProjectItems = @(Ensure-ProjectItems -Document $ProjectDocument -ExpectedItems $ExpectedItems)
     $AddedLinkDependencies = @(Ensure-ProjectLinkDependencies -Document $ProjectDocument -Dependencies $RequiredLinkDependencies)
@@ -442,6 +542,11 @@ if (-not $CheckOnly) {
     $ProjectChanged = (@($AddedProjectItems).Count -gt 0) -or (@($AddedLinkDependencies).Count -gt 0) -or (@($AddedLanguageStandards).Count -gt 0)
     if ($ProjectChanged -and $PSCmdlet.ShouldProcess($ProjectPath, "Wire native bridge source files into SDK project")) {
         $ProjectDocument.Save($ProjectPath)
+    }
+    if ($PSCmdlet.ShouldProcess($ModuleMainPath, "Wire native bridge lifecycle hooks into SDK module entry point")) {
+        $ModuleHookResult = Ensure-ModuleMainLifecycleHook -Path $ModuleMainPath
+        $ModuleLifecycleHookChanged = [bool]$ModuleHookResult.changed
+        $ModuleLifecycleHookAfter = $ModuleHookResult.status
     }
 }
 
@@ -480,9 +585,15 @@ $Report = [pscustomobject]@{
     missingProjectItems = @($MissingBefore)
     missingLinkDependencies = @($MissingLinkDependenciesBefore)
     missingLanguageStandards = @($MissingLanguageStandardBefore)
+    moduleMainPath = $ModuleMainPath
+    moduleLifecycleHookWired = [bool]$ModuleLifecycleHookBefore.hooked
+    moduleLifecycleHookWiredAfterRun = [bool]$ModuleLifecycleHookAfter.hooked
+    missingModuleLifecycleHooks = @($ModuleLifecycleHookBefore.missing)
+    moduleLifecycleHookError = $ModuleLifecycleHookBefore.error
+    moduleLifecycleHookChanged = [bool]$ModuleLifecycleHookChanged
     linkDependenciesWired = @($MissingLinkDependenciesBefore).Count -eq 0
     languageStandardWired = @($MissingLanguageStandardBefore).Count -eq 0
-    projectWired = (@($MissingBefore).Count -eq 0) -and (@($MissingLinkDependenciesBefore).Count -eq 0) -and (@($MissingLanguageStandardBefore).Count -eq 0)
+    projectWired = (@($MissingBefore).Count -eq 0) -and (@($MissingLinkDependenciesBefore).Count -eq 0) -and (@($MissingLanguageStandardBefore).Count -eq 0) -and [bool]$ModuleLifecycleHookBefore.hooked
     checkOnly = [bool]$CheckOnly
     projectChanged = [bool]$ProjectChanged
     filtersChanged = [bool]$FiltersChanged
@@ -517,11 +628,18 @@ if ($Json) {
             Write-Host "- $Missing"
         }
     }
+    if (-not $ModuleLifecycleHookBefore.hooked) {
+        Write-Host "Missing native bridge lifecycle hook in Source\ModuleMain.cpp:"
+        foreach ($Missing in $ModuleLifecycleHookBefore.missing) {
+            Write-Host "- $Missing"
+        }
+    }
     if (-not $CheckOnly) {
         Write-Host "Added project items: $(@($AddedProjectItems).Count)"
         Write-Host "Added linker dependencies: $(@($AddedLinkDependencies).Count)"
         Write-Host "Added C++ language standard settings: $(@($AddedLanguageStandards).Count)"
         Write-Host "Added filter items: $(@($AddedFilterItems).Count)"
+        Write-Host "Native bridge lifecycle hook changed: $ModuleLifecycleHookChanged"
     }
     Write-Host ""
     Write-Host "Next: build with scripts\build-native-bridge.ps1, then install with scripts\doctor-native-bridge.ps1 after a successful artifact build."

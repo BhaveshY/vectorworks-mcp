@@ -259,9 +259,12 @@ def _response_bytes(response):
         return json.dumps(safe, ensure_ascii=False, allow_nan=False).encode("utf-8")
 
 def _set_rfield(h, rec, field, val):
-    """Safely try SetRField, silently skip on failure."""
-    try: vs.SetRField(h, rec, field, str(val))
-    except Exception: pass
+    """Try SetRField and return an error string on failure."""
+    try:
+        vs.SetRField(h, rec, field, str(val))
+        return ""
+    except Exception as exc:
+        return "{rec}.{field}: {err}".format(rec=rec, field=field, err=exc)
 
 def _rgb_to_idx(r, g, b):
     """Convert RGB (0-65535) to VW color index."""
@@ -270,6 +273,22 @@ def _rgb_to_idx(r, g, b):
     if hasattr(vs, 'RGBToColorIndex'):
         return vs.RGBToColorIndex(r, g, b)
     return 0
+
+def _set_object_rgb_color(h, prop, value):
+    r, g, b = [int(x.strip()) for x in value.split(",")]
+    for component_name, component in (("r", r), ("g", g), ("b", b)):
+        if component < 0 or component > 65535:
+            raise ValueError("{0} color component must be in 0..65535".format(component_name))
+    if prop == "fillColor":
+        if hasattr(vs, "SetFillFore"):
+            vs.SetFillFore(h, (r, g, b))
+        else:
+            vs.SetFillForeColor(h, _rgb_to_idx(r, g, b))
+    else:
+        if hasattr(vs, "SetPenFore"):
+            vs.SetPenFore(h, (r, g, b))
+        else:
+            vs.SetPenForeColor(h, _rgb_to_idx(r, g, b))
 
 # === HANDLERS ===
 
@@ -344,9 +363,7 @@ def handle_set_property(p):
         if prop == "name": vs.SetName(h, val)
         elif prop == "class": vs.SetClass(h, val)
         elif prop in ("fillColor", "penColor"):
-            r, g, b = [int(x.strip()) for x in val.split(",")]
-            idx = _rgb_to_idx(r, g, b)
-            (vs.SetFillForeColor if prop == "fillColor" else vs.SetPenForeColor)(h, idx)
+            _set_object_rgb_color(h, prop, val)
         elif prop == "lineWeight": vs.SetLW(h, int(val))
         elif prop == "opacity": vs.SetOpacity(h, int(val))
         else: return _err(f"Unknown property: {prop}. Use: name, class, fillColor, penColor, lineWeight, opacity")
@@ -392,20 +409,26 @@ def handle_worksheet(p):
         ws_h = vs.GetObject(ws_name)
         if ws_h is None: return _err(f"Worksheet '{ws_name}' not found")
         if action == "read":
-            return _ok({"row": row, "col": col, "value": str(vs.GetWSCellValue(ws_h, row, col))})
+            if hasattr(vs, "GetWSCellString"):
+                value = vs.GetWSCellString(ws_h, row, col)
+            else:
+                value = vs.GetWSCellValue(ws_h, row, col)
+            return _ok({"row": row, "col": col, "value": str(value)})
         elif action == "read_range":
             data = []
             for r in range(row, row + num_rows):
                 rd = []
                 for c in range(col, col + 20):
-                    v = vs.GetWSCellValue(ws_h, r, c)
+                    v = vs.GetWSCellString(ws_h, r, c) if hasattr(vs, "GetWSCellString") else vs.GetWSCellValue(ws_h, r, c)
                     if v is None or str(v).strip() == "": break
                     rd.append(str(v))
                 if not rd: break
                 data.append(rd)
             return _ok(data)
         elif action == "write":
-            vs.SetWSCellValue(ws_h, row, col, p.get("value", "")); vs.ReDrawAll()
+            if not hasattr(vs, "SetWSCellFormula"):
+                return _err("Vectorworks API SetWSCellFormula is not available; cannot write worksheet cells safely")
+            vs.SetWSCellFormula(ws_h, row, col, row, col, p.get("value", "")); vs.ReDrawAll()
             return _ok(f"Set cell ({row},{col})")
         else: return _err("Unknown action. Use: list, read, read_range, write")
     except Exception: return _err(traceback.format_exc())
@@ -433,7 +456,14 @@ def handle_export(p):
     if fmt not in menu: return _err(f"Unknown format: {fmt}. Use: pdf, dxf, dwg, image")
     try:
         vs.DoMenuTextByName(menu[fmt], 0)
-        return _ok(f"{fmt.upper()} export dialog opened. Save to: {fp}")
+        return _ok({
+            "dialog_opened": True,
+            "format": fmt,
+            "requested_path": fp,
+            "saved": False,
+            "requires_user_save": True,
+            "message": "{fmt} export dialog opened; choose the requested path in Vectorworks to save.".format(fmt=fmt.upper()),
+        })
     except Exception: return _err(traceback.format_exc())
 
 def handle_import_file(p):
@@ -443,11 +473,14 @@ def handle_import_file(p):
     if fmt == "auto": fmt = os.path.splitext(fp)[1].lstrip(".").lower()
     try:
         if fmt in ("dxf", "dwg"):
-            vs.ImportDXFDWGFile(fp, False); vs.ReDrawAll()
-            return _ok(f"Imported {fmt.upper()}: {fp}")
+            result = vs.ImportDXFDWGFile(fp); vs.ReDrawAll()
+            return _ok({"format": fmt, "file_path": fp, "import_result": result})
         elif fmt in ("png", "jpg", "jpeg", "tif", "tiff", "bmp"):
-            vs.ImportImageFile(fp, (0, 0)); vs.ReDrawAll()
-            return _ok(f"Imported image: {fp}, handle: {_reg(vs.LNewObj())}")
+            h = vs.ImportImageFile(fp, (0, 0))
+            if h is None and hasattr(vs, "LNewObj"):
+                h = vs.LNewObj()
+            vs.ReDrawAll()
+            return _ok(f"Imported image: {fp}, handle: {_reg(h)}")
         else: return _err(f"Unsupported format: {fmt}. Use: dxf, dwg, png, jpg")
     except Exception: return _err(traceback.format_exc())
 
@@ -472,9 +505,14 @@ def handle_screenshot(p):
     except OSError:
         pass
     try:
-        if hasattr(vs, 'ExportImageFile'): vs.ExportImageFile(fp)
-        else: vs.DoMenuTextByName("Export Image File", 0)
-        return _ok(fp)
+        vs.DoMenuTextByName("Export Image File", 0)
+        return _ok({
+            "dialog_opened": True,
+            "requested_path": fp,
+            "saved": False,
+            "requires_user_save": True,
+            "message": "Export Image File dialog opened; choose the requested path in Vectorworks to save.",
+        })
     except Exception: return _err(traceback.format_exc())
 
 
@@ -529,34 +567,55 @@ def handle_create_wall(p):
         vs.Wall(sx, sy, ex, ey)
         h = vs.LNewObj()
         if h is None: return _err("Failed to create wall")
-        _set_rfield(h, 'Wall', 'Height', height)
-        _set_rfield(h, 'Wall', 'Thickness', thickness)
-        _set_rfield(h, 'Wall', 'Width', thickness)
-        if p.get("style_name"): _set_rfield(h, 'Wall', 'Style', p["style_name"])
+        field_errors = [
+            err for err in (
+                _set_rfield(h, 'Wall', 'Height', height),
+                _set_rfield(h, 'Wall', 'Thickness', thickness),
+                _set_rfield(h, 'Wall', 'Width', thickness),
+                _set_rfield(h, 'Wall', 'Style', p["style_name"]) if p.get("style_name") else "",
+            ) if err
+        ]
         vs.ReDrawAll()
-        return _ok(f"Created wall ({sx},{sy})->({ex},{ey}), h={height}, t={thickness}, handle: {_reg(h)}")
+        result = {"message": f"Created wall ({sx},{sy})->({ex},{ey}), h={height}, t={thickness}", "handle": _reg(h)}
+        if field_errors:
+            result["field_warnings"] = field_errors
+        return _ok(result)
     except Exception: return _err(traceback.format_exc())
 
 def handle_insert_door(p):
     try:
         h = vs.CreateCustomObjectN('Door', (p.get("x", 0), p.get("y", 0)), p.get("rotation", 0), False)
         if h is None: return _err("Failed to create Door. Is the plugin available?")
-        _set_rfield(h, 'Door', 'Width', p.get("width", 900))
-        _set_rfield(h, 'Door', 'Height', p.get("height", 2100))
+        field_errors = [
+            err for err in (
+                _set_rfield(h, 'Door', 'Width', p.get("width", 900)),
+                _set_rfield(h, 'Door', 'Height', p.get("height", 2100)),
+            ) if err
+        ]
         vs.ReDrawAll()
-        return _ok(f"Inserted door {p.get('width',900)}x{p.get('height',2100)}, handle: {_reg(h)}")
+        result = {"message": f"Inserted door {p.get('width',900)}x{p.get('height',2100)}", "handle": _reg(h)}
+        if field_errors:
+            result["field_warnings"] = field_errors
+        return _ok(result)
     except Exception: return _err(traceback.format_exc())
 
 def handle_insert_window(p):
     try:
         h = vs.CreateCustomObjectN('Window', (p.get("x", 0), p.get("y", 0)), p.get("rotation", 0), False)
         if h is None: return _err("Failed to create Window. Is the plugin available?")
-        _set_rfield(h, 'Window', 'Width', p.get("width", 1200))
-        _set_rfield(h, 'Window', 'Height', p.get("height", 1500))
-        _set_rfield(h, 'Window', 'Elevation In Wall', p.get("sill_height", 900))
-        _set_rfield(h, 'Window', 'SillHeight', p.get("sill_height", 900))
+        field_errors = [
+            err for err in (
+                _set_rfield(h, 'Window', 'Width', p.get("width", 1200)),
+                _set_rfield(h, 'Window', 'Height', p.get("height", 1500)),
+                _set_rfield(h, 'Window', 'Elevation In Wall', p.get("sill_height", 900)),
+                _set_rfield(h, 'Window', 'SillHeight', p.get("sill_height", 900)),
+            ) if err
+        ]
         vs.ReDrawAll()
-        return _ok(f"Inserted window, handle: {_reg(h)}")
+        result = {"message": "Inserted window", "handle": _reg(h)}
+        if field_errors:
+            result["field_warnings"] = field_errors
+        return _ok(result)
     except Exception: return _err(traceback.format_exc())
 
 def handle_create_slab(p):
@@ -584,10 +643,16 @@ def handle_create_roof(p):
         cx, cy = sum(x[0] for x in pts)/len(pts), sum(x[1] for x in pts)/len(pts)
         h = vs.CreateCustomObjectN('Roof', (cx, cy), 0, False)
         if h is not None:
+            field_errors = []
             for f, v in [('Slope', slope), ('Bearing Height', bh), ('Overhang', oh), ('Thickness', thick)]:
-                _set_rfield(h, 'Roof', f, v)
+                err = _set_rfield(h, 'Roof', f, v)
+                if err:
+                    field_errors.append(err)
             vs.ReDrawAll()
-            return _ok(f"Created roof, slope={slope}deg, handle: {_reg(h)}")
+            result = {"message": f"Created roof, slope={slope}deg", "handle": _reg(h)}
+            if field_errors:
+                result["field_warnings"] = field_errors
+            return _ok(result)
         # Fallback: flat extrusion
         vs.BeginXtrd(bh, bh + thick)
         vs.ClosePoly(); vs.BeginPoly()

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vectorworks-mcp"
+version = "0.3.0"
+description = "MCP server and Vectorworks listener bridge for Vectorworks 2024/2025."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "fastmcp>=3.3.1,<4",
+  "pydantic>=2,<3",
+]
+
+[project.scripts]
+vectorworks-mcp = "server:main"
+
+[tool.setuptools]
+py-modules = ["server", "vw_listener"]
