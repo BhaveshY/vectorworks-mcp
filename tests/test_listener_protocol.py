@@ -259,6 +259,88 @@ class ListenerProtocolTests(unittest.TestCase):
         self.assertTrue(ping["result"]["cad_api_safe"])
         self.assertFalse(ping["result"]["transport_only"])
 
+    def test_runtime_handlers_use_documented_vectorworks_api_shapes(self):
+        listener, _alerts = self.load_listener()
+
+        class FakeVS:
+            def __init__(self):
+                self.calls = []
+
+            def GetObject(self, name):
+                self.calls.append(("GetObject", name))
+                return "worksheet-handle" if name == "Schedule" else None
+
+            def GetWSCellString(self, worksheet, row, col):
+                self.calls.append(("GetWSCellString", worksheet, row, col))
+                return "cell text"
+
+            def SetWSCellFormula(self, worksheet, top, left, bottom, right, formula):
+                self.calls.append(("SetWSCellFormula", worksheet, top, left, bottom, right, formula))
+
+            def ImportDXFDWGFile(self, file_path):
+                self.calls.append(("ImportDXFDWGFile", file_path))
+                return 0
+
+            def ImportImageFile(self, file_path, point):
+                self.calls.append(("ImportImageFile", file_path, point))
+                return "image-handle"
+
+            def DoMenuTextByName(self, menu, index):
+                self.calls.append(("DoMenuTextByName", menu, index))
+
+            def SetFillFore(self, handle, color):
+                self.calls.append(("SetFillFore", handle, color))
+
+            def SetPenFore(self, handle, color):
+                self.calls.append(("SetPenFore", handle, color))
+
+            def ReDrawAll(self):
+                self.calls.append(("ReDrawAll",))
+
+        fake_vs = FakeVS()
+        listener.vs = fake_vs
+
+        read = listener.handle_worksheet({"action": "read", "worksheet_name": "Schedule", "row": 2, "col": 3})
+        self.assertTrue(read["success"])
+        self.assertEqual(read["result"]["value"], "cell text")
+        self.assertIn(("GetWSCellString", "worksheet-handle", 2, 3), fake_vs.calls)
+
+        write = listener.handle_worksheet(
+            {"action": "write", "worksheet_name": "Schedule", "row": 4, "col": 5, "value": "Door A"}
+        )
+        self.assertTrue(write["success"])
+        self.assertIn(("SetWSCellFormula", "worksheet-handle", 4, 5, 4, 5, "Door A"), fake_vs.calls)
+
+        dxf_path = self.tmp_path() / "fixture.dxf"
+        dxf_path.write_text("0\nEOF\n", encoding="utf-8")
+        imported = listener.handle_import_file({"file_path": str(dxf_path), "format": "dxf"})
+        self.assertTrue(imported["success"])
+        self.assertIn(("ImportDXFDWGFile", str(dxf_path)), fake_vs.calls)
+        self.assertNotIn(("ImportDXFDWGFile", str(dxf_path), False), fake_vs.calls)
+
+        image_path = self.tmp_path() / "fixture.png"
+        image_path.write_bytes(b"not a real png")
+        image = listener.handle_import_file({"file_path": str(image_path), "format": "png"})
+        self.assertTrue(image["success"])
+        self.assertIn(("ImportImageFile", str(image_path), (0, 0)), fake_vs.calls)
+
+        handle_id = listener._reg(object())
+        color = listener.handle_set_property({"handle": handle_id, "property_name": "fillColor", "value": "1,2,3"})
+        self.assertTrue(color["success"])
+        self.assertTrue(any(call[0] == "SetFillFore" and call[2] == (1, 2, 3) for call in fake_vs.calls))
+
+        export = listener.handle_export({"format": "pdf", "file_path": "C:\\Temp\\out.pdf"})
+        self.assertTrue(export["success"])
+        self.assertTrue(export["result"]["requires_user_save"])
+        self.assertFalse(export["result"]["saved"])
+        self.assertIn(("DoMenuTextByName", "Export PDF", 0), fake_vs.calls)
+
+        screenshot = listener.handle_screenshot({"file_path": "C:\\Temp\\view.png"})
+        self.assertTrue(screenshot["success"])
+        self.assertTrue(screenshot["result"]["requires_user_save"])
+        self.assertFalse(screenshot["result"]["saved"])
+        self.assertIn(("DoMenuTextByName", "Export Image File", 0), fake_vs.calls)
+
     def test_default_autostart_mode_is_dialog(self):
         listener, _alerts = self.load_listener()
         old_mode = os.environ.get("VW_MCP_MODE", MISSING)

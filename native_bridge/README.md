@@ -179,14 +179,17 @@ the current stage and plan the user Plug-ins deployment:
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -Json
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\VectorworksMCPBridge.vwlibrary -Install -WhatIf
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\VectorworksMCPBridge.vwlibrary -Install
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\ObjectExample.vlb -Install -WhatIf
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\ObjectExample.vlb -Install
 ```
 
 The doctor does not install anything unless `-Install` is passed with an
 explicit `-BuiltArtifact`. By default it reports prerequisites, source worktree
 state, candidate artifact, target user Plug-ins folder, and the next command an
 agent should run.
+The official SDK example scaffold currently emits `ObjectExample.vlb`; pass the
+actual built artifact path reported by `scripts\build-native-bridge.ps1` or the
+native doctor.
 
 The generated worktree lives under `native_bridge/worktree/SDKExamples/` and is
 ignored by git. It preserves the official examples' relative layout so the

@@ -336,6 +336,9 @@ if ($Install) {
     }
 }
 
+$ScaffoldAbsent = $MissingScaffoldFiles.Count -eq $RequiredScaffoldFiles.Count
+$ScaffoldPartiallyCopied = $MissingScaffoldFiles.Count -gt 0 -and $MissingScaffoldFiles.Count -lt $RequiredScaffoldFiles.Count
+
 $NextActions = [System.Collections.Generic.List[string]]::new()
 if (-not $Prereqs.ready) {
     $VsHint = if ($NeedsVisualStudioBootstrap) { " -InstallVisualStudioBuildTools" } else { "" }
@@ -382,8 +385,6 @@ if ($NextActions.Count -eq 0) {
 $NextCommand = ""
 $NextCommandReason = ""
 $NextCommandSpec = $null
-$ScaffoldAbsent = $MissingScaffoldFiles.Count -eq $RequiredScaffoldFiles.Count
-$ScaffoldPartiallyCopied = $MissingScaffoldFiles.Count -gt 0 -and $MissingScaffoldFiles.Count -lt $RequiredScaffoldFiles.Count
 
 if ($InstallPerformed -or ($InstallCandidate -and $InstalledArtifactMatchesCandidate -and -not $Install)) {
     $SmokeArgs = [System.Collections.Generic.List[string]]::new()

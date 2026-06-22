@@ -26,7 +26,13 @@ import sys
 import threading
 import time
 import uuid
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
+
+try:
+    from pydantic import Field
+except Exception:
+    def Field(*_args: Any, **_kwargs: Any) -> None:
+        return None
 
 try:
     from fastmcp import FastMCP
@@ -93,7 +99,7 @@ class _MissingFastMCP:
             return lambda decorated: decorated
         return func
 
-    def run(self):
+    def run(self, *args, **kwargs):
         raise RuntimeError(
             "The 'fastmcp' package is not installed. Install host dependencies "
             "from this repository first: py -m pip install -r requirements.txt"
@@ -186,7 +192,16 @@ SymbolAction = Literal["list", "insert"]
 ExportFormat = Literal["pdf", "dxf", "dwg", "image"]
 ImportFormat = Literal["auto", "dxf", "dwg", "png", "jpg", "jpeg", "tif", "tiff", "bmp"]
 SelectionAction = Literal["get", "select", "clear", "delete", "move", "duplicate"]
-PointList = list[list[float]]
+MAX_OBJECT_QUERY_LIMIT = 1000
+ObjectQueryLimit = Annotated[int, Field(ge=1, le=MAX_OBJECT_QUERY_LIMIT)]
+WorksheetRow = Annotated[int, Field(ge=1, le=1_048_576)]
+WorksheetColumn = Annotated[int, Field(ge=1, le=16_384)]
+WorksheetRowCount = Annotated[int, Field(ge=1, le=500)]
+NonEmptyPath = Annotated[str, Field(min_length=1)]
+PositiveLength = Annotated[float, Field(gt=0)]
+Point2D = Annotated[list[float], Field(min_length=2, max_length=2)]
+PointList = Annotated[list[Point2D], Field(max_length=1000)]
+PolygonPointList = Annotated[list[Point2D], Field(min_length=3, max_length=1000)]
 
 
 _ANNOTATION_KEYS = ("readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint")
@@ -1121,7 +1136,7 @@ def vw_get_layers() -> str:
 
 
 @_tool("vw_get_objects")
-def vw_get_objects(layer: str = "", object_type: str = "", limit: int = 100) -> str:
+def vw_get_objects(layer: str = "", object_type: str = "", limit: ObjectQueryLimit = 100) -> str:
     """List objects. Filter by layer name and type such as rect, line, or wall."""
     return _send_tool("vw_get_objects", {"layer": layer, "object_type": object_type, "limit": limit})
 
@@ -1133,7 +1148,7 @@ def vw_set_object_property(handle: str, property_name: PropertyName, value: str)
 
 
 @_tool("vw_find_objects")
-def vw_find_objects(criteria: str, limit: int = 100) -> str:
+def vw_find_objects(criteria: str, limit: ObjectQueryLimit = 100) -> str:
     """Find objects using VW criteria such as 'T=RECT', 'T=WALL', 'C=Furniture', or 'ALL'."""
     return _send_tool("vw_find_objects", {"criteria": criteria, "limit": limit})
 
@@ -1148,10 +1163,10 @@ def vw_manage_classes(action: ClassAction, class_name: str = "") -> str:
 def vw_worksheet(
     action: WorksheetAction,
     worksheet_name: str = "",
-    row: int = 1,
-    col: int = 1,
+    row: WorksheetRow = 1,
+    col: WorksheetColumn = 1,
     value: str = "",
-    num_rows: int = 10,
+    num_rows: WorksheetRowCount = 10,
 ) -> str:
     """Worksheet operations: list, read, write, or read_range."""
     return _send_tool(
@@ -1174,13 +1189,15 @@ def vw_symbol(action: SymbolAction, symbol_name: str = "", x: float = 0, y: floa
 
 
 @_tool("vw_export")
-def vw_export(format: ExportFormat, file_path: str) -> str:
-    """Export document. format is pdf, dxf, dwg, or image. file_path is the full output path."""
+def vw_export(format: ExportFormat, file_path: NonEmptyPath) -> str:
+    """Open the Vectorworks export dialog for pdf, dxf, dwg, or image.
+    file_path is the requested save path to choose in the dialog; the listener
+    reports whether the operation needs manual save confirmation."""
     return _send_tool("vw_export", {"format": format, "file_path": file_path})
 
 
 @_tool("vw_import_file")
-def vw_import_file(file_path: str, format: ImportFormat = "auto") -> str:
+def vw_import_file(file_path: NonEmptyPath, format: ImportFormat = "auto") -> str:
     """Import a DXF, DWG, or image file. Use auto to detect from the extension."""
     return _send_tool("vw_import_file", {"file_path": file_path, "format": format})
 
@@ -1193,7 +1210,7 @@ def vw_get_document_info() -> str:
 
 @_tool("vw_screenshot")
 def vw_screenshot(file_path: str = "") -> str:
-    """Capture viewport screenshot as PNG. Empty file_path defaults to ~/.vectorworks-mcp/screenshot.png."""
+    """Open Vectorworks Export Image File dialog. Empty file_path suggests ~/.vectorworks-mcp/screenshot.png."""
     return _send_tool("vw_screenshot", {"file_path": file_path})
 
 
@@ -1244,8 +1261,8 @@ def vw_create_wall(
     start_y: float,
     end_x: float,
     end_y: float,
-    height: float = 3000,
-    thickness: float = 200,
+    height: PositiveLength = 3000,
+    thickness: PositiveLength = 200,
     style_name: str = "",
 ) -> str:
     """Create parametric wall. Coordinates are in mm. Defaults to 3m height and 200mm thickness."""
@@ -1264,7 +1281,7 @@ def vw_create_wall(
 
 
 @_tool("vw_insert_door")
-def vw_insert_door(x: float, y: float, width: float = 900, height: float = 2100, rotation: float = 0) -> str:
+def vw_insert_door(x: float, y: float, width: PositiveLength = 900, height: PositiveLength = 2100, rotation: float = 0) -> str:
     """Insert parametric door. Place on or near a wall for auto-insertion."""
     return _send_tool("vw_insert_door", {"x": x, "y": y, "width": width, "height": height, "rotation": rotation})
 
@@ -1273,8 +1290,8 @@ def vw_insert_door(x: float, y: float, width: float = 900, height: float = 2100,
 def vw_insert_window(
     x: float,
     y: float,
-    width: float = 1200,
-    height: float = 1500,
+    width: PositiveLength = 1200,
+    height: PositiveLength = 1500,
     sill_height: float = 900,
     rotation: float = 0,
 ) -> str:
@@ -1286,20 +1303,20 @@ def vw_insert_window(
 
 
 @_tool("vw_create_slab")
-def vw_create_slab(points: PointList, thickness: float = 200, elevation: float = 0) -> str:
-    """Create 3D floor slab from polygon. points is [[x, y], ...] in mm and needs at least 3 points."""
+def vw_create_slab(points: PolygonPointList, thickness: PositiveLength = 200, elevation: float = 0) -> str:
+    """Create an extruded floor-like solid from a polygon. This is not a BIM slab object."""
     return _send_tool("vw_create_slab", {"points": points, "thickness": thickness, "elevation": elevation})
 
 
 @_tool("vw_create_roof")
 def vw_create_roof(
-    points: PointList,
+    points: PolygonPointList,
     bearing_height: float = 3000,
     slope: float = 30,
     overhang: float = 500,
-    thickness: float = 200,
+    thickness: PositiveLength = 200,
 ) -> str:
-    """Create roof from footprint. bearing_height is where roof starts. slope is in degrees."""
+    """Try to create a roof custom object from a footprint, with flat extrusion fallback."""
     return _send_tool(
         "vw_create_roof",
         {
@@ -1323,7 +1340,7 @@ def main() -> int:
         print(f"Vectorworks MCP configuration error: {_CONFIG_ERROR}", file=sys.stderr)
         return 2
     try:
-        mcp.run()
+        mcp.run(transport="stdio", show_banner=False)
         return 0
     except RuntimeError as exc:
         print(f"Vectorworks MCP startup error: {exc}", file=sys.stderr)

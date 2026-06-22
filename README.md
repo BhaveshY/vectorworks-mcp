@@ -31,12 +31,17 @@ transport-only or legacy listeners.
 | Python `foreground` listener | legacy diagnostic only | no, guarded | blocks UI |
 | Python `background` listener | diagnostic only | no, guarded | no reliable scheduling |
 | Python `win_timer` listener | diagnostic only | no, guarded | transport ping only |
-| Native SDK bridge | planned scaffold | intended yes | intended non-modal |
+| Native SDK bridge | phase-0 transport scaffold | no, guarded | non-modal ping/stop only |
 
 The proper long-term fix for non-modal, always-on control is a native
-Vectorworks SDK plug-in bridge. The SDK bridge is scaffolded in
-`native_bridge/`, but it is not compiled or installed by default. Until that
-bridge exists, use the generated dialog launcher for real CAD work.
+Vectorworks SDK plug-in bridge. The current SDK bridge scaffold in
+`native_bridge/` can be copied into an SDK examples worktree, wired into the
+module lifecycle, built, installed, and smoke-tested for phase-0 `ping`/`stop`
+transport. It is not compiled or installed by default by the host MCP setup. It
+intentionally reports `cad_api_safe=false`,
+`transport_only=true`, and `cad_handlers_implemented=false` until phase-1 native
+CAD handlers are implemented. Use the generated dialog launcher for real CAD
+work.
 
 Why this is not as simple as a Revit-style setup yet:
 
@@ -67,11 +72,14 @@ Native bridge planning aids:
 - `scripts/copy-native-bridge-scaffold.ps1` copies the reviewed no-SDK native
   scaffold into that worktree after the unmodified SDK example builds.
 - `scripts/wire-native-bridge-project.ps1` idempotently adds the copied
-  scaffold files to the SDK `.vcxproj` and `.vcxproj.filters`.
+  scaffold files to the SDK `.vcxproj` and `.vcxproj.filters`, then patches
+  `Source\ModuleMain.cpp` so the transport starts and stops with the plug-in
+  lifecycle.
 - `scripts/build-native-bridge.ps1` builds that worktree after native
   prerequisites are present.
 - `scripts/smoke-native-bridge.ps1` verifies a loaded native bridge with
-  repeated raw-protocol ping and read-only CAD calls.
+  repeated raw-protocol phase-0 ping/stop checks. Later native CAD phases remain
+  gated until their handlers are implemented.
 
 Native bridge prerequisite check:
 
@@ -131,16 +139,19 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\copy-native-bridge-scaffold.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\wire-native-bridge-project.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
-powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\VectorworksMCPBridge.vwlibrary -Install -WhatIf
-powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\VectorworksMCPBridge.vwlibrary -Install
-# Restart Vectorworks, enable/load the native VectorworksMCPBridge plug-in, then run the phase-0 stop smoke first.
+powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\ObjectExample.vlb -Install -WhatIf
+powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\ObjectExample.vlb -Install
+# Restart Vectorworks, enable/load the installed plug-in, then run the phase-0 stop smoke first.
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Phase 0 -Stop -Json
 ```
 
-After the phase-0 stop smoke passes, load the native bridge plug-in again before
-running the default phase-1 read gate. In a disposable test document, add
-`-AllowWriteFixture` to prove create/select/delete cleanup; the delete runs only
-after the fixture identity and exact selection are verified.
+The official SDK example scaffold currently emits `ObjectExample.vlb`; the
+doctor accepts the built artifact path explicitly and installs that candidate
+when requested. After the phase-0 stop smoke passes, load the native bridge
+plug-in again only when testing the still-gated phase-1 read path. In a
+disposable test document, add `-AllowWriteFixture` after native write handlers
+exist to prove create/select/delete cleanup; the delete runs only after the
+fixture identity and exact selection are verified.
 
 The Python listener also applies conservative resource guards for long agent
 sessions: `VW_MCP_MAX_CLIENTS`, `VW_MCP_CLIENT_IDLE_SECONDS`,
@@ -165,6 +176,18 @@ cd C:\path\to\vectorworks-mcp
 powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-agent.ps1 -Verify
 ```
 
+Package-style local development is also supported:
+
+```powershell
+py -3 -m pip install -e .
+# Use vectorworks-mcp as the stdio command in an MCP client configuration.
+```
+
+The console script starts the same host MCP server as `server.py`; the
+self-bootstrapping scripts remain the recommended setup path because they also
+prepare the repo-local virtual environment, generated Vectorworks loader, and
+Claude Code registration.
+
 Bundled plugin helper:
 
 ```powershell
@@ -185,7 +208,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-claude-code.ps1 -Ve
 The setup is idempotent and safe to rerun. It:
 
 - creates or refreshes `.venv`
-- installs pinned host dependencies
+- installs bounded host dependencies into the repo-local virtual environment
 - generates `vw_start_listener_2024.py` with machine-specific absolute paths and `VW_MCP_MODE=dialog`
 - generates `vw_load_listener_2024.py`, a tiny stable Vectorworks script/menu loader that runs the current launcher file
 - best-effort copies the exact loader script text to your clipboard
@@ -359,10 +382,10 @@ Core:
 | `vw_manage_classes` | List, create, delete classes |
 | `vw_worksheet` | Read/write worksheet cells and ranges |
 | `vw_symbol` | List and insert symbols |
-| `vw_export` | Export PDF, DXF, DWG, or image where VW supports automation |
+| `vw_export` | Open the matching Vectorworks export dialog and report that manual save confirmation is required |
 | `vw_import_file` | Import DXF, DWG, or image files |
 | `vw_get_document_info` | Document metadata |
-| `vw_screenshot` | Capture viewport screenshot where supported |
+| `vw_screenshot` | Open the Vectorworks Export Image File dialog with the requested path |
 | `vw_stop_listener` | Ask the listener to stop gracefully |
 | `vw_selection` | Get, select, clear, delete, move, or duplicate selected objects |
 
@@ -373,8 +396,8 @@ Architectural:
 | `vw_create_wall` | Create parametric walls |
 | `vw_insert_door` | Insert a parametric door |
 | `vw_insert_window` | Insert a parametric window |
-| `vw_create_slab` | Create a slab from a polygon footprint |
-| `vw_create_roof` | Create a roof from a footprint |
+| `vw_create_slab` | Create an extruded floor-like solid from a polygon footprint, not a BIM slab object |
+| `vw_create_roof` | Try to create a roof custom object from a footprint, with flat extrusion fallback |
 | `vw_inspect_object` | Discover object/plugin parameters |
 
 ## Agent Handoff

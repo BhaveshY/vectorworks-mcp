@@ -6,7 +6,7 @@ For fresh Windows PC onboarding, follow `AGENT_INSTALL.md` first.
 
 - `server.py` is the host-side stdio MCP server used by Claude Code.
 - `vw_listener.py` runs inside Vectorworks 2024/2025 and listens on TCP `127.0.0.1:9877` by default. Generated launchers normally run it with `VW_MCP_MODE=dialog`, the only pure-Python mode currently safe for real `vs.*` API calls. Background and Windows timer modes are transport-only diagnostics.
-- `native_bridge/` is the long-term native Vectorworks SDK bridge scaffold. It is planned, not compiled, and not wired into `.mcp.json` by default.
+- `native_bridge/` is the long-term native Vectorworks SDK bridge scaffold. It can be wired into an SDK example project for phase-0 ping/stop transport, but native CAD handlers are not implemented and it is not wired into `.mcp.json` by default.
 - `native_bridge/HANDLER_MATRIX.md` is the handler-by-handler implementation map for the native SDK bridge.
 - `native_bridge/mock/mock_bridge.py` is a no-SDK contract harness for host/native protocol compatibility.
 - `native_bridge/src/` contains SDK-agnostic native source scaffold files. They are not a standalone build and intentionally avoid Vectorworks SDK includes.
@@ -76,15 +76,16 @@ If the generated launcher does not set `VW_MCP_MODE=dialog`, rerun
 | Python `foreground` | Legacy diagnostic only; can block the UI | Must reject |
 | Python `background` | Transport diagnostics only | Must reject |
 | Python `win_timer` | Transport diagnostics only | Must reject |
-| Native SDK bridge | Long-term non-modal target | Not available until compiled and installed |
+| Native SDK bridge | Long-term non-modal target | Phase-0 ping/stop only until native CAD handlers exist |
 
 Do not route users to `background` or `win_timer` for real Vectorworks work.
 Host tools whose `TOOL_SAFETY` entry has `requires_cad_preflight: true`
 auto-block when bridge status is missing or reports `cad_api_safe: false` /
 `transport_only: true`; treat that block as authoritative and fix the listener
 before retrying CAD work.
-Do not claim native non-modal support is installed unless a compiled bridge has
-been built from the Vectorworks SDK and smoke-tested in Vectorworks.
+Do not claim native non-modal CAD support is installed unless a compiled bridge
+has been built from the Vectorworks SDK and phase-1 CAD smoke tests pass in
+Vectorworks.
 Keep the native handler matrix in sync whenever `vw_listener.py` adds, removes,
 or renames a handler.
 
@@ -137,9 +138,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\copy-native-bridge-scaffold.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\wire-native-bridge-project.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
-powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\VectorworksMCPBridge.vwlibrary -Install -WhatIf
-powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\VectorworksMCPBridge.vwlibrary -Install
-# Restart Vectorworks, enable/load the native bridge plug-in, then prove phase-0 stop/release first.
+powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\ObjectExample.vlb -Install -WhatIf
+powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\ObjectExample.vlb -Install
+# Restart Vectorworks, enable/load the installed plug-in, then prove phase-0 stop/release first.
 powershell -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Phase 0 -Stop -Json
 ```
 

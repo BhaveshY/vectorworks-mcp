@@ -362,6 +362,8 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("Revit-style connector", native_readme)
         root_readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("not compiled or installed by default", root_readme)
+        self.assertIn("phase-0 transport scaffold", root_readme)
+        self.assertIn("cad_handlers_implemented=false", root_readme)
         self.assertIn("Why this is not as simple as a Revit-style setup yet", root_readme)
         self.assertIn("bridge_kind=python_dialog_agent_session", root_readme)
         self.assertIn("Raw socket reachability is not enough", root_readme)
@@ -616,6 +618,22 @@ class AgentReadinessTests(unittest.TestCase):
             bridge = worktree / "Examples2024" / "VectorworksMCPBridge"
             source_root = bridge / "Source"
             source_root.mkdir(parents=True)
+            module_main = source_root / "ModuleMain.cpp"
+            module_main.write_text(
+                """#include "StdAfx.h"
+#include "Extensions/ExtObj.h"
+#include "Extensions/ExtTool.h"
+
+extern "C" Sint32 GS_EXTERNAL_ENTRY plugin_module_main(Sint32 action, void* moduleInfo, const VWIID& iid, IVWUnknown*& inOutInterface, CallBackPtr cbp)
+{
+    ::GS_InitializeVCOM( cbp );
+
+    Sint32 reply = 0L;
+    return reply;
+}
+""",
+                encoding="utf-8",
+            )
             project = bridge / "VectorworksMCPBridge2024.vcxproj"
             filters = bridge / "VectorworksMCPBridge2024.vcxproj.filters"
             project.write_text(
@@ -684,10 +702,17 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertGreaterEqual(len(first_report["addedProjectItems"]), 5)
             self.assertIn("Ws2_32.lib", "\n".join(first_report["addedLinkDependencies"]))
             self.assertIn("stdcpp17", "\n".join(first_report["addedLanguageStandards"]))
+            self.assertTrue(first_report["moduleLifecycleHookChanged"])
+            self.assertTrue(first_report["moduleLifecycleHookWiredAfterRun"])
             project_text = project.read_text(encoding="utf-8")
             filters_text = filters.read_text(encoding="utf-8")
+            module_text = module_main.read_text(encoding="utf-8")
             self.assertIn("Ws2_32.lib;%(AdditionalDependencies)", project_text)
             self.assertIn("<LanguageStandard>stdcpp17</LanguageStandard>", project_text)
+            self.assertIn("Vectorworks MCP native bridge lifecycle hook", module_text)
+            self.assertIn("VectorworksMCP::OnPluginLoadStartTransport", module_text)
+            self.assertIn("VectorworksMCP::OnPluginUnloadStopTransport", module_text)
+            self.assertIn("VectorworksMCP::OnVectorworksMainPluginEvent", module_text)
             for include in (
                 "Source\\VectorworksMCPBridge\\BridgeProtocol.cpp",
                 "Source\\VectorworksMCPBridge\\NativeTransport.cpp",
@@ -722,6 +747,8 @@ class AgentReadinessTests(unittest.TestCase):
             )
             second_report = json.loads(second.stdout)
             self.assertTrue(second_report["projectWired"])
+            self.assertTrue(second_report["moduleLifecycleHookWired"])
+            self.assertFalse(second_report["moduleLifecycleHookChanged"])
             self.assertEqual(second_report["addedProjectItems"], [])
             self.assertEqual(second_report["addedLinkDependencies"], [])
             self.assertEqual(second_report["addedLanguageStandards"], [])
@@ -796,6 +823,21 @@ class AgentReadinessTests(unittest.TestCase):
             worktree = temp_root / "SDK Examples With Spaces"
             bridge = worktree / "Examples2024" / "VectorworksMCPBridge"
             (bridge / "Source").mkdir(parents=True)
+            (bridge / "Source" / "ModuleMain.cpp").write_text(
+                """#include "StdAfx.h"
+#include "Extensions/ExtObj.h"
+#include "Extensions/ExtTool.h"
+
+extern "C" Sint32 GS_EXTERNAL_ENTRY plugin_module_main(Sint32 action, void* moduleInfo, const VWIID& iid, IVWUnknown*& inOutInterface, CallBackPtr cbp)
+{
+    ::GS_InitializeVCOM( cbp );
+
+    Sint32 reply = 0L;
+    return reply;
+}
+""",
+                encoding="utf-8",
+            )
             (bridge / "VectorworksMCPBridge2024.sln").write_text("fake solution\n", encoding="utf-8")
             project = bridge / "VectorworksMCPBridge2024.vcxproj"
             project.write_text(
@@ -1320,14 +1362,15 @@ if ($Json) {
         self.assertIn("implemented_actions", protocol)
         self.assertIn("selection` with `action=get`", protocol)
         self.assertIn(
-            "powershell -ExecutionPolicy Bypass -File .\\scripts\\doctor-native-bridge.ps1 -BuiltArtifact C:\\path\\to\\VectorworksMCPBridge.vwlibrary -Install -WhatIf",
+            "powershell -ExecutionPolicy Bypass -File .\\scripts\\doctor-native-bridge.ps1 -BuiltArtifact C:\\path\\to\\ObjectExample.vlb -Install -WhatIf",
             root_readme,
         )
         self.assertIn(
-            "powershell -ExecutionPolicy Bypass -File .\\scripts\\doctor-native-bridge.ps1 -BuiltArtifact C:\\path\\to\\VectorworksMCPBridge.vwlibrary -Install\n# Restart Vectorworks",
+            "powershell -ExecutionPolicy Bypass -File .\\scripts\\doctor-native-bridge.ps1 -BuiltArtifact C:\\path\\to\\ObjectExample.vlb -Install\n# Restart Vectorworks",
             root_readme,
         )
-        self.assertIn("enable/load the native VectorworksMCPBridge plug-in", root_readme)
+        self.assertIn("enable/load the installed plug-in", root_readme)
+        self.assertIn("ObjectExample.vlb", root_readme)
         self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", root_readme)
         self.assertIn("wire-native-bridge-project.ps1", root_readme)
         self.assertIn("nextCommand", root_readme)
@@ -1337,11 +1380,11 @@ if ($Json) {
         self.assertIn("mayInstallSoftware", root_readme)
         self.assertIn("rerunDoctorAfter", root_readme)
         self.assertIn(
-            "doctor-native-bridge.ps1 -BuiltArtifact C:\\path\\to\\VectorworksMCPBridge.vwlibrary -Install -WhatIf",
+            "doctor-native-bridge.ps1 -BuiltArtifact C:\\path\\to\\ObjectExample.vlb -Install -WhatIf",
             agents,
         )
         self.assertIn(
-            "doctor-native-bridge.ps1 -BuiltArtifact C:\\path\\to\\VectorworksMCPBridge.vwlibrary -Install",
+            "doctor-native-bridge.ps1 -BuiltArtifact C:\\path\\to\\ObjectExample.vlb -Install",
             agents,
         )
         self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", agents)

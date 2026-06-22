@@ -2,6 +2,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 import unittest
@@ -307,6 +308,36 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("Get-Command claude", bundled_contract)
         self.assertIn("plugin validate", bundled_contract)
         self.assertIn("skipping official Claude bundled-plugin validation", bundled_contract)
+
+    def test_server_tool_safety_imports_without_optional_host_dependencies(self):
+        code = f"""
+import importlib.abc
+import json
+import sys
+
+class BlockOptionalHostDeps(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split(".", 1)[0] in {{"fastmcp", "pydantic"}}:
+            raise ModuleNotFoundError("blocked optional host dependency: " + fullname, name=fullname)
+        return None
+
+sys.meta_path.insert(0, BlockOptionalHostDeps())
+sys.path.insert(0, {json.dumps(str(ROOT))})
+import server
+print(json.dumps({{"tool_count": len(server.TOOL_SAFETY), "vw_ping_read_only": server.TOOL_SAFETY["vw_ping"]["readOnlyHint"]}}, sort_keys=True))
+"""
+
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=str(ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertGreaterEqual(payload["tool_count"], 25)
+        self.assertTrue(payload["vw_ping_read_only"])
 
     def test_readme_uses_canonical_repo_override_env_var(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
