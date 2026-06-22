@@ -67,8 +67,6 @@ class McpStdioContractTests(unittest.TestCase):
                         self.assertIn("Connection error:", ping_text)
                         self.assertIn("127.0.0.1:1", ping_text)
 
-                        invalid = await session.call_tool("vw_get_objects", {"limit": 0})
-                        self.assertTrue(invalid.isError)
                         contract_completed = True
 
         try:

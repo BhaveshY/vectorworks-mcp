@@ -16,6 +16,7 @@ Before changing the drawing, confirm the connection:
 Use the MCP tools deliberately:
 
 - Create basic geometry with `vw_create_object`.
+- For fast native floor-plan drafting, prefer `vw_create_schematic_room`, `vw_create_schematic_door`, and `vw_create_schematic_window`. They create 2D schematic drafting geometry, not BIM objects.
 - Use architectural tools for BIM elements: `vw_create_wall`, `vw_insert_door`, `vw_insert_window`, `vw_create_slab`, `vw_create_roof`.
 - Inspect and find existing objects with `vw_get_objects`, `vw_find_objects`, and `vw_inspect_object`.
 - Manage organization with `vw_manage_classes`, layers, names, and properties before bulk edits.

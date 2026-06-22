@@ -735,6 +735,10 @@ bool MatchesObjectType(short actualType, std::string requestedType) {
     return ObjectTypeName(actualType) == requestedType;
 }
 
+bool IsUserVisibleObjectType(short type) {
+    return type != kTermNode && type != kLayerNode && type != kHeaderNode && type != kUndoPlaceholderNode;
+}
+
 std::string LayerNameForObject(MCObjectHandle object) {
     MCObjectHandle layer = gSDK->SearchForAncestorType(kLayerNode, object);
     if (!layer) {
@@ -899,7 +903,7 @@ void CollectObjectsInLayer(
          object && gSDK->GetObjectTypeN(object) != kTermNode && static_cast<int>(outObjects.size()) < limit;
          object = gSDK->NextObject(object)) {
         const short type = gSDK->GetObjectTypeN(object);
-        if (type == kLayerNode || type == kHeaderNode) {
+        if (!IsUserVisibleObjectType(type)) {
             continue;
         }
         if (MatchesObjectType(type, objectType)) {
@@ -936,7 +940,7 @@ std::string HandleGetObjects(const Params& params) {
 std::vector<MCObjectHandle> CollectSelectedObjects() {
     std::vector<MCObjectHandle> selected;
     gSDK->ForEachObjectN(allObjects + descendIntoAll + descendIntoViewports + descendIntoAuxLists, [&](MCObjectHandle object) {
-        if (object && gSDK->GetObjectTypeN(object) != kTermNode && gSDK->IsSelected(object)) {
+        if (object && IsUserVisibleObjectType(gSDK->GetObjectTypeN(object)) && gSDK->IsSelected(object)) {
             selected.push_back(object);
         }
     });

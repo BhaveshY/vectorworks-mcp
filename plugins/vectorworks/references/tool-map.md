@@ -19,7 +19,10 @@ Document context:
 
 Create and edit:
 
-- `vw_create_object`: rect, circle, oval, line, arc, polygon.
+- `vw_create_object`: rect, circle, oval, line, arc; polygon is listener-dependent and blocked by native phase 1.
+- `vw_create_schematic_room`: rectangular schematic room from native 2D wall rectangles.
+- `vw_create_schematic_door`: schematic door leaf and swing arc from native 2D primitives.
+- `vw_create_schematic_window`: schematic double-line window marker from native 2D primitives.
 - `vw_set_object_property`: name, class, color, line weight, opacity.
 - `vw_selection`: get, select, clear, delete, move, or duplicate selected objects.
 
@@ -61,6 +64,9 @@ Rules:
 | `vw_create_object` | `document-write` | `create_object` | `false` | `false` | `false` | `true` | `true` |
 | `vw_create_roof` | `document-write` | `create_roof` | `false` | `false` | `false` | `true` | `true` |
 | `vw_create_slab` | `document-write` | `create_slab` | `false` | `false` | `false` | `true` | `true` |
+| `vw_create_schematic_door` | `schematic-floor-plan` | `create_object` | `false` | `false` | `false` | `true` | `true` |
+| `vw_create_schematic_room` | `schematic-floor-plan` | `create_object` | `false` | `false` | `false` | `true` | `true` |
+| `vw_create_schematic_window` | `schematic-floor-plan` | `create_object` | `false` | `false` | `false` | `true` | `true` |
 | `vw_create_wall` | `document-write` | `create_wall` | `false` | `false` | `false` | `true` | `true` |
 | `vw_export` | `file-write` | `export` | `false` | `false` | `false` | `true` | `true` |
 | `vw_find_objects` | `document-read` | `find_objects` | `true` | `false` | `true` | `true` | `true` |

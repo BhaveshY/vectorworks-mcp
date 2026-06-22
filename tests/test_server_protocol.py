@@ -142,6 +142,23 @@ def _configure_server(port, max_frame_bytes=1024 * 1024):
     server._CONFIG_ERROR = None
 
 
+def _native_phase_one_status():
+    return {
+        "pong": True,
+        "cad_api_safe": True,
+        "transport_only": False,
+        "native_bridge": True,
+        "native_phase": 1,
+        "implemented_actions": sorted(server.NATIVE_PHASE_ONE_REQUIRED_ACTIONS),
+        "bridge_kind": "native_sdk_bridge_phase1",
+        "dispatch_mode": "native_sdk",
+        "handlers": 7,
+        "version": "native-sdk-bridge-phase1",
+        "main_context_pump": "win32_ui_timer",
+        "main_context_pump_ready": True,
+    }
+
+
 class ServerProtocolTests(unittest.TestCase):
     def tearDown(self):
         server._close()
@@ -511,6 +528,110 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertEqual(blocked["reason"], "native_bridge_action_not_implemented")
         self.assertIn("selection action is not implemented by native bridge: move", blocked["native_readiness_errors"])
         self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_layers"])
+
+    def test_create_schematic_room_composes_native_rectangles(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_one_status()}
+            if request["action"] == "create_object":
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {
+                        "type": request["params"]["object_type"],
+                        "handle": "h-{0}".format(len(listener.requests)),
+                    },
+                }
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=5) as listener:
+            _configure_server(listener.port)
+            result = json.loads(server.vw_create_schematic_room(0, 0, 4000, 3000, 200, name="Bedroom"))
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["schematic"])
+        self.assertFalse(result["bim_objects"])
+        self.assertEqual(result["created_count"], 4)
+        self.assertEqual([request["action"] for request in listener.requests], ["ping"] + ["create_object"] * 4)
+        created_params = [request["params"] for request in listener.requests[1:]]
+        self.assertEqual([params["object_type"] for params in created_params], ["rect", "rect", "rect", "rect"])
+        self.assertEqual(created_params[0]["name"], "Bedroom south wall")
+        self.assertEqual(created_params[0]["class_name"], "A-FP-Schematic-Wall")
+        self.assertEqual(
+            [(params["x1"], params["y1"], params["x2"], params["y2"]) for params in created_params],
+            [(0, 0, 4000, 200), (0, 2800, 4000, 3000), (0, 200, 200, 2800), (3800, 200, 4000, 2800)],
+        )
+
+    def test_create_schematic_room_rejects_impossible_wall_thickness_without_connecting(self):
+        result = json.loads(server.vw_create_schematic_room(0, 0, 300, 300, 200))
+
+        self.assertFalse(result["ok"])
+        self.assertIn("wall_thickness", result["error"])
+
+    def test_create_schematic_door_composes_native_line_and_arc(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_one_status()}
+            if request["action"] == "create_object":
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {"type": request["params"]["object_type"], "handle": "h-{0}".format(len(listener.requests))},
+                }
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=3) as listener:
+            _configure_server(listener.port)
+            result = json.loads(
+                server.vw_create_schematic_door(1000, 2000, width=900, rotation=0, swing="left", name="D1")
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["created_count"], 2)
+        line_params = listener.requests[1]["params"]
+        arc_params = listener.requests[2]["params"]
+        self.assertEqual(line_params["object_type"], "line")
+        self.assertEqual(line_params["name"], "D1 leaf")
+        self.assertAlmostEqual(line_params["x1"], 1000)
+        self.assertAlmostEqual(line_params["y1"], 2000)
+        self.assertAlmostEqual(line_params["x2"], 1000)
+        self.assertAlmostEqual(line_params["y2"], 2900)
+        self.assertEqual(arc_params["object_type"], "arc")
+        self.assertEqual(arc_params["name"], "D1 swing")
+        self.assertEqual(arc_params["radius"], 900)
+        self.assertEqual(arc_params["start_angle"], 0)
+        self.assertEqual(arc_params["sweep_angle"], 90)
+
+    def test_create_schematic_window_composes_parallel_native_lines(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_one_status()}
+            if request["action"] == "create_object":
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {"type": request["params"]["object_type"], "handle": "h-{0}".format(len(listener.requests))},
+                }
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=3) as listener:
+            _configure_server(listener.port)
+            result = json.loads(server.vw_create_schematic_window(0, 0, 1000, 0, marker_depth=200, name="W1"))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["created_count"], 2)
+        line_a = listener.requests[1]["params"]
+        line_b = listener.requests[2]["params"]
+        self.assertEqual(line_a["object_type"], "line")
+        self.assertEqual(line_b["object_type"], "line")
+        self.assertEqual((line_a["x1"], line_a["y1"], line_a["x2"], line_a["y2"]), (0.0, 100.0, 1000.0, 100.0))
+        self.assertEqual((line_b["x1"], line_b["y1"], line_b["x2"], line_b["y2"]), (0.0, -100.0, 1000.0, -100.0))
+
+    def test_create_schematic_window_rejects_zero_length_marker_without_connecting(self):
+        result = json.loads(server.vw_create_schematic_window(10, 10, 10, 10))
+
+        self.assertFalse(result["ok"])
+        self.assertIn("endpoints", result["error"])
 
     def test_send_tool_reuses_recent_safe_preflight(self):
         def handler(request):
