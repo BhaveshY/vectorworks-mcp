@@ -286,6 +286,7 @@ $AllowedCategories = @(
     "health",
     "document-read",
     "document-write",
+    "schematic-floor-plan",
     "document-export",
     "file-write",
     "listener-control",

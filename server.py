@@ -19,6 +19,7 @@ Environment variables, all optional:
 
 import atexit
 import json
+import math
 import os
 import socket
 import struct
@@ -200,6 +201,7 @@ _cad_safe_cache: Optional[tuple[float, dict[str, Any]]] = None
 
 
 ObjectType = Literal["rect", "circle", "oval", "line", "arc", "polygon"]
+DoorSwing = Literal["left", "right"]
 PropertyName = Literal["name", "class", "fillColor", "penColor", "lineWeight", "opacity"]
 ClassAction = Literal["list", "create", "delete"]
 WorksheetAction = Literal["list", "read", "write", "read_range"]
@@ -324,6 +326,36 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
     "vw_create_object": {
         "category": "document-write",
         "wire_action": "create_object",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_create_schematic_room": {
+        "category": "schematic-floor-plan",
+        "wire_action": "create_object",
+        "composes_actions": ["create_object"],
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_create_schematic_door": {
+        "category": "schematic-floor-plan",
+        "wire_action": "create_object",
+        "composes_actions": ["create_object"],
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_create_schematic_window": {
+        "category": "schematic-floor-plan",
+        "wire_action": "create_object",
+        "composes_actions": ["create_object"],
         "readOnlyHint": False,
         "destructiveHint": False,
         "idempotentHint": False,
@@ -1207,6 +1239,268 @@ def vw_create_object(
             "sweep_angle": sweep_angle,
             "name": name,
             "class_name": class_name,
+        },
+    )
+
+
+def _floor_plan_error(message: str) -> str:
+    return json.dumps({"ok": False, "error": message}, sort_keys=True)
+
+
+def _decode_tool_result(raw: str) -> Any:
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+
+def _tool_result_failed(raw: str, decoded: Any) -> bool:
+    if isinstance(decoded, dict):
+        if decoded.get("blocked") is True:
+            return True
+        if decoded.get("ok") is False and ("reason" in decoded or "error" in decoded):
+            return True
+    return raw.startswith(
+        (
+            "Configuration error:",
+            "Connection error:",
+            "Protocol error:",
+            "Request was not sent",
+            "Unexpected error",
+            "Unknown commit state",
+            "VW Error",
+        )
+    )
+
+
+def _send_create_primitive(params: dict[str, Any]) -> str:
+    return _send_tool("vw_create_object", params)
+
+
+def _create_floor_plan_primitives(tool: str, primitives: list[dict[str, Any]], metadata: dict[str, Any]) -> str:
+    created: list[dict[str, Any]] = []
+    for index, primitive in enumerate(primitives, start=1):
+        params = dict(primitive)
+        role = str(params.pop("role", "primitive"))
+        raw = _send_create_primitive(params)
+        decoded = _decode_tool_result(raw)
+        entry = {
+            "index": index,
+            "role": role,
+            "object_type": params.get("object_type"),
+            "params": params,
+            "result": decoded,
+        }
+        if _tool_result_failed(raw, decoded):
+            return json.dumps(
+                {
+                    "ok": False,
+                    "tool": tool,
+                    "schematic": True,
+                    "bim_objects": False,
+                    "created_count": len(created),
+                    "created": created,
+                    "failed_step": entry,
+                    "warning": "Earlier primitives may already exist in the active Vectorworks document.",
+                    **metadata,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        created.append(entry)
+
+    return json.dumps(
+        {
+            "ok": True,
+            "tool": tool,
+            "schematic": True,
+            "bim_objects": False,
+            "created_count": len(created),
+            "created": created,
+            **metadata,
+        },
+        indent=2,
+        sort_keys=True,
+    )
+
+
+def _named(base: str, suffix: str) -> str:
+    base = str(base or "").strip()
+    if not base:
+        return ""
+    return f"{base} {suffix}"
+
+
+def _line_endpoint(x: float, y: float, length: float, angle_degrees: float) -> tuple[float, float]:
+    radians = math.radians(angle_degrees)
+    return (x + length * math.cos(radians), y + length * math.sin(radians))
+
+
+@_tool("vw_create_schematic_room")
+def vw_create_schematic_room(
+    x: float,
+    y: float,
+    width: PositiveLength,
+    depth: PositiveLength,
+    wall_thickness: PositiveLength = 200,
+    name: str = "",
+    class_name: str = "A-FP-Schematic-Wall",
+) -> str:
+    """Create a rectangular schematic room from four 2D wall rectangles.
+    Coordinates use the active document units. This is drafting geometry, not BIM walls."""
+    if wall_thickness * 2 >= min(width, depth):
+        return _floor_plan_error("wall_thickness must be less than half of both width and depth")
+
+    x2 = x + width
+    y2 = y + depth
+    t = wall_thickness
+    primitives = [
+        {
+            "role": "south_wall",
+            "object_type": "rect",
+            "x1": x,
+            "y1": y,
+            "x2": x2,
+            "y2": y + t,
+            "name": _named(name, "south wall"),
+            "class_name": class_name,
+        },
+        {
+            "role": "north_wall",
+            "object_type": "rect",
+            "x1": x,
+            "y1": y2 - t,
+            "x2": x2,
+            "y2": y2,
+            "name": _named(name, "north wall"),
+            "class_name": class_name,
+        },
+        {
+            "role": "west_wall",
+            "object_type": "rect",
+            "x1": x,
+            "y1": y + t,
+            "x2": x + t,
+            "y2": y2 - t,
+            "name": _named(name, "west wall"),
+            "class_name": class_name,
+        },
+        {
+            "role": "east_wall",
+            "object_type": "rect",
+            "x1": x2 - t,
+            "y1": y + t,
+            "x2": x2,
+            "y2": y2 - t,
+            "name": _named(name, "east wall"),
+            "class_name": class_name,
+        },
+    ]
+    return _create_floor_plan_primitives(
+        "vw_create_schematic_room",
+        primitives,
+        {"origin": [x, y], "width": width, "depth": depth, "wall_thickness": wall_thickness},
+    )
+
+
+@_tool("vw_create_schematic_door")
+def vw_create_schematic_door(
+    hinge_x: float,
+    hinge_y: float,
+    width: PositiveLength = 900,
+    rotation: float = 0,
+    swing: DoorSwing = "left",
+    name: str = "",
+    class_name: str = "A-FP-Schematic-Door",
+) -> str:
+    """Draw a schematic door leaf and swing arc. This is drafting geometry, not a BIM door."""
+    sweep_angle = 90 if swing == "left" else -90
+    leaf_angle = rotation + sweep_angle
+    leaf_x, leaf_y = _line_endpoint(hinge_x, hinge_y, width, leaf_angle)
+    primitives = [
+        {
+            "role": "door_leaf",
+            "object_type": "line",
+            "x1": hinge_x,
+            "y1": hinge_y,
+            "x2": leaf_x,
+            "y2": leaf_y,
+            "name": _named(name, "leaf"),
+            "class_name": class_name,
+        },
+        {
+            "role": "door_swing",
+            "object_type": "arc",
+            "x1": hinge_x,
+            "y1": hinge_y,
+            "radius": width,
+            "start_angle": rotation,
+            "sweep_angle": sweep_angle,
+            "name": _named(name, "swing"),
+            "class_name": class_name,
+        },
+    ]
+    return _create_floor_plan_primitives(
+        "vw_create_schematic_door",
+        primitives,
+        {
+            "hinge": [hinge_x, hinge_y],
+            "width": width,
+            "rotation": rotation,
+            "swing": swing,
+        },
+    )
+
+
+@_tool("vw_create_schematic_window")
+def vw_create_schematic_window(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    marker_depth: PositiveLength = 150,
+    name: str = "",
+    class_name: str = "A-FP-Schematic-Window",
+) -> str:
+    """Draw a schematic double-line window marker between two points.
+    This is drafting geometry, not a BIM window."""
+    dx = x2 - x1
+    dy = y2 - y1
+    length = math.hypot(dx, dy)
+    if length <= 0:
+        return _floor_plan_error("window endpoints must not be identical")
+
+    offset_x = (-dy / length) * (marker_depth / 2)
+    offset_y = (dx / length) * (marker_depth / 2)
+    primitives = [
+        {
+            "role": "window_line_a",
+            "object_type": "line",
+            "x1": x1 + offset_x,
+            "y1": y1 + offset_y,
+            "x2": x2 + offset_x,
+            "y2": y2 + offset_y,
+            "name": _named(name, "line A"),
+            "class_name": class_name,
+        },
+        {
+            "role": "window_line_b",
+            "object_type": "line",
+            "x1": x1 - offset_x,
+            "y1": y1 - offset_y,
+            "x2": x2 - offset_x,
+            "y2": y2 - offset_y,
+            "name": _named(name, "line B"),
+            "class_name": class_name,
+        },
+    ]
+    return _create_floor_plan_primitives(
+        "vw_create_schematic_window",
+        primitives,
+        {
+            "start": [x1, y1],
+            "end": [x2, y2],
+            "marker_depth": marker_depth,
         },
     )
 

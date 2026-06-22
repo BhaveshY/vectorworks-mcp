@@ -438,6 +438,8 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("PendingCountForDiagnostics", combined)
         self.assertIn("InFlightCountForDiagnostics", combined)
         self.assertIn("kCadHandlersImplemented", combined)
+        self.assertIn("IsUserVisibleObjectType", combined)
+        self.assertIn("kUndoPlaceholderNode", combined)
         self.assertIn("native bridge phase 0 CAD handlers are not implemented", combined)
         self.assertIn("native bridge CAD handlers are not ready: main context pump is not running", combined)
         self.assertIn("native bridge timed out waiting for Vectorworks main/plugin context", combined)
