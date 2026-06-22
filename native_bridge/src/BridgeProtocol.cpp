@@ -346,6 +346,7 @@ RequestEnvelope ParseRequestEnvelope(std::string_view payload) {
     bool seenId = false;
     bool seenAction = false;
     bool seenParams = false;
+    bool seenAuthToken = false;
 
     cursor.Expect('{', "request envelope must be a JSON object");
     if (!cursor.ConsumeIf('}')) {
@@ -377,6 +378,12 @@ RequestEnvelope ParseRequestEnvelope(std::string_view payload) {
                 const auto end = cursor.Position();
                 request.paramsJson = std::string(Trim(payload.substr(start, end - start)));
                 seenParams = true;
+            } else if (key == kFieldAuthToken) {
+                if (seenAuthToken) {
+                    throw std::invalid_argument("duplicate request auth_token field");
+                }
+                request.authToken = cursor.ParseString();
+                seenAuthToken = true;
             } else {
                 cursor.SkipValue();
             }

@@ -190,11 +190,15 @@ void TestProtocol() {
     Require(ping.id == "abc", "request id parse failed");
     Require(ping.action == "ping", "request action parse failed");
     Require(ping.paramsJson == "{}", "missing params should default to object");
+    Require(ping.authToken.empty(), "missing auth token should default to empty");
 
     const auto objects = ParseRequestEnvelope(R"({"params":{"limit":10,"layer":"A"},"action":"get_objects","id":"req-1"})");
     Require(objects.id == "req-1", "out-of-order id parse failed");
     Require(objects.action == "get_objects", "out-of-order action parse failed");
     Require(objects.paramsJson == R"({"limit":10,"layer":"A"})", "params object capture failed");
+
+    const auto authed = ParseRequestEnvelope(R"({"id":"auth-1","action":"ping","auth_token":"secret","params":{}})");
+    Require(authed.authToken == "secret", "auth token parse failed");
 
     const auto escaped = ParseRequestEnvelope(R"({"id":"a\u0031","action":"p\ting","params":{}})");
     Require(escaped.id == "a1", "unicode escape parse failed");
@@ -205,6 +209,7 @@ void TestProtocol() {
     RequireThrows([] { ParseRequestEnvelope(R"({"id":"abc"})"); }, "missing action should fail");
     RequireThrows([] { ParseRequestEnvelope(R"({"id":"abc","action":"ping","params":[]})"); }, "array params should fail");
     RequireThrows([] { ParseRequestEnvelope(R"({"id":"abc","id":"dup","action":"ping"})"); }, "duplicate id should fail");
+    RequireThrows([] { ParseRequestEnvelope(R"({"id":"abc","action":"ping","auth_token":"a","auth_token":"b"})"); }, "duplicate auth_token should fail");
 
     const auto success = SerializeResponseEnvelope(ResponseEnvelope{"abc", true, R"({"pong":true})", ""});
     Require(success == R"({"id":"abc","success":true,"result":{"pong":true}})", "success response serialization failed");
@@ -255,11 +260,19 @@ void TestQueue() {
     const auto cancelled = queue.WaitForResponseOnSocketThread("r2", std::chrono::milliseconds(1));
     Require(!cancelled.success, "cancelled response should fail");
     RequireContains(cancelled.error, "native bridge test cancellation", "cancel reason should propagate");
+
+    CadRequestQueue writeQueue(1);
+    const RequestEnvelope writeRequest{"w1", "create_object", R"({"object_type":"rect"})"};
+    Require(!writeQueue.EnqueueFromSocketThread(writeRequest).has_value(), "write enqueue should succeed");
+    const auto writeTimeout = writeQueue.WaitForResponseOnSocketThread("w1", std::chrono::milliseconds(1), true);
+    Require(!writeTimeout.success, "timed out write response should fail");
+    RequireContains(writeTimeout.error, "unknown_commit_state", "timed out write should report unknown commit state");
 }
 
 void TestPhaseZeroDispatch() {
     SetEnv("VW_MCP_HOST", "127.0.0.1");
     SetEnv("VW_MCP_PORT", "0");
+    SetEnv("VW_MCP_AUTH_TOKEN", "");
     OnPluginLoadStartTransport();
     Require(!StopRequested(), "load should reset stop request");
     Require(NativeTransportPortForDiagnostics() > 0, "plugin load should start native transport on a real port");
@@ -282,7 +295,44 @@ void TestPhaseZeroDispatch() {
     OnPluginUnloadStopTransport();
 }
 
+void TestDispatchAuth() {
+    SetEnv("VW_MCP_AUTH_TOKEN", "secret");
+
+    const auto missingAuth = DispatchFromSocketWorker(RequestEnvelope{"auth-missing", "ping", "{}"});
+    Require(!missingAuth.success, "missing native bridge auth token should fail when configured");
+    RequireContains(missingAuth.error, "authentication failed", "missing auth error message drifted");
+
+    const auto badAuth = DispatchFromSocketWorker(RequestEnvelope{"auth-bad", "ping", "{}", "wrong"});
+    Require(!badAuth.success, "bad native bridge auth token should fail");
+    RequireContains(badAuth.error, "authentication failed", "bad auth error message drifted");
+
+    const auto goodAuth = DispatchFromSocketWorker(RequestEnvelope{"auth-good", "ping", "{}", "secret"});
+    Require(goodAuth.success, "matching native bridge auth token should succeed");
+
+    SetEnv("VW_MCP_AUTH_TOKEN", "");
+}
+
 void TestNativeTransportRoundTrip() {
+    SetEnv("VW_MCP_AUTH_TOKEN", "");
+
+    NativeTransport anyAddress;
+    NativeTransportOptions anyAddressOptions;
+    anyAddressOptions.host = "0.0.0.0";
+    anyAddressOptions.port = 0;
+    RequireThrows(
+        [&] { anyAddress.Start(anyAddressOptions, DispatchFromSocketWorker); },
+        "native transport should reject wildcard bind hosts");
+    anyAddress.Stop();
+
+    NativeTransport lanAddress;
+    NativeTransportOptions lanAddressOptions;
+    lanAddressOptions.host = "192.168.1.20";
+    lanAddressOptions.port = 0;
+    RequireThrows(
+        [&] { lanAddress.Start(lanAddressOptions, DispatchFromSocketWorker); },
+        "native transport should reject LAN bind hosts");
+    lanAddress.Stop();
+
     NativeTransport transport;
     NativeTransportOptions options;
     options.host = "127.0.0.1";
@@ -325,14 +375,43 @@ void TestNativeTransportRoundTrip() {
     RequireContains(healthyPing, R"("id":"after-bad-frame")", "transport should accept clients after malformed frame");
     RequireContains(healthyPing, R"("success":true)", "transport ping after malformed frame should succeed");
     malformed.Stop();
+
+    SetEnv("VW_MCP_AUTH_TOKEN", "secret");
+    NativeTransport authed;
+    authed.Start(options, DispatchFromSocketWorker);
+    auto unauthorizedClient = ConnectToNativeTransport(authed.Port());
+    SendClientFrame(unauthorizedClient.Get(), R"({"id":"tcp-no-auth","action":"ping","params":{}})");
+    const auto unauthorizedPing = ReadClientFrame(unauthorizedClient.Get());
+    RequireContains(unauthorizedPing, R"("id":"tcp-no-auth")", "unauthorized ping response id drifted");
+    RequireContains(unauthorizedPing, R"("success":false)", "unauthorized ping should fail");
+    RequireContains(unauthorizedPing, "authentication failed", "unauthorized ping should describe auth failure");
+
+    auto authorizedClient = ConnectToNativeTransport(authed.Port());
+    SendClientFrame(authorizedClient.Get(), R"({"id":"tcp-auth","action":"ping","auth_token":"secret","params":{}})");
+    const auto authorizedPing = ReadClientFrame(authorizedClient.Get());
+    RequireContains(authorizedPing, R"("id":"tcp-auth")", "authorized ping response id drifted");
+    RequireContains(authorizedPing, R"("success":true)", "authorized ping should succeed");
+
+    SendClientFrame(authorizedClient.Get(), R"({"id":"tcp-auth-stop","action":"stop","auth_token":"secret","params":{}})");
+    const auto authorizedStop = ReadClientFrame(authorizedClient.Get());
+    RequireContains(authorizedStop, R"("id":"tcp-auth-stop")", "authorized stop response id drifted");
+    RequireContains(authorizedStop, R"("success":true)", "authorized stop should succeed");
+    authed.Stop();
+    SetEnv("VW_MCP_AUTH_TOKEN", "");
 }
 
 int main() {
-    TestProtocol();
-    TestDispatcherMetadata();
-    TestQueue();
-    TestPhaseZeroDispatch();
-    TestNativeTransportRoundTrip();
-    std::cout << "OK: native bridge scaffold compile smoke passed\n";
-    return 0;
+    try {
+        TestProtocol();
+        TestDispatcherMetadata();
+        TestQueue();
+        TestPhaseZeroDispatch();
+        TestDispatchAuth();
+        TestNativeTransportRoundTrip();
+        std::cout << "OK: native bridge scaffold compile smoke passed\n";
+        return 0;
+    } catch (const std::exception& error) {
+        std::cerr << "FAIL: " << error.what() << "\n";
+        return 1;
+    }
 }

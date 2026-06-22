@@ -9,8 +9,17 @@ from typing import Any
 
 
 PHASE_ZERO_MIN_HANDLER_COUNT = 2
-PHASE_ONE_MIN_HANDLER_COUNT = 7
-PHASE_ONE_REQUIRED_ACTIONS = {"ping", "stop", "get_document_info", "get_layers", "get_objects", "selection", "create_object"}
+PHASE_ONE_MIN_HANDLER_COUNT = 8
+PHASE_ONE_REQUIRED_ACTIONS = {
+    "ping",
+    "stop",
+    "get_document_info",
+    "get_layers",
+    "get_objects",
+    "selection",
+    "create_object",
+    "batch_create_objects",
+}
 PHASE_ONE_READ_ACTIONS = ("get_document_info", "get_layers", "get_objects", "selection")
 UNSAFE_DISPATCH_MODES = {"background", "foreground", "win_timer"}
 UNSAFE_BRIDGE_KINDS = {"python_foreground_diagnostic", "python_transport_only"}
@@ -382,12 +391,37 @@ def _validate_fixture_selected(
 def _extract_created_handle(result: Any) -> str | None:
     if isinstance(result, dict):
         handle = result.get("handle")
-        return str(handle) if handle else None
+        if handle:
+            return str(handle)
+        created = result.get("created")
+        if isinstance(created, list) and created and isinstance(created[0], dict):
+            handle = created[0].get("handle")
+            return str(handle) if handle else None
     if isinstance(result, str):
         match = re.search(r"handle:\s*([^\s,;]+)", result)
         if match:
             return match.group(1)
     return None
+
+
+def _validate_batch_create_result(report: dict[str, Any], result: Any) -> bool:
+    if not isinstance(result, dict):
+        report["failures"].append("batch_create_objects fixture result was not an object")
+        return False
+    if result.get("atomic") is not True:
+        report["failures"].append("batch_create_objects fixture result did not report atomic=true")
+        return False
+    if result.get("created_count") != 1:
+        report["failures"].append("batch_create_objects fixture did not report creating exactly one object")
+        return False
+    created = result.get("created")
+    if not isinstance(created, list) or len(created) != 1 or not isinstance(created[0], dict):
+        report["failures"].append("batch_create_objects fixture result did not include one created entry")
+        return False
+    if not _is_non_empty_string(created[0].get("handle")):
+        report["failures"].append("batch_create_objects fixture created entry did not include a handle")
+        return False
+    return True
 
 
 def _validate_fixture_delete_result(report: dict[str, Any], result: Any) -> bool:
@@ -479,6 +513,87 @@ def _run_phase_one_write_fixture(sock: socket.socket, report: dict[str, Any]) ->
     )
     if cleanup_response is not None:
         _validate_fixture_absent(report, cleanup_response.get("result"), fixture_name, fixture_handle)
+
+    batch_fixture_name = "VW_MCP_NATIVE_BATCH_SMOKE_{0}".format(int(time.time() * 1000))
+    batch_response = _record_call(
+        sock,
+        report,
+        "batch_create_objects",
+        "atomic-fixture",
+        params={
+            "object_count": 1,
+            "object_1_json": json.dumps(
+                {
+                    "object_type": "rect",
+                    "x1": 200,
+                    "y1": 0,
+                    "x2": 300,
+                    "y2": 100,
+                    "name": batch_fixture_name,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        },
+    )
+    batch_handle = _extract_created_handle(batch_response.get("result")) if batch_response else None
+    if batch_response is None or not _validate_batch_create_result(report, batch_response.get("result")) or not batch_handle:
+        report["failures"].append("skipped atomic batch fixture cleanup because creation did not return a verified handle")
+        return
+
+    batch_objects_response = _record_call(
+        sock,
+        report,
+        "get_objects",
+        "batch-fixture-present",
+        params={"limit": 200, "object_type": "rect"},
+    )
+    batch_fixture_present = False
+    if batch_objects_response is not None:
+        batch_fixture_present = _validate_fixture_present(
+            report,
+            batch_objects_response.get("result"),
+            batch_fixture_name,
+            batch_handle,
+        )
+
+    batch_selection_cleared = _record_call(sock, report, "selection", "batch-fixture-clear", params={"action": "clear"}) is not None
+    batch_selection_select_sent = _record_call(
+        sock,
+        report,
+        "selection",
+        "batch-fixture-select",
+        params={"action": "select", "criteria": "((N='{0}'))".format(batch_fixture_name)},
+    ) is not None
+    batch_selection_response = _record_call(sock, report, "selection", "batch-fixture-get", params={"action": "get"})
+    batch_fixture_selected = False
+    if batch_selection_response is not None:
+        batch_fixture_selected = _validate_fixture_selected(
+            report,
+            batch_selection_response.get("result"),
+            batch_fixture_name,
+            batch_handle,
+        )
+
+    if not (batch_fixture_present and batch_selection_cleared and batch_selection_select_sent and batch_fixture_selected):
+        report["failures"].append("skipped atomic batch fixture delete because fixture selection was not proven safe")
+        _record_call(sock, report, "selection", "batch-fixture-clear-after-skip", params={"action": "clear"})
+        return
+
+    batch_delete_response = _record_call(sock, report, "selection", "batch-fixture-delete", params={"action": "delete"})
+    if batch_delete_response is None:
+        return
+    _validate_fixture_delete_result(report, batch_delete_response.get("result"))
+
+    batch_cleanup_response = _record_call(
+        sock,
+        report,
+        "get_objects",
+        "batch-fixture-cleanup",
+        params={"limit": 200, "object_type": "rect"},
+    )
+    if batch_cleanup_response is not None:
+        _validate_fixture_absent(report, batch_cleanup_response.get("result"), batch_fixture_name, batch_handle)
 
 
 def _validate_phase_one_consistency(report: dict[str, Any], snapshots: dict[str, Any]) -> None:

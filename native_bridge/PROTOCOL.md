@@ -80,6 +80,7 @@ The native bridge should initially implement these handlers first:
 - `get_objects`
 - `selection`
 - `create_object`
+- `batch_create_objects`
 
 After those are stable, port the remaining handlers from `vw_listener.py` in
 small groups with smoke tests.
@@ -113,8 +114,8 @@ responses must satisfy these minimum shapes:
   mode must report `dispatch_mode: "native_sdk"` and a `bridge_kind` beginning
   with `native_sdk_bridge`; known Python diagnostic modes are rejected. It must
   also report `native_phase >= 1` and `implemented_actions` containing `ping`,
-  `stop`, `get_document_info`, `get_layers`, `get_objects`, `selection`, and
-  `create_object`. Windows SDK builds must also report
+  `stop`, `get_document_info`, `get_layers`, `get_objects`, `selection`,
+  `create_object`, and `batch_create_objects`. Windows SDK builds must also report
   `main_context_pump: "win32_ui_timer"` and
   `main_context_pump_ready: true`; otherwise CAD requests are not considered
   safe even when the handler list is complete.
@@ -130,6 +131,11 @@ responses must satisfy these minimum shapes:
   `top_left` and `bottom_right` as two-number lists.
 - `selection` with `action=get`: list of selected-object records using the same
   object shape as `get_objects`. An empty list is valid.
+- `batch_create_objects`: object with `atomic: true`, `created_count`, and a
+  `created` list containing one `{index, type, handle}` object per requested
+  primitive. The handler must create all requested primitives in one native undo
+  event and roll back created objects on ordinary handler errors before
+  returning failure.
 
 The harness also cross-checks the first successful phase-1 read snapshots:
 

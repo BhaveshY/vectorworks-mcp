@@ -595,6 +595,14 @@ double GetNumberParam(const Params& params, const std::string& key, double defau
     return found->second.numberValue;
 }
 
+double GetFiniteNumberParam(const Params& params, const std::string& key, double defaultValue) {
+    const double value = GetNumberParam(params, key, defaultValue);
+    if (!std::isfinite(value)) {
+        throw std::invalid_argument(key + " must be a finite number");
+    }
+    return value;
+}
+
 int GetBoundedIntParam(
     const Params& params,
     const std::string& key,
@@ -621,6 +629,18 @@ int GetBoundedIntParam(
     return std::min(value, maxValue);
 }
 
+int GetRequiredBoundedIntParam(
+    const Params& params,
+    const std::string& key,
+    int minValue,
+    int maxValue) {
+    const auto found = params.find(key);
+    if (found == params.end() || found->second.type == ParamValue::Type::Null) {
+        throw std::invalid_argument(key + " is required");
+    }
+    return GetBoundedIntParam(params, key, minValue, minValue, maxValue);
+}
+
 NativeTransportOptions GetTransportOptionsFromEnvironment() {
     NativeTransportOptions options;
     if (const char* host = std::getenv("VW_MCP_HOST")) {
@@ -641,16 +661,30 @@ NativeTransportOptions GetTransportOptionsFromEnvironment() {
     return options;
 }
 
+std::string RequiredAuthTokenFromEnvironment() {
+    if (const char* token = std::getenv("VW_MCP_AUTH_TOKEN")) {
+        if (token[0] != '\0') {
+            return token;
+        }
+    }
+    return "";
+}
+
+bool RequestAuthAccepted(const Protocol::RequestEnvelope& request) {
+    const std::string requiredToken = RequiredAuthTokenFromEnvironment();
+    return requiredToken.empty() || request.authToken == requiredToken;
+}
+
 Protocol::ResponseEnvelope HandlePingOnTransportThread(const Protocol::RequestEnvelope& request) {
 #if VECTORWORKS_MCP_HAS_SDK
     const bool ready = CadHandlersRuntimeReady();
-    std::string payload = R"({"pong":true,"version":"native-sdk-bridge-phase1","bridge_kind":"native_sdk_bridge_phase1","dispatch_mode":"native_sdk","handlers":7)";
+    std::string payload = R"({"pong":true,"version":"native-sdk-bridge-phase1","bridge_kind":"native_sdk_bridge_phase1","dispatch_mode":"native_sdk","handlers":8)";
     payload += ",\"cad_api_safe\":";
     payload += ready ? "true" : "false";
     payload += ",\"transport_only\":";
     payload += ready ? "false" : "true";
     payload += R"(,"native_bridge":true,"native_phase":1)";
-    payload += ",\"implemented_actions\":[\"ping\",\"stop\",\"get_document_info\",\"get_layers\",\"get_objects\",\"selection\",\"create_object\"]";
+    payload += ",\"implemented_actions\":[\"ping\",\"stop\",\"get_document_info\",\"get_layers\",\"get_objects\",\"selection\",\"create_object\",\"batch_create_objects\"]";
     payload += ",\"cad_handlers_implemented\":true";
     payload += ",\"main_context_pump\":";
     payload += JsonString(MainContextPumpName());
@@ -953,8 +987,18 @@ std::vector<MCObjectHandle> CollectSelectedObjects() {
 
 std::string HandleSelection(const Params& params) {
     const std::string action = ToLower(GetStringParam(params, "action", "get"));
+    const int limit = GetBoundedIntParam(params, "limit", 1000, 1, 1000);
     if (action == "get") {
-        return ObjectListJson(CollectSelectedObjects());
+        const auto selected = CollectSelectedObjects();
+        std::vector<MCObjectHandle> limited;
+        limited.reserve(std::min(static_cast<std::size_t>(limit), selected.size()));
+        for (MCObjectHandle object : selected) {
+            if (static_cast<int>(limited.size()) >= limit) {
+                break;
+            }
+            limited.push_back(object);
+        }
+        return ObjectListJson(limited);
     }
     if (action == "clear") {
         gSDK->DeselectAll();
@@ -965,9 +1009,9 @@ std::string HandleSelection(const Params& params) {
         if (criteria.empty()) {
             throw std::invalid_argument("criteria is required for selection select");
         }
-        const int limit = GetBoundedIntParam(params, "limit", 1000, 1, 1000);
         int matchedCount = 0;
         int selectedCount = 0;
+        gSDK->DeselectAll();
         gSDK->ForEachObjectInCriteria(TXString(criteria.c_str()), [&](MCObjectHandle object) {
             if (object && IsUserVisibleObjectType(gSDK->GetObjectTypeN(object))) {
                 ++matchedCount;
@@ -991,78 +1035,218 @@ std::string HandleSelection(const Params& params) {
         gSDK->SetUndoMethod(kUndoSwapObjects);
         gSDK->NameUndoEvent(TXString("Vectorworks MCP delete selection"));
         int deleted = 0;
-        for (MCObjectHandle object : selected) {
-            gSDK->AddBeforeSwapObject(object);
-            gSDK->DeleteObject(object, true);
-            ++deleted;
+        try {
+            for (MCObjectHandle object : selected) {
+                gSDK->AddBeforeSwapObject(object);
+                gSDK->DeleteObject(object, true);
+                ++deleted;
+            }
+            gSDK->EndUndoEvent();
+        } catch (...) {
+            gSDK->UndoAndRemove();
+            throw;
         }
-        gSDK->EndUndoEvent();
         return "{\"deleted\":" + std::to_string(deleted) + "}";
     }
     throw std::invalid_argument("unsupported selection action: " + action);
 }
 
-std::string HandleCreateObject(const Params& params) {
-    const std::string objectType = ToLower(GetStringParam(params, "object_type"));
-    if (objectType.empty()) {
-        throw std::invalid_argument("object_type is required");
+struct PrimitiveSpec {
+    std::string objectType;
+    double x1 = 0.0;
+    double y1 = 0.0;
+    double x2 = 100.0;
+    double y2 = 100.0;
+    double radius = 50.0;
+    double startAngle = 0.0;
+    double sweepAngle = 90.0;
+    std::string name;
+    std::string className;
+};
+
+struct CreatedPrimitive {
+    int index = 0;
+    std::string objectType;
+    MCObjectHandle handle = nullptr;
+};
+
+std::string CanonicalCreateObjectType(std::string objectType) {
+    objectType = ToLower(objectType);
+    if (objectType == "rectangle" || objectType == "box") {
+        return "rect";
     }
+    return objectType;
+}
 
-    const double x1 = GetNumberParam(params, "x1", 0.0);
-    const double y1 = GetNumberParam(params, "y1", 0.0);
-    const double x2 = GetNumberParam(params, "x2", 100.0);
-    const double y2 = GetNumberParam(params, "y2", 100.0);
-    const std::string name = GetStringParam(params, "name");
-    const std::string className = GetStringParam(params, "class_name");
+void ValidatePrimitiveSpec(const PrimitiveSpec& spec, const std::string& label) {
+    if (spec.objectType.empty()) {
+        throw std::invalid_argument(label + ".object_type is required");
+    }
+    if (spec.objectType == "rect" || spec.objectType == "oval") {
+        if (spec.x1 == spec.x2 || spec.y1 == spec.y2) {
+            throw std::invalid_argument(label + " " + spec.objectType + " bounds must have non-zero width and height");
+        }
+        return;
+    }
+    if (spec.objectType == "line") {
+        if (spec.x1 == spec.x2 && spec.y1 == spec.y2) {
+            throw std::invalid_argument(label + " line endpoints must not be identical");
+        }
+        return;
+    }
+    if (spec.objectType == "circle") {
+        if (spec.radius <= 0.0) {
+            throw std::invalid_argument(label + ".radius must be > 0");
+        }
+        return;
+    }
+    if (spec.objectType == "arc") {
+        if (spec.radius <= 0.0) {
+            throw std::invalid_argument(label + ".radius must be > 0");
+        }
+        if (spec.sweepAngle == 0.0) {
+            throw std::invalid_argument(label + ".sweep_angle must not be 0");
+        }
+        return;
+    }
+    throw std::invalid_argument("unsupported create_object type for native bridge phase 1: " + spec.objectType);
+}
 
-    gSDK->SupportUndoAndRemove();
-    gSDK->SetUndoMethod(kUndoSwapObjects);
-    gSDK->NameUndoEvent(TXString("Vectorworks MCP create object"));
+PrimitiveSpec ParsePrimitiveSpec(const Params& params, const std::string& label) {
+    PrimitiveSpec spec;
+    spec.objectType = GetStringParam(params, "object_type");
+    if (spec.objectType.empty()) {
+        spec.objectType = GetStringParam(params, "type");
+    }
+    spec.objectType = CanonicalCreateObjectType(spec.objectType);
+    spec.x1 = GetFiniteNumberParam(params, "x1", 0.0);
+    spec.y1 = GetFiniteNumberParam(params, "y1", 0.0);
+    spec.x2 = GetFiniteNumberParam(params, "x2", 100.0);
+    spec.y2 = GetFiniteNumberParam(params, "y2", 100.0);
+    spec.radius = GetFiniteNumberParam(params, "radius", 50.0);
+    spec.startAngle = GetFiniteNumberParam(params, "start_angle", 0.0);
+    spec.sweepAngle = GetFiniteNumberParam(params, "sweep_angle", 90.0);
+    spec.name = GetStringParam(params, "name");
+    spec.className = GetStringParam(params, "class_name");
+    ValidatePrimitiveSpec(spec, label);
+    return spec;
+}
 
+MCObjectHandle CreatePrimitiveFromSpec(const PrimitiveSpec& spec) {
     MCObjectHandle object = nullptr;
-    if (objectType == "rect" || objectType == "rectangle" || objectType == "box") {
-        object = gSDK->CreateRectangle(WorldRect(WorldPt(x1, y1), WorldPt(x2, y2)));
-    } else if (objectType == "oval") {
-        object = gSDK->CreateOval(WorldRect(WorldPt(x1, y1), WorldPt(x2, y2)));
-    } else if (objectType == "circle") {
-        const double radius = GetNumberParam(params, "radius", 50.0);
-        object = gSDK->CreateOval(WorldRect(WorldPt(x1, y1), radius));
-    } else if (objectType == "line") {
-        object = gSDK->CreateLine(WorldPt(x1, y1), WorldPt(x2, y2));
-    } else if (objectType == "arc") {
-        const double radius = GetNumberParam(params, "radius", 50.0);
-        const double startAngle = GetNumberParam(params, "start_angle", 0.0);
-        const double sweepAngle = GetNumberParam(params, "sweep_angle", 90.0);
-        object = gSDK->CreateArcN(WorldRect(WorldPt(x1, y1), radius), startAngle, sweepAngle);
-    } else {
-        gSDK->UndoAndRemove();
-        throw std::invalid_argument("unsupported create_object type for native bridge phase 1: " + objectType);
+    if (spec.objectType == "rect") {
+        object = gSDK->CreateRectangle(WorldRect(WorldPt(spec.x1, spec.y1), WorldPt(spec.x2, spec.y2)));
+    } else if (spec.objectType == "oval") {
+        object = gSDK->CreateOval(WorldRect(WorldPt(spec.x1, spec.y1), WorldPt(spec.x2, spec.y2)));
+    } else if (spec.objectType == "circle") {
+        object = gSDK->CreateOval(WorldRect(WorldPt(spec.x1, spec.y1), spec.radius));
+    } else if (spec.objectType == "line") {
+        object = gSDK->CreateLine(WorldPt(spec.x1, spec.y1), WorldPt(spec.x2, spec.y2));
+    } else if (spec.objectType == "arc") {
+        object = gSDK->CreateArcN(WorldRect(WorldPt(spec.x1, spec.y1), spec.radius), spec.startAngle, spec.sweepAngle);
     }
 
     if (!object) {
-        gSDK->UndoAndRemove();
-        throw std::runtime_error("Vectorworks did not return a handle for created " + objectType);
+        throw std::runtime_error("Vectorworks did not return a handle for created " + spec.objectType);
     }
 
-    if (!name.empty()) {
-        gSDK->SetObjectName(object, TXString(name.c_str()));
+    if (!spec.name.empty()) {
+        gSDK->SetObjectName(object, TXString(spec.name.c_str()));
     }
-    if (!className.empty()) {
-        InternalIndex classId = gSDK->ClassNameToID(TXString(className.c_str()));
+    if (!spec.className.empty()) {
+        InternalIndex classId = gSDK->ClassNameToID(TXString(spec.className.c_str()));
         if (!gSDK->ValidClass(classId)) {
-            classId = gSDK->AddClass(TXString(className.c_str()));
+            classId = gSDK->AddClass(TXString(spec.className.c_str()));
         }
         if (gSDK->ValidClass(classId)) {
             gSDK->SetObjectClass(object, classId);
         }
     }
-    gSDK->AddAfterSwapObject(object);
-    gSDK->EndUndoEvent();
+    return object;
+}
 
-    std::string json = "{\"type\":";
-    json += JsonString(objectType == "rectangle" || objectType == "box" ? "rect" : objectType);
+std::string CreatedPrimitiveJson(const CreatedPrimitive& created) {
+    std::string json = "{\"index\":";
+    json += std::to_string(created.index);
+    json += ",\"type\":";
+    json += JsonString(created.objectType);
     json += ",\"handle\":";
-    json += JsonString(HandleId(object));
+    json += JsonString(HandleId(created.handle));
+    json += "}";
+    return json;
+}
+
+std::string CreatedPrimitiveListJson(const std::vector<CreatedPrimitive>& created) {
+    std::string json = "[";
+    for (std::size_t index = 0; index < created.size(); ++index) {
+        if (index != 0u) {
+            json += ",";
+        }
+        json += CreatedPrimitiveJson(created[index]);
+    }
+    json += "]";
+    return json;
+}
+
+std::string HandleCreateObject(const Params& params) {
+    const PrimitiveSpec spec = ParsePrimitiveSpec(params, "create_object");
+
+    gSDK->SupportUndoAndRemove();
+    gSDK->SetUndoMethod(kUndoSwapObjects);
+    gSDK->NameUndoEvent(TXString("Vectorworks MCP create object"));
+
+    try {
+        MCObjectHandle object = CreatePrimitiveFromSpec(spec);
+        gSDK->AddAfterSwapObject(object);
+        gSDK->EndUndoEvent();
+
+        std::string json = "{\"type\":";
+        json += JsonString(spec.objectType);
+        json += ",\"handle\":";
+        json += JsonString(HandleId(object));
+        json += "}";
+        return json;
+    } catch (...) {
+        gSDK->UndoAndRemove();
+        throw;
+    }
+}
+
+std::string HandleBatchCreateObjects(const Params& params) {
+    const int objectCount = GetRequiredBoundedIntParam(params, "object_count", 1, 250);
+    std::vector<PrimitiveSpec> specs;
+    specs.reserve(static_cast<std::size_t>(objectCount));
+    for (int index = 1; index <= objectCount; ++index) {
+        const std::string key = "object_" + std::to_string(index) + "_json";
+        const std::string objectJson = GetStringParam(params, key);
+        if (objectJson.empty()) {
+            throw std::invalid_argument(key + " is required");
+        }
+        specs.push_back(ParsePrimitiveSpec(ParseParams(objectJson), key));
+    }
+
+    gSDK->SupportUndoAndRemove();
+    gSDK->SetUndoMethod(kUndoSwapObjects);
+    gSDK->NameUndoEvent(TXString("Vectorworks MCP atomic batch create objects"));
+
+    std::vector<CreatedPrimitive> created;
+    created.reserve(specs.size());
+    try {
+        for (std::size_t index = 0; index < specs.size(); ++index) {
+            MCObjectHandle object = CreatePrimitiveFromSpec(specs[index]);
+            gSDK->AddAfterSwapObject(object);
+            created.push_back({static_cast<int>(index + 1u), specs[index].objectType, object});
+        }
+        gSDK->EndUndoEvent();
+    } catch (...) {
+        gSDK->UndoAndRemove();
+        throw;
+    }
+
+    std::string json = "{\"atomic\":true,\"rollback_on_error\":true,\"created_count\":";
+    json += std::to_string(created.size());
+    json += ",\"created\":";
+    json += CreatedPrimitiveListJson(created);
     json += "}";
     return json;
 }
@@ -1087,6 +1271,9 @@ Protocol::ResponseEnvelope DispatchCadRequestOnVectorworksMainContext(const Prot
         }
         if (request.action == "create_object") {
             return {request.id, true, HandleCreateObject(params), ""};
+        }
+        if (request.action == "batch_create_objects") {
+            return {request.id, true, HandleBatchCreateObjects(params), ""};
         }
         return {request.id, false, "", "unknown native bridge CAD action: " + request.action};
     } catch (const std::exception& exc) {
@@ -1142,6 +1329,9 @@ void OnVectorworksMainPluginEvent() {
 }
 
 Protocol::ResponseEnvelope DispatchFromSocketWorker(const Protocol::RequestEnvelope& request) {
+    if (!RequestAuthAccepted(request)) {
+        return {request.id, false, "", "native bridge authentication failed"};
+    }
     if (request.action == "ping") {
         return HandlePingOnTransportThread(request);
     }
@@ -1151,6 +1341,7 @@ Protocol::ResponseEnvelope DispatchFromSocketWorker(const Protocol::RequestEnvel
         return {request.id, true, R"("Native bridge stop requested")", ""};
     }
     if (RequiresCadMainContext(request.action)) {
+        const ActionSpec* actionSpec = FindActionSpec(request.action);
         if (!CadHandlersRuntimeReady()) {
 #if VECTORWORKS_MCP_HAS_SDK
             return {
@@ -1169,7 +1360,10 @@ Protocol::ResponseEnvelope DispatchFromSocketWorker(const Protocol::RequestEnvel
         if (auto enqueueFailure = gCadQueue.EnqueueFromSocketThread(request)) {
             return *enqueueFailure;
         }
-        return gCadQueue.WaitForResponseOnSocketThread(request.id, kCadRequestTimeout);
+        return gCadQueue.WaitForResponseOnSocketThread(
+            request.id,
+            kCadRequestTimeout,
+            actionSpec != nullptr && actionSpec->mayWriteDocument);
     }
     return {request.id, false, "", "unknown native bridge action: " + request.action};
 }

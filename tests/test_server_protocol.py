@@ -152,7 +152,7 @@ def _native_phase_one_status():
         "implemented_actions": sorted(server.NATIVE_PHASE_ONE_REQUIRED_ACTIONS),
         "bridge_kind": "native_sdk_bridge_phase1",
         "dispatch_mode": "native_sdk",
-        "handlers": 7,
+        "handlers": 8,
         "version": "native-sdk-bridge-phase1",
         "main_context_pump": "win32_ui_timer",
         "main_context_pump_ready": True,
@@ -320,6 +320,16 @@ class ServerProtocolTests(unittest.TestCase):
 
         self.assertEqual(calls, [("ping", None, False)])
 
+    def test_config_rejects_non_loopback_hosts(self):
+        self.assertEqual(server._validate_loopback_host("127.0.0.1"), "127.0.0.1")
+        self.assertEqual(server._validate_loopback_host("::1"), "::1")
+        self.assertEqual(server._validate_loopback_host("localhost"), "localhost")
+
+        with self.assertRaises(server.ConfigError):
+            server._validate_loopback_host("0.0.0.0")
+        with self.assertRaises(server.ConfigError):
+            server._validate_loopback_host("192.168.1.20")
+
     def test_health_ping_uses_dedicated_connection_while_cad_call_is_blocked(self):
         cad_started = threading.Event()
         release_cad = threading.Event()
@@ -440,7 +450,7 @@ class ServerProtocolTests(unittest.TestCase):
                     "implemented_actions": sorted(server.NATIVE_PHASE_ONE_REQUIRED_ACTIONS),
                     "bridge_kind": "native_sdk_bridge_phase1",
                     "dispatch_mode": "native_sdk",
-                    "handlers": 7,
+                    "handlers": 8,
                     "version": "native-sdk-bridge-phase1",
                     "main_context_pump": "win32_ui_timer",
                     "main_context_pump_ready": True,
@@ -474,7 +484,7 @@ class ServerProtocolTests(unittest.TestCase):
                     "implemented_actions": sorted(server.NATIVE_PHASE_ONE_REQUIRED_ACTIONS),
                     "bridge_kind": "native_sdk_bridge_phase1",
                     "dispatch_mode": "native_sdk",
-                    "handlers": 7,
+                    "handlers": 8,
                     "version": "native-sdk-bridge-phase1",
                     "main_context_pump": "win32_ui_timer",
                     "main_context_pump_ready": True,
@@ -506,7 +516,7 @@ class ServerProtocolTests(unittest.TestCase):
                         "implemented_actions": sorted(server.NATIVE_PHASE_ONE_REQUIRED_ACTIONS),
                         "bridge_kind": "native_sdk_bridge_phase1",
                         "dispatch_mode": "native_sdk",
-                        "handlers": 7,
+                        "handlers": 8,
                         "version": "native-sdk-bridge-phase1",
                         "main_context_pump": "win32_ui_timer",
                         "main_context_pump_ready": True,
@@ -549,13 +559,19 @@ class ServerProtocolTests(unittest.TestCase):
         def handler(request):
             if request["action"] == "ping":
                 return {"id": request["id"], "success": True, "result": _native_phase_one_status()}
-            if request["action"] == "create_object":
+            if request["action"] == "batch_create_objects":
+                object_count = request["params"]["object_count"]
                 return {
                     "id": request["id"],
                     "success": True,
                     "result": {
-                        "type": request["params"]["object_type"],
-                        "handle": "h-{0}".format(len(listener.requests)),
+                        "atomic": True,
+                        "rollback_on_error": True,
+                        "created_count": object_count,
+                        "created": [
+                            {"index": index, "type": json.loads(request["params"][f"object_{index}_json"])["object_type"], "handle": f"h-{index}"}
+                            for index in range(1, object_count + 1)
+                        ],
                     },
                 }
             self.fail(f"Unexpected action: {request['action']}")
@@ -564,16 +580,20 @@ class ServerProtocolTests(unittest.TestCase):
             {"object_type": "rectangle", "x1": 0, "y1": 0, "x2": 100, "y2": 50, "name": "desk"},
             {"object_type": "line", "x1": 0, "y1": 0, "x2": 100, "y2": 0, "role": "axis"},
         ]
-        with FakeListener(handler, max_requests=3) as listener:
+        with FakeListener(handler, max_requests=2) as listener:
             _configure_server(listener.port)
             result = json.loads(
                 server.vw_batch_create_objects(objects, default_class_name="A-Test", name_prefix="Batch")
             )
 
         self.assertTrue(result["ok"])
+        self.assertTrue(result["atomic"])
+        self.assertTrue(result["native_batch"])
         self.assertEqual(result["created_count"], 2)
-        self.assertEqual([request["action"] for request in listener.requests], ["ping", "create_object", "create_object"])
-        created_params = [request["params"] for request in listener.requests[1:]]
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "batch_create_objects"])
+        batch_params = listener.requests[1]["params"]
+        self.assertEqual(batch_params["object_count"], 2)
+        created_params = [json.loads(batch_params[f"object_{index}_json"]) for index in (1, 2)]
         self.assertEqual(created_params[0]["object_type"], "rect")
         self.assertEqual(created_params[0]["name"], "Batch desk")
         self.assertEqual(created_params[0]["class_name"], "A-Test")
@@ -585,6 +605,31 @@ class ServerProtocolTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertIn("endpoints", result["error"])
+
+    def test_batch_create_objects_can_use_legacy_non_atomic_fallback(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_one_status()}
+            if request["action"] == "create_object":
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {"type": request["params"]["object_type"], "handle": "h-{0}".format(len(listener.requests))},
+                }
+            self.fail(f"Unexpected action: {request['action']}")
+
+        objects = [
+            {"object_type": "rect", "x1": 0, "y1": 0, "x2": 100, "y2": 50},
+            {"object_type": "line", "x1": 0, "y1": 0, "x2": 100, "y2": 0},
+        ]
+        with FakeListener(handler, max_requests=3) as listener:
+            _configure_server(listener.port)
+            result = json.loads(server.vw_batch_create_objects(objects, atomic=False))
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["atomic"])
+        self.assertEqual(result["created_count"], 2)
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "create_object", "create_object"])
 
     def test_plan_schematic_floor_plan_is_read_only(self):
         result = json.loads(
@@ -610,15 +655,24 @@ class ServerProtocolTests(unittest.TestCase):
         def handler(request):
             if request["action"] == "ping":
                 return {"id": request["id"], "success": True, "result": _native_phase_one_status()}
-            if request["action"] == "create_object":
+            if request["action"] == "batch_create_objects":
+                object_count = request["params"]["object_count"]
                 return {
                     "id": request["id"],
                     "success": True,
-                    "result": {"type": request["params"]["object_type"], "handle": "h-{0}".format(len(listener.requests))},
+                    "result": {
+                        "atomic": True,
+                        "rollback_on_error": True,
+                        "created_count": object_count,
+                        "created": [
+                            {"index": index, "type": json.loads(request["params"][f"object_{index}_json"])["object_type"], "handle": f"h-{index}"}
+                            for index in range(1, object_count + 1)
+                        ],
+                    },
                 }
             self.fail(f"Unexpected action: {request['action']}")
 
-        with FakeListener(handler, max_requests=9) as listener:
+        with FakeListener(handler, max_requests=2) as listener:
             _configure_server(listener.port)
             result = json.loads(
                 server.vw_create_schematic_floor_plan(
@@ -630,9 +684,13 @@ class ServerProtocolTests(unittest.TestCase):
             )
 
         self.assertTrue(result["ok"])
+        self.assertTrue(result["atomic"])
         self.assertEqual(result["created_count"], 8)
-        self.assertEqual([request["action"] for request in listener.requests], ["ping"] + ["create_object"] * 8)
-        created_params = [request["params"] for request in listener.requests[1:]]
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "batch_create_objects"])
+        created_params = [
+            json.loads(listener.requests[1]["params"][f"object_{index}_json"])
+            for index in range(1, 9)
+        ]
         self.assertEqual([params["object_type"] for params in created_params], ["rect"] * 4 + ["line", "arc", "line", "line"])
 
     def test_drawing_summary_composes_bounded_read_inventory(self):
@@ -697,18 +755,24 @@ class ServerProtocolTests(unittest.TestCase):
         def handler(request):
             if request["action"] == "ping":
                 return {"id": request["id"], "success": True, "result": _native_phase_one_status()}
-            if request["action"] == "create_object":
+            if request["action"] == "batch_create_objects":
+                object_count = request["params"]["object_count"]
                 return {
                     "id": request["id"],
                     "success": True,
                     "result": {
-                        "type": request["params"]["object_type"],
-                        "handle": "h-{0}".format(len(listener.requests)),
+                        "atomic": True,
+                        "rollback_on_error": True,
+                        "created_count": object_count,
+                        "created": [
+                            {"index": index, "type": json.loads(request["params"][f"object_{index}_json"])["object_type"], "handle": f"h-{index}"}
+                            for index in range(1, object_count + 1)
+                        ],
                     },
                 }
             self.fail(f"Unexpected action: {request['action']}")
 
-        with FakeListener(handler, max_requests=5) as listener:
+        with FakeListener(handler, max_requests=2) as listener:
             _configure_server(listener.port)
             result = json.loads(server.vw_create_schematic_room(0, 0, 4000, 3000, 200, name="Bedroom"))
 
@@ -716,8 +780,12 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertTrue(result["schematic"])
         self.assertFalse(result["bim_objects"])
         self.assertEqual(result["created_count"], 4)
-        self.assertEqual([request["action"] for request in listener.requests], ["ping"] + ["create_object"] * 4)
-        created_params = [request["params"] for request in listener.requests[1:]]
+        self.assertTrue(result["atomic"])
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "batch_create_objects"])
+        created_params = [
+            json.loads(listener.requests[1]["params"][f"object_{index}_json"])
+            for index in range(1, 5)
+        ]
         self.assertEqual([params["object_type"] for params in created_params], ["rect", "rect", "rect", "rect"])
         self.assertEqual(created_params[0]["name"], "Bedroom south wall")
         self.assertEqual(created_params[0]["class_name"], "A-FP-Schematic-Wall")
@@ -736,15 +804,24 @@ class ServerProtocolTests(unittest.TestCase):
         def handler(request):
             if request["action"] == "ping":
                 return {"id": request["id"], "success": True, "result": _native_phase_one_status()}
-            if request["action"] == "create_object":
+            if request["action"] == "batch_create_objects":
+                object_count = request["params"]["object_count"]
                 return {
                     "id": request["id"],
                     "success": True,
-                    "result": {"type": request["params"]["object_type"], "handle": "h-{0}".format(len(listener.requests))},
+                    "result": {
+                        "atomic": True,
+                        "rollback_on_error": True,
+                        "created_count": object_count,
+                        "created": [
+                            {"index": index, "type": json.loads(request["params"][f"object_{index}_json"])["object_type"], "handle": f"h-{index}"}
+                            for index in range(1, object_count + 1)
+                        ],
+                    },
                 }
             self.fail(f"Unexpected action: {request['action']}")
 
-        with FakeListener(handler, max_requests=3) as listener:
+        with FakeListener(handler, max_requests=2) as listener:
             _configure_server(listener.port)
             result = json.loads(
                 server.vw_create_schematic_door(1000, 2000, width=900, rotation=0, swing="left", name="D1")
@@ -752,8 +829,8 @@ class ServerProtocolTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["created_count"], 2)
-        line_params = listener.requests[1]["params"]
-        arc_params = listener.requests[2]["params"]
+        line_params = json.loads(listener.requests[1]["params"]["object_1_json"])
+        arc_params = json.loads(listener.requests[1]["params"]["object_2_json"])
         self.assertEqual(line_params["object_type"], "line")
         self.assertEqual(line_params["name"], "D1 leaf")
         self.assertAlmostEqual(line_params["x1"], 1000)
@@ -770,22 +847,31 @@ class ServerProtocolTests(unittest.TestCase):
         def handler(request):
             if request["action"] == "ping":
                 return {"id": request["id"], "success": True, "result": _native_phase_one_status()}
-            if request["action"] == "create_object":
+            if request["action"] == "batch_create_objects":
+                object_count = request["params"]["object_count"]
                 return {
                     "id": request["id"],
                     "success": True,
-                    "result": {"type": request["params"]["object_type"], "handle": "h-{0}".format(len(listener.requests))},
+                    "result": {
+                        "atomic": True,
+                        "rollback_on_error": True,
+                        "created_count": object_count,
+                        "created": [
+                            {"index": index, "type": json.loads(request["params"][f"object_{index}_json"])["object_type"], "handle": f"h-{index}"}
+                            for index in range(1, object_count + 1)
+                        ],
+                    },
                 }
             self.fail(f"Unexpected action: {request['action']}")
 
-        with FakeListener(handler, max_requests=3) as listener:
+        with FakeListener(handler, max_requests=2) as listener:
             _configure_server(listener.port)
             result = json.loads(server.vw_create_schematic_window(0, 0, 1000, 0, marker_depth=200, name="W1"))
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["created_count"], 2)
-        line_a = listener.requests[1]["params"]
-        line_b = listener.requests[2]["params"]
+        line_a = json.loads(listener.requests[1]["params"]["object_1_json"])
+        line_b = json.loads(listener.requests[1]["params"]["object_2_json"])
         self.assertEqual(line_a["object_type"], "line")
         self.assertEqual(line_b["object_type"], "line")
         self.assertEqual((line_a["x1"], line_a["y1"], line_a["x2"], line_a["y2"]), (0.0, 100.0, 1000.0, 100.0))
@@ -1059,6 +1145,7 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertTrue(server._action_safe_to_retry("manage_classes", {"action": "list"}))
         self.assertTrue(server._action_safe_to_retry("symbol", {"action": "list"}))
         self.assertFalse(server._action_safe_to_retry("create_object"))
+        self.assertFalse(server._action_safe_to_retry("batch_create_objects"))
         self.assertFalse(server._action_safe_to_retry("selection"))
         self.assertFalse(server._action_safe_to_retry("selection", {"action": "delete"}))
         self.assertFalse(server._action_safe_to_retry("selection", {"action": "move"}))
@@ -1069,6 +1156,7 @@ class ServerProtocolTests(unittest.TestCase):
 
     def test_action_safety_keeps_canonical_create_object_metadata(self):
         self.assertEqual(server._ACTION_SAFETY["create_object"], server.TOOL_SAFETY["vw_create_object"])
+        self.assertEqual(server._ACTION_SAFETY["batch_create_objects"], server.TOOL_SAFETY["vw_batch_create_objects"])
         self.assertEqual(server._ACTION_SAFETY["selection"], server.TOOL_SAFETY["vw_selection"])
 
     def test_send_tool_leaves_health_tools_unguarded(self):
@@ -1147,8 +1235,8 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertTrue(safety["vw_get_layers"]["requires_cad_preflight"])
         self.assertTrue(safety["vw_run_script"]["destructiveHint"])
         self.assertTrue(safety["vw_create_object"]["requires_cad_preflight"])
-        self.assertIsNone(safety["vw_batch_create_objects"]["wire_action"])
-        self.assertEqual(safety["vw_batch_create_objects"]["composes_actions"], ["create_object"])
+        self.assertEqual(safety["vw_batch_create_objects"]["wire_action"], "batch_create_objects")
+        self.assertNotIn("composes_actions", safety["vw_batch_create_objects"])
         self.assertIsNone(safety["vw_plan_schematic_floor_plan"]["wire_action"])
         self.assertFalse(safety["vw_plan_schematic_floor_plan"]["requires_cad_preflight"])
         self.assertTrue(safety["vw_plan_schematic_floor_plan"]["readOnlyHint"])
@@ -1263,7 +1351,7 @@ class ServerProtocolTests(unittest.TestCase):
                     "implemented_actions": sorted(server.NATIVE_PHASE_ONE_REQUIRED_ACTIONS),
                     "bridge_kind": "native_sdk_bridge_phase1",
                     "dispatch_mode": "native_sdk",
-                    "handlers": 7,
+                    "handlers": 8,
                     "version": "native-sdk-bridge-phase1",
                     "main_context_pump": "win32_ui_timer",
                     "main_context_pump_ready": False,

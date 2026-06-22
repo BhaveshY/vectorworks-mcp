@@ -162,9 +162,10 @@ cross-checks between document/layer/object snapshots. Add
 `-MaxPingMilliseconds` and `-MaxReadMilliseconds` when you want the smoke gate
 to fail bridges that are functionally correct but too slow for agent loops. Add
 `-AllowWriteFixture` only in a disposable test document; it creates a uniquely
-named rectangle and deletes it only after the fixture identity, object schema,
-and exact selection are verified. Use `-Phase 0 -Stop` for transport-only
-shutdown/port-release verification. Phase 0 accepts the reviewed native
+named rectangle with `create_object`, creates a second fixture through atomic
+`batch_create_objects`, and deletes each only after fixture identity, object
+schema, and exact selection are verified. Use `-Phase 0 -Stop` for
+transport-only shutdown/port-release verification. Phase 0 accepts the reviewed native
 scaffold's honest `cad_api_safe: false` / `transport_only: true` ping, but the
 default phase-1 smoke still requires a real CAD-safe bridge.
 The host-side `vw_preflight_for_cad` also blocks native bridges that claim

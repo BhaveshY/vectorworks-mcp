@@ -12,6 +12,7 @@ IMPLEMENTED_ACTIONS = {
     "get_objects",
     "selection",
     "create_object",
+    "batch_create_objects",
 }
 
 
@@ -244,6 +245,49 @@ class MockNativeBridge:
                             "id": request_id,
                             "success": True,
                             "result": "Created {0}, handle: {1}".format(object_type, handle),
+                        },
+                    )
+                elif action == "batch_create_objects":
+                    params = request.get("params", {})
+                    created = []
+                    object_count = int(params.get("object_count", 0))
+                    if object_count < 1:
+                        _write_json_frame(
+                            conn,
+                            {"id": request_id, "success": False, "error": "object_count must be >= 1"},
+                        )
+                        continue
+                    for index in range(1, object_count + 1):
+                        object_params = json.loads(params.get("object_{0}_json".format(index), "{}"))
+                        self.created_count += 1
+                        handle = "mock-created-{0}".format(self.created_count)
+                        name = object_params.get("name") or "Mock Created {0}".format(self.created_count)
+                        object_type = object_params.get("object_type") or object_params.get("type") or "rect"
+                        if object_type in ("rectangle", "box"):
+                            object_type = "rect"
+                        self.objects.append(
+                            {
+                                "handle": handle,
+                                "type": object_type,
+                                "name": name,
+                                "bounds": {
+                                    "top_left": [object_params.get("x1", 0), object_params.get("y1", 0)],
+                                    "bottom_right": [object_params.get("x2", 100), object_params.get("y2", 100)],
+                                },
+                            }
+                        )
+                        created.append({"index": index, "type": object_type, "handle": handle})
+                    _write_json_frame(
+                        conn,
+                        {
+                            "id": request_id,
+                            "success": True,
+                            "result": {
+                                "atomic": True,
+                                "rollback_on_error": True,
+                                "created_count": len(created),
+                                "created": created,
+                            },
                         },
                     )
                 elif action == "stop":

@@ -45,10 +45,11 @@ and `main_context_pump_ready=true`.
 Native phase 1 currently implements `get_document_info`, `get_layers`,
 `get_objects`, `selection` (`get`, `clear`, `select`, `delete`), and
 `create_object` for `rect`, `rectangle`, `box`, `circle`, `oval`, `line`, and
-`arc`. Host preflight blocks broader MCP tools or unsupported variants before
-dispatching them to the native bridge. Use the generated Python dialog launcher
-when you need broader legacy tool coverage that has not been ported to native
-yet.
+`arc`, plus atomic `batch_create_objects` for multiple phase-1 primitives in
+one native undo event. Host preflight blocks broader MCP tools or unsupported
+variants before dispatching them to the native bridge. Use the generated Python
+dialog launcher when you need broader legacy tool coverage that has not been
+ported to native yet.
 
 Why this is not as simple as a Revit-style setup yet:
 
@@ -382,8 +383,8 @@ Core:
 | `vw_capabilities` | Current bridge capabilities, native phase-1 support, and tool surface |
 | `vw_tool_safety` | Structured safety metadata for all tools |
 | `vw_run_script` | Execute trusted Python inside Vectorworks; requires `confirm="RUN_TRUSTED_CODE"` |
-| `vw_create_object` | Create rect, circle, oval, line, arc; polygon is listener-dependent and blocked by native phase 1 |
-| `vw_batch_create_objects` | Create many native phase-1 primitives in one MCP call |
+| `vw_create_object` | Create rect/rectangle/box, circle, oval, line, arc; polygon is listener-dependent and blocked by native phase 1 |
+| `vw_batch_create_objects` | Create many phase-1 primitives; `atomic=true` uses native all-or-none batch creation, `atomic=false` uses legacy non-atomic composition |
 | `vw_plan_schematic_floor_plan` | Dry-run a multi-room schematic floor plan and return the native primitives |
 | `vw_create_schematic_floor_plan` | Create a multi-room schematic floor plan from rooms, wall segments, doors, and windows |
 | `vw_create_schematic_room` | Create a rectangular schematic room from native 2D wall rectangles |
@@ -413,7 +414,7 @@ Architectural:
 | `vw_insert_window` | Insert a parametric window |
 | `vw_create_slab` | Create an extruded floor-like solid from a polygon footprint, not a BIM slab object |
 | `vw_create_roof` | Try to create a roof custom object from a footprint, with flat extrusion fallback |
-| `vw_inspect_object` | Discover object/plugin parameters |
+| `vw_inspect_object` | Discover object/plugin parameters; plugin probing requires `confirm="PROBE_PLUGIN"` |
 
 ## Agent Handoff
 
@@ -484,6 +485,15 @@ Vectorworks hangs after running the listener script:
 
 ## Security
 
-This is a local-trust connector. `vw_run_script` can execute arbitrary Python
-inside Vectorworks. Only enable this MCP server in Claude Code profiles you
-trust.
+This connector is loopback-only by default. The Python server and Python
+listener reject non-loopback `VW_MCP_HOST` values, and the native transport has
+the same local-bind policy.
+
+For stricter local-process isolation, set the same non-empty
+`VW_MCP_AUTH_TOKEN` in the MCP server environment and in the Vectorworks
+listener/native bridge environment. When configured, frames without the token
+are rejected before dispatch.
+
+`vw_run_script` can execute arbitrary Python inside Vectorworks. Destructive or
+trusted-code paths require explicit confirmation arguments, and the listener
+enforces the same confirmations for raw TCP requests.

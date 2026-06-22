@@ -21,6 +21,7 @@ Legend:
 | `get_objects` | `handle_get_objects` | read | main/plugin event context | 1 | Lists objects with layer/type filters |
 | `selection` | `handle_selection` | mixed/destructive | main/plugin event context | 1 | `get` and `clear` work; `delete` requires explicit destructive test |
 | `create_object` | `handle_create_object` | write | main/plugin event context | 1 | Creates and then deletes a test rectangle |
+| `batch_create_objects` | `handle_batch_create_objects` | write | main/plugin event context | 1 | Atomically creates multiple phase-1 primitives in one undo event; smoke creates and deletes a named fixture |
 | `set_property` | `handle_set_property` | write | main/plugin event context | 2 | Changes name/class/color/line weight on a test object |
 | `find_objects` | `handle_find_objects` | read | main/plugin event context | 2 | Criteria search returns known test object |
 | `manage_classes` | `handle_manage_classes` | mixed/destructive | main/plugin event context | 2 | Lists and creates a temporary class; delete has separate destructive check |

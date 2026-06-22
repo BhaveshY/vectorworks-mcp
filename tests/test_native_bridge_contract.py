@@ -243,6 +243,13 @@ class NativeBridgeContractTests(unittest.TestCase):
                 "selection",
                 "selection",
                 "get_objects",
+                "batch_create_objects",
+                "get_objects",
+                "selection",
+                "selection",
+                "selection",
+                "selection",
+                "get_objects",
             ],
         )
 
@@ -322,7 +329,7 @@ class NativeBridgeContractTests(unittest.TestCase):
             report = run_smoke(port=bridge.port, ping_count=1, read_count=1, timeout=1, phase=1)
 
         self.assertFalse(report["ok"])
-        self.assertIn("ping handlers was not an integer >= 7", report["failures"])
+        self.assertIn("ping handlers was not an integer >= 8", report["failures"])
         self.assertIn("bridge did not report cad_api_safe=true", report["failures"])
         self.assertIn("bridge did not report transport_only=false", report["failures"])
         self.assertIn("ping native_phase was not an integer >= 1", report["failures"])
@@ -346,7 +353,10 @@ class NativeBridgeContractTests(unittest.TestCase):
             report = run_smoke(port=bridge.port, ping_count=1, read_count=1, timeout=1, phase=1)
 
         self.assertFalse(report["ok"])
-        self.assertIn("ping implemented_actions missing phase-1 action(s): selection", report["failures"])
+        self.assertIn(
+            "ping implemented_actions missing phase-1 action(s): batch_create_objects, selection",
+            report["failures"],
+        )
 
     def test_native_smoke_harness_rejects_phase_one_without_ready_pump(self):
         status = {

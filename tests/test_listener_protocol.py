@@ -146,6 +146,10 @@ class ListenerProtocolTests(unittest.TestCase):
     def test_dispatch_rejects_invalid_action_and_params(self):
         listener, _alerts = self.load_listener()
 
+        bad_id = listener.dispatch({"id": 12, "action": "ping", "params": {}})
+        self.assertFalse(bad_id["success"])
+        self.assertIn("id", bad_id["error"])
+
         missing_action = listener.dispatch({"id": "missing", "params": {}})
         self.assertFalse(missing_action["success"])
         self.assertIn("action", missing_action["error"])
@@ -161,6 +165,46 @@ class ListenerProtocolTests(unittest.TestCase):
         null_params = listener.dispatch({"id": "null-params", "action": "ping", "params": None})
         self.assertFalse(null_params["success"])
         self.assertIn("params", null_params["error"])
+
+    def test_dispatch_enforces_optional_auth_token(self):
+        listener, _alerts = self.load_listener()
+        listener.AUTH_TOKEN = "secret"
+
+        missing = listener.dispatch({"id": "missing-auth", "action": "ping", "params": {}})
+        valid = listener.dispatch({"id": "valid-auth", "auth_token": "secret", "action": "ping", "params": {}})
+
+        self.assertFalse(missing["success"])
+        self.assertIn("authentication", missing["error"])
+        self.assertTrue(valid["success"])
+
+    def test_dispatch_rejects_duplicate_and_non_finite_json(self):
+        listener, _alerts = self.load_listener()
+
+        with self.assertRaises(ValueError):
+            listener._json_loads_strict('{"id":"1","id":"2","action":"ping","params":{}}')
+        with self.assertRaises(ValueError):
+            listener._json_loads_strict('{"id":"1","action":"ping","params":{"x":NaN}}')
+
+    def test_raw_destructive_handlers_require_confirmation(self):
+        listener, _alerts = self.load_listener()
+
+        run_script = listener.dispatch({"id": "script", "action": "run_script", "params": {"code": "print('x')"}})
+        delete_class = listener.dispatch(
+            {"id": "class", "action": "manage_classes", "params": {"action": "delete", "class_name": "A-Test"}}
+        )
+        delete_selection = listener.dispatch({"id": "selection", "action": "selection", "params": {"action": "delete"}})
+        inspect_plugin = listener.dispatch(
+            {"id": "inspect", "action": "inspect_object", "params": {"plugin_name": "Door"}}
+        )
+
+        self.assertFalse(run_script["success"])
+        self.assertIn("confirm", run_script["error"])
+        self.assertFalse(delete_class["success"])
+        self.assertIn("confirm", delete_class["error"])
+        self.assertFalse(delete_selection["success"])
+        self.assertIn("confirm", delete_selection["error"])
+        self.assertFalse(inspect_plugin["success"])
+        self.assertIn("confirm", inspect_plugin["error"])
 
     def test_listener_drops_idle_clients(self):
         listener, _alerts = self.load_listener()

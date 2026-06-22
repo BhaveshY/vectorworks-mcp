@@ -22,12 +22,13 @@ constexpr std::array<ActionSpec, 2> kPhaseZeroActions = {{
     {"stop", ExecutionContext::TransportThread, true, false},
 }};
 
-constexpr std::array<ActionSpec, 5> kPhaseOneActions = {{
+constexpr std::array<ActionSpec, 6> kPhaseOneActions = {{
     {"get_document_info", ExecutionContext::VectorworksMainPluginContext, false, false},
     {"get_layers", ExecutionContext::VectorworksMainPluginContext, false, false},
     {"get_objects", ExecutionContext::VectorworksMainPluginContext, false, false},
     {"selection", ExecutionContext::VectorworksMainPluginContext, true, true},
     {"create_object", ExecutionContext::VectorworksMainPluginContext, true, false},
+    {"batch_create_objects", ExecutionContext::VectorworksMainPluginContext, true, false},
 }};
 
 inline bool RequiresCadMainContext(std::string_view action) {

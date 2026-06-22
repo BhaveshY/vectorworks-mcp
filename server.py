@@ -18,6 +18,7 @@ Environment variables, all optional:
 """
 
 import atexit
+import ipaddress
 import json
 import math
 import os
@@ -61,6 +62,7 @@ NATIVE_PHASE_ONE_REQUIRED_ACTIONS = {
     "get_objects",
     "selection",
     "create_object",
+    "batch_create_objects",
 }
 NATIVE_PHASE_ONE_CREATE_OBJECT_TYPES = {
     "arc",
@@ -155,8 +157,21 @@ def _parse_float_env(name: str, default: float, min_value: float) -> float:
     return value
 
 
+def _validate_loopback_host(host: str, env_name: str = "VW_MCP_HOST") -> str:
+    normalized = str(host or "").strip() or DEFAULT_HOST
+    if normalized.lower() == "localhost":
+        return normalized
+    try:
+        if ipaddress.ip_address(normalized).is_loopback:
+            return normalized
+    except ValueError as exc:
+        raise ConfigError(f"{env_name} must be a loopback IP address or localhost, got {normalized!r}") from exc
+    raise ConfigError(f"{env_name} must be loopback-only; refusing {normalized!r}")
+
+
 def _load_config() -> tuple[str, int, float, float, int, int]:
     host = os.environ.get("VW_MCP_HOST", DEFAULT_HOST).strip() or DEFAULT_HOST
+    host = _validate_loopback_host(host)
     port = _parse_int_env("VW_MCP_PORT", DEFAULT_PORT, 1, 65535)
     timeout = _parse_float_env("VW_MCP_TIMEOUT", DEFAULT_TIMEOUT, 0.1)
     health_timeout = _parse_float_env("VW_MCP_HEALTH_TIMEOUT", min(DEFAULT_HEALTH_TIMEOUT, timeout), 0.1)
@@ -188,6 +203,7 @@ except ConfigError as exc:
     PREFLIGHT_CACHE_MS = DEFAULT_PREFLIGHT_CACHE_MS
 
 PREFLIGHT_CACHE_SECONDS = PREFLIGHT_CACHE_MS / 1000.0
+AUTH_TOKEN = os.environ.get("VW_MCP_AUTH_TOKEN", "").strip()
 
 
 mcp = FastMCP("Vectorworks 2024/2025") if FastMCP is not None else _MissingFastMCP("Vectorworks 2024/2025")
@@ -200,7 +216,7 @@ _cad_safe_cache_lock = threading.Lock()
 _cad_safe_cache: Optional[tuple[float, dict[str, Any]]] = None
 
 
-ObjectType = Literal["rect", "circle", "oval", "line", "arc", "polygon"]
+ObjectType = Literal["rect", "rectangle", "box", "circle", "oval", "line", "arc", "polygon"]
 DoorSwing = Literal["left", "right"]
 PropertyName = Literal["name", "class", "fillColor", "penColor", "lineWeight", "opacity"]
 ClassAction = Literal["list", "create", "delete"]
@@ -319,13 +335,15 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
         "requires_cad_preflight": True,
     },
     "vw_inspect_object": {
-        "category": "document-read",
+        "category": "document-write",
         "wire_action": "inspect_object",
-        "readOnlyHint": True,
+        "readOnlyHint": False,
         "destructiveHint": False,
-        "idempotentHint": True,
+        "idempotentHint": False,
         "openWorldHint": True,
         "requires_cad_preflight": True,
+        "writesDocument": True,
+        "confirmationRequired": True,
     },
     "vw_screenshot": {
         "category": "document-export",
@@ -356,8 +374,7 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
     },
     "vw_batch_create_objects": {
         "category": "document-write",
-        "wire_action": None,
-        "composes_actions": ["create_object"],
+        "wire_action": "batch_create_objects",
         "readOnlyHint": False,
         "destructiveHint": False,
         "idempotentHint": False,
@@ -1126,6 +1143,8 @@ def _request_once(action: str, params: Optional[dict[str, Any]]) -> dict[str, An
     _connect()
     request_id = uuid.uuid4().hex[:8]
     request = {"id": request_id, "action": action, "params": params or {}}
+    if AUTH_TOKEN:
+        request["auth_token"] = AUTH_TOKEN
     try:
         payload = _json_bytes(request)
         _send_frame(payload)
@@ -1145,6 +1164,8 @@ def _request_once(action: str, params: Optional[dict[str, Any]]) -> dict[str, An
 def _request_once_health(action: str, params: Optional[dict[str, Any]]) -> dict[str, Any]:
     request_id = uuid.uuid4().hex[:8]
     request = {"id": request_id, "action": action, "params": params or {}}
+    if AUTH_TOKEN:
+        request["auth_token"] = AUTH_TOKEN
     try:
         payload = _json_bytes(request)
     except ProtocolError as exc:
@@ -1204,7 +1225,10 @@ def _send(action: str, params: Optional[dict[str, Any]] = None, require_cad_safe
                 response = _request_once(action, params)
                 if response.get("success") is True:
                     return _format_result(response.get("result", "OK"))
-                return f"VW Error ({action}): {response.get('error', 'Unknown listener error')}"
+                listener_error = str(response.get("error", "Unknown listener error"))
+                if "unknown_commit_state" in listener_error.lower():
+                    return _unknown_commit_state_help(action, RuntimeError(listener_error))
+                return f"VW Error ({action}): {listener_error}"
             except RequestNotSentError as exc:
                 _close()
                 return _request_not_sent_help(action, exc)
@@ -1265,6 +1289,10 @@ def vw_capabilities(include_tools: bool = True) -> str:
         "native_phase_one_selection_actions": sorted(NATIVE_PHASE_ONE_SELECTION_ACTIONS),
         "host_capabilities": {
             "batch_primitive_creation": True,
+            "atomic_batch_primitive_creation": (
+                isinstance(decoded_status, dict)
+                and "batch_create_objects" in set(decoded_status.get("implemented_actions") or [])
+            ),
             "schematic_floor_plan_planning": True,
             "schematic_floor_plan_creation": True,
             "drawing_summary": True,
@@ -1293,7 +1321,7 @@ def vw_run_script(code: str, confirm: str = "") -> str:
             "RUN_TRUSTED_CODE",
             "vw_run_script executes trusted code inside Vectorworks and requires explicit confirmation",
         )
-    return _send_tool("vw_run_script", {"code": code})
+    return _send_tool("vw_run_script", {"code": code, "confirm": confirm})
 
 
 @_tool("vw_create_object")
@@ -1500,7 +1528,146 @@ def _normalise_create_primitive(
     return params
 
 
-def _create_primitives(
+def _native_batch_params(primitives: list[dict[str, Any]]) -> tuple[dict[str, Any], list[str], list[dict[str, Any]]]:
+    params: dict[str, Any] = {"object_count": len(primitives)}
+    roles: list[str] = []
+    sent_primitives: list[dict[str, Any]] = []
+    for index, primitive in enumerate(primitives, start=1):
+        primitive_params = dict(primitive)
+        roles.append(str(primitive_params.pop("role", "primitive")))
+        sent_primitives.append(primitive_params)
+        params[f"object_{index}_json"] = json.dumps(primitive_params, separators=(",", ":"), sort_keys=True)
+    return params, roles, sent_primitives
+
+
+def _atomic_batch_support_error(tool: str) -> Optional[str]:
+    raw_status = _send_health("ping")
+    decoded_status = _decode_tool_result(raw_status)
+    if _tool_result_failed(raw_status, decoded_status) or not isinstance(decoded_status, dict):
+        return json.dumps(
+            {
+                "ok": False,
+                "tool": tool,
+                "atomic": True,
+                "native_batch": False,
+                "error": "atomic batch creation requires a native bridge, but bridge status could not be verified",
+                "bridge_status": decoded_status,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    implemented_actions = decoded_status.get("implemented_actions")
+    supports_batch = (
+        decoded_status.get("native_bridge") is True
+        and decoded_status.get("cad_api_safe") is True
+        and isinstance(implemented_actions, list)
+        and "batch_create_objects" in implemented_actions
+    )
+    if supports_batch:
+        _remember_cad_safe_status(decoded_status)
+        return None
+    return json.dumps(
+        {
+            "ok": False,
+            "tool": tool,
+            "atomic": True,
+            "native_batch": False,
+            "error": "atomic batch creation requires the native Vectorworks bridge action 'batch_create_objects'",
+            "next_action": "Install/restart the updated native bridge, or call the creation tool with atomic=False for legacy non-atomic create_object composition.",
+            "bridge_status": decoded_status,
+        },
+        indent=2,
+        sort_keys=True,
+    )
+
+
+def _create_primitives_native_batch(
+    tool: str,
+    primitives: list[dict[str, Any]],
+    metadata: dict[str, Any],
+    *,
+    schematic: bool = False,
+    bim_objects: bool = False,
+) -> str:
+    support_error = _atomic_batch_support_error(tool)
+    if support_error is not None:
+        return support_error
+    params, roles, sent_primitives = _native_batch_params(primitives)
+    raw = _send_tool("vw_batch_create_objects", params)
+    decoded = _decode_tool_result(raw)
+    if _tool_result_failed(raw, decoded):
+        return json.dumps(
+            {
+                "ok": False,
+                "tool": tool,
+                "schematic": schematic,
+                "bim_objects": bim_objects,
+                "atomic": True,
+                "native_batch": True,
+                "attempted_count": len(primitives),
+                "created_count": 0,
+                "failed_count": len(primitives),
+                "result": decoded,
+                "warning": "Native atomic batch creation failed; the native bridge rolls back created primitives before returning ordinary handler errors. If transport failed after sending, inspect the document because commit state is unknown.",
+                **metadata,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+
+    native_created = decoded.get("created", []) if isinstance(decoded, dict) else []
+    if not isinstance(native_created, list) or len(native_created) != len(primitives):
+        return json.dumps(
+            {
+                "ok": False,
+                "tool": tool,
+                "schematic": schematic,
+                "bim_objects": bim_objects,
+                "atomic": True,
+                "native_batch": True,
+                "attempted_count": len(primitives),
+                "created_count": 0,
+                "failed_count": len(primitives),
+                "result": decoded,
+                "error": "native batch result did not contain one created entry per requested primitive",
+                **metadata,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+
+    created: list[dict[str, Any]] = []
+    for index, native_entry in enumerate(native_created, start=1):
+        role = roles[index - 1]
+        created.append(
+            {
+                "index": index,
+                "role": role,
+                "params": sent_primitives[index - 1],
+                "result": native_entry,
+            }
+        )
+
+    return json.dumps(
+        {
+            "ok": True,
+            "tool": tool,
+            "schematic": schematic,
+            "bim_objects": bim_objects,
+            "atomic": True,
+            "native_batch": True,
+            "attempted_count": len(created),
+            "created_count": len(created),
+            "created": created,
+            "native_result": decoded,
+            **metadata,
+        },
+        indent=2,
+        sort_keys=True,
+    )
+
+
+def _create_primitives_legacy(
     tool: str,
     primitives: list[dict[str, Any]],
     metadata: dict[str, Any],
@@ -1565,8 +1732,42 @@ def _create_primitives(
     )
 
 
-def _create_floor_plan_primitives(tool: str, primitives: list[dict[str, Any]], metadata: dict[str, Any]) -> str:
-    return _create_primitives(tool, primitives, metadata, schematic=True, bim_objects=False)
+def _create_primitives(
+    tool: str,
+    primitives: list[dict[str, Any]],
+    metadata: dict[str, Any],
+    *,
+    schematic: bool = False,
+    bim_objects: bool = False,
+    stop_on_error: bool = True,
+    atomic: bool = True,
+) -> str:
+    if atomic:
+        return _create_primitives_native_batch(
+            tool,
+            primitives,
+            metadata,
+            schematic=schematic,
+            bim_objects=bim_objects,
+        )
+    return _create_primitives_legacy(
+        tool,
+        primitives,
+        metadata,
+        schematic=schematic,
+        bim_objects=bim_objects,
+        stop_on_error=stop_on_error,
+    )
+
+
+def _create_floor_plan_primitives(
+    tool: str,
+    primitives: list[dict[str, Any]],
+    metadata: dict[str, Any],
+    *,
+    atomic: bool = True,
+) -> str:
+    return _create_primitives(tool, primitives, metadata, schematic=True, bim_objects=False, atomic=atomic)
 
 
 def _named(base: str, suffix: str) -> str:
@@ -1937,9 +2138,11 @@ def vw_batch_create_objects(
     default_class_name: str = "",
     name_prefix: str = "",
     stop_on_error: bool = True,
+    atomic: bool = True,
 ) -> str:
     """Create many native phase-1 primitives in one MCP call.
-    Supported object_type values are rect/rectangle/box, circle, oval, line, and arc. Not atomic."""
+    Supported object_type values are rect/rectangle/box, circle, oval, line, and arc.
+    By default this uses the native atomic batch action so either all primitives are created or none are."""
     try:
         primitives = [
             _normalise_create_primitive(
@@ -1961,10 +2164,12 @@ def vw_batch_create_objects(
             "default_class_name": default_class_name,
             "name_prefix": name_prefix,
             "stop_on_error": stop_on_error,
+            "atomic": atomic,
         },
         schematic=False,
         bim_objects=False,
         stop_on_error=stop_on_error,
+        atomic=atomic,
     )
 
 
@@ -2024,6 +2229,7 @@ def vw_create_schematic_floor_plan(
     door_class: str = "A-FP-Schematic-Door",
     window_class: str = "A-FP-Schematic-Window",
     stop_on_error: bool = True,
+    atomic: bool = True,
 ) -> str:
     """Create a multi-room schematic floor plan from structured rooms, wall segments, doors, and windows.
     This creates 2D drafting primitives, not BIM wall/door/window objects."""
@@ -2049,11 +2255,13 @@ def vw_create_schematic_floor_plan(
             "primitive_count": len(primitives),
             "warnings": warnings,
             "stop_on_error": stop_on_error,
+            "atomic": atomic,
             **counts,
         },
         schematic=True,
         bim_objects=False,
         stop_on_error=stop_on_error,
+        atomic=atomic,
     )
 
 
@@ -2066,6 +2274,7 @@ def vw_create_schematic_room(
     wall_thickness: PositiveLength = 200,
     name: str = "",
     class_name: str = "A-FP-Schematic-Wall",
+    atomic: bool = True,
 ) -> str:
     """Create a rectangular schematic room from four 2D wall rectangles.
     Coordinates use the active document units. This is drafting geometry, not BIM walls."""
@@ -2077,7 +2286,8 @@ def vw_create_schematic_room(
     return _create_floor_plan_primitives(
         "vw_create_schematic_room",
         primitives,
-        {"origin": [x, y], "width": width, "depth": depth, "wall_thickness": wall_thickness},
+        {"origin": [x, y], "width": width, "depth": depth, "wall_thickness": wall_thickness, "atomic": atomic},
+        atomic=atomic,
     )
 
 
@@ -2090,6 +2300,7 @@ def vw_create_schematic_door(
     swing: DoorSwing = "left",
     name: str = "",
     class_name: str = "A-FP-Schematic-Door",
+    atomic: bool = True,
 ) -> str:
     """Draw a schematic door leaf and swing arc. This is drafting geometry, not a BIM door."""
     try:
@@ -2113,7 +2324,9 @@ def vw_create_schematic_door(
             "width": width,
             "rotation": rotation,
             "swing": swing,
+            "atomic": atomic,
         },
+        atomic=atomic,
     )
 
 
@@ -2126,6 +2339,7 @@ def vw_create_schematic_window(
     marker_depth: PositiveLength = 150,
     name: str = "",
     class_name: str = "A-FP-Schematic-Window",
+    atomic: bool = True,
 ) -> str:
     """Draw a schematic double-line window marker between two points.
     This is drafting geometry, not a BIM window."""
@@ -2149,7 +2363,9 @@ def vw_create_schematic_window(
             "start": [x1, y1],
             "end": [x2, y2],
             "marker_depth": marker_depth,
+            "atomic": atomic,
         },
+        atomic=atomic,
     )
 
 
@@ -2291,7 +2507,7 @@ def vw_manage_classes(action: ClassAction, class_name: str = "", confirm: str = 
             "DELETE_CLASS",
             "class deletion is destructive and requires explicit confirmation",
         )
-    return _send_tool("vw_manage_classes", {"action": action, "class_name": class_name})
+    return _send_tool("vw_manage_classes", {"action": action, "class_name": class_name, "confirm": confirm})
 
 
 @_tool("vw_worksheet")
@@ -2393,7 +2609,7 @@ def vw_selection(action: SelectionAction, criteria: str = "", confirm: str = "",
             "DELETE_SELECTED",
             "selection delete is destructive and requires explicit confirmation",
         )
-    return _send_tool("vw_selection", {"action": action, "criteria": criteria, "limit": limit})
+    return _send_tool("vw_selection", {"action": action, "criteria": criteria, "confirm": confirm, "limit": limit})
 
 
 @_tool("vw_create_wall")
@@ -2471,9 +2687,15 @@ def vw_create_roof(
 
 
 @_tool("vw_inspect_object")
-def vw_inspect_object(handle: str = "", plugin_name: str = "") -> str:
-    """Discover configurable parameters of a VW object. Provide handle or plugin_name such as Door or Wall."""
-    return _send_tool("vw_inspect_object", {"handle": handle, "plugin_name": plugin_name})
+def vw_inspect_object(handle: str = "", plugin_name: str = "", confirm: str = "") -> str:
+    """Discover configurable parameters of a VW object. Plugin probing requires confirm='PROBE_PLUGIN'."""
+    if plugin_name and confirm != "PROBE_PLUGIN":
+        return _confirmation_error(
+            "vw_inspect_object",
+            "PROBE_PLUGIN",
+            "plugin probing creates and deletes a temporary Vectorworks object and requires explicit confirmation",
+        )
+    return _send_tool("vw_inspect_object", {"handle": handle, "plugin_name": plugin_name, "confirm": confirm})
 
 
 def main() -> int:

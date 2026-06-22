@@ -17,12 +17,12 @@ Document context:
 - `vw_get_objects`: list objects filtered by layer/type.
 - `vw_drawing_summary`: bounded document/layer/object inventory for planning and verification.
 - `vw_find_objects`: Vectorworks criteria search, such as `T=WALL`.
-- `vw_inspect_object`: discover object/plugin parameters.
+- `vw_inspect_object`: discover object/plugin parameters; plugin probing creates a temporary object and requires `confirm="PROBE_PLUGIN"`.
 
 Create and edit:
 
 - `vw_create_object`: rect, circle, oval, line, arc; polygon is listener-dependent and blocked by native phase 1.
-- `vw_batch_create_objects`: create many native phase-1 primitives in one MCP call.
+- `vw_batch_create_objects`: create many phase-1 primitives in one MCP call. `atomic=true` requires the native `batch_create_objects` bridge action; `atomic=false` uses legacy non-atomic `create_object` composition.
 - `vw_plan_schematic_floor_plan`: dry-run a multi-room schematic floor plan and return the primitives.
 - `vw_create_schematic_floor_plan`: create a multi-room schematic floor plan from rooms, walls, doors, and windows.
 - `vw_create_schematic_room`: rectangular schematic room from native 2D wall rectangles.
@@ -65,7 +65,7 @@ Rules:
 
 | Tool | Category | Wire action | Read-only | Destructive | Idempotent | Open-world | CAD preflight |
 |------|----------|-------------|-----------|-------------|------------|------------|---------------|
-| `vw_batch_create_objects` | `document-write` | `` | `false` | `false` | `false` | `true` | `true` |
+| `vw_batch_create_objects` | `document-write` | `batch_create_objects` | `false` | `false` | `false` | `true` | `true` |
 | `vw_bridge_status` | `health` | `ping` | `true` | `false` | `true` | `true` | `false` |
 | `vw_capabilities` | `metadata` | `ping` | `true` | `false` | `true` | `true` | `false` |
 | `vw_create_object` | `document-write` | `create_object` | `false` | `false` | `false` | `true` | `true` |
@@ -85,7 +85,7 @@ Rules:
 | `vw_import_file` | `document-write` | `import_file` | `false` | `false` | `false` | `true` | `true` |
 | `vw_insert_door` | `document-write` | `insert_door` | `false` | `false` | `false` | `true` | `true` |
 | `vw_insert_window` | `document-write` | `insert_window` | `false` | `false` | `false` | `true` | `true` |
-| `vw_inspect_object` | `document-read` | `inspect_object` | `true` | `false` | `true` | `true` | `true` |
+| `vw_inspect_object` | `document-write` | `inspect_object` | `false` | `false` | `false` | `true` | `true` |
 | `vw_manage_classes` | `mixed-destructive` | `manage_classes` | `false` | `true` | `false` | `true` | `true` |
 | `vw_ping` | `health` | `ping` | `true` | `false` | `true` | `true` | `false` |
 | `vw_plan_schematic_floor_plan` | `schematic-floor-plan` | `` | `true` | `false` | `true` | `false` | `false` |

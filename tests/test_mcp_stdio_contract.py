@@ -74,10 +74,16 @@ class McpStdioContractTests(unittest.TestCase):
                         batch_objects_schema = by_name["vw_batch_create_objects"].inputSchema["properties"]["objects"]
                         self.assertEqual(batch_objects_schema["minItems"], 1)
                         self.assertEqual(batch_objects_schema["maxItems"], 250)
+                        self.assertIn("atomic", by_name["vw_batch_create_objects"].inputSchema["properties"])
+
+                        create_object_type = by_name["vw_create_object"].inputSchema["properties"]["object_type"]
+                        self.assertIn("rectangle", create_object_type["enum"])
+                        self.assertIn("box", create_object_type["enum"])
 
                         floor_plan_rooms_schema = by_name["vw_create_schematic_floor_plan"].inputSchema["properties"]["rooms"]
                         self.assertEqual(floor_plan_rooms_schema["minItems"], 1)
                         self.assertEqual(floor_plan_rooms_schema["maxItems"], 100)
+                        self.assertIn("atomic", by_name["vw_create_schematic_floor_plan"].inputSchema["properties"])
 
                         contract_completed = True
                         ping = await session.call_tool("vw_ping", {})

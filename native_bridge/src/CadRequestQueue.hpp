@@ -86,7 +86,8 @@ public:
     // Called by the socket worker thread while waiting for main-context CAD/API work.
     Protocol::ResponseEnvelope WaitForResponseOnSocketThread(
         const std::string& id,
-        std::chrono::milliseconds timeout) {
+        std::chrono::milliseconds timeout,
+        bool mayWriteDocument = false) {
         std::unique_lock<std::mutex> lock(mutex_);
         const bool ready = cv_.wait_for(lock, timeout, [&] {
             const auto found = requests_.find(id);
@@ -107,6 +108,14 @@ public:
 
         if (ready && cancelled_) {
             return {id, false, "", cancellationReason_};
+        }
+        if (mayWriteDocument) {
+            return {
+                id,
+                false,
+                "",
+                "unknown_commit_state: native bridge timed out waiting for Vectorworks main/plugin context after a write request was accepted",
+            };
         }
         return {id, false, "", "native bridge timed out waiting for Vectorworks main/plugin context"};
     }

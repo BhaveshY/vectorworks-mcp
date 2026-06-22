@@ -37,7 +37,7 @@ try:
 except ModuleNotFoundError:
     vs = None
 
-import io, json, math, os, selectors, socket, struct, sys, threading, time, traceback, types
+import io, ipaddress, json, math, os, selectors, socket, struct, sys, threading, time, traceback, types
 
 __VERSION__ = "0.3.0-socket"
 
@@ -66,9 +66,21 @@ def _env_int(name, default, min_value=None, max_value=None):
     return value
 
 
+def _validate_loopback_host(host, env_name="VW_MCP_HOST"):
+    normalized = str(host or "").strip() or DEFAULT_HOST
+    if normalized.lower() == "localhost":
+        return normalized
+    try:
+        if ipaddress.ip_address(normalized).is_loopback:
+            return normalized
+    except ValueError:
+        raise ValueError("{name} must be a loopback IP address or localhost, got {value!r}".format(name=env_name, value=normalized))
+    raise ValueError("{name} must be loopback-only; refusing {value!r}".format(name=env_name, value=normalized))
+
+
 _CONFIG_ERROR = None
 try:
-    HOST = os.environ.get("VW_MCP_HOST", DEFAULT_HOST).strip() or DEFAULT_HOST
+    HOST = _validate_loopback_host(os.environ.get("VW_MCP_HOST", DEFAULT_HOST))
     PORT = _env_int("VW_MCP_PORT", DEFAULT_PORT, 1, 65535)
     MAX_FRAME_BYTES = _env_int("VW_MCP_MAX_FRAME_BYTES", DEFAULT_MAX_FRAME_BYTES, 1024, 128 * 1024 * 1024)
     MAX_PENDING_READ_BYTES = _env_int(
@@ -86,6 +98,7 @@ try:
     MAX_CLIENTS = _env_int("VW_MCP_MAX_CLIENTS", DEFAULT_MAX_CLIENTS, 1, 64)
     CLIENT_IDLE_SECONDS = _env_int("VW_MCP_CLIENT_IDLE_SECONDS", DEFAULT_CLIENT_IDLE_SECONDS, 30, 86400)
     DIALOG_TIMER_MS = _env_int("VW_MCP_DIALOG_TIMER_MS", DEFAULT_DIALOG_TIMER_MS, 20, 5000)
+    AUTH_TOKEN = os.environ.get("VW_MCP_AUTH_TOKEN", "").strip()
 except ValueError as e:
     _CONFIG_ERROR = str(e)
     HOST = DEFAULT_HOST
@@ -96,6 +109,7 @@ except ValueError as e:
     MAX_CLIENTS = DEFAULT_MAX_CLIENTS
     CLIENT_IDLE_SECONDS = DEFAULT_CLIENT_IDLE_SECONDS
     DIALOG_TIMER_MS = DEFAULT_DIALOG_TIMER_MS
+    AUTH_TOKEN = ""
 
 STOP_DIR = os.environ.get("VW_MCP_STOP_DIR") or os.path.join(
     os.path.expanduser("~"), ".vectorworks-mcp"
@@ -293,6 +307,8 @@ def _set_object_rgb_color(h, prop, value):
 # === HANDLERS ===
 
 def handle_run_script(p):
+    if p.get("confirm") != "RUN_TRUSTED_CODE":
+        return _err("run_script requires confirm='RUN_TRUSTED_CODE'")
     old = sys.stdout
     sys.stdout = cap = io.StringIO()
     try:
@@ -305,7 +321,7 @@ def handle_create_object(p):
     t = p.get("object_type", "").lower()
     x1, y1, x2, y2 = p.get("x1", 0), p.get("y1", 0), p.get("x2", 100), p.get("y2", 100)
     try:
-        if t == "rect": vs.Rect(x1, y1, x2, y2)
+        if t in ("rect", "rectangle", "box"): vs.Rect(x1, y1, x2, y2); t = "rect"
         elif t == "circle": vs.ArcByCenter(x1, y1, p.get("radius", 50), 0, 360)
         elif t == "oval": vs.Oval(x1, y1, x2, y2)
         elif t == "line": vs.MoveTo(x1, y1); vs.LineTo(x2, y2)
@@ -323,6 +339,60 @@ def handle_create_object(p):
         vs.ReDrawAll()
         return _ok(f"Created {t}, handle: {_reg(h)}")
     except Exception: return _err(traceback.format_exc())
+
+def _reject_json_constant(value):
+    raise ValueError("non-finite JSON constants are not allowed: {0}".format(value))
+
+def _reject_duplicate_object_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key: {0}".format(key))
+        result[key] = value
+    return result
+
+def _json_loads_strict(text):
+    return json.loads(
+        text,
+        parse_constant=_reject_json_constant,
+        object_pairs_hook=_reject_duplicate_object_pairs,
+    )
+
+def _created_handle_from_result(result):
+    if isinstance(result, str) and "handle:" in result:
+        return result.split("handle:", 1)[1].strip().split()[0].strip(",;")
+    return ""
+
+def handle_batch_create_objects(p):
+    try:
+        count = _bounded_int(p.get("object_count", 0), 0, 1, 250, "object_count")
+    except ValueError as e:
+        return _err(str(e))
+    created = []
+    for index in range(1, count + 1):
+        key = "object_{0}_json".format(index)
+        raw = p.get(key, "")
+        if not isinstance(raw, str) or not raw:
+            return _err("{0} is required".format(key))
+        try:
+            item = _json_loads_strict(raw)
+        except Exception as e:
+            return _err("{0} must be valid JSON object: {1}".format(key, e))
+        if not isinstance(item, dict):
+            return _err("{0} must be a JSON object".format(key))
+        result = handle_create_object(item)
+        if result.get("success") is not True:
+            return _err(
+                "non-atomic batch_create_objects failed at index {0}: {1}. Earlier primitives may already exist.".format(
+                    index,
+                    result.get("error", "unknown error"),
+                )
+            )
+        object_type = str(item.get("object_type") or item.get("type") or "rect").lower()
+        if object_type in ("rectangle", "box"):
+            object_type = "rect"
+        created.append({"index": index, "type": object_type, "handle": _created_handle_from_result(result.get("result"))})
+    return _ok({"atomic": False, "rollback_on_error": False, "created_count": len(created), "created": created})
 
 def handle_get_layers(p):
     layers, h = [], vs.FLayer()
@@ -392,6 +462,8 @@ def handle_manage_classes(p):
         elif action == "create":
             vs.NameClass(p.get("class_name", "")); return _ok(f"Created class '{p.get('class_name')}'")
         elif action == "delete":
+            if p.get("confirm") != "DELETE_CLASS":
+                return _err("class deletion requires confirm='DELETE_CLASS'")
             vs.DelClass(p.get("class_name", "")); return _ok(f"Deleted class '{p.get('class_name')}'")
         else: return _err("Unknown action. Use: list, create, delete")
     except Exception: return _err(traceback.format_exc())
@@ -540,6 +612,8 @@ def handle_selection(p):
         elif action == "clear":
             vs.DSelectAll(); vs.ReDrawAll(); return _ok("Selection cleared")
         elif action == "delete":
+            if p.get("confirm") != "DELETE_SELECTED":
+                return _err("selection delete requires confirm='DELETE_SELECTED'")
             to_del = list(_iter_selected())
             for h in to_del: vs.DelObject(h)
             vs.ReDrawAll(); return _ok(f"Deleted {len(to_del)} objects")
@@ -670,6 +744,8 @@ def handle_inspect_object(p):
             h = _get(hid)
             if h is None: return _err(f"Handle '{hid}' not found")
         elif pname:
+            if p.get("confirm") != "PROBE_PLUGIN":
+                return _err("plugin probing requires confirm='PROBE_PLUGIN'")
             h = vs.CreateCustomObjectN(pname, (0, 0), 0, False)
             if h is None: return _err(f"Cannot create '{pname}'. Check plugin name.")
             temp = True
@@ -697,6 +773,7 @@ def handle_inspect_object(p):
 # === DISPATCHER ===
 HANDLERS = {
     "run_script": handle_run_script, "create_object": handle_create_object,
+    "batch_create_objects": handle_batch_create_objects,
     "get_layers": handle_get_layers, "get_objects": handle_get_objects,
     "set_property": handle_set_property, "find_objects": handle_find_objects,
     "manage_classes": handle_manage_classes, "worksheet": handle_worksheet,
@@ -740,11 +817,7 @@ def _request_id(req):
     if not isinstance(req, dict):
         return ""
     rid = req.get("id", "")
-    if rid is None:
-        return ""
-    if isinstance(rid, (str, int, float, bool)):
-        return rid
-    return str(rid)
+    return rid if isinstance(rid, str) else ""
 
 
 def _request_error(req, message):
@@ -754,6 +827,10 @@ def _request_error(req, message):
 def dispatch(req):
     if not isinstance(req, dict):
         return _request_error(req, "Request must be a JSON object")
+    if not isinstance(req.get("id"), str) or not req.get("id"):
+        return _request_error(req, "Request id must be a non-empty string")
+    if AUTH_TOKEN and req.get("auth_token") != AUTH_TOKEN:
+        return _request_error(req, "Listener authentication failed")
     action = req.get("action", "")
     if not isinstance(action, str) or not action:
         return _request_error(req, "Request action must be a non-empty string")
@@ -1039,7 +1116,7 @@ class _ListenerServer:
                         break
                     rid = ""
                     try:
-                        req = json.loads(frame.decode("utf-8"))
+                        req = _json_loads_strict(frame.decode("utf-8"))
                         rid = req.get("id", "")
                         resp = dispatch(req)
                     except Exception as e:
