@@ -156,7 +156,8 @@ default, and runs the phase-1 read gate: `ping`, `get_document_info`,
 `get_layers`, `get_objects`, and read-only `selection.get`. The read gate
 validates the minimum response schemas documented in `PROTOCOL.md`, including
 ping safety fields, `native_phase >= 1`, `implemented_actions`, document counts,
-layer names, object handle/type fields, bounded object query semantics, and
+`main_context_pump: "win32_ui_timer"`, `main_context_pump_ready: true`, layer
+names, object handle/type fields, bounded object query semantics, and
 cross-checks between document/layer/object snapshots. Add
 `-MaxPingMilliseconds` and `-MaxReadMilliseconds` when you want the smoke gate
 to fail bridges that are functionally correct but too slow for agent loops. Add
@@ -167,7 +168,8 @@ shutdown/port-release verification. Phase 0 accepts the reviewed native
 scaffold's honest `cad_api_safe: false` / `transport_only: true` ping, but the
 default phase-1 smoke still requires a real CAD-safe bridge.
 The host-side `vw_preflight_for_cad` also blocks native bridges that claim
-`cad_api_safe: true` before reporting phase-1 capabilities.
+`cad_api_safe: true` before reporting phase-1 capabilities and a ready
+main-context pump.
 The SDK scaffold queue applies bounded backpressure and rejects duplicate
 request ids before work is handed to the Vectorworks main/plugin event context.
 While the copied scaffold is still phase 0, CAD actions fail immediately with

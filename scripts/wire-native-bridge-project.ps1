@@ -32,7 +32,8 @@ $HeaderFiles = @(
     "NativeTransport.hpp"
 )
 $RequiredLinkDependencies = @(
-    "Ws2_32.lib"
+    "Ws2_32.lib",
+    "User32.lib"
 )
 $LifecycleHookMarker = "Vectorworks MCP native bridge lifecycle hook"
 
@@ -328,7 +329,6 @@ function Get-ModuleMainLifecycleHookStatus {
         $RequiredTokens = @(
             "VectorworksMCP::OnPluginLoadStartTransport",
             "VectorworksMCP::OnPluginUnloadStopTransport",
-            "VectorworksMCP::OnVectorworksMainPluginEvent",
             "kPluginModuleInit",
             "kPluginModuleDeinit",
             $LifecycleHookMarker
@@ -338,6 +338,9 @@ function Get-ModuleMainLifecycleHookStatus {
             if (-not $Text.Contains($Token)) {
                 $Missing += $Token
             }
+        }
+        if ($Text -match "else\s*\{\s*VectorworksMCP::OnVectorworksMainPluginEvent\(\);\s*\}") {
+            $Missing += "remove broad OnVectorworksMainPluginEvent fallback"
         }
         $Status.missing = @($Missing)
         $Status.hooked = @($Missing).Count -eq 0
@@ -365,7 +368,6 @@ function Ensure-ModuleMainLifecycleHook {
 namespace VectorworksMCP {
 void OnPluginLoadStartTransport();
 void OnPluginUnloadStopTransport();
-void OnVectorworksMainPluginEvent();
 }
 
 "@
@@ -387,13 +389,22 @@ void OnVectorworksMainPluginEvent();
         VectorworksMCP::OnPluginLoadStartTransport();
     } else if (action == kPluginModuleDeinit) {
         VectorworksMCP::OnPluginUnloadStopTransport();
-    } else {
-        VectorworksMCP::OnVectorworksMainPluginEvent();
     }
 
 "@
         $Text = [regex]::Replace($Text, "::GS_InitializeVCOM\(\s*cbp\s*\);\s*", $HookBlock, 1)
     }
+
+    $Text = [regex]::Replace(
+        $Text,
+        "\r?\nvoid\s+OnVectorworksMainPluginEvent\s*\(\s*\)\s*;",
+        "",
+        1)
+    $Text = [regex]::Replace(
+        $Text,
+        "\s*else\s*\{\s*VectorworksMCP::OnVectorworksMainPluginEvent\(\);\s*\}",
+        "",
+        1)
 
     Set-Content -LiteralPath $Path -Value $Text -Encoding UTF8
     return [pscustomobject]@{
