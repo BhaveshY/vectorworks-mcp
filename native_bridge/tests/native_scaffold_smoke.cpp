@@ -273,6 +273,7 @@ void TestPhaseZeroDispatch() {
     SetEnv("VW_MCP_HOST", "127.0.0.1");
     SetEnv("VW_MCP_PORT", "0");
     SetEnv("VW_MCP_AUTH_TOKEN", "");
+    SetEnv("VW_MCP_INSECURE_NO_AUTH", "1");
     OnPluginLoadStartTransport();
     Require(!StopRequested(), "load should reset stop request");
     Require(NativeTransportPortForDiagnostics() > 0, "plugin load should start native transport on a real port");
@@ -293,9 +294,11 @@ void TestPhaseZeroDispatch() {
     Require(stop.success, "stop should succeed");
     Require(StopRequested(), "stop should set stop request");
     OnPluginUnloadStopTransport();
+    SetEnv("VW_MCP_INSECURE_NO_AUTH", "");
 }
 
 void TestDispatchAuth() {
+    SetEnv("VW_MCP_INSECURE_NO_AUTH", "");
     SetEnv("VW_MCP_AUTH_TOKEN", "secret");
 
     const auto missingAuth = DispatchFromSocketWorker(RequestEnvelope{"auth-missing", "ping", "{}"});
@@ -314,6 +317,7 @@ void TestDispatchAuth() {
 
 void TestNativeTransportRoundTrip() {
     SetEnv("VW_MCP_AUTH_TOKEN", "");
+    SetEnv("VW_MCP_INSECURE_NO_AUTH", "1");
 
     NativeTransport anyAddress;
     NativeTransportOptions anyAddressOptions;
@@ -376,6 +380,7 @@ void TestNativeTransportRoundTrip() {
     RequireContains(healthyPing, R"("success":true)", "transport ping after malformed frame should succeed");
     malformed.Stop();
 
+    SetEnv("VW_MCP_INSECURE_NO_AUTH", "");
     SetEnv("VW_MCP_AUTH_TOKEN", "secret");
     NativeTransport authed;
     authed.Start(options, DispatchFromSocketWorker);
@@ -398,6 +403,7 @@ void TestNativeTransportRoundTrip() {
     RequireContains(authorizedStop, R"("success":true)", "authorized stop should succeed");
     authed.Stop();
     SetEnv("VW_MCP_AUTH_TOKEN", "");
+    SetEnv("VW_MCP_INSECURE_NO_AUTH", "");
 }
 
 int main() {
