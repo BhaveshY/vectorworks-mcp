@@ -63,8 +63,12 @@ class ListenerProtocolTests(unittest.TestCase):
 
         old_vs = sys.modules.get("vs", MISSING)
         old_autostart = os.environ.get("VW_MCP_NO_AUTOSTART", MISSING)
+        old_insecure_no_auth = os.environ.get("VW_MCP_INSECURE_NO_AUTH", MISSING)
+        old_auth_token = os.environ.get("VW_MCP_AUTH_TOKEN", MISSING)
         sys.modules["vs"] = fake_vs
         os.environ["VW_MCP_NO_AUTOSTART"] = "1"
+        os.environ["VW_MCP_INSECURE_NO_AUTH"] = "1"
+        os.environ.pop("VW_MCP_AUTH_TOKEN", None)
 
         def restore():
             if old_vs is MISSING:
@@ -75,6 +79,14 @@ class ListenerProtocolTests(unittest.TestCase):
                 os.environ.pop("VW_MCP_NO_AUTOSTART", None)
             else:
                 os.environ["VW_MCP_NO_AUTOSTART"] = old_autostart
+            if old_insecure_no_auth is MISSING:
+                os.environ.pop("VW_MCP_INSECURE_NO_AUTH", None)
+            else:
+                os.environ["VW_MCP_INSECURE_NO_AUTH"] = old_insecure_no_auth
+            if old_auth_token is MISSING:
+                os.environ.pop("VW_MCP_AUTH_TOKEN", None)
+            else:
+                os.environ["VW_MCP_AUTH_TOKEN"] = old_auth_token
 
         self.addCleanup(restore)
 
@@ -206,6 +218,55 @@ class ListenerProtocolTests(unittest.TestCase):
         self.assertFalse(inspect_plugin["success"])
         self.assertIn("confirm", inspect_plugin["error"])
 
+    def test_raw_selection_delete_rejects_arbitrary_criteria(self):
+        listener, _alerts = self.load_listener()
+
+        delete_all = listener.dispatch(
+            {
+                "id": "selection-all",
+                "action": "selection",
+                "params": {"action": "delete", "criteria": "ALL", "confirm": "DELETE_EXACT_NAME"},
+            }
+        )
+        missing_exact_confirm = listener.dispatch(
+            {
+                "id": "selection-name",
+                "action": "selection",
+                "params": {"action": "delete", "criteria": "((N='Fixture'))", "confirm": "DELETE_SELECTED"},
+            }
+        )
+
+        self.assertFalse(delete_all["success"])
+        self.assertIn("exact object-name", delete_all["error"])
+        self.assertFalse(missing_exact_confirm["success"])
+        self.assertIn("DELETE_EXACT_NAME", missing_exact_confirm["error"])
+
+    def test_raw_phase_two_handlers_reject_invalid_params_before_api_call(self):
+        listener, _alerts = self.load_listener()
+
+        huge_text = listener.dispatch({
+            "id": "text-large",
+            "action": "create_text",
+            "params": {"text": "x" * 4097},
+        })
+        bad_width = listener.dispatch({
+            "id": "text-width",
+            "action": "create_text",
+            "params": {"text": "Room", "width": -1},
+        })
+        bad_dimension_type = listener.dispatch({
+            "id": "dim-type",
+            "action": "create_linear_dimension",
+            "params": {"start_x": 0, "start_y": 0, "end_x": 100, "end_y": 0, "dimension_type": 9},
+        })
+
+        self.assertFalse(huge_text["success"])
+        self.assertIn("4096", huge_text["error"])
+        self.assertFalse(bad_width["success"])
+        self.assertIn("width", bad_width["error"])
+        self.assertFalse(bad_dimension_type["success"])
+        self.assertIn("dimension_type", bad_dimension_type["error"])
+
     def test_listener_drops_idle_clients(self):
         listener, _alerts = self.load_listener()
         port = _free_port()
@@ -332,6 +393,32 @@ class ListenerProtocolTests(unittest.TestCase):
             def DoMenuTextByName(self, menu, index):
                 self.calls.append(("DoMenuTextByName", menu, index))
 
+            def CreateTextBlock(self, text, origin, fixed_size, width):
+                self.calls.append(("CreateTextBlock", text, origin, fixed_size, width))
+                return "text-handle"
+
+            def SetName(self, handle, name):
+                self.calls.append(("SetName", handle, name))
+
+            def SetClass(self, handle, class_name):
+                self.calls.append(("SetClass", handle, class_name))
+
+            def SetTextWidth(self, handle, width):
+                self.calls.append(("SetTextWidth", handle, width))
+
+            def SetTextWrap(self, handle, wrapped):
+                self.calls.append(("SetTextWrap", handle, wrapped))
+
+            def PagePointsToCoordLength(self, points):
+                self.calls.append(("PagePointsToCoordLength", points))
+                return points * 10
+
+            def SetTextSize(self, handle, first_char, num_chars, char_size):
+                self.calls.append(("SetTextSize", handle, first_char, num_chars, char_size))
+
+            def HRotate(self, handle, x, y, angle):
+                self.calls.append(("HRotate", handle, x, y, angle))
+
             def SetFillFore(self, handle, color):
                 self.calls.append(("SetFillFore", handle, color))
 
@@ -367,6 +454,28 @@ class ListenerProtocolTests(unittest.TestCase):
         image = listener.handle_import_file({"file_path": str(image_path), "format": "png"})
         self.assertTrue(image["success"])
         self.assertIn(("ImportImageFile", str(image_path), (0, 0)), fake_vs.calls)
+
+        text = listener.handle_create_text(
+            {
+                "text": "Room 101",
+                "x": 10,
+                "y": 20,
+                "width": 250,
+                "text_size": 12,
+                "fixed_size": True,
+                "wrap": True,
+                "rotation": 30,
+                "name": "label",
+                "class_name": "A-Annotation",
+            }
+        )
+        self.assertTrue(text["success"])
+        self.assertIn(("CreateTextBlock", "Room 101", (10.0, 20.0), True, 250.0), fake_vs.calls)
+        self.assertIn(("SetTextWidth", "text-handle", 250.0), fake_vs.calls)
+        self.assertIn(("SetTextWrap", "text-handle", True), fake_vs.calls)
+        self.assertIn(("PagePointsToCoordLength", 12.0), fake_vs.calls)
+        self.assertIn(("SetTextSize", "text-handle", 0, 8, 120.0), fake_vs.calls)
+        self.assertIn(("HRotate", "text-handle", 10.0, 20.0, 30.0), fake_vs.calls)
 
         handle_id = listener._reg(object())
         color = listener.handle_set_property({"handle": handle_id, "property_name": "fillColor", "value": "1,2,3"})

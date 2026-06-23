@@ -287,6 +287,7 @@ $AllowedCategories = @(
     "document-read",
     "document-write",
     "schematic-floor-plan",
+    "bim-floor-plan",
     "document-export",
     "file-write",
     "listener-control",

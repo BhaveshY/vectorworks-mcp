@@ -11,6 +11,8 @@ namespace VectorworksMCP {
 struct NativeTransportOptions {
     std::string host = "127.0.0.1";
     std::uint16_t port = 9877;
+    int maxClients = 8;
+    int clientIdleSeconds = 600;
 };
 
 class NativeTransport {

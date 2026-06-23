@@ -21,21 +21,24 @@ Document context:
 
 Create and edit:
 
-- `vw_create_object`: rect, circle, oval, line, arc; polygon is listener-dependent and blocked by native phase 1.
-- `vw_batch_create_objects`: create many phase-1 primitives in one MCP call. `atomic=true` requires the native `batch_create_objects` bridge action; `atomic=false` uses legacy non-atomic `create_object` composition.
+- `vw_create_object`: rect, circle, oval, line, arc; polygon is listener-dependent and blocked by the native bridge.
+- `vw_batch_create_objects`: create many native objects in one MCP call. Phase 1 supports primitives; phase 2 also supports walls, text, and linear dimensions. `atomic=true` requires the native `batch_create_objects` bridge action; `atomic=false` uses legacy non-atomic `create_object` composition.
 - `vw_plan_schematic_floor_plan`: dry-run a multi-room schematic floor plan and return the primitives.
 - `vw_create_schematic_floor_plan`: create a multi-room schematic floor plan from rooms, walls, doors, and windows.
+- `vw_create_bim_floor_plan`: create true wall objects plus optional room text labels and linear dimensions from rooms/walls.
 - `vw_create_schematic_room`: rectangular schematic room from native 2D wall rectangles.
 - `vw_create_schematic_door`: schematic door leaf and swing arc from native 2D primitives.
 - `vw_create_schematic_window`: schematic double-line window marker from native 2D primitives.
 - `vw_set_object_property`: name, class, color, line weight, opacity.
-- `vw_selection`: get, select, clear, delete, move, or duplicate selected objects; delete requires `confirm="DELETE_SELECTED"`.
+- `vw_selection`: get, select, clear, delete, move, or duplicate selected objects; selected-object delete requires `confirm="DELETE_SELECTED"` and exact-name criteria delete requires `confirm="DELETE_EXACT_NAME"`.
 
 Architecture:
 
-- `vw_create_wall`: parametric walls.
-- `vw_insert_door`: parametric doors.
-- `vw_insert_window`: parametric windows.
+- `vw_create_wall`: native true wall objects.
+- `vw_create_text`: native text annotations.
+- `vw_create_linear_dimension`: native linear dimensions.
+- `vw_insert_door`: parametric doors through the legacy/Python path; native wall-hosted insertion is deferred pending plugin inspection.
+- `vw_insert_window`: parametric windows through the legacy/Python path; native wall-hosted insertion is deferred pending plugin inspection.
 - `vw_create_slab`: slab from polygon footprint.
 - `vw_create_roof`: roof from footprint.
 
@@ -68,6 +71,8 @@ Rules:
 | `vw_batch_create_objects` | `document-write` | `batch_create_objects` | `false` | `false` | `false` | `true` | `true` |
 | `vw_bridge_status` | `health` | `ping` | `true` | `false` | `true` | `true` | `false` |
 | `vw_capabilities` | `metadata` | `ping` | `true` | `false` | `true` | `true` | `false` |
+| `vw_create_bim_floor_plan` | `bim-floor-plan` | `` | `false` | `false` | `false` | `true` | `true` |
+| `vw_create_linear_dimension` | `document-write` | `create_linear_dimension` | `false` | `false` | `false` | `true` | `true` |
 | `vw_create_object` | `document-write` | `create_object` | `false` | `false` | `false` | `true` | `true` |
 | `vw_create_roof` | `document-write` | `create_roof` | `false` | `false` | `false` | `true` | `true` |
 | `vw_create_slab` | `document-write` | `create_slab` | `false` | `false` | `false` | `true` | `true` |
@@ -75,6 +80,7 @@ Rules:
 | `vw_create_schematic_floor_plan` | `schematic-floor-plan` | `` | `false` | `false` | `false` | `true` | `true` |
 | `vw_create_schematic_room` | `schematic-floor-plan` | `` | `false` | `false` | `false` | `true` | `true` |
 | `vw_create_schematic_window` | `schematic-floor-plan` | `` | `false` | `false` | `false` | `true` | `true` |
+| `vw_create_text` | `document-write` | `create_text` | `false` | `false` | `false` | `true` | `true` |
 | `vw_create_wall` | `document-write` | `create_wall` | `false` | `false` | `false` | `true` | `true` |
 | `vw_drawing_summary` | `document-read` | `` | `true` | `false` | `true` | `true` | `true` |
 | `vw_export` | `file-write` | `export` | `false` | `false` | `false` | `true` | `true` |
@@ -103,6 +109,9 @@ Rules:
 
 Tool-level MCP annotations stay conservative for mixed tools. Use these action
 rows to choose the least risky variant before calling the tool.
+For `vw_selection.delete`, current-selection delete requires
+`confirm="DELETE_SELECTED"`; criteria delete is restricted to exact object-name
+criteria such as `((N='Fixture'))` and requires `confirm="DELETE_EXACT_NAME"`.
 
 | Tool action | Read-only | Destructive | Idempotent | Writes document | Writes selection | Writes files | Confirmation |
 |-------------|-----------|-------------|------------|-----------------|------------------|--------------|--------------|

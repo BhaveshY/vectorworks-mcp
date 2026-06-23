@@ -17,6 +17,16 @@ $StateDir = if ($env:LOCALAPPDATA) {
 }
 $BaseLogDir = Join-Path $StateDir "logs"
 $LogPath = Join-Path $BaseLogDir "mcp-server-bootstrap.log"
+$ProtocolStateDir = if ($env:VW_MCP_STOP_DIR) {
+    [System.IO.Path]::GetFullPath($env:VW_MCP_STOP_DIR)
+} else {
+    Join-Path $env:USERPROFILE ".vectorworks-mcp"
+}
+$AuthTokenPath = if ($env:VW_MCP_AUTH_TOKEN_FILE) {
+    [System.IO.Path]::GetFullPath($env:VW_MCP_AUTH_TOKEN_FILE)
+} else {
+    Join-Path $ProtocolStateDir "auth-token"
+}
 $FallbackVenvDir = Join-Path $StateDir "venv"
 $VenvDir = $RepoVenvDir
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
@@ -122,6 +132,26 @@ function Test-FastMcpImport {
     }
 }
 
+function Ensure-AuthToken {
+    if ($env:VW_MCP_INSECURE_NO_AUTH) {
+        return
+    }
+    if ($env:VW_MCP_AUTH_TOKEN) {
+        return
+    }
+
+    $AuthDir = Split-Path -Parent $AuthTokenPath
+    if ($AuthDir) {
+        New-Item -ItemType Directory -Force -Path $AuthDir *> $null
+    }
+    if (-not (Test-Path -LiteralPath $AuthTokenPath -PathType Leaf)) {
+        $Token = ([Guid]::NewGuid().ToString("N") + [Guid]::NewGuid().ToString("N"))
+        Set-Content -LiteralPath $AuthTokenPath -Value $Token -Encoding ASCII -NoNewline
+    }
+    $env:VW_MCP_AUTH_TOKEN_FILE = $AuthTokenPath
+    $env:VW_MCP_AUTH_TOKEN = (Get-Content -Raw -LiteralPath $AuthTokenPath).Trim()
+}
+
 function Ensure-Requirements {
     $StampPath = Join-Path $VenvDir ".requirements.sha256"
     $RequirementsHash = (Get-FileHash -Algorithm SHA256 $RequirementsPath).Hash
@@ -137,6 +167,8 @@ function Ensure-Requirements {
 try {
     Ensure-Venv
     Ensure-Requirements
+    if (-not $env:VW_MCP_STOP_DIR) { $env:VW_MCP_STOP_DIR = Join-Path $env:USERPROFILE ".vectorworks-mcp" }
+    Ensure-AuthToken
 } catch {
     $ErrorText = ($_ | Out-String).Trim()
     Write-BootstrapLog "Bootstrap failed: $ErrorText"
@@ -151,7 +183,6 @@ if ($SetupOnly) {
 if (-not $env:VW_MCP_HOST) { $env:VW_MCP_HOST = "127.0.0.1" }
 if (-not $env:VW_MCP_PORT) { $env:VW_MCP_PORT = "9877" }
 if (-not $env:VW_MCP_TIMEOUT) { $env:VW_MCP_TIMEOUT = "60" }
-if (-not $env:VW_MCP_STOP_DIR) { $env:VW_MCP_STOP_DIR = Join-Path $env:USERPROFILE ".vectorworks-mcp" }
 
 & $VenvPython $ServerPath
 exit $LASTEXITCODE

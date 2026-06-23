@@ -23,6 +23,12 @@ $ListenerPath = Join-Path $RepoRoot "vw_listener.py"
 $RunnerPath = Join-Path $RepoRoot "scripts\run-mcp-server.ps1"
 $VerifierPath = Join-Path $RepoRoot "scripts\verify-no-vectorworks.ps1"
 $CopyLoaderPath = Join-Path $RepoRoot "scripts\copy-vectorworks-loader.ps1"
+$DefaultStateDir = Join-Path $env:USERPROFILE ".vectorworks-mcp"
+$AuthTokenPath = if ($env:VW_MCP_AUTH_TOKEN_FILE) {
+    [System.IO.Path]::GetFullPath($env:VW_MCP_AUTH_TOKEN_FILE)
+} else {
+    Join-Path $DefaultStateDir "auth-token"
+}
 
 if (-not $LauncherPath) {
     $LauncherPath = Join-Path $RepoRoot "vw_start_listener_2024.py"
@@ -56,15 +62,54 @@ function Write-AtomicText {
     Move-Item -Force -Path $TempPath -Destination $Path
 }
 
+function Ensure-AuthToken {
+    if ($env:VW_MCP_INSECURE_NO_AUTH) {
+        return ""
+    }
+    if ($env:VW_MCP_AUTH_TOKEN) {
+        $Token = $env:VW_MCP_AUTH_TOKEN.Trim()
+    } else {
+        $AuthDir = Split-Path -Parent $AuthTokenPath
+        if ($AuthDir) {
+            New-Item -ItemType Directory -Force -Path $AuthDir | Out-Null
+        }
+        if (-not (Test-Path -LiteralPath $AuthTokenPath -PathType Leaf)) {
+            $Token = ([Guid]::NewGuid().ToString("N") + [Guid]::NewGuid().ToString("N"))
+            Set-Content -LiteralPath $AuthTokenPath -Value $Token -Encoding ASCII -NoNewline
+        } else {
+            $Token = (Get-Content -Raw -LiteralPath $AuthTokenPath).Trim()
+        }
+    }
+    if (-not $Token) {
+        throw "Generated Vectorworks MCP auth token was empty."
+    }
+    $env:VW_MCP_AUTH_TOKEN_FILE = $AuthTokenPath
+    $env:VW_MCP_AUTH_TOKEN = $Token
+    return $Token
+}
+
 function New-VectorworksLauncher {
     param(
         [string]$Path,
         [string]$HostName,
-        [int]$ListenPort
+        [int]$ListenPort,
+        [string]$AuthToken
     )
-    $StopDir = Join-Path $env:USERPROFILE ".vectorworks-mcp"
+    $StopDir = $DefaultStateDir
     $ListenerLiteral = ConvertTo-PythonRawStringLiteral $ListenerPath
     $StopDirLiteral = ConvertTo-PythonRawStringLiteral $StopDir
+    $AuthTokenLiteral = ConvertTo-PythonRawStringLiteral $AuthToken
+    $AuthTokenPathLiteral = ConvertTo-PythonRawStringLiteral $AuthTokenPath
+    $AuthLines = if ($AuthToken) {
+@"
+os.environ["VW_MCP_AUTH_TOKEN_FILE"] = $AuthTokenPathLiteral
+os.environ["VW_MCP_AUTH_TOKEN"] = $AuthTokenLiteral
+"@
+    } else {
+@"
+os.environ["VW_MCP_INSECURE_NO_AUTH"] = "1"
+"@
+    }
     $Text = @"
 import os
 import runpy
@@ -74,6 +119,7 @@ os.environ["VW_MCP_PORT"] = "$ListenPort"
 os.environ["VW_MCP_STOP_DIR"] = $StopDirLiteral
 os.environ["VW_MCP_MODE"] = "dialog"
 os.environ["VW_MCP_DIALOG_TIMER_MS"] = "50"
+$AuthLines
 
 runpy.run_path($ListenerLiteral, run_name="__main__")
 "@
@@ -122,6 +168,19 @@ function New-ClaudeServerConfig {
         [int]$ListenPort,
         [int]$ToolTimeoutSeconds
     )
+    $ServerEnv = [ordered]@{
+        VW_MCP_HOST = $HostName
+        VW_MCP_PORT = "$ListenPort"
+        VW_MCP_TIMEOUT = "$ToolTimeoutSeconds"
+        VW_MCP_PREFLIGHT_CACHE_MS = "750"
+        VW_MCP_STOP_DIR = $DefaultStateDir
+    }
+    if ($env:VW_MCP_AUTH_TOKEN) {
+        $ServerEnv["VW_MCP_AUTH_TOKEN_FILE"] = $AuthTokenPath
+        $ServerEnv["VW_MCP_AUTH_TOKEN"] = $env:VW_MCP_AUTH_TOKEN
+    } elseif ($env:VW_MCP_INSECURE_NO_AUTH) {
+        $ServerEnv["VW_MCP_INSECURE_NO_AUTH"] = "1"
+    }
     return [ordered]@{
         type = "stdio"
         command = "powershell.exe"
@@ -133,13 +192,7 @@ function New-ClaudeServerConfig {
             "-File",
             $RunnerPath
         )
-        env = [ordered]@{
-            VW_MCP_HOST = $HostName
-            VW_MCP_PORT = "$ListenPort"
-            VW_MCP_TIMEOUT = "$ToolTimeoutSeconds"
-            VW_MCP_PREFLIGHT_CACHE_MS = "750"
-            VW_MCP_STOP_DIR = (Join-Path $env:USERPROFILE ".vectorworks-mcp")
-        }
+        env = $ServerEnv
         timeout = ($ToolTimeoutSeconds * 1000)
     }
 }
@@ -190,7 +243,8 @@ if (-not $SkipInstall) {
     }
 }
 
-$GeneratedLauncherPath = New-VectorworksLauncher -Path $LauncherPath -HostName $ListenHost -ListenPort $Port
+$AuthToken = Ensure-AuthToken
+$GeneratedLauncherPath = New-VectorworksLauncher -Path $LauncherPath -HostName $ListenHost -ListenPort $Port -AuthToken $AuthToken
 $GeneratedLoaderPath = New-VectorworksLoader -Path $LoaderPath -TargetLauncherPath $GeneratedLauncherPath
 $Config = New-ClaudeServerConfig -HostName $ListenHost -ListenPort $Port -ToolTimeoutSeconds $TimeoutSeconds
 $Json = $Config | ConvertTo-Json -Depth 10 -Compress

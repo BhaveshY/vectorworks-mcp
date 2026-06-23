@@ -16,6 +16,7 @@ so `server.py` and Claude Code do not need a new tool surface.
 {
   "id": "client-generated-id",
   "action": "get_layers",
+  "auth_token": "shared-local-token",
   "params": {}
 }
 ```
@@ -24,6 +25,8 @@ Rules:
 
 - `id` is echoed in the response.
 - `action` matches the existing handler names in `vw_listener.py`.
+- `auth_token` must match `VW_MCP_AUTH_TOKEN` or the per-user auth-token file
+  unless `VW_MCP_INSECURE_NO_AUTH=1` is explicitly set for diagnostics.
 - `params` is an object. Missing params are treated as `{}`.
 
 ## Response
@@ -81,9 +84,14 @@ The native bridge should initially implement these handlers first:
 - `selection`
 - `create_object`
 - `batch_create_objects`
+- `create_wall`
+- `create_text`
+- `create_linear_dimension`
 
-After those are stable, port the remaining handlers from `vw_listener.py` in
-small groups with smoke tests.
+Phase 1 is the minimum stable baseline. Phase 2 adds true wall objects, text
+annotations, linear dimensions, and mixed atomic batch creation. After those are
+stable, port the remaining handlers from `vw_listener.py` in small groups with
+smoke tests.
 
 ## Phase-0 Smoke Schema
 
@@ -115,7 +123,9 @@ responses must satisfy these minimum shapes:
   with `native_sdk_bridge`; known Python diagnostic modes are rejected. It must
   also report `native_phase >= 1` and `implemented_actions` containing `ping`,
   `stop`, `get_document_info`, `get_layers`, `get_objects`, `selection`,
-  `create_object`, and `batch_create_objects`. Windows SDK builds must also report
+  `create_object`, and `batch_create_objects`. A phase-2 bridge must additionally
+  report `native_phase >= 2` and include `create_wall`, `create_text`, and
+  `create_linear_dimension`. Windows SDK builds must also report
   `main_context_pump: "win32_ui_timer"` and
   `main_context_pump_ready: true`; otherwise CAD requests are not considered
   safe even when the handler list is complete.
@@ -131,14 +141,26 @@ responses must satisfy these minimum shapes:
   `top_left` and `bottom_right` as two-number lists.
 - `selection` with `action=get`: list of selected-object records using the same
   object shape as `get_objects`. An empty list is valid.
-- `create_object`: object with non-empty string `type` and `handle`. If the
-  active Vectorworks session has no writable layer, the native bridge
-  creates/selects `Vectorworks MCP Layer` before drawing.
+- `create_object`: object with non-empty string `type` and `handle`. Phase 1
+  accepts `rect`, `circle`, `oval`, `line`, and `arc`. Phase 2 also accepts
+  `wall`, `text`, and `linear_dimension` through the same object schema. Write
+  actions require an active Vectorworks document. If the active document has no
+  current writable design layer, the native bridge attempts to create/select
+  `Vectorworks MCP Layer` before drawing.
 - `batch_create_objects`: object with `atomic: true`, `created_count`, and a
   `created` list containing one `{index, type, handle}` object per requested
-  primitive. The handler must create all requested primitives in one native undo
-  event and roll back created objects on ordinary handler errors before
-  returning failure. It uses the same no-layer bootstrap as `create_object`.
+  object. Phase 1 batches are primitive-only; phase 2 batches may mix primitives,
+  walls, text, and linear dimensions. The handler must create all requested
+  objects in one native undo event and roll back created objects on ordinary
+  handler errors before returning failure. It uses the same no-layer bootstrap as
+  `create_object`.
+- `create_wall`: object with `type: "wall"` and `handle`; accepts start/end
+  coordinates, `height`, `thickness`, optional `class_name`, `name`, and optional
+  existing `style_name`.
+- `create_text`: object with `type: "text"` and `handle`; accepts `text`,
+  origin, optional width, rotation, class/name, and point text size.
+- `create_linear_dimension`: object with `type: "linear_dimension"` and
+  `handle`; accepts start/end coordinates and dimension offset.
 
 The harness also cross-checks the first successful phase-1 read snapshots:
 

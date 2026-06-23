@@ -13,6 +13,9 @@ Environment variables, all optional:
   VW_MCP_TIMEOUT          per-request timeout in seconds, default 60
   VW_MCP_HEALTH_TIMEOUT   ping/preflight timeout in seconds, default min(2, VW_MCP_TIMEOUT)
   VW_MCP_MAX_FRAME_BYTES  max protocol frame size, default 16777216
+  VW_MCP_AUTH_TOKEN       local protocol auth token; defaults to the token file
+  VW_MCP_AUTH_TOKEN_FILE  auth token file path; default ~/.vectorworks-mcp/auth-token
+  VW_MCP_INSECURE_NO_AUTH set to 1 only for local diagnostics/tests
   VW_MCP_PREFLIGHT_CACHE_MS
                           safe-CAD preflight success cache in ms, default 750
 """
@@ -22,6 +25,8 @@ import ipaddress
 import json
 import math
 import os
+from pathlib import Path
+import re
 import socket
 import struct
 import sys
@@ -54,6 +59,7 @@ DEFAULT_HEALTH_TIMEOUT = 2.0
 DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024
 DEFAULT_PREFLIGHT_CACHE_MS = 750
 MAX_PREFLIGHT_CACHE_MS = 5_000
+DEFAULT_AUTH_TOKEN_FILENAME = "auth-token"
 NATIVE_PHASE_ONE_REQUIRED_ACTIONS = {
     "ping",
     "stop",
@@ -64,6 +70,11 @@ NATIVE_PHASE_ONE_REQUIRED_ACTIONS = {
     "create_object",
     "batch_create_objects",
 }
+NATIVE_PHASE_TWO_REQUIRED_ACTIONS = NATIVE_PHASE_ONE_REQUIRED_ACTIONS | {
+    "create_wall",
+    "create_text",
+    "create_linear_dimension",
+}
 NATIVE_PHASE_ONE_CREATE_OBJECT_TYPES = {
     "arc",
     "box",
@@ -72,6 +83,12 @@ NATIVE_PHASE_ONE_CREATE_OBJECT_TYPES = {
     "oval",
     "rect",
     "rectangle",
+}
+NATIVE_PHASE_TWO_CREATE_OBJECT_TYPES = NATIVE_PHASE_ONE_CREATE_OBJECT_TYPES | {
+    "dimension",
+    "linear_dimension",
+    "text",
+    "wall",
 }
 NATIVE_PHASE_ONE_SELECTION_ACTIONS = {
     "clear",
@@ -169,6 +186,56 @@ def _validate_loopback_host(host: str, env_name: str = "VW_MCP_HOST") -> str:
     raise ConfigError(f"{env_name} must be loopback-only; refusing {normalized!r}")
 
 
+def _truthy_env(name: str) -> bool:
+    return str(os.environ.get(name, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _default_state_dir() -> Path:
+    configured = os.environ.get("VW_MCP_STOP_DIR", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    userprofile = os.environ.get("USERPROFILE", "").strip()
+    if userprofile:
+        return Path(userprofile) / ".vectorworks-mcp"
+    return Path.home() / ".vectorworks-mcp"
+
+
+def _default_auth_token_file() -> Path:
+    configured = os.environ.get("VW_MCP_AUTH_TOKEN_FILE", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return _default_state_dir() / DEFAULT_AUTH_TOKEN_FILENAME
+
+
+def _read_auth_token_file() -> str:
+    try:
+        path = _default_auth_token_file()
+        if not path.is_file():
+            return ""
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _load_auth_token() -> str:
+    if _truthy_env("VW_MCP_INSECURE_NO_AUTH"):
+        return ""
+    token = os.environ.get("VW_MCP_AUTH_TOKEN", "").strip()
+    if token:
+        return token
+    return _read_auth_token_file()
+
+
+def _auth_configuration_error() -> Optional[str]:
+    if AUTH_TOKEN or ALLOW_INSECURE_NO_AUTH:
+        return None
+    return (
+        "VW_MCP_AUTH_TOKEN is required for the local Vectorworks protocol. "
+        "Run scripts\\run-mcp-server.ps1 or scripts\\register-claude-code.ps1 to generate "
+        f"{_default_auth_token_file()}, or set VW_MCP_INSECURE_NO_AUTH=1 only for local diagnostics."
+    )
+
+
 def _load_config() -> tuple[str, int, float, float, int, int]:
     host = os.environ.get("VW_MCP_HOST", DEFAULT_HOST).strip() or DEFAULT_HOST
     host = _validate_loopback_host(host)
@@ -203,7 +270,13 @@ except ConfigError as exc:
     PREFLIGHT_CACHE_MS = DEFAULT_PREFLIGHT_CACHE_MS
 
 PREFLIGHT_CACHE_SECONDS = PREFLIGHT_CACHE_MS / 1000.0
-AUTH_TOKEN = os.environ.get("VW_MCP_AUTH_TOKEN", "").strip()
+AUTH_TOKEN = _load_auth_token()
+ALLOW_INSECURE_NO_AUTH = _truthy_env("VW_MCP_INSECURE_NO_AUTH")
+_EXACT_NAME_CRITERIA_RE = re.compile(r"^\(\(N='[^']{1,255}'\)\)$")
+
+
+def _is_exact_name_criteria(criteria: str) -> bool:
+    return bool(_EXACT_NAME_CRITERIA_RE.fullmatch(str(criteria or "").strip()))
 
 
 mcp = FastMCP("Vectorworks 2024/2025") if FastMCP is not None else _MissingFastMCP("Vectorworks 2024/2025")
@@ -217,6 +290,19 @@ _cad_safe_cache: Optional[tuple[float, dict[str, Any]]] = None
 
 
 ObjectType = Literal["rect", "rectangle", "box", "circle", "oval", "line", "arc", "polygon"]
+BatchObjectType = Literal[
+    "rect",
+    "rectangle",
+    "box",
+    "circle",
+    "oval",
+    "line",
+    "arc",
+    "wall",
+    "text",
+    "dimension",
+    "linear_dimension",
+]
 DoorSwing = Literal["left", "right"]
 PropertyName = Literal["name", "class", "fillColor", "penColor", "lineWeight", "opacity"]
 ClassAction = Literal["list", "create", "delete"]
@@ -237,6 +323,7 @@ PointList = Annotated[list[Point2D], Field(max_length=1000)]
 PolygonPointList = Annotated[list[Point2D], Field(min_length=3, max_length=1000)]
 PrimitiveObjectList = Annotated[list[dict[str, Any]], Field(min_length=1, max_length=250)]
 FloorPlanRoomList = Annotated[list[dict[str, Any]], Field(min_length=1, max_length=100)]
+OptionalFloorPlanRoomList = Annotated[list[dict[str, Any]], Field(max_length=100)]
 FloorPlanItemList = Annotated[list[dict[str, Any]], Field(max_length=250)]
 
 
@@ -533,6 +620,34 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
     "vw_create_wall": {
         "category": "document-write",
         "wire_action": "create_wall",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_create_text": {
+        "category": "document-write",
+        "wire_action": "create_text",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_create_linear_dimension": {
+        "category": "document-write",
+        "wire_action": "create_linear_dimension",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_create_bim_floor_plan": {
+        "category": "bim-floor-plan",
+        "wire_action": None,
+        "composes_actions": ["batch_create_objects"],
         "readOnlyHint": False,
         "destructiveHint": False,
         "idempotentHint": False,
@@ -947,6 +1062,19 @@ def _native_readiness_errors(status: dict[str, Any]) -> list[str]:
     return errors
 
 
+def _native_phase(status: dict[str, Any]) -> int:
+    native_phase = status.get("native_phase")
+    if isinstance(native_phase, int) and not isinstance(native_phase, bool):
+        return native_phase
+    return 0
+
+
+def _native_create_object_types(status: dict[str, Any]) -> set[str]:
+    if _native_phase(status) >= 2:
+        return set(NATIVE_PHASE_TWO_CREATE_OBJECT_TYPES)
+    return set(NATIVE_PHASE_ONE_CREATE_OBJECT_TYPES)
+
+
 def _native_action_readiness_errors(
     status: dict[str, Any],
     blocked_action: Optional[str],
@@ -964,7 +1092,7 @@ def _native_action_readiness_errors(
     params = blocked_params or {}
     if blocked_action == "create_object":
         object_type = str(params.get("object_type", "") or "").strip().lower()
-        if object_type and object_type not in NATIVE_PHASE_ONE_CREATE_OBJECT_TYPES:
+        if object_type and object_type not in _native_create_object_types(status):
             errors.append("create_object object_type is not implemented by native bridge: {0}".format(object_type))
     elif blocked_action == "selection":
         selection_action = str(params.get("action", "") or "").strip().lower()
@@ -1189,6 +1317,9 @@ def _request_once_health(action: str, params: Optional[dict[str, Any]]) -> dict[
 def _send_health(action: str = "ping", params: Optional[dict[str, Any]] = None) -> str:
     if _CONFIG_ERROR:
         return f"Configuration error: {_CONFIG_ERROR}"
+    auth_error = _auth_configuration_error()
+    if auth_error:
+        return f"Configuration error: {auth_error}"
     try:
         response = _request_once_health(action, params)
         if response.get("success") is True:
@@ -1210,6 +1341,9 @@ def _send_health(action: str = "ping", params: Optional[dict[str, Any]] = None) 
 def _send(action: str, params: Optional[dict[str, Any]] = None, require_cad_safe: bool = False) -> str:
     if _CONFIG_ERROR:
         return f"Configuration error: {_CONFIG_ERROR}"
+    auth_error = _auth_configuration_error()
+    if auth_error:
+        return f"Configuration error: {auth_error}"
 
     with _lock:
         for attempt in (0, 1):
@@ -1280,27 +1414,49 @@ def vw_capabilities(include_tools: bool = True) -> str:
     raw_status = _send_health("ping")
     decoded_status = _decode_tool_result(raw_status)
     status_ok = not _tool_result_failed(raw_status, decoded_status)
+    native_ready = (
+        isinstance(decoded_status, dict)
+        and _evaluate_cad_preflight_status(decoded_status).get("ok") is True
+    )
+    implemented_actions = (
+        set(decoded_status.get("implemented_actions") or [])
+        if isinstance(decoded_status, dict) and isinstance(decoded_status.get("implemented_actions"), list)
+        else set()
+    )
+    phase_two_ready = (
+        native_ready
+        and _native_phase(decoded_status) >= 2
+        and NATIVE_PHASE_TWO_REQUIRED_ACTIONS <= implemented_actions
+    )
     payload: dict[str, Any] = {
         "ok": status_ok,
         "tool": "vw_capabilities",
         "bridge_status": decoded_status,
         "native_phase_one_required_actions": sorted(NATIVE_PHASE_ONE_REQUIRED_ACTIONS),
+        "native_phase_two_required_actions": sorted(NATIVE_PHASE_TWO_REQUIRED_ACTIONS),
         "native_phase_one_create_object_types": sorted(NATIVE_PHASE_ONE_CREATE_OBJECT_TYPES),
+        "native_phase_two_create_object_types": sorted(NATIVE_PHASE_TWO_CREATE_OBJECT_TYPES),
         "native_phase_one_selection_actions": sorted(NATIVE_PHASE_ONE_SELECTION_ACTIONS),
         "host_capabilities": {
             "batch_primitive_creation": True,
             "atomic_batch_primitive_creation": (
-                isinstance(decoded_status, dict)
-                and "batch_create_objects" in set(decoded_status.get("implemented_actions") or [])
+                native_ready
+                and "batch_create_objects" in implemented_actions
             ),
+            "atomic_mixed_production_batch_creation": phase_two_ready,
             "schematic_floor_plan_planning": True,
             "schematic_floor_plan_creation": True,
+            "native_wall_creation": phase_two_ready,
+            "native_text_creation": phase_two_ready,
+            "native_linear_dimension_creation": phase_two_ready,
             "drawing_summary": True,
-            "true_bim_objects": False,
+            "true_bim_objects": phase_two_ready,
         },
         "notes": [
             "Native phase 1 supports 2D primitives, reads, and bounded selection operations.",
+            "Native phase 2 adds true wall objects, text annotations, linear dimensions, and mixed atomic batches when the upgraded bridge is installed.",
             "Schematic floor-plan tools create drafting geometry, not BIM wall/door/window objects.",
+            "Door/window/space automation stays behind plugin inspection because Vectorworks plugin parameters and wall-hosting behavior are version-sensitive.",
         ],
     }
     if include_tools:
@@ -1395,18 +1551,51 @@ def _send_create_primitive(params: dict[str, Any]) -> str:
     return _send_tool("vw_create_object", params)
 
 
+def _send_create_normalised_object(params: dict[str, Any]) -> str:
+    object_type = str(params.get("object_type", "")).lower()
+    if object_type == "wall":
+        return _send_tool("vw_create_wall", params)
+    if object_type == "text":
+        return _send_tool("vw_create_text", params)
+    if object_type in ("dimension", "linear_dimension"):
+        return _send_tool("vw_create_linear_dimension", params)
+    return _send_create_primitive(params)
+
+
 _PRIMITIVE_COORD_KEYS = ("x1", "y1", "x2", "y2")
 _PRIMITIVE_ALLOWED_KEYS = {
     "role",
     "object_type",
     "type",
+    "x",
+    "y",
     "x1",
     "y1",
     "x2",
     "y2",
+    "start_x",
+    "start_y",
+    "end_x",
+    "end_y",
     "radius",
     "start_angle",
     "sweep_angle",
+    "height",
+    "thickness",
+    "style_name",
+    "text",
+    "width",
+    "rotation",
+    "text_size",
+    "size",
+    "fixed_size",
+    "wrap",
+    "offset",
+    "dimension_offset",
+    "text_offset",
+    "direction_x",
+    "direction_y",
+    "dimension_type",
     "name",
     "class_name",
 }
@@ -1453,6 +1642,27 @@ def _coerce_number(
     return result
 
 
+def _coerce_number_any(
+    item: dict[str, Any],
+    keys: tuple[str, ...],
+    *,
+    default: Optional[float] = None,
+    required: bool = False,
+    min_value: Optional[float] = None,
+    label: str = "item",
+) -> float:
+    for key in keys:
+        if key in item and item.get(key) is not None:
+            return _coerce_number(item, key, required=True, min_value=min_value, label=label)
+    if required:
+        raise ValueError(f"{label}.{keys[0]} is required")
+    if default is None:
+        raise ValueError(f"{label}.{keys[0]} has no default")
+    if min_value is not None and default < min_value:
+        raise ValueError(f"{label}.{keys[0]} must be >= {min_value}")
+    return float(default)
+
+
 def _coerce_positive_number(
     item: dict[str, Any],
     key: str,
@@ -1464,6 +1674,43 @@ def _coerce_positive_number(
     if result <= 0:
         raise ValueError(f"{label}.{key} must be > 0")
     return result
+
+
+def _coerce_positive_number_any(
+    item: dict[str, Any],
+    keys: tuple[str, ...],
+    *,
+    default: Optional[float] = None,
+    label: str = "item",
+) -> float:
+    result = _coerce_number_any(item, keys, default=default, required=default is None, min_value=0, label=label)
+    if result <= 0:
+        raise ValueError(f"{label}.{keys[0]} must be > 0")
+    return result
+
+
+def _coerce_bool(item: dict[str, Any], key: str, default: bool = False, *, label: str = "item") -> bool:
+    value = item.get(key, default)
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"{label}.{key} must be a boolean")
+
+
+def _coerce_int(
+    item: dict[str, Any],
+    key: str,
+    *,
+    default: int,
+    min_value: int,
+    max_value: int,
+    label: str = "item",
+) -> int:
+    value = item.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{label}.{key} must be an integer")
+    if value < min_value or value > max_value:
+        raise ValueError(f"{label}.{key} must be between {min_value} and {max_value}")
+    return value
 
 
 def _optional_text(item: dict[str, Any], key: str, default: str = "") -> str:
@@ -1490,10 +1737,12 @@ def _normalise_create_primitive(
     object_type = str(raw.get("object_type", raw.get("type", "")) or "").strip().lower()
     if object_type == "rectangle" or object_type == "box":
         object_type = "rect"
+    if object_type == "dimension":
+        object_type = "linear_dimension"
     if object_type == "polygon":
-        raise ValueError(f"{label}.object_type polygon is not supported by the native phase-1 bridge")
-    if object_type not in NATIVE_PHASE_ONE_CREATE_OBJECT_TYPES:
-        raise ValueError(f"{label}.object_type must be one of: {', '.join(sorted(NATIVE_PHASE_ONE_CREATE_OBJECT_TYPES))}")
+        raise ValueError(f"{label}.object_type polygon is not supported by the native bridge")
+    if object_type not in NATIVE_PHASE_TWO_CREATE_OBJECT_TYPES:
+        raise ValueError(f"{label}.object_type must be one of: {', '.join(sorted(NATIVE_PHASE_TWO_CREATE_OBJECT_TYPES))}")
 
     params: dict[str, Any] = {"object_type": object_type}
     if object_type in {"rect", "oval", "line"}:
@@ -1511,6 +1760,42 @@ def _normalise_create_primitive(
         params["radius"] = _coerce_positive_number(raw, "radius", label=label)
         params["start_angle"] = _coerce_number(raw, "start_angle", default=0, label=label)
         params["sweep_angle"] = _coerce_number(raw, "sweep_angle", default=90, label=label)
+    elif object_type == "wall":
+        params["start_x"] = _coerce_number_any(raw, ("start_x", "x1"), required=True, label=label)
+        params["start_y"] = _coerce_number_any(raw, ("start_y", "y1"), required=True, label=label)
+        params["end_x"] = _coerce_number_any(raw, ("end_x", "x2"), required=True, label=label)
+        params["end_y"] = _coerce_number_any(raw, ("end_y", "y2"), required=True, label=label)
+        if params["start_x"] == params["end_x"] and params["start_y"] == params["end_y"]:
+            raise ValueError(f"{label} wall endpoints must not be identical")
+        params["height"] = _coerce_positive_number(raw, "height", default=3000, label=label)
+        params["thickness"] = _coerce_positive_number(raw, "thickness", default=200, label=label)
+        style_name = _optional_text(raw, "style_name", "")
+        if style_name:
+            params["style_name"] = style_name
+    elif object_type == "text":
+        text = _optional_text(raw, "text", "")
+        if not text:
+            raise ValueError(f"{label}.text is required")
+        params["text"] = text
+        params["x1"] = _coerce_number_any(raw, ("x", "x1"), default=0, label=label)
+        params["y1"] = _coerce_number_any(raw, ("y", "y1"), default=0, label=label)
+        params["width"] = _coerce_number(raw, "width", default=0, min_value=0, label=label)
+        params["rotation"] = _coerce_number(raw, "rotation", default=0, label=label)
+        params["text_size"] = _coerce_number_any(raw, ("text_size", "size"), default=0, min_value=0, label=label)
+        params["fixed_size"] = _coerce_bool(raw, "fixed_size", False, label=label)
+        params["wrap"] = _coerce_bool(raw, "wrap", params["width"] > 0, label=label)
+    elif object_type == "linear_dimension":
+        params["start_x"] = _coerce_number_any(raw, ("start_x", "x1"), required=True, label=label)
+        params["start_y"] = _coerce_number_any(raw, ("start_y", "y1"), required=True, label=label)
+        params["end_x"] = _coerce_number_any(raw, ("end_x", "x2"), required=True, label=label)
+        params["end_y"] = _coerce_number_any(raw, ("end_y", "y2"), required=True, label=label)
+        if params["start_x"] == params["end_x"] and params["start_y"] == params["end_y"]:
+            raise ValueError(f"{label} linear_dimension endpoints must not be identical")
+        params["offset"] = _coerce_number_any(raw, ("offset", "dimension_offset"), default=300, label=label)
+        params["text_offset"] = _coerce_number(raw, "text_offset", default=0, label=label)
+        params["direction_x"] = _coerce_number(raw, "direction_x", default=0, label=label)
+        params["direction_y"] = _coerce_number(raw, "direction_y", default=0, label=label)
+        params["dimension_type"] = _coerce_int(raw, "dimension_type", default=1, min_value=0, max_value=2, label=label)
 
     name = _optional_text(raw, "name", "")
     if name_prefix:
@@ -1536,11 +1821,16 @@ def _native_batch_params(primitives: list[dict[str, Any]]) -> tuple[dict[str, An
         primitive_params = dict(primitive)
         roles.append(str(primitive_params.pop("role", "primitive")))
         sent_primitives.append(primitive_params)
-        params[f"object_{index}_json"] = json.dumps(primitive_params, separators=(",", ":"), sort_keys=True)
+        params[f"object_{index}_json"] = json.dumps(
+            primitive_params,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
     return params, roles, sent_primitives
 
 
-def _atomic_batch_support_error(tool: str) -> Optional[str]:
+def _atomic_batch_support_error(tool: str, object_types: Optional[set[str]] = None) -> Optional[str]:
     raw_status = _send_health("ping")
     decoded_status = _decode_tool_result(raw_status)
     if _tool_result_failed(raw_status, decoded_status) or not isinstance(decoded_status, dict):
@@ -1564,6 +1854,23 @@ def _atomic_batch_support_error(tool: str) -> Optional[str]:
         and "batch_create_objects" in implemented_actions
     )
     if supports_batch:
+        requested_types = object_types or set()
+        unsupported_types = sorted(requested_types - _native_create_object_types(decoded_status))
+        if unsupported_types:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "tool": tool,
+                    "atomic": True,
+                    "native_batch": False,
+                    "error": "atomic batch includes object types not implemented by this native bridge",
+                    "unsupported_object_types": unsupported_types,
+                    "next_action": "Install/restart the phase-2 native bridge, or remove unsupported object types from the batch.",
+                    "bridge_status": decoded_status,
+                },
+                indent=2,
+                sort_keys=True,
+            )
         _remember_cad_safe_status(decoded_status)
         return None
     return json.dumps(
@@ -1573,7 +1880,7 @@ def _atomic_batch_support_error(tool: str) -> Optional[str]:
             "atomic": True,
             "native_batch": False,
             "error": "atomic batch creation requires the native Vectorworks bridge action 'batch_create_objects'",
-            "next_action": "Install/restart the updated native bridge, or call the creation tool with atomic=False for legacy non-atomic create_object composition.",
+            "next_action": "Install/restart the updated native bridge, or call the creation tool with atomic=False for non-atomic typed creation.",
             "bridge_status": decoded_status,
         },
         indent=2,
@@ -1589,7 +1896,10 @@ def _create_primitives_native_batch(
     schematic: bool = False,
     bim_objects: bool = False,
 ) -> str:
-    support_error = _atomic_batch_support_error(tool)
+    support_error = _atomic_batch_support_error(
+        tool,
+        {str(primitive.get("object_type", "")) for primitive in primitives},
+    )
     if support_error is not None:
         return support_error
     params, roles, sent_primitives = _native_batch_params(primitives)
@@ -1681,7 +1991,7 @@ def _create_primitives_legacy(
     for index, primitive in enumerate(primitives, start=1):
         params = dict(primitive)
         role = str(params.pop("role", "primitive"))
-        raw = _send_create_primitive(params)
+        raw = _send_create_normalised_object(params)
         decoded = _decode_tool_result(raw)
         entry = {
             "index": index,
@@ -1843,6 +2153,129 @@ def _room_primitives(
             "x2": x2,
             "y2": y2 - t,
             "name": _named(name, "east wall"),
+            "class_name": class_name,
+        },
+    ]
+
+
+def _wall_object(
+    start_x: float,
+    start_y: float,
+    end_x: float,
+    end_y: float,
+    thickness: float,
+    height: float,
+    *,
+    name: str = "",
+    class_name: str = "A-Wall",
+    style_name: str = "",
+    role: str = "wall",
+) -> dict[str, Any]:
+    if start_x == end_x and start_y == end_y:
+        raise ValueError("wall endpoints must not be identical")
+    if thickness <= 0:
+        raise ValueError("wall thickness must be > 0")
+    if height <= 0:
+        raise ValueError("wall height must be > 0")
+    wall = {
+        "role": role,
+        "object_type": "wall",
+        "start_x": start_x,
+        "start_y": start_y,
+        "end_x": end_x,
+        "end_y": end_y,
+        "thickness": thickness,
+        "height": height,
+        "name": name,
+        "class_name": class_name,
+    }
+    if style_name:
+        wall["style_name"] = style_name
+    return wall
+
+
+def _room_wall_objects(
+    x: float,
+    y: float,
+    width: float,
+    depth: float,
+    wall_thickness: float,
+    wall_height: float,
+    *,
+    name: str = "",
+    class_name: str = "A-Wall",
+    style_name: str = "",
+    role_prefix: str = "",
+) -> list[dict[str, Any]]:
+    if width <= 0 or depth <= 0:
+        raise ValueError("room width and depth must be > 0")
+    prefix = f"{role_prefix}_" if role_prefix else ""
+    x2 = x + width
+    y2 = y + depth
+    return [
+        _wall_object(x, y, x2, y, wall_thickness, wall_height, name=_named(name, "south wall"), class_name=class_name, style_name=style_name, role=f"{prefix}south_wall"),
+        _wall_object(x2, y, x2, y2, wall_thickness, wall_height, name=_named(name, "east wall"), class_name=class_name, style_name=style_name, role=f"{prefix}east_wall"),
+        _wall_object(x2, y2, x, y2, wall_thickness, wall_height, name=_named(name, "north wall"), class_name=class_name, style_name=style_name, role=f"{prefix}north_wall"),
+        _wall_object(x, y2, x, y, wall_thickness, wall_height, name=_named(name, "west wall"), class_name=class_name, style_name=style_name, role=f"{prefix}west_wall"),
+    ]
+
+
+def _room_label_object(
+    x: float,
+    y: float,
+    width: float,
+    depth: float,
+    text: str,
+    *,
+    text_size: float,
+    class_name: str,
+    role: str,
+) -> dict[str, Any]:
+    return {
+        "role": role,
+        "object_type": "text",
+        "text": text,
+        "x": x + width / 2,
+        "y": y + depth / 2,
+        "width": max(width * 0.8, 0),
+        "text_size": text_size,
+        "name": text,
+        "class_name": class_name,
+    }
+
+
+def _room_dimension_objects(
+    x: float,
+    y: float,
+    width: float,
+    depth: float,
+    *,
+    offset: float,
+    class_name: str,
+    role_prefix: str,
+    name: str,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "role": f"{role_prefix}_width_dimension",
+            "object_type": "linear_dimension",
+            "start_x": x,
+            "start_y": y,
+            "end_x": x + width,
+            "end_y": y,
+            "offset": -abs(offset),
+            "name": _named(name, "width dimension"),
+            "class_name": class_name,
+        },
+        {
+            "role": f"{role_prefix}_depth_dimension",
+            "object_type": "linear_dimension",
+            "start_x": x,
+            "start_y": y,
+            "end_x": x,
+            "end_y": y + depth,
+            "offset": -abs(offset),
+            "name": _named(name, "depth dimension"),
             "class_name": class_name,
         },
     ]
@@ -2132,6 +2565,121 @@ def _build_schematic_floor_plan_primitives(
     return primitives, warnings, counts
 
 
+def _build_bim_floor_plan_objects(
+    rooms: Optional[list[dict[str, Any]]],
+    walls: Optional[list[dict[str, Any]]],
+    *,
+    wall_thickness: float,
+    wall_height: float,
+    name: str,
+    wall_class: str,
+    annotation_class: str,
+    dimension_class: str,
+    wall_style_name: str,
+    label_rooms: bool,
+    dimension_rooms: bool,
+    label_text_size: float,
+    dimension_offset: float,
+) -> tuple[list[dict[str, Any]], list[str], dict[str, int]]:
+    rooms = rooms or []
+    if not rooms and not walls:
+        raise ValueError("provide at least one room or wall")
+
+    objects: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    counts = {
+        "rooms_count": len(rooms),
+        "wall_segments_count": len(walls or []),
+        "labels_count": 0,
+        "dimensions_count": 0,
+    }
+
+    if label_text_size < 0:
+        raise ValueError("label_text_size must be >= 0")
+    if dimension_offset < 0:
+        raise ValueError("dimension_offset must be >= 0")
+
+    for index, room in enumerate(rooms, start=1):
+        label = f"rooms[{index}]"
+        if not isinstance(room, dict):
+            raise ValueError(f"{label} must be an object")
+        room_name = _prefixed_name(name, _optional_text(room, "name"), f"room {index}")
+        room_class = _optional_text(room, "class_name", wall_class)
+        room_style = _optional_text(room, "style_name", wall_style_name)
+        x = _coerce_number(room, "x", required=True, label=label)
+        y = _coerce_number(room, "y", required=True, label=label)
+        width = _coerce_positive_number(room, "width", label=label)
+        depth = _coerce_positive_number(room, "depth", label=label)
+        room_thickness = _coerce_positive_number(room, "wall_thickness", default=wall_thickness, label=label)
+        room_height = _coerce_positive_number(room, "wall_height", default=wall_height, label=label)
+        objects.extend(
+            _room_wall_objects(
+                x,
+                y,
+                width,
+                depth,
+                room_thickness,
+                room_height,
+                name=room_name,
+                class_name=room_class,
+                style_name=room_style,
+                role_prefix=f"room_{index}",
+            )
+        )
+        if label_rooms:
+            objects.append(
+                _room_label_object(
+                    x,
+                    y,
+                    width,
+                    depth,
+                    room_name,
+                    text_size=label_text_size,
+                    class_name=annotation_class,
+                    role=f"room_{index}_label",
+                )
+            )
+            counts["labels_count"] += 1
+        if dimension_rooms:
+            room_dimensions = _room_dimension_objects(
+                x,
+                y,
+                width,
+                depth,
+                offset=dimension_offset,
+                class_name=dimension_class,
+                role_prefix=f"room_{index}",
+                name=room_name,
+            )
+            objects.extend(room_dimensions)
+            counts["dimensions_count"] += len(room_dimensions)
+
+    for index, wall in enumerate(walls or [], start=1):
+        label = f"walls[{index}]"
+        if not isinstance(wall, dict):
+            raise ValueError(f"{label} must be an object")
+        wall_name = _prefixed_name(name, _optional_text(wall, "name"), f"wall segment {index}")
+        objects.append(
+            _wall_object(
+                _coerce_number_any(wall, ("start_x", "x1"), required=True, label=label),
+                _coerce_number_any(wall, ("start_y", "y1"), required=True, label=label),
+                _coerce_number_any(wall, ("end_x", "x2"), required=True, label=label),
+                _coerce_number_any(wall, ("end_y", "y2"), required=True, label=label),
+                _coerce_positive_number(wall, "thickness", default=wall_thickness, label=label),
+                _coerce_positive_number(wall, "height", default=wall_height, label=label),
+                name=wall_name,
+                class_name=_optional_text(wall, "class_name", wall_class),
+                style_name=_optional_text(wall, "style_name", wall_style_name),
+                role=f"wall_segment_{index}",
+            )
+        )
+
+    if wall_style_name:
+        warnings.append("wall_style_name is applied only when the native bridge can resolve an existing Wall Style resource")
+    warnings.append("native doors/windows/spaces are intentionally excluded until plugin parameter inspection and wall-hosting smoke tests are implemented")
+    return objects, warnings, counts
+
+
 @_tool("vw_batch_create_objects")
 def vw_batch_create_objects(
     objects: PrimitiveObjectList,
@@ -2140,9 +2688,9 @@ def vw_batch_create_objects(
     stop_on_error: bool = True,
     atomic: bool = True,
 ) -> str:
-    """Create many native phase-1 primitives in one MCP call.
-    Supported object_type values are rect/rectangle/box, circle, oval, line, and arc.
-    By default this uses the native atomic batch action so either all primitives are created or none are."""
+    """Create many native objects in one MCP call.
+    Supported object_type values are rect/rectangle/box, circle, oval, line, arc, wall, text, and linear_dimension.
+    By default this uses the native atomic batch action so either all objects are created or none are."""
     try:
         primitives = [
             _normalise_create_primitive(
@@ -2261,6 +2809,59 @@ def vw_create_schematic_floor_plan(
         schematic=True,
         bim_objects=False,
         stop_on_error=stop_on_error,
+        atomic=atomic,
+    )
+
+
+@_tool("vw_create_bim_floor_plan")
+def vw_create_bim_floor_plan(
+    rooms: Optional[OptionalFloorPlanRoomList] = None,
+    walls: Optional[FloorPlanItemList] = None,
+    wall_thickness: PositiveLength = 200,
+    wall_height: PositiveLength = 3000,
+    name: str = "",
+    wall_class: str = "A-Wall",
+    annotation_class: str = "A-Annotation",
+    dimension_class: str = "Dimension",
+    wall_style_name: str = "",
+    label_rooms: bool = True,
+    dimension_rooms: bool = True,
+    label_text_size: float = 10,
+    dimension_offset: float = 500,
+    atomic: bool = True,
+) -> str:
+    """Create a native wall-based floor plan from structured rectangular rooms and wall segments.
+    This creates true Vectorworks wall objects plus optional text labels and linear dimensions, but not native doors/windows/spaces yet."""
+    try:
+        objects, warnings, counts = _build_bim_floor_plan_objects(
+            rooms,
+            walls,
+            wall_thickness=wall_thickness,
+            wall_height=wall_height,
+            name=name,
+            wall_class=wall_class,
+            annotation_class=annotation_class,
+            dimension_class=dimension_class,
+            wall_style_name=wall_style_name,
+            label_rooms=label_rooms,
+            dimension_rooms=dimension_rooms,
+            label_text_size=label_text_size,
+            dimension_offset=dimension_offset,
+        )
+    except ValueError as exc:
+        return _json_error("vw_create_bim_floor_plan", str(exc), schematic=False, bim_objects=True)
+
+    return _create_primitives(
+        "vw_create_bim_floor_plan",
+        objects,
+        {
+            "object_count": len(objects),
+            "warnings": warnings,
+            "atomic": atomic,
+            **counts,
+        },
+        schematic=False,
+        bim_objects=True,
         atomic=atomic,
     )
 
@@ -2602,13 +3203,34 @@ def vw_stop_listener() -> str:
 
 @_tool("vw_selection")
 def vw_selection(action: SelectionAction, criteria: str = "", confirm: str = "", limit: ObjectQueryLimit = 1000) -> str:
-    """Selection ops. For select, criteria is a VW criteria string. Delete requires confirm='DELETE_SELECTED'."""
-    if action == "delete" and confirm != "DELETE_SELECTED":
-        return _confirmation_error(
-            "vw_selection",
-            "DELETE_SELECTED",
-            "selection delete is destructive and requires explicit confirmation",
-        )
+    """Selection ops. For select, criteria is a VW criteria string.
+    Delete of the current selection requires confirm='DELETE_SELECTED'.
+    Criteria delete is restricted to exact-name criteria and requires confirm='DELETE_EXACT_NAME'."""
+    if action == "delete":
+        if criteria:
+            if not _is_exact_name_criteria(criteria):
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "blocked": True,
+                        "blocked_action": "selection",
+                        "reason": "unsafe_delete_criteria",
+                        "message": "selection delete with criteria is restricted to exact object-name criteria like ((N='Name')).",
+                    },
+                    sort_keys=True,
+                )
+            if confirm != "DELETE_EXACT_NAME":
+                return _confirmation_error(
+                    "vw_selection",
+                    "DELETE_EXACT_NAME",
+                    "criteria-based selection delete is restricted to exact-name cleanup and requires explicit confirmation",
+                )
+        elif confirm != "DELETE_SELECTED":
+            return _confirmation_error(
+                "vw_selection",
+                "DELETE_SELECTED",
+                "selection delete is destructive and requires explicit confirmation",
+            )
     return _send_tool("vw_selection", {"action": action, "criteria": criteria, "confirm": confirm, "limit": limit})
 
 
@@ -2633,6 +3255,70 @@ def vw_create_wall(
             "height": height,
             "thickness": thickness,
             "style_name": style_name,
+        },
+    )
+
+
+@_tool("vw_create_text")
+def vw_create_text(
+    text: str,
+    x: float = 0,
+    y: float = 0,
+    width: float = 0,
+    text_size: float = 0,
+    rotation: float = 0,
+    fixed_size: bool = False,
+    wrap: bool = False,
+    name: str = "",
+    class_name: str = "A-Annotation",
+) -> str:
+    """Create a native Vectorworks text block. text_size is in page points; 0 keeps the document default."""
+    return _send_tool(
+        "vw_create_text",
+        {
+            "text": text,
+            "x1": x,
+            "y1": y,
+            "width": width,
+            "text_size": text_size,
+            "rotation": rotation,
+            "fixed_size": fixed_size,
+            "wrap": wrap,
+            "name": name,
+            "class_name": class_name,
+        },
+    )
+
+
+@_tool("vw_create_linear_dimension")
+def vw_create_linear_dimension(
+    start_x: float,
+    start_y: float,
+    end_x: float,
+    end_y: float,
+    offset: float = 300,
+    text_offset: float = 0,
+    direction_x: float = 0,
+    direction_y: float = 0,
+    dimension_type: Annotated[int, Field(ge=0, le=2)] = 1,
+    name: str = "",
+    class_name: str = "Dimension",
+) -> str:
+    """Create a native linear dimension between two points."""
+    return _send_tool(
+        "vw_create_linear_dimension",
+        {
+            "start_x": start_x,
+            "start_y": start_y,
+            "end_x": end_x,
+            "end_y": end_y,
+            "offset": offset,
+            "text_offset": text_offset,
+            "direction_x": direction_x,
+            "direction_y": direction_y,
+            "dimension_type": dimension_type,
+            "name": name,
+            "class_name": class_name,
         },
     )
 

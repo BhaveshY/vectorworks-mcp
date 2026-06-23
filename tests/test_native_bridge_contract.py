@@ -108,13 +108,14 @@ class NativeBridgeContractTests(unittest.TestCase):
             layers = json.loads(server.vw_get_layers())
             objects = json.loads(server.vw_get_objects())
             selection = json.loads(server.vw_selection("get"))
-            created = server.vw_create_object("rect")
+            created = json.loads(server.vw_create_object("rect"))
 
         self.assertEqual(info["filename"], "Mock.vwx")
         self.assertEqual(layers[0]["name"], "Design Layer-1")
         self.assertEqual(objects[0]["handle"], "mock-rect-1")
         self.assertEqual(selection, [])
-        self.assertIn("mock-created-1", created)
+        self.assertEqual(created["handle"], "mock-created-1")
+        self.assertEqual(created["uuid"], "mock-uuid-1")
         self.assertEqual(
             [request["action"] for request in bridge.requests],
             ["ping", "get_document_info", "get_layers", "get_objects", "selection", "create_object"],
@@ -252,6 +253,23 @@ class NativeBridgeContractTests(unittest.TestCase):
                 "get_objects",
             ],
         )
+
+    def test_native_smoke_harness_accepts_phase_two_write_fixture(self):
+        with MockNativeBridge() as bridge:
+            report = run_smoke(
+                port=bridge.port,
+                ping_count=1,
+                read_count=1,
+                timeout=1,
+                phase=2,
+                allow_write_fixture=True,
+            )
+
+        self.assertTrue(report["ok"], report["failures"])
+        actions = [request["action"] for request in bridge.requests]
+        self.assertIn("create_wall", actions)
+        self.assertIn("create_text", actions)
+        self.assertIn("create_linear_dimension", actions)
 
     def test_native_smoke_harness_phase_zero_can_stop_bridge(self):
         with MockNativeBridge() as bridge:
@@ -407,7 +425,7 @@ class NativeBridgeContractTests(unittest.TestCase):
         self.assertFalse(report["stop_port_released"])
         self.assertIn("bridge port did not close after stop", report["failures"])
 
-    def test_native_smoke_write_fixture_refuses_unsafe_selection_delete(self):
+    def test_native_smoke_write_fixture_deletes_by_exact_name_after_extra_selection(self):
         calls = []
         state = {"fixture_name": ""}
         original_record_call = smoke_module._record_call
@@ -417,10 +435,25 @@ class NativeBridgeContractTests(unittest.TestCase):
             if action == "create_object":
                 state["fixture_name"] = str((params or {}).get("name", ""))
                 return {"success": True, "result": "Created rect, handle: fixture-1"}
+            if action == "batch_create_objects":
+                state["batch_fixture_name"] = json.loads(str((params or {}).get("object_1_json", "{}"))).get("name", "")
+                return {
+                    "success": True,
+                    "result": {
+                        "atomic": True,
+                        "created_count": 1,
+                        "created": [{"handle": "batch-fixture-1", "type": "rect", "name": state["batch_fixture_name"]}],
+                    },
+                }
             if action == "get_objects" and iteration == "fixture-present":
                 return {
                     "success": True,
                     "result": [{"handle": "fixture-1", "type": "rect", "name": state["fixture_name"]}],
+                }
+            if action == "get_objects" and iteration == "batch-fixture-present":
+                return {
+                    "success": True,
+                    "result": [{"handle": "batch-fixture-1", "type": "rect", "name": state["batch_fixture_name"]}],
                 }
             if action == "selection" and iteration == "fixture-get":
                 return {
@@ -430,6 +463,18 @@ class NativeBridgeContractTests(unittest.TestCase):
                         {"handle": "other-1", "type": "rect", "name": "Do Not Delete"},
                     ],
                 }
+            if action == "selection" and iteration == "batch-fixture-get":
+                return {
+                    "success": True,
+                    "result": [
+                        {"handle": "batch-fixture-1", "type": "rect", "name": state["batch_fixture_name"]},
+                        {"handle": "other-1", "type": "rect", "name": "Do Not Delete"},
+                    ],
+                }
+            if action == "selection" and iteration in {"fixture-delete", "batch-fixture-delete"}:
+                return {"success": True, "result": {"deleted_count": 1}}
+            if action == "get_objects" and iteration in {"fixture-cleanup", "batch-fixture-cleanup"}:
+                return {"success": True, "result": []}
             return {"success": True, "result": "OK"}
 
         try:
@@ -439,10 +484,102 @@ class NativeBridgeContractTests(unittest.TestCase):
         finally:
             smoke_module._record_call = original_record_call
 
-        self.assertIn("selection included non-fixture objects; refusing cleanup delete", report["failures"])
-        self.assertIn("skipped fixture delete because fixture selection was not proven safe", report["failures"])
-        self.assertNotIn(("selection", "fixture-delete", {"action": "delete"}), calls)
-        self.assertIn(("selection", "fixture-clear-after-skip", {"action": "clear"}), calls)
+        self.assertFalse(report["failures"], report["failures"])
+        self.assertIn(
+            (
+                "selection",
+                "fixture-delete",
+                {
+                    "action": "delete",
+                    "criteria": "((N='{0}'))".format(state["fixture_name"]),
+                    "confirm": "DELETE_EXACT_NAME",
+                },
+            ),
+            calls,
+        )
+        self.assertNotIn(("selection", "fixture-delete", {"action": "delete", "confirm": "DELETE_SELECTED"}), calls)
+
+    def test_native_phase_two_smoke_deletes_by_exact_name_after_compound_selection(self):
+        calls = []
+        state = {"fixture_name": "", "handle": "phase2-fixture-1"}
+        result_types = {
+            "create_wall": "wall",
+            "create_text": "text",
+            "create_linear_dimension": "linear_dimension",
+        }
+        original_record_call = smoke_module._record_call
+
+        def fake_record_call(_sock, _report, action, iteration, params=None):
+            calls.append((action, iteration, params or {}))
+            if action in result_types:
+                state["fixture_name"] = str((params or {}).get("name", ""))
+                state["handle"] = "{0}-handle".format(action)
+                return {"success": True, "result": {"type": result_types[action], "handle": state["handle"]}}
+            if action == "get_objects" and str(iteration).endswith("-present"):
+                return {
+                    "success": True,
+                    "result": [{"handle": state["handle"], "type": "wall", "name": state["fixture_name"]}],
+                }
+            if action == "selection" and str(iteration).endswith("-get"):
+                return {
+                    "success": True,
+                    "result": [
+                        {"handle": state["handle"], "type": "wall", "name": state["fixture_name"]},
+                        {"handle": "other-1", "type": "rect", "name": "Do Not Delete"},
+                    ],
+                }
+            if action == "selection" and str(iteration).endswith("-delete"):
+                return {"success": True, "result": {"deleted_count": 1}}
+            if action == "get_objects" and str(iteration).endswith("-cleanup"):
+                return {"success": True, "result": []}
+            return {"success": True, "result": "OK"}
+
+        try:
+            smoke_module._record_call = fake_record_call
+            report = {"checks": [], "failures": []}
+            smoke_module._run_phase_two_write_fixture(object(), report)
+        finally:
+            smoke_module._record_call = original_record_call
+
+        self.assertFalse(report["failures"], report["failures"])
+        phase_two_deletes = [
+            params
+            for action, iteration, params in calls
+            if action == "selection" and str(iteration).endswith("-delete")
+        ]
+        self.assertEqual(len(phase_two_deletes), 3)
+        self.assertTrue(all(params.get("confirm") == "DELETE_EXACT_NAME" for params in phase_two_deletes))
+        self.assertTrue(all(str(params.get("criteria", "")).startswith("((N='VW_MCP_NATIVE_PHASE2_SMOKE_") for params in phase_two_deletes))
+
+    def test_native_selection_delete_requires_raw_confirmation(self):
+        source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
+        delete_branch = source[source.index('if (action == "delete")'):]
+
+        self.assertIn('confirm") != "DELETE_EXACT_NAME"', delete_branch)
+        self.assertIn('confirm") != "DELETE_SELECTED"', delete_branch)
+        self.assertLess(
+            delete_branch.index('confirm") != "DELETE_EXACT_NAME"'),
+            delete_branch.index("SupportUndoAndRemove"),
+        )
+        self.assertLess(
+            delete_branch.index('confirm") != "DELETE_SELECTED"'),
+            delete_branch.index("SupportUndoAndRemove"),
+        )
+
+    def test_native_linear_dimension_filter_is_canonicalized(self):
+        source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
+        matches_block = source[source.index("bool MatchesObjectType"):]
+
+        self.assertIn('requestedType == "linear_dimension"', matches_block)
+        self.assertIn('requestedType = "dimension"', matches_block)
+
+    def test_native_writable_layer_fallback_creates_design_layer(self):
+        source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
+        layer_block = source[source.index("MCObjectHandle EnsureWritableLayer()"):]
+
+        self.assertIn('CreateLayer(TXString("Vectorworks MCP Layer"), 1)', layer_block)
+        self.assertIn("CreateLayerN", layer_block)
+        self.assertLess(layer_block.index("CreateLayer(TXString"), layer_block.index("CreateLayerN"))
 
     def test_native_smoke_write_fixture_aborts_cleanup_when_create_fails(self):
         calls = []
@@ -722,7 +859,7 @@ class NativeBridgeContractTests(unittest.TestCase):
             report["failures"],
         )
         self.assertIn("skipped fixture delete because fixture selection was not proven safe", report["failures"])
-        self.assertNotIn(("selection", "fixture-delete", {"action": "delete"}), calls)
+        self.assertNotIn(("selection", "fixture-delete", {"action": "delete", "confirm": "DELETE_SELECTED"}), calls)
 
     def test_handler_matrix_matches_listener_and_server_wire_actions(self):
         listener_handlers = _listener_handlers()

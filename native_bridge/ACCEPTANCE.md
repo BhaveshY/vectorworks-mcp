@@ -71,3 +71,30 @@ Record:
 - SDK version.
 - Visual Studio version/toolset.
 - Any failing handler names and exact errors.
+
+## Latest Validation Record
+
+Recorded on 2026-06-23 against Vectorworks Architect 2024 on Windows.
+
+- No-Vectorworks checks: `py -3 -m unittest discover -v` passed 177 tests;
+  `scripts\check-bundled-plugin-contract.ps1` passed; `git diff --check`
+  passed.
+- Native build: `scripts\copy-native-bridge-scaffold.ps1 -Force`,
+  `scripts\wire-native-bridge-project.ps1`, and
+  `scripts\build-native-bridge.ps1` completed successfully. MSBuild reported
+  0 warnings and 0 errors.
+- Built artifact:
+  `native_bridge\worktree\SDKExamples\Output\2024\_Output\Debug\ObjectExample.vlb`
+  with SHA-256
+  `D4E19AA1CC0310A860A85D3609739310CEAC337E32B343A2A1ADC5E585F80AB8`.
+- Install check: `scripts\doctor-native-bridge.ps1 -BuiltArtifact ... -Install
+  -Json` reported `installedArtifactMatchesCandidate: true`.
+- Live phase-2 smoke:
+  `scripts\smoke-native-bridge.ps1 -Phase 2 -PingCount 3 -ReadCount 2
+  -TimeoutSeconds 25 -IncludeObjects -AllowWriteFixture -Json` passed with
+  `ok: true`, `cad_api_safe: true`, `transport_only: false`,
+  `main_context_pump_ready: true`, and native actions for `create_wall`,
+  `create_text`, `create_linear_dimension`, `create_object`, and atomic
+  `batch_create_objects`.
+- Cleanup: a follow-up exact-name cleanup pass removed four leftover smoke
+  objects from an earlier failed cleanup attempt.

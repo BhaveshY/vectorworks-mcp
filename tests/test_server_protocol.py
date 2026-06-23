@@ -139,6 +139,8 @@ def _configure_server(port, max_frame_bytes=1024 * 1024):
     server.HEALTH_TIMEOUT = 0.25
     server.MAX_FRAME_BYTES = max_frame_bytes
     server.PREFLIGHT_CACHE_SECONDS = 0.75
+    server.AUTH_TOKEN = "test-token"
+    server.ALLOW_INSECURE_NO_AUTH = False
     server._CONFIG_ERROR = None
 
 
@@ -154,6 +156,23 @@ def _native_phase_one_status():
         "dispatch_mode": "native_sdk",
         "handlers": 8,
         "version": "native-sdk-bridge-phase1",
+        "main_context_pump": "win32_ui_timer",
+        "main_context_pump_ready": True,
+    }
+
+
+def _native_phase_two_status():
+    return {
+        "pong": True,
+        "cad_api_safe": True,
+        "transport_only": False,
+        "native_bridge": True,
+        "native_phase": 2,
+        "implemented_actions": sorted(server.NATIVE_PHASE_TWO_REQUIRED_ACTIONS),
+        "bridge_kind": "native_sdk_bridge_phase2",
+        "dispatch_mode": "native_sdk",
+        "handlers": 11,
+        "version": "native-sdk-bridge-phase2",
         "main_context_pump": "win32_ui_timer",
         "main_context_pump_ready": True,
     }
@@ -555,6 +574,149 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertFalse(result["host_capabilities"]["true_bim_objects"])
         self.assertEqual([request["action"] for request in listener.requests], ["ping"])
 
+    def test_capabilities_reports_native_phase_two_production_surface(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_two_status()}
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=1) as listener:
+            _configure_server(listener.port)
+            result = json.loads(server.vw_capabilities(include_tools=False))
+
+        self.assertTrue(result["ok"])
+        self.assertIn("wall", result["native_phase_two_create_object_types"])
+        self.assertTrue(result["host_capabilities"]["true_bim_objects"])
+        self.assertTrue(result["host_capabilities"]["native_text_creation"])
+        self.assertTrue(result["host_capabilities"]["native_linear_dimension_creation"])
+
+    def test_capabilities_do_not_advertise_native_writes_when_bridge_is_not_cad_safe(self):
+        unsafe_status = _native_phase_two_status()
+        unsafe_status["cad_api_safe"] = False
+        unsafe_status["transport_only"] = True
+        unsafe_status["main_context_pump_ready"] = False
+
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": unsafe_status}
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=1) as listener:
+            _configure_server(listener.port)
+            result = json.loads(server.vw_capabilities(include_tools=False))
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["host_capabilities"]["atomic_mixed_production_batch_creation"])
+        self.assertFalse(result["host_capabilities"]["native_wall_creation"])
+        self.assertFalse(result["host_capabilities"]["native_text_creation"])
+        self.assertFalse(result["host_capabilities"]["native_linear_dimension_creation"])
+        self.assertFalse(result["host_capabilities"]["true_bim_objects"])
+
+    def test_phase_two_direct_text_and_dimension_actions(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_two_status()}
+            if request["action"] == "create_text":
+                return {"id": request["id"], "success": True, "result": {"type": "text", "handle": "text-1"}}
+            if request["action"] == "create_linear_dimension":
+                return {"id": request["id"], "success": True, "result": {"type": "linear_dimension", "handle": "dim-1"}}
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=3) as listener:
+            _configure_server(listener.port)
+            text_result = json.loads(server.vw_create_text("Office", x=10, y=20, text_size=12))
+            dim_result = json.loads(server.vw_create_linear_dimension(0, 0, 4000, 0, offset=500))
+
+        self.assertEqual(text_result["type"], "text")
+        self.assertEqual(dim_result["type"], "linear_dimension")
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "create_text", "create_linear_dimension"])
+        self.assertEqual(listener.requests[1]["params"]["text"], "Office")
+        self.assertEqual(listener.requests[2]["params"]["end_x"], 4000)
+
+    def test_batch_create_objects_accepts_phase_two_mixed_production_objects(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_two_status()}
+            if request["action"] == "batch_create_objects":
+                object_count = request["params"]["object_count"]
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {
+                        "atomic": True,
+                        "rollback_on_error": True,
+                        "created_count": object_count,
+                        "created": [
+                            {"index": index, "type": json.loads(request["params"][f"object_{index}_json"])["object_type"], "handle": f"h-{index}"}
+                            for index in range(1, object_count + 1)
+                        ],
+                    },
+                }
+            self.fail(f"Unexpected action: {request['action']}")
+
+        objects = [
+            {"object_type": "wall", "start_x": 0, "start_y": 0, "end_x": 4000, "end_y": 0, "height": 3000, "thickness": 200},
+            {"object_type": "text", "text": "Office", "x": 2000, "y": 1500, "text_size": 10},
+            {"object_type": "linear_dimension", "start_x": 0, "start_y": 0, "end_x": 4000, "end_y": 0, "offset": 500},
+        ]
+        with FakeListener(handler, max_requests=2) as listener:
+            _configure_server(listener.port)
+            result = json.loads(server.vw_batch_create_objects(objects, atomic=True))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["created_count"], 3)
+        sent = [json.loads(listener.requests[1]["params"][f"object_{index}_json"]) for index in range(1, 4)]
+        self.assertEqual([item["object_type"] for item in sent], ["wall", "text", "linear_dimension"])
+
+    def test_batch_create_objects_preserves_non_ascii_for_native_params(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_two_status()}
+            if request["action"] == "batch_create_objects":
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {
+                        "atomic": True,
+                        "rollback_on_error": True,
+                        "created_count": 1,
+                        "created": [{"index": 1, "type": "text", "handle": "h-1"}],
+                    },
+                }
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=2) as listener:
+            _configure_server(listener.port)
+            result = json.loads(
+                server.vw_batch_create_objects(
+                    [{"object_type": "text", "text": "Café", "x": 0, "y": 0}],
+                    atomic=True,
+                )
+            )
+
+        self.assertTrue(result["ok"])
+        encoded = listener.requests[1]["params"]["object_1_json"]
+        self.assertIn("Café", encoded)
+        self.assertNotIn("\\u00e9", encoded)
+
+    def test_phase_one_batch_rejects_production_object_types_before_write(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_one_status()}
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=1) as listener:
+            _configure_server(listener.port)
+            result = json.loads(
+                server.vw_batch_create_objects(
+                    [{"object_type": "wall", "start_x": 0, "start_y": 0, "end_x": 1000, "end_y": 0}]
+                )
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("wall", result["unsupported_object_types"])
+        self.assertEqual([request["action"] for request in listener.requests], ["ping"])
+
     def test_batch_create_objects_composes_native_primitives(self):
         def handler(request):
             if request["action"] == "ping":
@@ -631,6 +793,39 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertEqual(result["created_count"], 2)
         self.assertEqual([request["action"] for request in listener.requests], ["ping", "create_object", "create_object"])
 
+    def test_batch_create_objects_non_atomic_routes_phase_two_types_to_typed_actions(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_two_status()}
+            if request["action"] in {"create_wall", "create_text", "create_linear_dimension"}:
+                object_type = {
+                    "create_wall": "wall",
+                    "create_text": "text",
+                    "create_linear_dimension": "linear_dimension",
+                }[request["action"]]
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {"type": object_type, "handle": "h-{0}".format(len(listener.requests))},
+                }
+            self.fail(f"Unexpected action: {request['action']}")
+
+        objects = [
+            {"object_type": "wall", "start_x": 0, "start_y": 0, "end_x": 4000, "end_y": 0},
+            {"object_type": "text", "text": "Office", "x": 0, "y": 0},
+            {"object_type": "linear_dimension", "start_x": 0, "start_y": 0, "end_x": 4000, "end_y": 0},
+        ]
+        with FakeListener(handler, max_requests=4) as listener:
+            _configure_server(listener.port)
+            result = json.loads(server.vw_batch_create_objects(objects, atomic=False))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["created_count"], 3)
+        self.assertEqual(
+            [request["action"] for request in listener.requests],
+            ["ping", "create_wall", "create_text", "create_linear_dimension"],
+        )
+
     def test_plan_schematic_floor_plan_is_read_only(self):
         result = json.loads(
             server.vw_plan_schematic_floor_plan(
@@ -693,6 +888,82 @@ class ServerProtocolTests(unittest.TestCase):
         ]
         self.assertEqual([params["object_type"] for params in created_params], ["rect"] * 4 + ["line", "arc", "line", "line"])
 
+    def test_create_bim_floor_plan_composes_native_walls_labels_and_dimensions(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_two_status()}
+            if request["action"] == "batch_create_objects":
+                object_count = request["params"]["object_count"]
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {
+                        "atomic": True,
+                        "rollback_on_error": True,
+                        "created_count": object_count,
+                        "created": [
+                            {"index": index, "type": json.loads(request["params"][f"object_{index}_json"])["object_type"], "handle": f"h-{index}"}
+                            for index in range(1, object_count + 1)
+                        ],
+                    },
+                }
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=2) as listener:
+            _configure_server(listener.port)
+            result = json.loads(
+                server.vw_create_bim_floor_plan(
+                    rooms=[{"name": "Office", "x": 0, "y": 0, "width": 4000, "depth": 3000}],
+                    name="Suite",
+                )
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["bim_objects"])
+        self.assertEqual(result["created_count"], 7)
+        created_params = [
+            json.loads(listener.requests[1]["params"][f"object_{index}_json"])
+            for index in range(1, 8)
+        ]
+        self.assertEqual([params["object_type"] for params in created_params], ["wall", "wall", "wall", "wall", "text", "linear_dimension", "linear_dimension"])
+        self.assertEqual(created_params[0]["name"], "Suite Office south wall")
+        self.assertEqual(created_params[4]["text"], "Suite Office")
+
+    def test_create_bim_floor_plan_accepts_wall_only_layout(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_two_status()}
+            if request["action"] == "batch_create_objects":
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {
+                        "atomic": True,
+                        "rollback_on_error": True,
+                        "created_count": 1,
+                        "created": [{"index": 1, "type": "wall", "handle": "h-1"}],
+                    },
+                }
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=2) as listener:
+            _configure_server(listener.port)
+            result = json.loads(
+                server.vw_create_bim_floor_plan(
+                    walls=[{"name": "Partition", "x1": 0, "y1": 0, "x2": 4000, "y2": 0}],
+                    name="Suite",
+                    label_rooms=False,
+                    dimension_rooms=False,
+                )
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["rooms_count"], 0)
+        self.assertEqual(result["wall_segments_count"], 1)
+        created_params = json.loads(listener.requests[1]["params"]["object_1_json"])
+        self.assertEqual(created_params["object_type"], "wall")
+        self.assertEqual(created_params["name"], "Suite Partition")
+
     def test_drawing_summary_composes_bounded_read_inventory(self):
         def handler(request):
             if request["action"] == "ping":
@@ -750,6 +1021,13 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertEqual(delete_selection["required_confirmation"], "DELETE_SELECTED")
         self.assertFalse(delete_class["ok"])
         self.assertEqual(delete_class["required_confirmation"], "DELETE_CLASS")
+
+    def test_selection_delete_blocks_arbitrary_criteria(self):
+        result = json.loads(server.vw_selection("delete", "ALL", confirm="DELETE_EXACT_NAME"))
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["blocked"])
+        self.assertEqual(result["reason"], "unsafe_delete_criteria")
 
     def test_create_schematic_room_composes_native_rectangles(self):
         def handler(request):

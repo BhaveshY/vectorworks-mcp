@@ -31,13 +31,16 @@ CONFIG (env vars, all optional):
   VW_MCP_CLIENT_IDLE_SECONDS default 600
   VW_MCP_MODE       win_timer | dialog | foreground | background; default dialog
   VW_MCP_DIALOG_TIMER_MS default 50
+  VW_MCP_AUTH_TOKEN local protocol auth token; defaults to ~/.vectorworks-mcp/auth-token
+  VW_MCP_AUTH_TOKEN_FILE override auth token file path
+  VW_MCP_INSECURE_NO_AUTH set to 1 only for local diagnostics/tests
 """
 try:
     import vs
 except ModuleNotFoundError:
     vs = None
 
-import io, ipaddress, json, math, os, selectors, socket, struct, sys, threading, time, traceback, types
+import io, ipaddress, json, math, os, re, selectors, socket, struct, sys, threading, time, traceback, types
 
 __VERSION__ = "0.3.0-socket"
 
@@ -49,6 +52,7 @@ DEFAULT_MAX_PENDING_BUFFER_SLACK_BYTES = 4096
 DEFAULT_MAX_CLIENTS = 8
 DEFAULT_CLIENT_IDLE_SECONDS = 600
 DEFAULT_DIALOG_TIMER_MS = 50
+DEFAULT_AUTH_TOKEN_FILENAME = "auth-token"
 
 
 def _env_int(name, default, min_value=None, max_value=None):
@@ -78,6 +82,53 @@ def _validate_loopback_host(host, env_name="VW_MCP_HOST"):
     raise ValueError("{name} must be loopback-only; refusing {value!r}".format(name=env_name, value=normalized))
 
 
+def _truthy_env(name):
+    return str(os.environ.get(name, "")).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _default_state_dir():
+    configured = os.environ.get("VW_MCP_STOP_DIR", "").strip()
+    if configured:
+        return os.path.expanduser(configured)
+    return os.path.join(os.path.expanduser("~"), ".vectorworks-mcp")
+
+
+def _default_auth_token_file():
+    configured = os.environ.get("VW_MCP_AUTH_TOKEN_FILE", "").strip()
+    if configured:
+        return os.path.expanduser(configured)
+    return os.path.join(_default_state_dir(), DEFAULT_AUTH_TOKEN_FILENAME)
+
+
+def _read_auth_token_file():
+    try:
+        path = _default_auth_token_file()
+        if not os.path.isfile(path):
+            return ""
+        with open(path, "r", encoding="utf-8") as handle:
+            return handle.read().strip()
+    except Exception:
+        return ""
+
+
+def _load_auth_token():
+    if _truthy_env("VW_MCP_INSECURE_NO_AUTH"):
+        return ""
+    token = os.environ.get("VW_MCP_AUTH_TOKEN", "").strip()
+    if token:
+        return token
+    return _read_auth_token_file()
+
+
+def _auth_required_error():
+    if AUTH_TOKEN or ALLOW_INSECURE_NO_AUTH:
+        return ""
+    return (
+        "VW_MCP_AUTH_TOKEN is required for the local Vectorworks MCP protocol; "
+        "run scripts/register-claude-code.ps1 or set VW_MCP_INSECURE_NO_AUTH=1 only for diagnostics"
+    )
+
+
 _CONFIG_ERROR = None
 try:
     HOST = _validate_loopback_host(os.environ.get("VW_MCP_HOST", DEFAULT_HOST))
@@ -98,7 +149,8 @@ try:
     MAX_CLIENTS = _env_int("VW_MCP_MAX_CLIENTS", DEFAULT_MAX_CLIENTS, 1, 64)
     CLIENT_IDLE_SECONDS = _env_int("VW_MCP_CLIENT_IDLE_SECONDS", DEFAULT_CLIENT_IDLE_SECONDS, 30, 86400)
     DIALOG_TIMER_MS = _env_int("VW_MCP_DIALOG_TIMER_MS", DEFAULT_DIALOG_TIMER_MS, 20, 5000)
-    AUTH_TOKEN = os.environ.get("VW_MCP_AUTH_TOKEN", "").strip()
+    AUTH_TOKEN = _load_auth_token()
+    ALLOW_INSECURE_NO_AUTH = _truthy_env("VW_MCP_INSECURE_NO_AUTH")
 except ValueError as e:
     _CONFIG_ERROR = str(e)
     HOST = DEFAULT_HOST
@@ -110,6 +162,7 @@ except ValueError as e:
     CLIENT_IDLE_SECONDS = DEFAULT_CLIENT_IDLE_SECONDS
     DIALOG_TIMER_MS = DEFAULT_DIALOG_TIMER_MS
     AUTH_TOKEN = ""
+    ALLOW_INSECURE_NO_AUTH = False
 
 STOP_DIR = os.environ.get("VW_MCP_STOP_DIR") or os.path.join(
     os.path.expanduser("~"), ".vectorworks-mcp"
@@ -174,6 +227,11 @@ TYPE_NAMES = {
 MAX_OBJECT_QUERY_LIMIT = 1000
 MAX_WORKSHEET_ROWS = 500
 MAX_POINT_LIST_LENGTH = 1000
+_EXACT_NAME_CRITERIA_RE = re.compile(r"^\(\(N='[^']{1,255}'\)\)$")
+
+
+def _is_exact_name_criteria(criteria):
+    return bool(_EXACT_NAME_CRITERIA_RE.match(str(criteria or "").strip()))
 
 
 def _bounded_int(value, default, min_value, max_value, name):
@@ -303,6 +361,52 @@ def _set_object_rgb_color(h, prop, value):
             vs.SetPenFore(h, (r, g, b))
         else:
             vs.SetPenForeColor(h, _rgb_to_idx(r, g, b))
+
+def _finite_float(value, default, label, min_value=None, max_value=None):
+    if value is None:
+        value = default
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("{0} must be a finite number".format(label))
+    if not math.isfinite(number):
+        raise ValueError("{0} must be a finite number".format(label))
+    if min_value is not None and number < min_value:
+        raise ValueError("{0} must be >= {1}".format(label, min_value))
+    if max_value is not None and number > max_value:
+        raise ValueError("{0} must be <= {1}".format(label, max_value))
+    return number
+
+def _bounded_text(value, label, max_len=4096):
+    if value is None:
+        text = ""
+    else:
+        text = str(value)
+    if not text:
+        raise ValueError("{0} is required".format(label))
+    if len(text) > max_len:
+        raise ValueError("{0} must be at most {1} characters".format(label, max_len))
+    return text
+
+def _strict_bounded_int(value, default, label, min_value, max_value):
+    number = _finite_float(value, default, label, min_value=min_value, max_value=max_value)
+    if int(number) != number:
+        raise ValueError("{0} must be an integer".format(label))
+    return int(number)
+
+def _bool_param(value, default=False):
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off"):
+        return False
+    raise ValueError("boolean value expected")
 
 # === HANDLERS ===
 
@@ -612,8 +716,16 @@ def handle_selection(p):
         elif action == "clear":
             vs.DSelectAll(); vs.ReDrawAll(); return _ok("Selection cleared")
         elif action == "delete":
-            if p.get("confirm") != "DELETE_SELECTED":
+            if criteria:
+                if not _is_exact_name_criteria(criteria):
+                    return _err("selection delete criteria must be exact object-name criteria like ((N='Name'))")
+                if p.get("confirm") != "DELETE_EXACT_NAME":
+                    return _err("selection delete with criteria requires confirm='DELETE_EXACT_NAME'")
+            elif p.get("confirm") != "DELETE_SELECTED":
                 return _err("selection delete requires confirm='DELETE_SELECTED'")
+            if criteria:
+                vs.DSelectAll()
+                vs.SelectObj(criteria)
             to_del = list(_iter_selected())
             for h in to_del: vs.DelObject(h)
             vs.ReDrawAll(); return _ok(f"Deleted {len(to_del)} objects")
@@ -654,6 +766,79 @@ def handle_create_wall(p):
         if field_errors:
             result["field_warnings"] = field_errors
         return _ok(result)
+    except Exception: return _err(traceback.format_exc())
+
+def handle_create_text(p):
+    try:
+        text = _bounded_text(p.get("text", ""), "text")
+        x1 = _finite_float(p.get("x1", p.get("x", 0)), 0, "x1")
+        y1 = _finite_float(p.get("y1", p.get("y", 0)), 0, "y1")
+        width = _finite_float(p.get("width", 0), 0, "width", min_value=0)
+        rotation = _finite_float(p.get("rotation", 0), 0, "rotation")
+        text_size = _finite_float(p.get("text_size", p.get("size", 0)), 0, "text_size", min_value=0)
+        fixed_size = _bool_param(p.get("fixed_size"), False)
+        wrap = _bool_param(p.get("wrap"), width > 0)
+        warnings = []
+        h = None
+        if hasattr(vs, "CreateTextBlock"):
+            h = vs.CreateTextBlock(text, (x1, y1), fixed_size, width)
+        else:
+            if fixed_size:
+                warnings.append("fixed_size requires Vectorworks CreateTextBlock; created regular text instead")
+            if hasattr(vs, "TextOrigin"): vs.TextOrigin(x1, y1)
+        if h is None:
+            if hasattr(vs, "CreateText"):
+                vs.CreateText(text)
+            elif hasattr(vs, "Text"):
+                vs.Text(text)
+            else:
+                return _err("Vectorworks API CreateText/Text is not available")
+        if h is None:
+            h = vs.LNewObj()
+        if h and p.get("name"): vs.SetName(h, p["name"])
+        if h and p.get("class_name"): vs.SetClass(h, p["class_name"])
+        if h and width and hasattr(vs, "SetTextWidth"): vs.SetTextWidth(h, width)
+        elif h and width:
+            warnings.append("SetTextWidth is not available in this Vectorworks Python API")
+        if h and hasattr(vs, "SetTextWrap"): vs.SetTextWrap(h, bool(wrap or width > 0))
+        elif h and wrap:
+            warnings.append("SetTextWrap is not available in this Vectorworks Python API")
+        if h and text_size > 0 and hasattr(vs, "SetTextSize"):
+            char_size = vs.PagePointsToCoordLength(text_size) if hasattr(vs, "PagePointsToCoordLength") else text_size
+            vs.SetTextSize(h, 0, len(text), char_size)
+        elif h and text_size > 0:
+            warnings.append("SetTextSize is not available in this Vectorworks Python API")
+        if h and rotation and hasattr(vs, "HRotate"): vs.HRotate(h, x1, y1, rotation)
+        vs.ReDrawAll()
+        result = {"type": "text", "handle": _reg(h)}
+        if warnings:
+            result["field_warnings"] = warnings
+        return _ok(result)
+    except Exception: return _err(traceback.format_exc())
+
+def handle_create_linear_dimension(p):
+    try:
+        sx = _finite_float(p.get("start_x", p.get("x1", 0)), 0, "start_x")
+        sy = _finite_float(p.get("start_y", p.get("y1", 0)), 0, "start_y")
+        ex = _finite_float(p.get("end_x", p.get("x2", 1000)), 1000, "end_x")
+        ey = _finite_float(p.get("end_y", p.get("y2", 0)), 0, "end_y")
+        offset = _finite_float(p.get("offset", p.get("dimension_offset", 300)), 300, "offset")
+        text_offset = _finite_float(p.get("text_offset", 0), 0, "text_offset")
+        direction_x = _finite_float(p.get("direction_x", 0), 0, "direction_x")
+        direction_y = _finite_float(p.get("direction_y", 0), 0, "direction_y")
+        dimension_type = _strict_bounded_int(p.get("dimension_type", 1), 1, "dimension_type", 0, 2)
+        if sx == ex and sy == ey: return _err("linear_dimension endpoints must not be identical")
+        if hasattr(vs, "LinearDim"):
+            vs.LinearDim(sx, sy, ex, ey, offset, dimension_type)
+        elif hasattr(vs, "CreateLinearDimension"):
+            vs.CreateLinearDimension((sx, sy), (ex, ey), offset, text_offset, (direction_x, direction_y), dimension_type)
+        else:
+            return _err("Vectorworks API LinearDim/CreateLinearDimension is not available")
+        h = vs.LNewObj()
+        if h and p.get("name"): vs.SetName(h, p["name"])
+        if h and p.get("class_name"): vs.SetClass(h, p["class_name"])
+        vs.ReDrawAll()
+        return _ok({"type": "linear_dimension", "handle": _reg(h)})
     except Exception: return _err(traceback.format_exc())
 
 def handle_insert_door(p):
@@ -781,6 +966,7 @@ HANDLERS = {
     "import_file": handle_import_file, "get_document_info": handle_get_document_info,
     "screenshot": handle_screenshot, "stop": handle_stop, "selection": handle_selection,
     "create_wall": handle_create_wall, "insert_door": handle_insert_door,
+    "create_text": handle_create_text, "create_linear_dimension": handle_create_linear_dimension,
     "insert_window": handle_insert_window, "create_slab": handle_create_slab,
     "create_roof": handle_create_roof, "inspect_object": handle_inspect_object,
 }
@@ -829,6 +1015,9 @@ def dispatch(req):
         return _request_error(req, "Request must be a JSON object")
     if not isinstance(req.get("id"), str) or not req.get("id"):
         return _request_error(req, "Request id must be a non-empty string")
+    auth_error = _auth_required_error()
+    if auth_error:
+        return _request_error(req, auth_error)
     if AUTH_TOKEN and req.get("auth_token") != AUTH_TOKEN:
         return _request_error(req, "Listener authentication failed")
     action = req.get("action", "")

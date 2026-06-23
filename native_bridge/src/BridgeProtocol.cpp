@@ -12,6 +12,8 @@ namespace Protocol {
 
 namespace {
 
+constexpr int kMaxJsonNestingDepth = 64;
+
 bool IsWhitespace(char ch) {
     return ch == ' ' || ch == '\n' || ch == '\r' || ch == '\t';
 }
@@ -152,7 +154,14 @@ public:
         throw std::invalid_argument("unterminated JSON string");
     }
 
-    void SkipValue() {
+    void CheckDepth(int depth) const {
+        if (depth > kMaxJsonNestingDepth) {
+            throw std::invalid_argument("JSON nesting depth exceeded native bridge limit");
+        }
+    }
+
+    void SkipValue(int depth = 0) {
+        CheckDepth(depth);
         SkipWhitespace();
         if (AtEnd()) {
             throw std::invalid_argument("expected JSON value");
@@ -163,11 +172,11 @@ public:
             return;
         }
         if (ch == '{') {
-            SkipObject();
+            SkipObject(depth);
             return;
         }
         if (ch == '[') {
-            SkipArray();
+            SkipArray(depth);
             return;
         }
         if (ch == '-' || std::isdigit(static_cast<unsigned char>(ch))) {
@@ -180,7 +189,8 @@ public:
         throw std::invalid_argument("expected JSON value");
     }
 
-    void SkipObject() {
+    void SkipObject(int depth = 0) {
+        CheckDepth(depth);
         Expect('{', "expected JSON object");
         if (ConsumeIf('}')) {
             return;
@@ -188,7 +198,7 @@ public:
         while (true) {
             ParseString();
             Expect(':', "expected ':' after JSON object key");
-            SkipValue();
+            SkipValue(depth + 1);
             if (ConsumeIf('}')) {
                 return;
             }
@@ -196,13 +206,14 @@ public:
         }
     }
 
-    void SkipArray() {
+    void SkipArray(int depth = 0) {
+        CheckDepth(depth);
         Expect('[', "expected JSON array");
         if (ConsumeIf(']')) {
             return;
         }
         while (true) {
-            SkipValue();
+            SkipValue(depth + 1);
             if (ConsumeIf(']')) {
                 return;
             }

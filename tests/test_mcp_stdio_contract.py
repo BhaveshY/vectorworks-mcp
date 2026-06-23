@@ -25,6 +25,7 @@ class McpStdioContractTests(unittest.TestCase):
                     "VW_MCP_PORT": "1",
                     "VW_MCP_TIMEOUT": "0.5",
                     "VW_MCP_HEALTH_TIMEOUT": "0.2",
+                    "VW_MCP_INSECURE_NO_AUTH": "1",
                 }
             )
             params = StdioServerParameters(
@@ -50,6 +51,9 @@ class McpStdioContractTests(unittest.TestCase):
                             "vw_batch_create_objects",
                             "vw_plan_schematic_floor_plan",
                             "vw_create_schematic_floor_plan",
+                            "vw_create_bim_floor_plan",
+                            "vw_create_text",
+                            "vw_create_linear_dimension",
                             "vw_drawing_summary",
                             "vw_capabilities",
                             "vw_get_layers",
@@ -84,6 +88,17 @@ class McpStdioContractTests(unittest.TestCase):
                         self.assertEqual(floor_plan_rooms_schema["minItems"], 1)
                         self.assertEqual(floor_plan_rooms_schema["maxItems"], 100)
                         self.assertIn("atomic", by_name["vw_create_schematic_floor_plan"].inputSchema["properties"])
+
+                        bim_floor_plan_schema = by_name["vw_create_bim_floor_plan"].inputSchema
+                        self.assertIn("wall_height", bim_floor_plan_schema["properties"])
+                        self.assertIn("dimension_rooms", bim_floor_plan_schema["properties"])
+                        self.assertIn("rooms", bim_floor_plan_schema["properties"])
+                        self.assertIn("walls", bim_floor_plan_schema["properties"])
+                        self.assertNotIn("rooms", bim_floor_plan_schema.get("required", []))
+
+                        dimension_schema = by_name["vw_create_linear_dimension"].inputSchema["properties"]["dimension_type"]
+                        self.assertEqual(dimension_schema["minimum"], 0)
+                        self.assertEqual(dimension_schema["maximum"], 2)
 
                         contract_completed = True
                         ping = await session.call_tool("vw_ping", {})

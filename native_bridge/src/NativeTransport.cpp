@@ -67,6 +67,12 @@ int LastSocketError() {
 bool IsInterruptedAcceptError(int error) {
     return error == WSAEINTR || error == WSAENOTSOCK || error == WSAEINVAL;
 }
+
+void SetSocketTimeouts(SocketHandle socket, int idleSeconds) {
+    const int milliseconds = idleSeconds * 1000;
+    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&milliseconds), sizeof(milliseconds));
+    setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&milliseconds), sizeof(milliseconds));
+}
 #else
 using SocketHandle = int;
 constexpr SocketHandle kInvalidSocket = -1;
@@ -91,6 +97,14 @@ int LastSocketError() {
 
 bool IsInterruptedAcceptError(int error) {
     return error == EBADF || error == EINVAL || error == EINTR;
+}
+
+void SetSocketTimeouts(SocketHandle socket, int idleSeconds) {
+    timeval timeout{};
+    timeout.tv_sec = idleSeconds;
+    timeout.tv_usec = 0;
+    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 }
 #endif
 
@@ -243,6 +257,8 @@ public:
         }
 
         dispatcher_ = std::move(dispatcher);
+        maxClients_ = options.maxClients < 1 ? 1 : options.maxClients;
+        clientIdleSeconds_ = options.clientIdleSeconds < 30 ? 30 : options.clientIdleSeconds;
         stopRequested_.store(false);
         listenSocket_.store(listener.Release());
         boundPort_ = BoundPort(listenSocket_.load());
@@ -321,6 +337,12 @@ private:
             }
 
             std::lock_guard<std::mutex> lock(mutex_);
+            if (static_cast<int>(clientSockets_.size()) >= maxClients_) {
+                CloseSocket(client);
+                lastError_ = "native transport rejected client because max client count was reached";
+                continue;
+            }
+            SetSocketTimeouts(client, clientIdleSeconds_);
             clientSockets_.push_back(client);
             clientThreads_.emplace_back([this, client] { HandleClient(client); });
         }
@@ -393,6 +415,8 @@ private:
     std::atomic_bool running_{false};
     std::uint16_t boundPort_ = 0;
     std::string lastError_;
+    int maxClients_ = 8;
+    int clientIdleSeconds_ = 600;
 };
 
 NativeTransport::NativeTransport() : impl_(new Impl()) {}

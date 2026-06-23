@@ -1,7 +1,11 @@
 import json
+import re
 import socket
 import struct
 import threading
+
+
+EXACT_NAME_CRITERIA_RE = re.compile(r"^\(\(N='[^']{1,255}'\)\)$")
 
 
 IMPLEMENTED_ACTIONS = {
@@ -13,6 +17,9 @@ IMPLEMENTED_ACTIONS = {
     "selection",
     "create_object",
     "batch_create_objects",
+    "create_wall",
+    "create_text",
+    "create_linear_dimension",
 }
 
 
@@ -39,6 +46,28 @@ def _write_json_frame(sock, payload):
     sock.sendall(struct.pack(">I", len(data)) + data)
 
 
+def _mock_bounds(params, object_type):
+    if object_type == "wall":
+        return {
+            "top_left": [params.get("start_x", params.get("x1", 0)), params.get("start_y", params.get("y1", 0))],
+            "bottom_right": [params.get("end_x", params.get("x2", 100)), params.get("end_y", params.get("y2", 100))],
+        }
+    if object_type == "text":
+        return {
+            "top_left": [params.get("x", params.get("x1", 0)), params.get("y", params.get("y1", 0))],
+            "bottom_right": [params.get("x", params.get("x1", 0)) + params.get("width", 100), params.get("y", params.get("y1", 0))],
+        }
+    if object_type == "linear_dimension":
+        return {
+            "top_left": [params.get("start_x", params.get("x1", 0)), params.get("start_y", params.get("y1", 0))],
+            "bottom_right": [params.get("end_x", params.get("x2", 100)), params.get("end_y", params.get("y2", 0))],
+        }
+    return {
+        "top_left": [params.get("x1", 0), params.get("y1", 0)],
+        "bottom_right": [params.get("x2", 100), params.get("y2", 100)],
+    }
+
+
 class MockNativeBridge:
     """Small TCP bridge used by tests to exercise the native protocol contract."""
 
@@ -61,7 +90,7 @@ class MockNativeBridge:
             "cad_api_safe": True,
             "transport_only": False,
             "native_bridge": True,
-            "native_phase": 1,
+            "native_phase": 2,
             "implemented_actions": sorted(IMPLEMENTED_ACTIONS),
             "main_context_pump": "win32_ui_timer",
             "main_context_pump_ready": True,
@@ -205,7 +234,40 @@ class MockNativeBridge:
                         result = "Selected {0} objects".format(len(self.selection))
                         _write_json_frame(conn, {"id": request_id, "success": True, "result": result})
                     elif selection_action == "delete":
-                        selected = set(self.selection)
+                        criteria = str(params.get("criteria", ""))
+                        if criteria:
+                            expected_confirm = "DELETE_EXACT_NAME"
+                            criteria_valid = EXACT_NAME_CRITERIA_RE.fullmatch(criteria) is not None
+                        else:
+                            expected_confirm = "DELETE_SELECTED"
+                            criteria_valid = True
+                        if params.get("confirm") != expected_confirm:
+                            _write_json_frame(
+                                conn,
+                                {
+                                    "id": request_id,
+                                    "success": False,
+                                    "error": "selection delete requires confirm='{0}'".format(expected_confirm),
+                                },
+                            )
+                            continue
+                        if not criteria_valid:
+                            _write_json_frame(
+                                conn,
+                                {
+                                    "id": request_id,
+                                    "success": False,
+                                    "error": "selection delete criteria must be exact object-name criteria",
+                                },
+                            )
+                            continue
+                        if criteria:
+                            selected = {
+                                obj["handle"] for obj in self.objects
+                                if obj["handle"] in criteria or obj["name"] in criteria
+                            }
+                        else:
+                            selected = set(self.selection)
                         deleted = len(selected)
                         self.objects = [obj for obj in self.objects if obj["handle"] not in selected]
                         self.selection = []
@@ -228,15 +290,15 @@ class MockNativeBridge:
                     handle = "mock-created-{0}".format(self.created_count)
                     name = params.get("name") or "Mock Created {0}".format(self.created_count)
                     object_type = params.get("object_type") or params.get("type") or "rect"
+                    if object_type == "dimension":
+                        object_type = "linear_dimension"
                     self.objects.append(
                         {
                             "handle": handle,
                             "type": object_type,
                             "name": name,
-                            "bounds": {
-                                "top_left": [params.get("x1", 0), params.get("y1", 0)],
-                                "bottom_right": [params.get("x2", 100), params.get("y2", 100)],
-                            },
+                            "uuid": "mock-uuid-{0}".format(self.created_count),
+                            "bounds": _mock_bounds(params, object_type),
                         }
                     )
                     _write_json_frame(
@@ -244,7 +306,34 @@ class MockNativeBridge:
                         {
                             "id": request_id,
                             "success": True,
-                            "result": "Created {0}, handle: {1}".format(object_type, handle),
+                            "result": {"type": object_type, "handle": handle, "uuid": "mock-uuid-{0}".format(self.created_count)},
+                        },
+                    )
+                elif action in ("create_wall", "create_text", "create_linear_dimension"):
+                    params = request.get("params", {})
+                    self.created_count += 1
+                    handle = "mock-created-{0}".format(self.created_count)
+                    object_type = {
+                        "create_wall": "wall",
+                        "create_text": "text",
+                        "create_linear_dimension": "linear_dimension",
+                    }[action]
+                    name = params.get("name") or "Mock Created {0}".format(self.created_count)
+                    self.objects.append(
+                        {
+                            "handle": handle,
+                            "type": object_type,
+                            "name": name,
+                            "uuid": "mock-uuid-{0}".format(self.created_count),
+                            "bounds": _mock_bounds(params, object_type),
+                        }
+                    )
+                    _write_json_frame(
+                        conn,
+                        {
+                            "id": request_id,
+                            "success": True,
+                            "result": {"type": object_type, "handle": handle, "uuid": "mock-uuid-{0}".format(self.created_count)},
                         },
                     )
                 elif action == "batch_create_objects":
@@ -265,18 +354,18 @@ class MockNativeBridge:
                         object_type = object_params.get("object_type") or object_params.get("type") or "rect"
                         if object_type in ("rectangle", "box"):
                             object_type = "rect"
+                        if object_type == "dimension":
+                            object_type = "linear_dimension"
                         self.objects.append(
                             {
                                 "handle": handle,
                                 "type": object_type,
                                 "name": name,
-                                "bounds": {
-                                    "top_left": [object_params.get("x1", 0), object_params.get("y1", 0)],
-                                    "bottom_right": [object_params.get("x2", 100), object_params.get("y2", 100)],
-                                },
+                                "uuid": "mock-uuid-{0}".format(self.created_count),
+                                "bounds": _mock_bounds(object_params, object_type),
                             }
                         )
-                        created.append({"index": index, "type": object_type, "handle": handle})
+                        created.append({"index": index, "type": object_type, "handle": handle, "uuid": "mock-uuid-{0}".format(self.created_count)})
                     _write_json_frame(
                         conn,
                         {

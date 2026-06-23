@@ -51,6 +51,11 @@ The host MCP server can keep using the same TCP protocol it uses today. The
 native bridge should replace `vw_listener.py` for always-on production use, not
 replace the host MCP tool surface.
 
+The local protocol is authenticated by default. The native bridge reads
+`VW_MCP_AUTH_TOKEN`, then `VW_MCP_AUTH_TOKEN_FILE`, then the default
+`%USERPROFILE%\.vectorworks-mcp\auth-token`; unauthenticated frames are rejected
+unless `VW_MCP_INSECURE_NO_AUTH=1` is explicitly set for diagnostics.
+
 Use `HANDLER_MATRIX.md` as the native implementation roadmap. Use
 `mock/mock_bridge.py` as the no-SDK protocol harness when changing host
 preflight or server behavior.
@@ -137,7 +142,7 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\wire-n
 ```
 
 The scaffold lives in `native_bridge/src/`. It encodes the protocol constants,
-strict request/response envelope handling, phase-0/phase-1 dispatcher map, and
+strict request/response envelope handling, phase-0/phase-1/phase-2 dispatcher map, and
 the worker-thread to Vectorworks main/plugin event-context queue. It
 intentionally has no Vectorworks SDK includes and no standalone project files. A
 copied scaffold should only advertise phase-0 transport readiness; it must not
@@ -161,16 +166,22 @@ names, object handle/type fields, bounded object query semantics, and
 cross-checks between document/layer/object snapshots. Add
 `-MaxPingMilliseconds` and `-MaxReadMilliseconds` when you want the smoke gate
 to fail bridges that are functionally correct but too slow for agent loops. Add
-`-AllowWriteFixture` only in a disposable test document; it creates a uniquely
+`-AllowWriteFixture` only in a disposable active test document; it creates a uniquely
 named rectangle with `create_object`, creates a second fixture through atomic
 `batch_create_objects`, and deletes each only after fixture identity, object
-schema, and exact selection are verified. Use `-Phase 0 -Stop` for
+schema, and exact selection are verified. Use `-Phase 2 -AllowWriteFixture` to
+also create and delete one true wall, one text block, and one linear dimension
+through their native handlers. Use `-Phase 0 -Stop` for
 transport-only shutdown/port-release verification. Phase 0 accepts the reviewed native
 scaffold's honest `cad_api_safe: false` / `transport_only: true` ping, but the
 default phase-1 smoke still requires a real CAD-safe bridge.
-The host-side `vw_preflight_for_cad` also blocks native bridges that claim
+The write fixtures require a real open Vectorworks document; the Home screen or
+template chooser can answer transport/read health checks but does not provide a
+writable design layer target.
+The host-side `vw_preflight_for_cad` blocks native bridges that claim
 `cad_api_safe: true` before reporting phase-1 capabilities and a ready
-main-context pump.
+main-context pump, and it blocks phase-2 tools when a bridge has not advertised
+the corresponding implemented action.
 The SDK scaffold queue applies bounded backpressure and rejects duplicate
 request ids before work is handed to the Vectorworks main/plugin event context.
 While the copied scaffold is still phase 0, CAD actions fail immediately with

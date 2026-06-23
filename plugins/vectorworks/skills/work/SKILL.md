@@ -28,7 +28,7 @@ Safety habits:
 - If a tool returns `blocked: true`, stop and fix the listener/bridge status before retrying CAD work.
 - If ping reports `native_phase: 0` or `transport_only: true`, do not call CAD handlers; run `vectorworksctl native-next --plan-only --json`.
 - Ask before destructive edits such as delete, class-wide changes, overwrites, or exports over existing files.
-- Destructive/code-execution/probing tools require explicit confirmation arguments such as `confirm="DELETE_SELECTED"`, `confirm="DELETE_CLASS"`, `confirm="RUN_TRUSTED_CODE"`, or `confirm="PROBE_PLUGIN"`.
+- Destructive/code-execution/probing tools require explicit confirmation arguments such as `confirm="DELETE_SELECTED"`, `confirm="DELETE_EXACT_NAME"` for exact-name criteria cleanup, `confirm="DELETE_CLASS"`, `confirm="RUN_TRUSTED_CODE"`, or `confirm="PROBE_PLUGIN"`.
 - If an operation reports unknown commit state, do not retry non-idempotent or destructive tools. Stabilize the connection, then inspect with read-only tools.
 - State the assumed units when the user gives dimensions. Default to the document/user context; if unknown, use millimeters for architectural dimensions.
 - Verify after changes with object queries, document info, or screenshot/export tools when available.

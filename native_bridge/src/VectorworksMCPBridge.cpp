@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <iomanip>
 #include <limits>
 #include <optional>
@@ -603,6 +604,71 @@ double GetFiniteNumberParam(const Params& params, const std::string& key, double
     return value;
 }
 
+bool GetBoolParam(const Params& params, const std::string& key, bool defaultValue = false) {
+    const auto found = params.find(key);
+    if (found == params.end() || found->second.type == ParamValue::Type::Null) {
+        return defaultValue;
+    }
+    if (found->second.type != ParamValue::Type::Boolean) {
+        throw std::invalid_argument(key + " must be a boolean");
+    }
+    return found->second.boolValue;
+}
+
+std::string TrimCopy(std::string value) {
+    auto first = value.begin();
+    while (first != value.end() && std::isspace(static_cast<unsigned char>(*first))) {
+        ++first;
+    }
+    auto last = value.end();
+    while (last != first && std::isspace(static_cast<unsigned char>(*(last - 1)))) {
+        --last;
+    }
+    return std::string(first, last);
+}
+
+bool TruthyEnvironmentFlag(const char* name) {
+    const char* raw = std::getenv(name);
+    if (!raw) {
+        return false;
+    }
+    std::string value = ToLower(TrimCopy(raw));
+    return value == "1" || value == "true" || value == "yes" || value == "on";
+}
+
+std::string DefaultAuthTokenPath() {
+    if (const char* configured = std::getenv("VW_MCP_AUTH_TOKEN_FILE")) {
+        if (configured[0] != '\0') {
+            return configured;
+        }
+    }
+    if (const char* userProfile = std::getenv("USERPROFILE")) {
+        if (userProfile[0] != '\0') {
+            std::string path = userProfile;
+            if (!path.empty() && path.back() != '\\' && path.back() != '/') {
+                path += "\\";
+            }
+            path += ".vectorworks-mcp\\auth-token";
+            return path;
+        }
+    }
+    return "";
+}
+
+std::string ReadAuthTokenFile() {
+    const auto path = DefaultAuthTokenPath();
+    if (path.empty()) {
+        return "";
+    }
+    std::ifstream input(path);
+    if (!input) {
+        return "";
+    }
+    std::string token;
+    std::getline(input, token);
+    return TrimCopy(token);
+}
+
 int GetBoundedIntParam(
     const Params& params,
     const std::string& key,
@@ -667,24 +733,27 @@ std::string RequiredAuthTokenFromEnvironment() {
             return token;
         }
     }
-    return "";
+    return ReadAuthTokenFile();
 }
 
 bool RequestAuthAccepted(const Protocol::RequestEnvelope& request) {
+    if (TruthyEnvironmentFlag("VW_MCP_INSECURE_NO_AUTH")) {
+        return true;
+    }
     const std::string requiredToken = RequiredAuthTokenFromEnvironment();
-    return requiredToken.empty() || request.authToken == requiredToken;
+    return !requiredToken.empty() && request.authToken == requiredToken;
 }
 
 Protocol::ResponseEnvelope HandlePingOnTransportThread(const Protocol::RequestEnvelope& request) {
 #if VECTORWORKS_MCP_HAS_SDK
     const bool ready = CadHandlersRuntimeReady();
-    std::string payload = R"({"pong":true,"version":"native-sdk-bridge-phase1","bridge_kind":"native_sdk_bridge_phase1","dispatch_mode":"native_sdk","handlers":8)";
+    std::string payload = R"({"pong":true,"version":"native-sdk-bridge-phase2","bridge_kind":"native_sdk_bridge_phase2","dispatch_mode":"native_sdk","handlers":11)";
     payload += ",\"cad_api_safe\":";
     payload += ready ? "true" : "false";
     payload += ",\"transport_only\":";
     payload += ready ? "false" : "true";
-    payload += R"(,"native_bridge":true,"native_phase":1)";
-    payload += ",\"implemented_actions\":[\"ping\",\"stop\",\"get_document_info\",\"get_layers\",\"get_objects\",\"selection\",\"create_object\",\"batch_create_objects\"]";
+    payload += R"(,"native_bridge":true,"native_phase":2)";
+    payload += ",\"implemented_actions\":[\"ping\",\"stop\",\"get_document_info\",\"get_layers\",\"get_objects\",\"selection\",\"create_object\",\"batch_create_objects\",\"create_wall\",\"create_text\",\"create_linear_dimension\"]";
     payload += ",\"cad_handlers_implemented\":true";
     payload += ",\"main_context_pump\":";
     payload += JsonString(MainContextPumpName());
@@ -719,6 +788,17 @@ std::string HandleId(MCObjectHandle handle) {
     return out.str();
 }
 
+std::string ObjectUuidString(MCObjectHandle handle) {
+    if (!handle) {
+        return "";
+    }
+    TXString uuid;
+    if (gSDK->GetObjectUuid(handle, uuid)) {
+        return TxToUtf8(uuid);
+    }
+    return "";
+}
+
 std::string ObjectTypeName(short type) {
     switch (type) {
         case kLineNode:
@@ -747,6 +827,8 @@ std::string ObjectTypeName(short type) {
             return "extrude";
         case kLayerNode:
             return "layer";
+        case dimHeaderNode:
+            return "dimension";
         case kWallNode:
             return "wall";
         case kSlabNode:
@@ -765,6 +847,8 @@ bool MatchesObjectType(short actualType, std::string requestedType) {
     }
     if (requestedType == "rectangle" || requestedType == "box") {
         requestedType = "rect";
+    } else if (requestedType == "linear_dimension") {
+        requestedType = "dimension";
     }
     return ObjectTypeName(actualType) == requestedType;
 }
@@ -790,6 +874,11 @@ std::string ObjectJson(MCObjectHandle object) {
 
     std::string json = "{\"handle\":";
     json += JsonString(HandleId(object));
+    const auto uuid = ObjectUuidString(object);
+    if (!uuid.empty()) {
+        json += ",\"uuid\":";
+        json += JsonString(uuid);
+    }
     json += ",\"type\":";
     json += JsonString(ObjectTypeName(type));
     json += ",\"type_id\":";
@@ -985,6 +1074,51 @@ std::vector<MCObjectHandle> CollectSelectedObjects() {
     return selected;
 }
 
+std::vector<MCObjectHandle> CollectObjectsByCriteria(const std::string& criteria) {
+    std::vector<MCObjectHandle> objects;
+    gSDK->ForEachObjectInCriteria(TXString(criteria.c_str()), [&](MCObjectHandle object) {
+        if (!object || !IsUserVisibleObjectType(gSDK->GetObjectTypeN(object))) {
+            return;
+        }
+        if (std::find(objects.begin(), objects.end(), object) == objects.end()) {
+            objects.push_back(object);
+        }
+    });
+    return objects;
+}
+
+std::optional<std::string> ExactNameFromCriteria(const std::string& criteria) {
+    constexpr std::string_view prefix = "((N='";
+    constexpr std::string_view suffix = "'))";
+    if (criteria.size() <= prefix.size() + suffix.size()) {
+        return std::nullopt;
+    }
+    if (criteria.compare(0, prefix.size(), prefix) != 0) {
+        return std::nullopt;
+    }
+    if (criteria.compare(criteria.size() - suffix.size(), suffix.size(), suffix) != 0) {
+        return std::nullopt;
+    }
+    std::string name = criteria.substr(prefix.size(), criteria.size() - prefix.size() - suffix.size());
+    if (name.empty() || name.size() > 255u || name.find('\'') != std::string::npos) {
+        return std::nullopt;
+    }
+    return name;
+}
+
+std::vector<MCObjectHandle> CollectObjectsByExactNameCriteria(const std::string& criteria) {
+    const auto name = ExactNameFromCriteria(criteria);
+    if (!name) {
+        throw std::invalid_argument("selection delete criteria must be exact object-name criteria like ((N='Name'))");
+    }
+    std::vector<MCObjectHandle> objects;
+    MCObjectHandle object = gSDK->GetNamedObject(TXString(name->c_str()));
+    if (object && IsUserVisibleObjectType(gSDK->GetObjectTypeN(object))) {
+        objects.push_back(object);
+    }
+    return objects;
+}
+
 std::string HandleSelection(const Params& params) {
     const std::string action = ToLower(GetStringParam(params, "action", "get"));
     const int limit = GetBoundedIntParam(params, "limit", 1000, 1, 1000);
@@ -1009,26 +1143,49 @@ std::string HandleSelection(const Params& params) {
         if (criteria.empty()) {
             throw std::invalid_argument("criteria is required for selection select");
         }
+        const auto exactName = ExactNameFromCriteria(criteria);
         int matchedCount = 0;
         int selectedCount = 0;
         gSDK->DeselectAll();
-        gSDK->ForEachObjectInCriteria(TXString(criteria.c_str()), [&](MCObjectHandle object) {
+        if (exactName) {
+            MCObjectHandle object = gSDK->GetNamedObject(TXString(exactName->c_str()));
             if (object && IsUserVisibleObjectType(gSDK->GetObjectTypeN(object))) {
                 ++matchedCount;
+                if (selectedCount < limit) {
+                    gSDK->SelectObject(object, true);
+                    ++selectedCount;
+                }
             }
-            if (object && IsUserVisibleObjectType(gSDK->GetObjectTypeN(object)) && selectedCount < limit) {
-                gSDK->SelectObject(object, true);
-                ++selectedCount;
-            }
-        });
+        } else {
+            gSDK->ForEachObjectInCriteria(TXString(criteria.c_str()), [&](MCObjectHandle object) {
+                if (object && IsUserVisibleObjectType(gSDK->GetObjectTypeN(object))) {
+                    ++matchedCount;
+                }
+                if (object && IsUserVisibleObjectType(gSDK->GetObjectTypeN(object)) && selectedCount < limit) {
+                    gSDK->SelectObject(object, true);
+                    ++selectedCount;
+                }
+            });
+        }
         return "{\"selected\":" + std::to_string(selectedCount)
             + ",\"matched\":" + std::to_string(matchedCount)
             + ",\"limit\":" + std::to_string(limit)
             + ",\"truncated\":" + (matchedCount > selectedCount ? "true" : "false") + "}";
     }
     if (action == "delete") {
-        const auto selected = CollectSelectedObjects();
-        if (selected.empty()) {
+        const std::string criteria = GetStringParam(params, "criteria");
+        if (!criteria.empty()) {
+            if (GetStringParam(params, "confirm") != "DELETE_EXACT_NAME") {
+                throw std::invalid_argument("selection delete with criteria requires confirm='DELETE_EXACT_NAME'");
+            }
+        } else if (GetStringParam(params, "confirm") != "DELETE_SELECTED") {
+            throw std::invalid_argument("selection delete requires confirm='DELETE_SELECTED'");
+        }
+        const auto targets = criteria.empty() ? CollectSelectedObjects() : CollectObjectsByExactNameCriteria(criteria);
+        if (static_cast<int>(targets.size()) > limit) {
+            throw std::invalid_argument("selection delete matched more objects than the requested limit");
+        }
+        if (targets.empty()) {
             return R"({"deleted":0})";
         }
         gSDK->SupportUndoAndRemove();
@@ -1036,7 +1193,7 @@ std::string HandleSelection(const Params& params) {
         gSDK->NameUndoEvent(TXString("Vectorworks MCP delete selection"));
         int deleted = 0;
         try {
-            for (MCObjectHandle object : selected) {
+            for (MCObjectHandle object : targets) {
                 gSDK->AddBeforeSwapObject(object);
                 gSDK->DeleteObject(object, true);
                 ++deleted;
@@ -1060,6 +1217,20 @@ struct PrimitiveSpec {
     double radius = 50.0;
     double startAngle = 0.0;
     double sweepAngle = 90.0;
+    double height = 3000.0;
+    double thickness = 200.0;
+    double width = 0.0;
+    double rotation = 0.0;
+    double textSize = 0.0;
+    double dimensionOffset = 300.0;
+    double dimensionTextOffset = 0.0;
+    double directionX = 0.0;
+    double directionY = 0.0;
+    int dimensionType = 1;
+    bool fixedSizeText = false;
+    bool wrapText = false;
+    std::string text;
+    std::string styleName;
     std::string name;
     std::string className;
 };
@@ -1068,6 +1239,7 @@ struct CreatedPrimitive {
     int index = 0;
     std::string objectType;
     MCObjectHandle handle = nullptr;
+    std::vector<std::string> warnings;
 };
 
 MCObjectHandle EnsureWritableLayer() {
@@ -1082,7 +1254,10 @@ MCObjectHandle EnsureWritableLayer() {
         }
     }
     if (!layer) {
-        layer = gSDK->CreateLayerN(TXString("Vectorworks MCP Layer"), 1.0);
+        layer = gSDK->CreateLayer(TXString("Vectorworks MCP Layer"), 1);
+        if (!layer) {
+            layer = gSDK->CreateLayerN(TXString("Vectorworks MCP Layer"), 1.0);
+        }
         if (layer) {
             gSDK->AddAfterSwapObject(layer);
         }
@@ -1099,7 +1274,44 @@ std::string CanonicalCreateObjectType(std::string objectType) {
     if (objectType == "rectangle" || objectType == "box") {
         return "rect";
     }
+    if (objectType == "dimension" || objectType == "linear_dimension") {
+        return "linear_dimension";
+    }
     return objectType;
+}
+
+bool HasParam(const Params& params, const std::string& key) {
+    return params.find(key) != params.end();
+}
+
+double GetFiniteNumberParamAlias(
+    const Params& params,
+    const std::string& preferredKey,
+    const std::string& aliasKey,
+    double defaultValue) {
+    if (HasParam(params, preferredKey)) {
+        return GetFiniteNumberParam(params, preferredKey, defaultValue);
+    }
+    return GetFiniteNumberParam(params, aliasKey, defaultValue);
+}
+
+double RequirePositiveNumber(double value, const std::string& label) {
+    if (value <= 0.0) {
+        throw std::invalid_argument(label + " must be > 0");
+    }
+    return value;
+}
+
+std::string JsonStringArray(const std::vector<std::string>& values) {
+    std::string json = "[";
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        if (index != 0u) {
+            json += ",";
+        }
+        json += JsonString(values[index]);
+    }
+    json += "]";
+    return json;
 }
 
 void ValidatePrimitiveSpec(const PrimitiveSpec& spec, const std::string& label) {
@@ -1133,7 +1345,36 @@ void ValidatePrimitiveSpec(const PrimitiveSpec& spec, const std::string& label) 
         }
         return;
     }
-    throw std::invalid_argument("unsupported create_object type for native bridge phase 1: " + spec.objectType);
+    if (spec.objectType == "wall") {
+        if (spec.x1 == spec.x2 && spec.y1 == spec.y2) {
+            throw std::invalid_argument(label + " wall endpoints must not be identical");
+        }
+        RequirePositiveNumber(spec.thickness, label + ".thickness");
+        RequirePositiveNumber(spec.height, label + ".height");
+        return;
+    }
+    if (spec.objectType == "text") {
+        if (spec.text.empty()) {
+            throw std::invalid_argument(label + ".text is required");
+        }
+        if (spec.width < 0.0) {
+            throw std::invalid_argument(label + ".width must be >= 0");
+        }
+        if (spec.textSize < 0.0) {
+            throw std::invalid_argument(label + ".text_size must be >= 0");
+        }
+        return;
+    }
+    if (spec.objectType == "linear_dimension") {
+        if (spec.x1 == spec.x2 && spec.y1 == spec.y2) {
+            throw std::invalid_argument(label + " linear_dimension endpoints must not be identical");
+        }
+        if (spec.dimensionType < 0 || spec.dimensionType > 2) {
+            throw std::invalid_argument(label + ".dimension_type must be 0, 1, or 2");
+        }
+        return;
+    }
+    throw std::invalid_argument("unsupported create object type for native bridge: " + spec.objectType);
 }
 
 PrimitiveSpec ParsePrimitiveSpec(const Params& params, const std::string& label) {
@@ -1142,21 +1383,85 @@ PrimitiveSpec ParsePrimitiveSpec(const Params& params, const std::string& label)
     if (spec.objectType.empty()) {
         spec.objectType = GetStringParam(params, "type");
     }
+    if (spec.objectType.empty()) {
+        if (label == "create_wall") {
+            spec.objectType = "wall";
+        } else if (label == "create_text") {
+            spec.objectType = "text";
+        } else if (label == "create_linear_dimension") {
+            spec.objectType = "linear_dimension";
+        }
+    }
     spec.objectType = CanonicalCreateObjectType(spec.objectType);
-    spec.x1 = GetFiniteNumberParam(params, "x1", 0.0);
-    spec.y1 = GetFiniteNumberParam(params, "y1", 0.0);
-    spec.x2 = GetFiniteNumberParam(params, "x2", 100.0);
-    spec.y2 = GetFiniteNumberParam(params, "y2", 100.0);
+    spec.x1 = GetFiniteNumberParamAlias(params, "x1", "start_x", 0.0);
+    spec.y1 = GetFiniteNumberParamAlias(params, "y1", "start_y", 0.0);
+    spec.x2 = GetFiniteNumberParamAlias(params, "x2", "end_x", 100.0);
+    spec.y2 = GetFiniteNumberParamAlias(params, "y2", "end_y", 100.0);
     spec.radius = GetFiniteNumberParam(params, "radius", 50.0);
     spec.startAngle = GetFiniteNumberParam(params, "start_angle", 0.0);
     spec.sweepAngle = GetFiniteNumberParam(params, "sweep_angle", 90.0);
+    spec.height = GetFiniteNumberParam(params, "height", 3000.0);
+    spec.thickness = GetFiniteNumberParam(params, "thickness", 200.0);
+    spec.width = GetFiniteNumberParam(params, "width", 0.0);
+    spec.rotation = GetFiniteNumberParam(params, "rotation", 0.0);
+    spec.textSize = GetFiniteNumberParam(params, "text_size", GetFiniteNumberParam(params, "size", 0.0));
+    spec.dimensionOffset = GetFiniteNumberParam(params, "offset", GetFiniteNumberParam(params, "dimension_offset", 300.0));
+    spec.dimensionTextOffset = GetFiniteNumberParam(params, "text_offset", 0.0);
+    spec.directionX = GetFiniteNumberParam(params, "direction_x", 0.0);
+    spec.directionY = GetFiniteNumberParam(params, "direction_y", 0.0);
+    spec.dimensionType = GetBoundedIntParam(params, "dimension_type", 1, 0, 2);
+    spec.fixedSizeText = GetBoolParam(params, "fixed_size", false);
+    spec.wrapText = GetBoolParam(params, "wrap", false);
+    spec.text = GetStringParam(params, "text");
+    spec.styleName = GetStringParam(params, "style_name");
     spec.name = GetStringParam(params, "name");
     spec.className = GetStringParam(params, "class_name");
     ValidatePrimitiveSpec(spec, label);
     return spec;
 }
 
-MCObjectHandle CreatePrimitiveFromSpec(const PrimitiveSpec& spec) {
+void ApplyObjectNameAndClass(MCObjectHandle object, const PrimitiveSpec& spec) {
+    if (!object) {
+        return;
+    }
+    if (!spec.name.empty()) {
+        gSDK->SetObjectName(object, TXString(spec.name.c_str()));
+    }
+    if (!spec.className.empty()) {
+        InternalIndex classId = gSDK->ClassNameToID(TXString(spec.className.c_str()));
+        if (!gSDK->ValidClass(classId)) {
+            classId = gSDK->AddClass(TXString(spec.className.c_str()));
+        }
+        if (gSDK->ValidClass(classId)) {
+            gSDK->SetObjectClass(object, classId);
+        }
+    }
+}
+
+void ApplyWallStyleIfRequested(MCObjectHandle wall, const PrimitiveSpec& spec, std::vector<std::string>* warnings) {
+    if (!wall || spec.styleName.empty()) {
+        return;
+    }
+    InternalIndex styleIndex = 0;
+    if (!gSDK->NameToInternalIndexN(TXString(spec.styleName.c_str()), styleIndex) || styleIndex == 0) {
+        if (warnings) {
+            warnings->push_back("wall style not found: " + spec.styleName);
+        }
+        return;
+    }
+    MCObjectHandle styleHandle = gSDK->InternalIndexToHandle(styleIndex);
+    if (!styleHandle || gSDK->GetObjectTypeN(styleHandle) != kWallStyleNode) {
+        if (warnings) {
+            warnings->push_back("resource is not a wall style: " + spec.styleName);
+        }
+        return;
+    }
+    if (!gSDK->SetWallStyle(wall, styleIndex, 0, 0) && warnings) {
+        warnings->push_back("Vectorworks rejected wall style: " + spec.styleName);
+    }
+}
+
+MCObjectHandle CreatePrimitiveFromSpec(const PrimitiveSpec& spec, std::vector<std::string>* warnings = nullptr) {
     EnsureWritableLayer();
 
     MCObjectHandle object = nullptr;
@@ -1170,24 +1475,50 @@ MCObjectHandle CreatePrimitiveFromSpec(const PrimitiveSpec& spec) {
         object = gSDK->CreateLine(WorldPt(spec.x1, spec.y1), WorldPt(spec.x2, spec.y2));
     } else if (spec.objectType == "arc") {
         object = gSDK->CreateArcN(WorldRect(WorldPt(spec.x1, spec.y1), spec.radius), spec.startAngle, spec.sweepAngle);
+    } else if (spec.objectType == "wall") {
+        object = gSDK->CreateWall(WorldPt(spec.x1, spec.y1), WorldPt(spec.x2, spec.y2), spec.thickness);
+        if (object) {
+            gSDK->SetWallWidth(object, spec.thickness);
+            gSDK->SetWallCornerHeights(object, spec.height, 0, spec.height, 0);
+            ApplyWallStyleIfRequested(object, spec, warnings);
+        }
+    } else if (spec.objectType == "text") {
+        object = gSDK->CreateTextBlock(
+            TXString(spec.text.c_str()),
+            WorldPt(spec.x1, spec.y1),
+            spec.fixedSizeText,
+            spec.width);
+        if (object) {
+            if (spec.width > 0.0) {
+                gSDK->SetTextWidth(object, spec.width);
+            }
+            if (spec.wrapText || spec.width > 0.0) {
+                gSDK->SetTextWrap(object, true);
+            }
+            if (spec.rotation != 0.0) {
+                gSDK->SetTextOrientationN(object, spec.rotation, 0);
+            }
+            if (spec.textSize > 0.0) {
+                double_gs points = spec.textSize;
+                const WorldCoord charSize = gSDK->PagePointsToCoordLength(points);
+                gSDK->SetTextSize(object, 0, static_cast<Sint32>(spec.text.size()), charSize);
+            }
+        }
+    } else if (spec.objectType == "linear_dimension") {
+        object = gSDK->CreateLinearDimension(
+            WorldPt(spec.x1, spec.y1),
+            WorldPt(spec.x2, spec.y2),
+            spec.dimensionOffset,
+            spec.dimensionTextOffset,
+            Vector2(spec.directionX, spec.directionY),
+            static_cast<short>(spec.dimensionType));
     }
 
     if (!object) {
         throw std::runtime_error("Vectorworks did not return a handle for created " + spec.objectType);
     }
 
-    if (!spec.name.empty()) {
-        gSDK->SetObjectName(object, TXString(spec.name.c_str()));
-    }
-    if (!spec.className.empty()) {
-        InternalIndex classId = gSDK->ClassNameToID(TXString(spec.className.c_str()));
-        if (!gSDK->ValidClass(classId)) {
-            classId = gSDK->AddClass(TXString(spec.className.c_str()));
-        }
-        if (gSDK->ValidClass(classId)) {
-            gSDK->SetObjectClass(object, classId);
-        }
-    }
+    ApplyObjectNameAndClass(object, spec);
     return object;
 }
 
@@ -1198,6 +1529,15 @@ std::string CreatedPrimitiveJson(const CreatedPrimitive& created) {
     json += JsonString(created.objectType);
     json += ",\"handle\":";
     json += JsonString(HandleId(created.handle));
+    const auto uuid = ObjectUuidString(created.handle);
+    if (!uuid.empty()) {
+        json += ",\"uuid\":";
+        json += JsonString(uuid);
+    }
+    if (!created.warnings.empty()) {
+        json += ",\"warnings\":";
+        json += JsonStringArray(created.warnings);
+    }
     json += "}";
     return json;
 }
@@ -1214,15 +1554,16 @@ std::string CreatedPrimitiveListJson(const std::vector<CreatedPrimitive>& create
     return json;
 }
 
-std::string HandleCreateObject(const Params& params) {
-    const PrimitiveSpec spec = ParsePrimitiveSpec(params, "create_object");
+std::string HandleCreateTypedObject(const Params& params, const std::string& label, const TXString& undoName) {
+    const PrimitiveSpec spec = ParsePrimitiveSpec(params, label);
 
     gSDK->SupportUndoAndRemove();
     gSDK->SetUndoMethod(kUndoSwapObjects);
-    gSDK->NameUndoEvent(TXString("Vectorworks MCP create object"));
+    gSDK->NameUndoEvent(undoName);
 
     try {
-        MCObjectHandle object = CreatePrimitiveFromSpec(spec);
+        std::vector<std::string> warnings;
+        MCObjectHandle object = CreatePrimitiveFromSpec(spec, &warnings);
         gSDK->AddAfterSwapObject(object);
         gSDK->EndUndoEvent();
 
@@ -1230,12 +1571,37 @@ std::string HandleCreateObject(const Params& params) {
         json += JsonString(spec.objectType);
         json += ",\"handle\":";
         json += JsonString(HandleId(object));
+        const auto uuid = ObjectUuidString(object);
+        if (!uuid.empty()) {
+            json += ",\"uuid\":";
+            json += JsonString(uuid);
+        }
+        if (!warnings.empty()) {
+            json += ",\"warnings\":";
+            json += JsonStringArray(warnings);
+        }
         json += "}";
         return json;
     } catch (...) {
         gSDK->UndoAndRemove();
         throw;
     }
+}
+
+std::string HandleCreateObject(const Params& params) {
+    return HandleCreateTypedObject(params, "create_object", TXString("Vectorworks MCP create object"));
+}
+
+std::string HandleCreateWall(const Params& params) {
+    return HandleCreateTypedObject(params, "create_wall", TXString("Vectorworks MCP create wall"));
+}
+
+std::string HandleCreateText(const Params& params) {
+    return HandleCreateTypedObject(params, "create_text", TXString("Vectorworks MCP create text"));
+}
+
+std::string HandleCreateLinearDimension(const Params& params) {
+    return HandleCreateTypedObject(params, "create_linear_dimension", TXString("Vectorworks MCP create dimension"));
 }
 
 std::string HandleBatchCreateObjects(const Params& params) {
@@ -1259,9 +1625,10 @@ std::string HandleBatchCreateObjects(const Params& params) {
     created.reserve(specs.size());
     try {
         for (std::size_t index = 0; index < specs.size(); ++index) {
-            MCObjectHandle object = CreatePrimitiveFromSpec(specs[index]);
+            std::vector<std::string> warnings;
+            MCObjectHandle object = CreatePrimitiveFromSpec(specs[index], &warnings);
             gSDK->AddAfterSwapObject(object);
-            created.push_back({static_cast<int>(index + 1u), specs[index].objectType, object});
+            created.push_back({static_cast<int>(index + 1u), specs[index].objectType, object, warnings});
         }
         gSDK->EndUndoEvent();
     } catch (...) {
@@ -1300,6 +1667,15 @@ Protocol::ResponseEnvelope DispatchCadRequestOnVectorworksMainContext(const Prot
         }
         if (request.action == "batch_create_objects") {
             return {request.id, true, HandleBatchCreateObjects(params), ""};
+        }
+        if (request.action == "create_wall") {
+            return {request.id, true, HandleCreateWall(params), ""};
+        }
+        if (request.action == "create_text") {
+            return {request.id, true, HandleCreateText(params), ""};
+        }
+        if (request.action == "create_linear_dimension") {
+            return {request.id, true, HandleCreateLinearDimension(params), ""};
         }
         return {request.id, false, "", "unknown native bridge CAD action: " + request.action};
     } catch (const std::exception& exc) {

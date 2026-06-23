@@ -38,20 +38,25 @@ Vectorworks SDK plug-in bridge. The SDK bridge in `native_bridge/` can be copied
 into an SDK examples worktree, wired into the module lifecycle, built,
 installed, and smoke-tested. It is not compiled or installed by default by the
 host MCP setup, because fresh machines still need the official Vectorworks SDK
-and Visual Studio C++ build tools. When the compiled phase-1 bridge is loaded it
-reports `native-sdk-bridge-phase1`, `cad_api_safe=true`, `transport_only=false`,
-and `main_context_pump_ready=true`.
+and Visual Studio C++ build tools. When the compiled phase-2 bridge is loaded it
+reports `native-sdk-bridge-phase2`, `cad_api_safe=true`, `transport_only=false`,
+and `main_context_pump_ready=true`; older phase-1 builds report
+`native-sdk-bridge-phase1`.
 
-Native phase 1 currently implements `get_document_info`, `get_layers`,
+Native phase 1 implements `get_document_info`, `get_layers`,
 `get_objects`, `selection` (`get`, `clear`, `select`, `delete`), and
 `create_object` for `rect`, `rectangle`, `box`, `circle`, `oval`, `line`, and
 `arc`, plus atomic `batch_create_objects` for multiple phase-1 primitives in
-one native undo event. In a freshly opened session with no writable layer,
-native primitive creation creates/selects a default `Vectorworks MCP Layer`
-before drawing. Host preflight blocks broader MCP tools or unsupported variants
-before dispatching them to the native bridge. Use the generated Python dialog
-launcher when you need broader legacy tool coverage that has not been ported to
-native yet.
+one native undo event. Native phase 2 adds true wall objects, text blocks,
+linear dimensions, and mixed atomic batches, including `vw_create_bim_floor_plan`
+for wall-based rectangular room layouts. Write tools require an active
+Vectorworks document; the Home/no-document screen can answer read health checks
+but is not a valid drawing target. In an active document with no current
+writable design layer, native creation attempts to create/select a default
+`Vectorworks MCP Layer` before drawing. Host preflight blocks broader MCP tools
+or unsupported variants before dispatching them to the native bridge. Use the
+generated Python dialog launcher when you need broader legacy tool coverage that
+has not been ported to native yet.
 
 Why this is not as simple as a Revit-style setup yet:
 
@@ -89,8 +94,10 @@ Native bridge planning aids:
   prerequisites are present.
 - `scripts/smoke-native-bridge.ps1` verifies a loaded native bridge with
   repeated raw-protocol phase-1 read checks by default, optional
-  `-AllowWriteFixture` create/select/delete cleanup, and `-Phase 0 -Stop` port
-  release checks.
+  `-AllowWriteFixture` create/select/delete cleanup, `-Phase 2
+  -AllowWriteFixture` wall/text/dimension write checks, and `-Phase 0 -Stop`
+  port release checks. Write fixtures must run in a disposable active document,
+  not on the Vectorworks Home/no-document screen.
 
 Native bridge prerequisite check:
 
@@ -382,13 +389,14 @@ Core:
 | `vw_ping` | Health check, including bridge mode and CAD safety status |
 | `vw_bridge_status` | Same status payload as `vw_ping`, named for agent preflight checks |
 | `vw_preflight_for_cad` | Structured JSON go/no-go check before real CAD/API handlers |
-| `vw_capabilities` | Current bridge capabilities, native phase-1 support, and tool surface |
+| `vw_capabilities` | Current bridge capabilities, native phase-1/phase-2 support, and tool surface |
 | `vw_tool_safety` | Structured safety metadata for all tools |
 | `vw_run_script` | Execute trusted Python inside Vectorworks; requires `confirm="RUN_TRUSTED_CODE"` |
-| `vw_create_object` | Create rect/rectangle/box, circle, oval, line, arc; polygon is listener-dependent and blocked by native phase 1 |
-| `vw_batch_create_objects` | Create many phase-1 primitives; `atomic=true` uses native all-or-none batch creation, `atomic=false` uses legacy non-atomic composition |
+| `vw_create_object` | Create rect/rectangle/box, circle, oval, line, arc; phase-2 batches also support wall, text, and linear_dimension |
+| `vw_batch_create_objects` | Create many native objects; `atomic=true` uses native all-or-none batch creation, `atomic=false` uses legacy non-atomic composition |
 | `vw_plan_schematic_floor_plan` | Dry-run a multi-room schematic floor plan and return the native primitives |
 | `vw_create_schematic_floor_plan` | Create a multi-room schematic floor plan from rooms, wall segments, doors, and windows |
+| `vw_create_bim_floor_plan` | Create a native wall-based floor plan with optional room labels and linear dimensions |
 | `vw_create_schematic_room` | Create a rectangular schematic room from native 2D wall rectangles |
 | `vw_create_schematic_door` | Draw a schematic door leaf and swing arc from native 2D primitives |
 | `vw_create_schematic_window` | Draw a schematic double-line window marker from native 2D primitives |
@@ -405,15 +413,17 @@ Core:
 | `vw_get_document_info` | Document metadata |
 | `vw_screenshot` | Open the Vectorworks Export Image File dialog with the requested path |
 | `vw_stop_listener` | Ask the listener to stop gracefully |
-| `vw_selection` | Get, select, clear, delete, move, or duplicate selected objects; delete requires `confirm="DELETE_SELECTED"` |
+| `vw_selection` | Get, select, clear, delete, move, or duplicate selected objects; selected-object delete requires `confirm="DELETE_SELECTED"`; exact-name criteria delete requires `confirm="DELETE_EXACT_NAME"` |
 
 Architectural:
 
 | Tool | Description |
 |------|-------------|
-| `vw_create_wall` | Create parametric walls |
-| `vw_insert_door` | Insert a parametric door |
-| `vw_insert_window` | Insert a parametric window |
+| `vw_create_wall` | Create native true wall objects |
+| `vw_create_text` | Create native text annotations |
+| `vw_create_linear_dimension` | Create native linear dimensions |
+| `vw_insert_door` | Insert a parametric door through the Python/legacy path; native wall-hosted insertion is deferred pending plugin inspection |
+| `vw_insert_window` | Insert a parametric window through the Python/legacy path; native wall-hosted insertion is deferred pending plugin inspection |
 | `vw_create_slab` | Create an extruded floor-like solid from a polygon footprint, not a BIM slab object |
 | `vw_create_roof` | Try to create a roof custom object from a footprint, with flat extrusion fallback |
 | `vw_inspect_object` | Discover object/plugin parameters; plugin probing requires `confirm="PROBE_PLUGIN"` |
@@ -487,15 +497,18 @@ Vectorworks hangs after running the listener script:
 
 ## Security
 
-This connector is loopback-only by default. The Python server and Python
-listener reject non-loopback `VW_MCP_HOST` values, and the native transport has
-the same local-bind policy.
-
-For stricter local-process isolation, set the same non-empty
-`VW_MCP_AUTH_TOKEN` in the MCP server environment and in the Vectorworks
-listener/native bridge environment. When configured, frames without the token
-are rejected before dispatch.
+This connector is loopback-only and authenticated by default. The Python server
+and Python listener reject non-loopback `VW_MCP_HOST` values, and the native
+transport has the same local-bind policy. Setup writes a per-user token to
+`C:\Users\<you>\.vectorworks-mcp\auth-token` and sets `VW_MCP_AUTH_TOKEN` /
+`VW_MCP_AUTH_TOKEN_FILE` for the MCP server and generated Vectorworks launcher.
+Frames without the token are rejected before dispatch. `VW_MCP_INSECURE_NO_AUTH=1`
+exists only for local diagnostics/tests.
 
 `vw_run_script` can execute arbitrary Python inside Vectorworks. Destructive or
 trusted-code paths require explicit confirmation arguments, and the listener
-enforces the same confirmations for raw TCP requests.
+enforces the same confirmations for raw TCP requests. `vw_selection` delete
+without criteria deletes only the current selection with
+`confirm="DELETE_SELECTED"`; criteria-based delete is restricted to exact object
+name criteria such as `((N='Fixture'))` and requires
+`confirm="DELETE_EXACT_NAME"`.

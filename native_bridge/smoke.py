@@ -1,5 +1,7 @@
 import argparse
 import json
+import os
+from pathlib import Path
 import re
 import socket
 import struct
@@ -10,6 +12,7 @@ from typing import Any
 
 PHASE_ZERO_MIN_HANDLER_COUNT = 2
 PHASE_ONE_MIN_HANDLER_COUNT = 8
+PHASE_TWO_MIN_HANDLER_COUNT = 11
 PHASE_ONE_REQUIRED_ACTIONS = {
     "ping",
     "stop",
@@ -20,11 +23,45 @@ PHASE_ONE_REQUIRED_ACTIONS = {
     "create_object",
     "batch_create_objects",
 }
+PHASE_TWO_REQUIRED_ACTIONS = PHASE_ONE_REQUIRED_ACTIONS | {
+    "create_wall",
+    "create_text",
+    "create_linear_dimension",
+}
 PHASE_ONE_READ_ACTIONS = ("get_document_info", "get_layers", "get_objects", "selection")
 UNSAFE_DISPATCH_MODES = {"background", "foreground", "win_timer"}
 UNSAFE_BRIDGE_KINDS = {"python_foreground_diagnostic", "python_transport_only"}
 NATIVE_DISPATCH_MODES = {"native_sdk"}
 NATIVE_BRIDGE_KIND_PREFIXES = ("native_sdk_bridge",)
+AUTH_TOKEN = ""
+
+
+def _default_auth_token_file() -> Path:
+    configured = os.environ.get("VW_MCP_AUTH_TOKEN_FILE", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    stop_dir = os.environ.get("VW_MCP_STOP_DIR", "").strip()
+    if stop_dir:
+        return Path(stop_dir).expanduser() / "auth-token"
+    userprofile = os.environ.get("USERPROFILE", "").strip()
+    if userprofile:
+        return Path(userprofile) / ".vectorworks-mcp" / "auth-token"
+    return Path.home() / ".vectorworks-mcp" / "auth-token"
+
+
+def _load_auth_token(explicit: str = "") -> str:
+    if explicit:
+        return explicit
+    env_token = os.environ.get("VW_MCP_AUTH_TOKEN", "").strip()
+    if env_token:
+        return env_token
+    try:
+        path = _default_auth_token_file()
+        if path.is_file():
+            return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        pass
+    return ""
 
 
 def _read_exact(sock: socket.socket, size: int) -> bytes:
@@ -50,8 +87,19 @@ def _write_frame(sock: socket.socket, payload: dict[str, Any]) -> None:
     sock.sendall(struct.pack(">I", len(data)) + data)
 
 
-def _call(sock: socket.socket, action: str, params: dict[str, Any] | None, request_id: str) -> dict[str, Any]:
-    _write_frame(sock, {"id": request_id, "action": action, "params": params or {}})
+def _call(
+    sock: socket.socket,
+    action: str,
+    params: dict[str, Any] | None,
+    request_id: str,
+    auth_token: str = "",
+) -> dict[str, Any]:
+    request = {"id": request_id, "action": action, "params": params or {}}
+    if not auth_token:
+        auth_token = AUTH_TOKEN
+    if auth_token:
+        request["auth_token"] = auth_token
+    _write_frame(sock, request)
     response = _read_frame(sock)
     if not isinstance(response, dict):
         raise RuntimeError("bridge response for {0} was not an object".format(action))
@@ -68,11 +116,12 @@ def _record_call(
     params: dict[str, Any] | None = None,
     latency_budget_ms: float | None = None,
     latency_budget_label: str = "latency",
+    auth_token: str = "",
 ) -> dict[str, Any] | None:
     started = time.perf_counter()
     request_id = "{0}-{1}".format(action, iteration)
     try:
-        response = _call(sock, action, params, request_id)
+        response = _call(sock, action, params, request_id, auth_token=auth_token)
         elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
         success = response.get("success")
         check = {
@@ -149,7 +198,11 @@ def _validate_ping(report: dict[str, Any], result: Any, require_native: bool, ph
     if require_native and not bridge_kind_normalized.startswith(NATIVE_BRIDGE_KIND_PREFIXES):
         report["failures"].append("native bridge bridge_kind did not start with native_sdk_bridge")
     handlers = result.get("handlers")
-    min_handlers = PHASE_ONE_MIN_HANDLER_COUNT if phase >= 1 else PHASE_ZERO_MIN_HANDLER_COUNT
+    min_handlers = PHASE_ZERO_MIN_HANDLER_COUNT
+    if phase >= 2:
+        min_handlers = PHASE_TWO_MIN_HANDLER_COUNT
+    elif phase >= 1:
+        min_handlers = PHASE_ONE_MIN_HANDLER_COUNT
     if (
         not isinstance(handlers, int)
         or isinstance(handlers, bool)
@@ -163,14 +216,15 @@ def _validate_ping(report: dict[str, Any], result: Any, require_native: bool, ph
         if not isinstance(implemented_actions, list) or not all(isinstance(action, str) for action in implemented_actions):
             report["failures"].append("ping implemented_actions was not a list of strings")
         else:
-            missing_actions = sorted(PHASE_ONE_REQUIRED_ACTIONS - set(implemented_actions))
+            required_actions = PHASE_TWO_REQUIRED_ACTIONS if phase >= 2 else PHASE_ONE_REQUIRED_ACTIONS
+            missing_actions = sorted(required_actions - set(implemented_actions))
             if missing_actions:
                 report["failures"].append(
-                    "ping implemented_actions missing phase-1 action(s): {0}".format(", ".join(missing_actions))
+                    "ping implemented_actions missing phase-{0} action(s): {1}".format(phase, ", ".join(missing_actions))
                 )
         native_phase = result.get("native_phase")
-        if not isinstance(native_phase, int) or isinstance(native_phase, bool) or native_phase < 1:
-            report["failures"].append("ping native_phase was not an integer >= 1")
+        if not isinstance(native_phase, int) or isinstance(native_phase, bool) or native_phase < phase:
+            report["failures"].append("ping native_phase was not an integer >= {0}".format(phase))
         if result.get("main_context_pump") != "win32_ui_timer":
             report["failures"].append("ping main_context_pump was not win32_ui_timer")
         if result.get("main_context_pump_ready") is not True:
@@ -340,8 +394,12 @@ def _validate_fixture_present(
     result: Any,
     fixture_name: str,
     fixture_handle: str | None = None,
+    object_type: str | None = "rect",
 ) -> bool:
-    if not _validate_object_list(report, "fixture object check", result, params={"limit": 200, "object_type": "rect"}):
+    params = {"limit": 200} if object_type else {}
+    if object_type:
+        params["object_type"] = object_type
+    if not _validate_object_list(report, "fixture object check", result, params=params):
         return False
     if not any(_object_matches_fixture(obj, fixture_name, fixture_handle) for obj in result):
         report["failures"].append("created fixture object was not visible in get_objects")
@@ -354,8 +412,12 @@ def _validate_fixture_absent(
     result: Any,
     fixture_name: str,
     fixture_handle: str | None = None,
+    object_type: str | None = "rect",
 ) -> bool:
-    if not _validate_object_list(report, "fixture cleanup check", result, params={"limit": 200, "object_type": "rect"}):
+    params = {"limit": 200} if object_type else {}
+    if object_type:
+        params["object_type"] = object_type
+    if not _validate_object_list(report, "fixture cleanup check", result, params=params):
         return False
     if any(_object_matches_fixture(obj, fixture_name, fixture_handle) for obj in result):
         report["failures"].append("created fixture object remained after cleanup")
@@ -369,7 +431,7 @@ def _validate_fixture_selected(
     fixture_name: str,
     fixture_handle: str | None = None,
 ) -> bool:
-    if not _validate_object_list(report, "selection get", result, params={"object_type": "rect"}):
+    if not _validate_object_list(report, "selection get", result):
         return False
     if not result:
         report["failures"].append("fixture object was not selected")
@@ -378,12 +440,26 @@ def _validate_fixture_selected(
     if not fixture_matches:
         report["failures"].append("fixture object was not selected")
         return False
-    unexpected = [obj for obj in result if not _object_matches_fixture(obj, fixture_name, fixture_handle)]
-    if unexpected:
-        report["failures"].append("selection included non-fixture objects; refusing cleanup delete")
+    return True
+
+
+def _validate_fixture_selected_any_type(
+    report: dict[str, Any],
+    result: Any,
+    fixture_name: str,
+    fixture_handle: str | None = None,
+) -> bool:
+    if not _validate_object_list(report, "selection get", result):
         return False
-    if len(fixture_matches) != 1:
-        report["failures"].append("selection did not resolve to exactly one fixture object; refusing cleanup delete")
+    if not result:
+        report["failures"].append("phase-2 fixture object was not selected")
+        return False
+    fixture_matches = [obj for obj in result if _object_matches_fixture(obj, fixture_name, fixture_handle)]
+    if not fixture_matches:
+        report["failures"].append("phase-2 fixture object was not selected")
+        return False
+    if len(fixture_matches) < 1:
+        report["failures"].append("selection did not include the phase-2 fixture object; refusing cleanup delete")
         return False
     return True
 
@@ -402,6 +478,105 @@ def _extract_created_handle(result: Any) -> str | None:
         if match:
             return match.group(1)
     return None
+
+
+def _run_phase_two_write_fixture(sock: socket.socket, report: dict[str, Any]) -> None:
+    fixture_prefix = "VW_MCP_NATIVE_PHASE2_SMOKE_{0}".format(int(time.time() * 1000))
+    fixtures = [
+        (
+            "create_wall",
+            "wall",
+            {
+                "start_x": 0,
+                "start_y": 500,
+                "end_x": 1200,
+                "end_y": 500,
+                "height": 3000,
+                "thickness": 200,
+                "name": fixture_prefix + "_WALL",
+            },
+        ),
+        (
+            "create_text",
+            "text",
+            {
+                "text": "MCP smoke label",
+                "x1": 0,
+                "y1": 800,
+                "text_size": 10,
+                "name": fixture_prefix + "_TEXT",
+            },
+        ),
+        (
+            "create_linear_dimension",
+            "linear_dimension",
+            {
+                "start_x": 0,
+                "start_y": 1000,
+                "end_x": 1200,
+                "end_y": 1000,
+                "offset": 250,
+                "name": fixture_prefix + "_DIM",
+            },
+        ),
+    ]
+
+    for action, expected_type, params in fixtures:
+        name = str(params["name"])
+        response = _record_call(sock, report, action, "phase2-fixture", params=params)
+        if response is None:
+            report["failures"].append("skipped {0} cleanup because creation did not succeed".format(action))
+            continue
+        result = response.get("result")
+        if not isinstance(result, dict):
+            report["failures"].append("{0} result was not an object".format(action))
+            continue
+        if result.get("type") != expected_type:
+            report["failures"].append("{0} result type was not {1}".format(action, expected_type))
+        handle = _extract_created_handle(result)
+        if not handle:
+            report["failures"].append("{0} result did not include a handle".format(action))
+            continue
+
+        objects_response = _record_call(sock, report, "get_objects", "{0}-present".format(action), params={"limit": 500})
+        fixture_present = False
+        if objects_response is not None:
+            fixture_present = _validate_fixture_present(report, objects_response.get("result"), name, handle, object_type=None)
+
+        selection_cleared = _record_call(sock, report, "selection", "{0}-clear".format(action), params={"action": "clear"}) is not None
+        selection_select_sent = _record_call(
+            sock,
+            report,
+            "selection",
+            "{0}-select".format(action),
+            params={"action": "select", "criteria": "((N='{0}'))".format(name)},
+        ) is not None
+        selection_response = _record_call(sock, report, "selection", "{0}-get".format(action), params={"action": "get"})
+        fixture_selected = False
+        if selection_response is not None:
+            fixture_selected = _validate_fixture_selected_any_type(report, selection_response.get("result"), name, handle)
+
+        if not (fixture_present and selection_cleared and selection_select_sent and fixture_selected):
+            report["failures"].append("skipped {0} delete because exact-name fixture selection was not proven".format(action))
+            _record_call(sock, report, "selection", "{0}-clear-after-skip".format(action), params={"action": "clear"})
+            continue
+
+        delete_response = _record_call(
+            sock,
+            report,
+            "selection",
+            "{0}-delete".format(action),
+            params={
+                "action": "delete",
+                "criteria": "((N='{0}'))".format(name),
+                "confirm": "DELETE_EXACT_NAME",
+            },
+        )
+        if delete_response is not None:
+            _validate_fixture_delete_result(report, delete_response.get("result"))
+        cleanup_response = _record_call(sock, report, "get_objects", "{0}-cleanup".format(action), params={"limit": 500})
+        if cleanup_response is not None:
+            _validate_fixture_absent(report, cleanup_response.get("result"), name, handle, object_type=None)
 
 
 def _validate_batch_create_result(report: dict[str, Any], result: Any) -> bool:
@@ -499,7 +674,17 @@ def _run_phase_one_write_fixture(sock: socket.socket, report: dict[str, Any]) ->
         _record_call(sock, report, "selection", "fixture-clear-after-skip", params={"action": "clear"})
         return
 
-    delete_response = _record_call(sock, report, "selection", "fixture-delete", params={"action": "delete"})
+    delete_response = _record_call(
+        sock,
+        report,
+        "selection",
+        "fixture-delete",
+        params={
+            "action": "delete",
+            "criteria": "((N='{0}'))".format(fixture_name),
+            "confirm": "DELETE_EXACT_NAME",
+        },
+    )
     if delete_response is None:
         return
     _validate_fixture_delete_result(report, delete_response.get("result"))
@@ -580,7 +765,17 @@ def _run_phase_one_write_fixture(sock: socket.socket, report: dict[str, Any]) ->
         _record_call(sock, report, "selection", "batch-fixture-clear-after-skip", params={"action": "clear"})
         return
 
-    batch_delete_response = _record_call(sock, report, "selection", "batch-fixture-delete", params={"action": "delete"})
+    batch_delete_response = _record_call(
+        sock,
+        report,
+        "selection",
+        "batch-fixture-delete",
+        params={
+            "action": "delete",
+            "criteria": "((N='{0}'))".format(batch_fixture_name),
+            "confirm": "DELETE_EXACT_NAME",
+        },
+    )
     if batch_delete_response is None:
         return
     _validate_fixture_delete_result(report, batch_delete_response.get("result"))
@@ -665,7 +860,11 @@ def run_smoke(
     stop: bool = False,
     max_ping_ms: float | None = None,
     max_read_ms: float | None = None,
+    auth_token: str = "",
 ) -> dict[str, Any]:
+    global AUTH_TOKEN
+    old_auth_token = AUTH_TOKEN
+    AUTH_TOKEN = _load_auth_token(auth_token)
     report: dict[str, Any] = {
         "ok": False,
         "host": host,
@@ -696,6 +895,7 @@ def run_smoke(
     if max_read_ms is not None and max_read_ms <= 0:
         report["failures"].append("max_read_ms must be greater than 0")
     if report["failures"]:
+        AUTH_TOKEN = old_auth_token
         return report
 
     stop_acknowledged = False
@@ -749,6 +949,8 @@ def run_smoke(
 
             if phase >= 1 and allow_write_fixture:
                 _run_phase_one_write_fixture(sock, report)
+            if phase >= 2 and allow_write_fixture:
+                _run_phase_two_write_fixture(sock, report)
 
             if stop:
                 stop_acknowledged = _record_call(sock, report, "stop", 1) is not None
@@ -768,6 +970,7 @@ def run_smoke(
             report["stop_port_released"] = False
 
     report["ok"] = len(report["failures"]) == 0
+    AUTH_TOKEN = old_auth_token
     return report
 
 
@@ -780,11 +983,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--read-count", type=int, default=10)
     parser.add_argument("--allow-non-native", action="store_true")
     parser.add_argument("--include-objects", action="store_true")
-    parser.add_argument("--phase", type=int, choices=(0, 1), default=1)
+    parser.add_argument("--phase", type=int, choices=(0, 1, 2), default=1)
     parser.add_argument("--allow-write-fixture", action="store_true")
     parser.add_argument("--stop", action="store_true")
     parser.add_argument("--max-ping-ms", type=float, default=None)
     parser.add_argument("--max-read-ms", type=float, default=None)
+    parser.add_argument("--auth-token", default="")
     parser.add_argument("--json", action="store_true")
     return parser.parse_args(argv)
 
@@ -804,6 +1008,7 @@ def main(argv: list[str] | None = None) -> int:
         stop=args.stop,
         max_ping_ms=args.max_ping_ms,
         max_read_ms=args.max_read_ms,
+        auth_token=args.auth_token,
     )
 
     if args.json:
