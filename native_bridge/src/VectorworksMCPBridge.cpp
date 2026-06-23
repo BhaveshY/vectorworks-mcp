@@ -1070,6 +1070,30 @@ struct CreatedPrimitive {
     MCObjectHandle handle = nullptr;
 };
 
+MCObjectHandle EnsureWritableLayer() {
+    MCObjectHandle layer = gSDK->GetActiveLayer();
+    if (!layer) {
+        layer = gSDK->GetCurrentLayer();
+    }
+    if (!layer) {
+        const auto layers = CollectLayerHandles();
+        if (!layers.empty()) {
+            layer = layers.front();
+        }
+    }
+    if (!layer) {
+        layer = gSDK->CreateLayerN(TXString("Vectorworks MCP Layer"), 1.0);
+        if (layer) {
+            gSDK->AddAfterSwapObject(layer);
+        }
+    }
+    if (!layer) {
+        throw std::runtime_error("active Vectorworks document has no writable design layer");
+    }
+    gSDK->SetCurrentLayer(layer);
+    return layer;
+}
+
 std::string CanonicalCreateObjectType(std::string objectType) {
     objectType = ToLower(objectType);
     if (objectType == "rectangle" || objectType == "box") {
@@ -1133,6 +1157,8 @@ PrimitiveSpec ParsePrimitiveSpec(const Params& params, const std::string& label)
 }
 
 MCObjectHandle CreatePrimitiveFromSpec(const PrimitiveSpec& spec) {
+    EnsureWritableLayer();
+
     MCObjectHandle object = nullptr;
     if (spec.objectType == "rect") {
         object = gSDK->CreateRectangle(WorldRect(WorldPt(spec.x1, spec.y1), WorldPt(spec.x2, spec.y2)));

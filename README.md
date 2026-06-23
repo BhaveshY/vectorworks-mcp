@@ -46,10 +46,12 @@ Native phase 1 currently implements `get_document_info`, `get_layers`,
 `get_objects`, `selection` (`get`, `clear`, `select`, `delete`), and
 `create_object` for `rect`, `rectangle`, `box`, `circle`, `oval`, `line`, and
 `arc`, plus atomic `batch_create_objects` for multiple phase-1 primitives in
-one native undo event. Host preflight blocks broader MCP tools or unsupported
-variants before dispatching them to the native bridge. Use the generated Python
-dialog launcher when you need broader legacy tool coverage that has not been
-ported to native yet.
+one native undo event. In a freshly opened session with no writable layer,
+native primitive creation creates/selects a default `Vectorworks MCP Layer`
+before drawing. Host preflight blocks broader MCP tools or unsupported variants
+before dispatching them to the native bridge. Use the generated Python dialog
+launcher when you need broader legacy tool coverage that has not been ported to
+native yet.
 
 Why this is not as simple as a Revit-style setup yet:
 

@@ -131,11 +131,14 @@ responses must satisfy these minimum shapes:
   `top_left` and `bottom_right` as two-number lists.
 - `selection` with `action=get`: list of selected-object records using the same
   object shape as `get_objects`. An empty list is valid.
+- `create_object`: object with non-empty string `type` and `handle`. If the
+  active Vectorworks session has no writable layer, the native bridge
+  creates/selects `Vectorworks MCP Layer` before drawing.
 - `batch_create_objects`: object with `atomic: true`, `created_count`, and a
   `created` list containing one `{index, type, handle}` object per requested
   primitive. The handler must create all requested primitives in one native undo
   event and roll back created objects on ordinary handler errors before
-  returning failure.
+  returning failure. It uses the same no-layer bootstrap as `create_object`.
 
 The harness also cross-checks the first successful phase-1 read snapshots:
 
