@@ -8,7 +8,7 @@
     {
       "name": "vectorworks",
       "source": "./",
-      "description": "Connect Claude Code to Vectorworks 2024/2025 through the local vectorworks-mcp connector.",
+      "description": "Connect Claude Code to Vectorworks 2024/2025 through the production vectorworks-mcp connector.",
       "author": {
         "name": "Bhavesh"
       },

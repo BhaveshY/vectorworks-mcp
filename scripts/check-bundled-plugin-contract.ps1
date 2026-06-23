@@ -19,14 +19,32 @@ function Assert-File {
     }
 }
 
+function Test-PythonCommand {
+    param(
+        [string]$Command,
+        [string[]]$Args = @()
+    )
+
+    try {
+        & $Command @($Args + @("-c", "import sys; sys.exit(0)")) *> $null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
+}
+
 function Get-FirstPythonCommand {
+    $RepoVenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+    if ((Test-Path -LiteralPath $RepoVenvPython -PathType Leaf) -and (Test-PythonCommand -Command $RepoVenvPython)) {
+        return [pscustomobject]@{ Command = $RepoVenvPython; Args = @() }
+    }
     if (Get-Command py -ErrorAction SilentlyContinue) {
         return [pscustomobject]@{ Command = "py"; Args = @("-3") }
     }
     if (Get-Command python -ErrorAction SilentlyContinue) {
         return [pscustomobject]@{ Command = "python"; Args = @() }
     }
-    throw "Python was not found; cannot validate bundled plugin safety metadata."
+    throw "Python was not found; cannot validate bundled plugin safety metadata. Run scripts\bootstrap-agent.ps1 first or install Python 3."
 }
 
 $RequiredFiles = @(

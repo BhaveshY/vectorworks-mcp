@@ -4,23 +4,25 @@ For fresh Windows PC onboarding, follow `AGENT_INSTALL.md` first.
 
 ## Project Shape
 
-- `server.py` is the host-side stdio MCP server used by Claude Code.
+- `server.py` is the host-side stdio MCP server used by Codex, Claude Code, and other MCP clients.
 - `vw_listener.py` runs inside Vectorworks 2024/2025 and listens on TCP `127.0.0.1:9877` by default. Generated launchers normally run it with `VW_MCP_MODE=dialog`, the only pure-Python mode currently safe for real `vs.*` API calls. Background and Windows timer modes are transport-only diagnostics.
-- `native_bridge/` is the native Vectorworks SDK bridge source. It can be wired into an SDK example project for phase-0 ping/stop transport and phase-1 CAD handlers (`get_document_info`, `get_layers`, `get_objects`, `selection` get/clear/select/delete, `create_object` for rect/rectangle/box/circle/oval/line/arc, and atomic `batch_create_objects`). It is not wired into `.mcp.json` by default because it must be built and installed into Vectorworks.
+- `native_bridge/` is the native Vectorworks SDK bridge source. It can be wired into an SDK example project for phase-0 ping/stop transport, phase-1 CAD handlers (`get_document_info`, `get_layers`, `get_objects`, `selection` get/clear/select/delete, `create_object` for rect/rectangle/box/circle/oval/line/arc, and atomic `batch_create_objects`), and phase-2 production handlers (`create_wall`, `create_text`, `create_linear_dimension`, and mixed wall/text/dimension batches). It is not wired into `.mcp.json` by default because it must be built and installed into Vectorworks.
 - `vw_capabilities` reports current bridge/native support and should be used when choosing between native-safe helpers and broader legacy tools.
 - `vw_drawing_summary` is the preferred read-only production snapshot after preflight and before/after non-trivial edits.
-- `vw_batch_create_objects`, `vw_plan_schematic_floor_plan`, `vw_create_schematic_floor_plan`, `vw_create_schematic_room`, `vw_create_schematic_door`, and `vw_create_schematic_window` are drafting helpers for phase-1 primitives. `atomic=true` requires the native bridge and creates all primitives in one native undo event; `atomic=false` uses legacy non-atomic composition. They create 2D schematic geometry, not BIM wall/door/window objects.
+- `vw_batch_create_objects`, `vw_plan_schematic_floor_plan`, `vw_create_schematic_floor_plan`, `vw_create_schematic_room`, `vw_create_schematic_door`, and `vw_create_schematic_window` are drafting helpers. `atomic=true` requires the native bridge and creates all objects in one native undo event; phase 2 supports true walls, text, linear dimensions, and mixed batches. Schematic helpers still create 2D drafting geometry, not BIM doors/windows/spaces.
 - `native_bridge/HANDLER_MATRIX.md` is the handler-by-handler implementation map for the native SDK bridge.
 - `native_bridge/mock/mock_bridge.py` is a no-SDK contract harness for host/native protocol compatibility.
 - `native_bridge/src/` contains SDK-agnostic native source scaffold files. They are not a standalone build and intentionally avoid Vectorworks SDK includes.
 - `scripts/run-mcp-server.ps1` is the self-bootstrapping MCP entrypoint. It creates `.venv`, installs `requirements.txt`, then launches `server.py`.
-- `scripts/register-claude-code.ps1` is the primary Windows setup command. It is idempotent: it refreshes dependencies, generates `vw_start_listener_2024.py` plus the stable `vw_load_listener_2024.py` Vectorworks loader, can copy the loader text to the clipboard, and updates the `vectorworks` MCP server entry.
+- `scripts/bootstrap-agent.ps1` is the primary Windows setup command for a checkout. It refreshes dependencies, generates `vw_start_listener_2024.py` plus the stable `vw_load_listener_2024.py` Vectorworks loader, can copy the loader text to the clipboard, and updates client registration unless `-Client HostOnly` is used.
+- `scripts/register-claude-code.ps1` is the Claude Code registration helper used by the Claude-specific bootstrap path.
 - `scripts/copy-vectorworks-loader.ps1` is the first-class Vectorworks handoff helper. Use it whenever the user or an agent is unsure what to paste into Vectorworks.
 - `plugins/vectorworks/bin/vectorworksctl` is the stable RADAR-style helper.
   Prefer `py -3 .\plugins\vectorworks\bin\vectorworksctl agent-install --repo-path $PWD --json`
   for fresh-PC setup and `py -3 .\plugins\vectorworks\bin\vectorworksctl doctor --repo-path $PWD --json`
   for diagnosis.
 - `plugins/vectorworks/` is the Claude Code plugin. Keep its manifest, skills, scripts, and `.mcp.json` aligned with the repo scripts.
+- The root `.mcp.json` is client-neutral and repo-relative for Codex/Claude Code project MCP loading. Do not put Claude-only variables such as `${CLAUDE_PROJECT_DIR}` back into the root config; plugin configs may still use `${CLAUDE_PLUGIN_ROOT}`.
 
 ## Windows Baseline
 
@@ -50,6 +52,12 @@ Equivalent Claude Code-specific command:
 powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-claude-code.ps1 -Verify
 ```
 
+Codex/non-Claude host-only setup:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-agent.ps1 -Client HostOnly -Verify
+```
+
 This does not require Vectorworks. It should create/update:
 
 - `.venv\`
@@ -57,7 +65,7 @@ This does not require Vectorworks. It should create/update:
 - `vw_load_listener_2024.py`, the stable script/menu loader to paste into Vectorworks
 - clipboard contents set to that stable loader script when the desktop clipboard is available
 - project `.mcp.json`
-- user `~\.claude.json` when the `claude` CLI is not available
+- user `~\.claude.json` when the Claude Code setup path is used and the `claude` CLI is not available
 
 For Claude Code plugin workflow, use:
 
@@ -69,7 +77,8 @@ Plugin skills are namespaced as `/vectorworks:setup`, `/vectorworks:ping`,
 `/vectorworks:diagnose`, and `/vectorworks:work`.
 
 If the generated launcher does not set `VW_MCP_MODE=dialog`, rerun
-`scripts\register-claude-code.ps1` or `scripts\bootstrap-claude-code.ps1`.
+`scripts\bootstrap-agent.ps1 -Verify` or, for host-only clients,
+`scripts\bootstrap-agent.ps1 -Client HostOnly -Verify`.
 
 ## Bridge Modes
 
@@ -79,7 +88,7 @@ If the generated launcher does not set `VW_MCP_MODE=dialog`, rerun
 | Python `foreground` | Legacy diagnostic only; can block the UI | Must reject |
 | Python `background` | Transport diagnostics only | Must reject |
 | Python `win_timer` | Transport diagnostics only | Must reject |
-| Native SDK bridge | Non-modal native target | Phase-1 implemented actions only |
+| Native SDK bridge | Non-modal native target | Phase-1 and phase-2 implemented actions only |
 
 Do not route users to `background` or `win_timer` for real Vectorworks work.
 Host tools whose `TOOL_SAFETY` entry has `requires_cad_preflight: true`
@@ -87,8 +96,8 @@ auto-block when bridge status is missing or reports `cad_api_safe: false` /
 `transport_only: true`; treat that block as authoritative and fix the listener
 before retrying CAD work.
 Do not claim native non-modal CAD support is installed unless a compiled bridge
-has been built from the Vectorworks SDK and phase-0 stop plus phase-1 read/write
-smoke tests pass in Vectorworks. The host must block native actions or variants
+has been built from the Vectorworks SDK and phase-0 stop plus phase-1/phase-2
+read/write smoke tests pass in Vectorworks. The host must block native actions or variants
 that are not present in the bridge `implemented_actions` surface instead of
 forwarding them as unknown bridge actions.
 Keep the native handler matrix in sync whenever `vw_listener.py` adds, removes,
@@ -155,8 +164,8 @@ If `check-native-bridge-prereqs.ps1 -Json` reports `sdkArchiveCandidates`, pass
 the candidate through `-SdkArchivePath` so setup reuses the downloaded SDK ZIP
 instead of downloading it again.
 After phase 0 passes, load the native bridge again, run the default phase-1 read
-smoke, and run `-AllowWriteFixture` in a disposable document before claiming
-native write readiness. Do not run the default native smoke against a
+smoke, and run `-Phase 2 -AllowWriteFixture` in a disposable document before claiming
+native production write readiness. Do not run the default native smoke against a
 non-SDK/transport-only build; it is only valid after the SDK-backed project is
 wired and built.
 
@@ -172,8 +181,8 @@ End-to-end tests require the user to open Vectorworks. Do not claim full end-to-
 
 - Vectorworks 2024/2025 is open.
 - The generated `vw_load_listener_2024.py` has been copied with `scripts\copy-vectorworks-loader.ps1`, then pasted into Resource Manager or installed as a Plug-in Manager menu command. It should run the current `vw_start_listener_2024.py` from disk and open a `VW MCP Listener` dialog; leave that dialog open while the agent controls Vectorworks, then stop/close it for manual work.
-- Claude Code has been restarted after MCP registration.
-- `/mcp` shows `vectorworks`.
+- The MCP client has been restarted or reloaded after registration/trust changes.
+- `vectorworks` is trusted and loaded in the MCP client; Claude Code users can confirm this with `/mcp`.
 - First tool call is `vw_ping`; do not treat listener startup as fully proven until this works.
 - Before real CAD work, prefer `vw_preflight_for_cad` when available. If it blocks, do not call CAD handlers.
 

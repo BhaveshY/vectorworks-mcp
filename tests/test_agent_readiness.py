@@ -68,17 +68,26 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertEqual(server["env"]["VW_MCP_HOST"], "127.0.0.1")
         self.assertEqual(server["env"]["VW_MCP_PORT"], "9877")
         self.assertEqual(server["env"]["VW_MCP_PREFLIGHT_CACHE_MS"], "750")
+        self.assertNotIn("CLAUDE_PROJECT_DIR", (ROOT / ".mcp.json").read_text(encoding="utf-8"))
         self.assertNotIn(":-", (ROOT / ".mcp.json").read_text(encoding="utf-8"))
 
     def test_agent_instruction_files_exist(self):
         self.assertTrue((ROOT / "AGENTS.md").exists())
         self.assertTrue((ROOT / "CLAUDE.md").exists())
+        self.assertTrue((ROOT / "CODEX.md").exists())
         self.assertTrue((ROOT / "AGENT_INSTALL.md").exists())
         self.assertIn("@AGENTS.md", (ROOT / "CLAUDE.md").read_text(encoding="utf-8"))
-        self.assertIn("AGENT_INSTALL.md", (ROOT / "AGENTS.md").read_text(encoding="utf-8"))
+        self.assertIn("AGENTS.md", (ROOT / "CODEX.md").read_text(encoding="utf-8"))
+        self.assertIn("-Client HostOnly -Verify", (ROOT / "CODEX.md").read_text(encoding="utf-8"))
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        self.assertIn("AGENT_INSTALL.md", agents)
+        self.assertIn("bootstrap-agent.ps1` is the primary Windows setup command", agents)
+        self.assertIn("Claude Code registration helper", agents)
         agent_install = (ROOT / "AGENT_INSTALL.md").read_text(encoding="utf-8")
         self.assertIn("winget install --id Python.Python.3.12", agent_install)
         self.assertIn("vectorworksctl agent-install", agent_install)
+        self.assertIn("-Client HostOnly -Verify", agent_install)
+        self.assertIn("Codex", agent_install)
         self.assertIn("setup_complete", agent_install)
         self.assertIn("requires_action", agent_install)
         self.assertIn("native_summary.missing_allow_flags", agent_install)
@@ -88,7 +97,7 @@ class AgentReadinessTests(unittest.TestCase):
         marker = json.loads((ROOT / ".vectorworks-mcp-contract.json").read_text(encoding="utf-8"))
 
         self.assertEqual(marker["name"], "vectorworks-mcp")
-        self.assertGreaterEqual(marker["contractVersion"], 12)
+        self.assertGreaterEqual(marker["contractVersion"], 13)
         for feature in (
             "stable-loader",
             "loader-clipboard-copy",
@@ -102,6 +111,9 @@ class AgentReadinessTests(unittest.TestCase):
             "native-sdk-archive-reuse",
             "native-phase0-transport",
             "native-phase1-cad-handlers",
+            "native-phase2-cad-handlers",
+            "local-auth-token-required",
+            "client-neutral-project-mcp",
         ):
             self.assertIn(feature, marker["requiredFeatures"])
 
@@ -134,7 +146,13 @@ class AgentReadinessTests(unittest.TestCase):
         runner = (ROOT / "scripts" / "run-mcp-server.ps1").read_text(encoding="utf-8")
 
         self.assertIn("function Test-PythonExecutable", runner)
-        self.assertIn("Existing virtual environment python could not run; recreating", runner)
+        self.assertIn("function Test-PythonPip", runner)
+        self.assertIn("Reset-Venv -Reason \"Existing virtual environment python could not run\"", runner)
+        self.assertIn('Write-BootstrapLog "$Reason; recreating $VenvDir"', runner)
+        self.assertIn("Existing virtual environment pip could not run", runner)
+        self.assertIn("ensurepip", runner)
+        self.assertIn("force-reinstalling requirements", runner)
+        self.assertIn("--force-reinstall", runner)
         self.assertIn("$FallbackVenvDir", runner)
         self.assertIn("Using fallback virtual environment", runner)
         self.assertIn("Remove-Item -LiteralPath $VenvDir -Recurse -Force", runner)
@@ -325,7 +343,7 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIn("runpy.run_path", loader_text)
             _assert_path_in_text(self, launcher_path, loader_text)
             self.assertIn("VW_MCP_LOADER_METADATA", loader_text)
-            self.assertIn('"contractVersion": 12', loader_text)
+            self.assertIn('"contractVersion": 13', loader_text)
             self.assertIn('"native-bridge-scaffold-copy"', loader_text)
             self.assertIn('"native-doctor-next-command"', loader_text)
             self.assertIn('"native-doctor-command-spec"', loader_text)
@@ -334,6 +352,10 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIn('"native-runner-spec-validation"', loader_text)
             self.assertIn('"native-sdk-archive-reuse"', loader_text)
             self.assertIn('"native-phase0-transport"', loader_text)
+            self.assertIn('"native-phase1-cad-handlers"', loader_text)
+            self.assertIn('"native-phase2-cad-handlers"', loader_text)
+            self.assertIn('"local-auth-token-required"', loader_text)
+            self.assertIn('"client-neutral-project-mcp"', loader_text)
 
     def test_native_bridge_scaffold_is_explicitly_not_default(self):
         expected_files = (
@@ -363,8 +385,9 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("Revit-style connector", native_readme)
         root_readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("not compiled or installed by default", root_readme)
-        self.assertIn("phase-1 SDK bridge", root_readme)
+        self.assertIn("phase-2 SDK bridge", root_readme)
         self.assertIn("native-sdk-bridge-phase1", root_readme)
+        self.assertIn("native-sdk-bridge-phase2", root_readme)
         self.assertIn("main_context_pump_ready=true", root_readme)
         self.assertIn("Host preflight blocks broader MCP tools", root_readme)
         self.assertIn("Why this is not as simple as a Revit-style setup yet", root_readme)

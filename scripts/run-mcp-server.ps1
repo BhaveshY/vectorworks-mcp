@@ -88,23 +88,64 @@ function Test-PythonExecutable {
     }
 }
 
+function Test-PythonPip {
+    param([string]$Path)
+
+    if (-not (Test-PythonExecutable -Path $Path)) {
+        return $false
+    }
+
+    try {
+        & $Path -m pip --version *> $null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
+}
+
+function Reset-Venv {
+    param([string]$Reason)
+
+    Write-BootstrapLog "$Reason; recreating $VenvDir"
+    try {
+        Remove-Item -LiteralPath $VenvDir -Recurse -Force
+    } catch {
+        if ($VenvDir -ne $FallbackVenvDir) {
+            Write-BootstrapLog "Could not remove stale repo virtual environment: $($_.Exception.Message). Using fallback virtual environment at $FallbackVenvDir"
+            Use-VenvDir -Path $FallbackVenvDir
+            Ensure-Venv
+            return $true
+        }
+        throw
+    }
+
+    return $false
+}
+
 function Ensure-Venv {
     if (Test-Path -LiteralPath $VenvPython -PathType Leaf) {
         if (Test-PythonExecutable -Path $VenvPython) {
-            return
-        }
-
-        Write-BootstrapLog "Existing virtual environment python could not run; recreating $VenvDir"
-        try {
-            Remove-Item -LiteralPath $VenvDir -Recurse -Force
-        } catch {
-            if ($VenvDir -ne $FallbackVenvDir) {
-                Write-BootstrapLog "Could not remove stale repo virtual environment: $($_.Exception.Message). Using fallback virtual environment at $FallbackVenvDir"
-                Use-VenvDir -Path $FallbackVenvDir
-                Ensure-Venv
+            if (Test-PythonPip -Path $VenvPython) {
                 return
             }
-            throw
+
+            Write-BootstrapLog "Existing virtual environment pip could not run; attempting ensurepip in $VenvDir"
+            try {
+                Invoke-Logged { & $VenvPython -m ensurepip --upgrade }
+            } catch {
+                Write-BootstrapLog "ensurepip failed for existing virtual environment: $($_.Exception.Message)"
+            }
+            if (Test-PythonPip -Path $VenvPython) {
+                return
+            }
+
+            if (Reset-Venv -Reason "Existing virtual environment pip could not run") {
+                return
+            }
+        } else {
+            if (Reset-Venv -Reason "Existing virtual environment python could not run") {
+                return
+            }
         }
     }
 
@@ -160,6 +201,13 @@ function Ensure-Requirements {
     if (($ExistingHash.Trim() -ne $RequirementsHash) -or (-not (Test-FastMcpImport))) {
         Write-BootstrapLog "Installing requirements from $RequirementsPath"
         Invoke-Logged { & $VenvPython -m pip install -r $RequirementsPath }
+        if (-not (Test-FastMcpImport)) {
+            Write-BootstrapLog "fastmcp import still failed after normal install; force-reinstalling requirements from $RequirementsPath"
+            Invoke-Logged { & $VenvPython -m pip install --upgrade --force-reinstall -r $RequirementsPath }
+        }
+        if (-not (Test-FastMcpImport)) {
+            throw "fastmcp import failed after requirements installation. See $LogPath"
+        }
         Set-Content -Path $StampPath -Value $RequirementsHash -Encoding ASCII
     }
 }

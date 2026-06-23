@@ -35,16 +35,16 @@ native bridge exists to provide that non-modal plug-in callback path.
 ## Target Architecture
 
 ```text
-Claude Code <--stdio--> server.py
-                         |
-                         v
-                 TCP length-prefixed JSON
-                         |
-                         v
-            Native Vectorworks SDK plug-in bridge
-                         |
-                         v
-            Vectorworks SDK main/event context
+Codex / Claude Code / MCP client <--stdio--> server.py
+                                             |
+                                             v
+                                     TCP length-prefixed JSON
+                                             |
+                                             v
+                        Native Vectorworks SDK plug-in bridge
+                                             |
+                                             v
+                        Vectorworks SDK main/event context
 ```
 
 The host MCP server can keep using the same TCP protocol it uses today. The

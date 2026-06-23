@@ -10,7 +10,8 @@ Required:
 - Windows 11 PowerShell
 - Git
 - Python 3.10 or newer
-- Claude Code with plugin support
+- Codex, Claude Code, or another stdio MCP client
+- Claude Code with plugin support when using `/plugin` or `/vectorworks:*`
 - Vectorworks 2024 or 2025 for real CAD work
 
 If Git or Python are missing, install them first:
@@ -23,7 +24,7 @@ winget install --id Python.Python.3.12 --exact --source winget --accept-package-
 Open a new PowerShell after installing host tools so `git`, `py`, and `python`
 are visible on PATH.
 
-## Preferred Claude Plugin Path
+## Preferred Claude Code Plugin Path
 
 Inside Claude Code:
 
@@ -53,13 +54,25 @@ Then run:
 
 ## Direct Connector Setup
 
-For a direct connector checkout:
+For a direct connector checkout used by Codex, Claude Code project MCP, or any
+other MCP client:
 
 ```powershell
 git clone https://github.com/BhaveshY/vectorworks-mcp.git $env:USERPROFILE\repos\vectorworks-mcp
 cd $env:USERPROFILE\repos\vectorworks-mcp
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-agent.ps1 -Verify
 ```
+
+For Codex/non-Claude installs where you do not want to touch Claude Code config:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-agent.ps1 -Client HostOnly -Verify
+```
+
+Then add or trust the repo `.mcp.json`. It is client-neutral and uses the
+repo-relative `scripts/run-mcp-server.ps1` path. If the client launches MCP
+servers from outside the repo root, configure the same stdio server with an
+absolute `-File C:\path\to\vectorworks-mcp\scripts\run-mcp-server.ps1`.
 
 For the bundled plugin helper from this connector repo:
 
@@ -97,9 +110,12 @@ py -3 .\plugins\vectorworks\bin\vectorworksctl native-next --repo-path $PWD --js
 
 After a native artifact is built, install only through the guarded doctor/native
 runner, then restart/load Vectorworks, run phase-0 stop/port-release smoke, load
-the bridge again, run the default phase-1 read smoke, and run
-`-AllowWriteFixture` in a disposable document before claiming native write
-readiness.
+the bridge again, run the default phase-1 read smoke, and run the phase-2 write
+smoke in a disposable document before claiming native production readiness:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Phase 2 -PingCount 3 -ReadCount 2 -IncludeObjects -AllowWriteFixture -Json
+```
 
 ## Result Fields
 

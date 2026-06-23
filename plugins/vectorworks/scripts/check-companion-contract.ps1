@@ -45,7 +45,7 @@ $RequiredScripts = @(
     "scripts\test-native-bridge-scaffold.ps1"
 )
 
-$RequiredFeatures = @("stable-loader", "loader-clipboard-copy", "native-bridge-scaffold", "native-bridge-scaffold-copy", "native-doctor-next-command", "native-doctor-command-spec", "native-bridge-project-wire", "native-doctor-next-runner", "native-runner-spec-validation", "native-sdk-archive-reuse", "native-phase0-transport", "native-phase1-cad-handlers")
+$RequiredFeatures = @("stable-loader", "loader-clipboard-copy", "native-bridge-scaffold", "native-bridge-scaffold-copy", "native-doctor-next-command", "native-doctor-command-spec", "native-bridge-project-wire", "native-doctor-next-runner", "native-runner-spec-validation", "native-sdk-archive-reuse", "native-phase0-transport", "native-phase1-cad-handlers", "native-phase2-cad-handlers", "local-auth-token-required", "client-neutral-project-mcp")
 
 $ContractMarker = Join-Path $RepoRoot ".vectorworks-mcp-contract.json"
 if (-not (Test-Path -LiteralPath $ContractMarker)) {
@@ -59,10 +59,10 @@ try {
 try {
     $ContractVersion = [int]$Contract.contractVersion
 } catch {
-    throw "Companion repo contract marker is incompatible. Expected numeric contractVersion >= 12."
+    throw "Companion repo contract marker is incompatible. Expected numeric contractVersion >= 13."
 }
-if ($Contract.name -ne "vectorworks-mcp" -or $ContractVersion -lt 12) {
-    throw "Companion repo contract marker is incompatible. Expected vectorworks-mcp contractVersion >= 12."
+if ($Contract.name -ne "vectorworks-mcp" -or $ContractVersion -lt 13) {
+    throw "Companion repo contract marker is incompatible. Expected vectorworks-mcp contractVersion >= 13."
 }
 $ContractFeatures = @($Contract.requiredFeatures | ForEach-Object { [string]$_ })
 foreach ($RequiredFeature in $RequiredFeatures) {
@@ -99,14 +99,32 @@ if ($MissingDocs.Count -gt 0 -or $StaleDocs.Count -gt 0) {
     throw "Tool map drift. Missing docs: $($MissingDocs -join ', '); stale docs: $($StaleDocs -join ', ')"
 }
 
+function Test-PythonCommand {
+    param(
+        [string]$Command,
+        [string[]]$Args = @()
+    )
+
+    try {
+        & $Command @($Args + @("-c", "import sys; sys.exit(0)")) *> $null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
+}
+
 function Get-FirstPythonCommand {
+    $RepoVenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
+    if ((Test-Path -LiteralPath $RepoVenvPython -PathType Leaf) -and (Test-PythonCommand -Command $RepoVenvPython)) {
+        return [pscustomobject]@{ Command = $RepoVenvPython; Args = @() }
+    }
     if (Get-Command py -ErrorAction SilentlyContinue) {
         return [pscustomobject]@{ Command = "py"; Args = @("-3") }
     }
     if (Get-Command python -ErrorAction SilentlyContinue) {
         return [pscustomobject]@{ Command = "python"; Args = @() }
     }
-    throw "Python was not found; cannot validate companion server safety metadata."
+    throw "Python was not found; cannot validate companion server safety metadata. Run scripts\bootstrap-agent.ps1 first or install Python 3."
 }
 
 function Get-ScriptParameterNames {

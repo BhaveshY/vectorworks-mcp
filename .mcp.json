@@ -9,7 +9,7 @@
         "-ExecutionPolicy",
         "Bypass",
         "-File",
-        "${CLAUDE_PROJECT_DIR}/scripts/run-mcp-server.ps1"
+        "scripts/run-mcp-server.ps1"
       ],
       "env": {
         "VW_MCP_HOST": "127.0.0.1",

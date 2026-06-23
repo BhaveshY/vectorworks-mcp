@@ -28,7 +28,9 @@ launching VW and running the listener.
 on VW 2024, not 2025).
 
 **Where:**
-- GitHub repo description: "MCP server bridging Claude Code to **Vectorworks 2025**".
+- Historical GitHub repo description at the time was Claude-specific and
+  2025-only; the current repo description/docs should say Codex, Claude Code,
+  or any stdio MCP client with Vectorworks 2024/2025.
 - `README.md` heading: "Vectorworks **2025** MCP Server", install step 3 says
   "Open **Vectorworks 2025**".
 - But `server.py` and `vw_listener.py` module docstrings both say

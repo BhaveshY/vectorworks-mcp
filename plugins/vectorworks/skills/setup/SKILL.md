@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Set up or repair the Vectorworks Claude Code plugin/runtime on Windows 11. Use when the user asks to connect Claude Code to Vectorworks, install the Vectorworks plugin/server, make the repo agent-ready, or fix missing MCP setup.
+description: Set up or repair the Vectorworks MCP runtime, Claude Code plugin, or companion checkout on Windows 11. Use when the user asks to connect Claude Code or Codex to Vectorworks, install the Vectorworks plugin/server, make the repo agent-ready, or fix missing MCP setup.
 ---
 
 # Vectorworks Setup
@@ -27,6 +27,16 @@ checks the current contract, and asks the native bridge doctor for a structured
 next step. Follow `native_plan.nextCommandSpec`; do not improvise SDK, Visual
 Studio, or Vectorworks plug-in install commands.
 
+For Codex or non-Claude host-only setup, use the companion repo command:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-agent.ps1 -Client HostOnly -Verify
+```
+
+Then use the repo `.mcp.json`, or configure the same `powershell.exe -File
+scripts\run-mcp-server.ps1` stdio server with an absolute path if the client
+does not launch from the repo root.
+
 ## Temporary Python Fallback
 
 Use the Python dialog listener only when the user explicitly needs today's
@@ -47,6 +57,6 @@ does not make the Python listener the long-term default.
   Cursor, or non-interactive shells.
 - Raw socket reachability is not enough. CAD work requires `cad_api_safe: true`
   and `transport_only: false`.
-- The long-term goal is a compiled Vectorworks SDK bridge that auto-loads in
-  Vectorworks and owns the local transport. Python loader repair is fallback
-  only.
+- The production non-modal path is the compiled Vectorworks SDK bridge. Phase 2
+  supports native walls, text, linear dimensions, and mixed atomic batches.
+  Python loader repair is fallback only.

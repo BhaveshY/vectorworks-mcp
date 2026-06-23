@@ -210,7 +210,8 @@ Recommended order:
    ``scripts\wire-native-bridge-project.ps1``.
 5. Keep socket work off the Vectorworks API path; marshal CAD handlers to the
    Vectorworks main/plugin event context.
-6. Implement phase 0 and phase 1 from ``native_bridge\HANDLER_MATRIX.md``.
+6. Implement or verify phases 0, 1, and 2 from
+   ``native_bridge\HANDLER_MATRIX.md``.
 "@
 Set-Content -LiteralPath $NotesPath -Value $Notes -Encoding UTF8
 

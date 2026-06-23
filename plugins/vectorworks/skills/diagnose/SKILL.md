@@ -1,6 +1,6 @@
 ---
 name: diagnose
-description: Diagnose Vectorworks Claude Code runtime, native bridge, listener, or MCP failures on Windows. Use when Vectorworks hangs, ping fails, MCP tools are missing, setup stopped working, or native bridge setup is unclear.
+description: Diagnose the Vectorworks MCP runtime, native bridge, listener, or client integration on Windows. Use when Vectorworks hangs, ping fails, MCP tools are missing, setup stopped working, or native bridge setup is unclear.
 ---
 
 # Vectorworks Diagnosis
@@ -34,6 +34,9 @@ Follow `nextCommandSpec` and safety fields. `missingAllowFlags`,
 - `native_plan` or `native-next` reports a bootstrap/build/install stage:
   report that native bridge setup is not complete yet and follow only the
   structured next command.
+- Native production readiness means `native_phase >= 2`, `cad_api_safe: true`,
+  `transport_only: false`, `main_context_pump_ready: true`, and implemented
+  actions for the requested wall/text/dimension/batch work.
 - `sdkArchiveCandidates` exists: reuse the downloaded SDK ZIP with
   `--sdk-archive-path` / `-SdkArchivePath`; do not download another copy.
 - `vw_ping` or raw ping reports `cad_api_safe: false` or
@@ -41,8 +44,9 @@ Follow `nextCommandSpec` and safety fields. `missingAllowFlags`,
 - Python listener timeout while Vectorworks owns the port: use the STOP file and
   restart Vectorworks if needed, but treat this as fallback listener recovery,
   not the long-term fix.
-- MCP tools absent but raw listener works: Claude Code has not loaded the
-  plugin/MCP server. Reload plugins or start Claude Code with this plugin.
+- MCP tools absent but raw listener works: the MCP client has not loaded the
+  `vectorworks` server. In Claude Code, reload plugins or start Claude Code
+  with this plugin. In Codex/direct clients, trust or add the repo `.mcp.json`.
 - Tool result contains `blocked: true`: stop and follow the reported reason
   before attempting CAD work.
 - Tool result reports `unknown commit state`: do not retry non-idempotent or destructive tools. Use

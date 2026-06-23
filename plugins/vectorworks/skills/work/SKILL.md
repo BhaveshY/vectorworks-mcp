@@ -1,6 +1,6 @@
 ---
 name: work
-description: Work with Vectorworks through MCP tools for CAD/BIM tasks. Use when the user asks Claude to draw, model, inspect, edit, export, import, screenshot, create walls/doors/windows/slabs/roofs, manage classes/layers, or automate Vectorworks 2024/2025.
+description: Work with Vectorworks through MCP tools for CAD/BIM tasks. Use when the user asks an MCP agent to draw, model, inspect, edit, export, import, screenshot, create walls/doors/windows/slabs/roofs, manage classes/layers, or automate Vectorworks 2024/2025.
 ---
 
 # Vectorworks Work
@@ -16,9 +16,9 @@ Before changing the drawing, confirm the connection:
 Use the MCP tools deliberately:
 
 - Create basic geometry with `vw_create_object`.
-- For repeated primitive creation, prefer `vw_batch_create_objects` over many separate MCP calls. Use the default `atomic=true` when the native bridge reports `batch_create_objects`; use `atomic=false` only when deliberately accepting legacy non-atomic composition.
-- For native floor-plan drafting, use `vw_plan_schematic_floor_plan` first for dry-run geometry, then `vw_create_schematic_floor_plan` for multi-room layouts. Use `vw_create_schematic_room`, `vw_create_schematic_door`, and `vw_create_schematic_window` for focused edits. These tools create 2D schematic drafting geometry, not BIM objects, and their atomic creation path requires the native bridge.
-- Use architectural tools for BIM elements: `vw_create_wall`, `vw_insert_door`, `vw_insert_window`, `vw_create_slab`, `vw_create_roof`.
+- For repeated creation, prefer `vw_batch_create_objects` over many separate MCP calls. Use the default `atomic=true` when the native bridge reports `batch_create_objects`; phase 2 can atomically mix primitives, true walls, text, and linear dimensions. Use `atomic=false` only when deliberately accepting legacy non-atomic composition.
+- For floor plans, use `vw_create_bim_floor_plan` when the target is true wall-based layout work with optional labels/dimensions. Use `vw_plan_schematic_floor_plan` first for dry-run drafting geometry, then `vw_create_schematic_floor_plan` for schematic multi-room layouts. Use `vw_create_schematic_room`, `vw_create_schematic_door`, and `vw_create_schematic_window` for focused 2D drafting edits.
+- Use architectural tools deliberately: `vw_create_wall`, `vw_create_text`, and `vw_create_linear_dimension` are native phase-2 production tools; `vw_insert_door`, `vw_insert_window`, `vw_create_slab`, and `vw_create_roof` remain broader Python/legacy paths unless capabilities say otherwise.
 - Inspect and find existing objects with `vw_get_objects`, `vw_find_objects`, and `vw_inspect_object`.
 - Manage organization with `vw_manage_classes`, layers, names, and properties before bulk edits.
 - Use `vw_run_script` only for trusted Python that the user would be comfortable running inside the active Vectorworks document; it requires `confirm="RUN_TRUSTED_CODE"`.
@@ -26,7 +26,7 @@ Use the MCP tools deliberately:
 Safety habits:
 
 - If a tool returns `blocked: true`, stop and fix the listener/bridge status before retrying CAD work.
-- If ping reports `native_phase: 0` or `transport_only: true`, do not call CAD handlers; run `vectorworksctl native-next --plan-only --json`.
+- If ping reports `native_phase: 0`, missing phase-2 actions, or `transport_only: true`, do not call unsupported CAD handlers; run `vectorworksctl native-next --plan-only --json`.
 - Ask before destructive edits such as delete, class-wide changes, overwrites, or exports over existing files.
 - Destructive/code-execution/probing tools require explicit confirmation arguments such as `confirm="DELETE_SELECTED"`, `confirm="DELETE_EXACT_NAME"` for exact-name criteria cleanup, `confirm="DELETE_CLASS"`, `confirm="RUN_TRUSTED_CODE"`, or `confirm="PROBE_PLUGIN"`.
 - If an operation reports unknown commit state, do not retry non-idempotent or destructive tools. Stabilize the connection, then inspect with read-only tools.

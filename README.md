@@ -1,11 +1,12 @@
 # Vectorworks 2024/2025 MCP Connector
 
-Connect Claude Code to Vectorworks on the same Windows PC.
+Connect Codex, Claude Code, or any stdio MCP client to Vectorworks on the same
+Windows PC.
 
 ## Architecture
 
 ```text
-Claude Code <--stdio--> scripts/run-mcp-server.ps1
+Codex / Claude Code / MCP client <--stdio--> scripts/run-mcp-server.ps1
                          |
                          v
                       server.py <--TCP/JSON--> vw_listener.py (modal agent session inside Vectorworks)
@@ -31,7 +32,7 @@ transport-only or legacy listeners.
 | Python `foreground` listener | legacy diagnostic only | no, guarded | blocks UI |
 | Python `background` listener | diagnostic only | no, guarded | no reliable scheduling |
 | Python `win_timer` listener | diagnostic only | no, guarded | transport ping only |
-| Native SDK bridge | phase-1 SDK bridge | yes, guarded to implemented actions | non-modal native plug-in |
+| Native SDK bridge | phase-2 SDK bridge when built/installed | yes, guarded to implemented actions | non-modal native plug-in |
 
 The proper long-term fix for non-modal, always-on control is a native
 Vectorworks SDK plug-in bridge. The SDK bridge in `native_bridge/` can be copied
@@ -169,6 +170,8 @@ when requested. After the phase-0 stop smoke passes, load the native bridge
 plug-in again and run the default phase-1 read smoke. In a disposable test
 document, add `-AllowWriteFixture` to prove create/select/delete cleanup; the
 delete runs only after the fixture identity and exact selection are verified.
+Run `-Phase 2 -AllowWriteFixture` in a disposable document to prove native wall,
+text, linear dimension, and mixed-batch creation.
 
 The Python listener also applies conservative resource guards for long agent
 sessions: `VW_MCP_MAX_CLIENTS`, `VW_MCP_CLIENT_IDLE_SECONDS`,
@@ -184,14 +187,56 @@ If the official SDK ZIP is already downloaded, the prerequisite checker reports
 it in `sdkArchiveCandidates`, and the guarded doctor/runner will prefer
 `-SdkArchivePath C:\path\to\SDK.zip` instead of downloading the archive again.
 
-## Agent-Ready Setup
+## Agent-Ready Universal Setup
 
-Fresh Windows 11 checkout:
+Fresh Windows 11 checkout for any agent or MCP client:
 
 ```powershell
 cd C:\path\to\vectorworks-mcp
 powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-agent.ps1 -Verify
 ```
+
+For Codex or another non-Claude MCP client that only needs the stdio server and
+repo verification, use the host-only path:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-agent.ps1 -Client HostOnly -Verify
+```
+
+Then point the client at the project `.mcp.json` from this repo, or configure
+the same server manually:
+
+```json
+{
+  "mcpServers": {
+    "vectorworks": {
+      "type": "stdio",
+      "command": "powershell.exe",
+      "args": [
+        "-NoLogo",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "scripts/run-mcp-server.ps1"
+      ],
+      "env": {
+        "VW_MCP_HOST": "127.0.0.1",
+        "VW_MCP_PORT": "9877",
+        "VW_MCP_TIMEOUT": "60",
+        "VW_MCP_PREFLIGHT_CACHE_MS": "750"
+      },
+      "timeout": 120000
+    }
+  }
+}
+```
+
+The root `.mcp.json` intentionally uses the repo-relative
+`scripts/run-mcp-server.ps1` path instead of Claude-only variables so project
+MCP loading can work in Codex, Claude Code, and other clients that launch from
+the checkout root. If your client launches MCP servers from another working
+directory, use the absolute path to `scripts\run-mcp-server.ps1`.
 
 Package-style local development is also supported:
 
@@ -200,10 +245,10 @@ py -3 -m pip install -e .
 # Use vectorworks-mcp as the stdio command in an MCP client configuration.
 ```
 
-The console script starts the same host MCP server as `server.py`; the
+The self-contained console script starts the same host MCP server as `server.py`; the
 self-bootstrapping scripts remain the recommended setup path because they also
 prepare the repo-local virtual environment, generated Vectorworks loader, and
-Claude Code registration.
+optional agent/client registration helpers.
 
 Bundled plugin helper:
 
@@ -233,9 +278,9 @@ The setup is idempotent and safe to rerun. It:
 - falls back to updating `C:\Users\<you>\.claude.json` if `claude` is not on PATH
 - runs no-Vectorworks host verification when `-Verify` is passed
 
-This repo also includes a project `.mcp.json` that points Claude Code at the
-self-bootstrapping runner. Claude Code may ask you to trust project MCP servers
-the first time it sees that file.
+This repo also includes a project `.mcp.json` that points compatible MCP clients
+at the self-bootstrapping runner. Claude Code and Codex may ask you to trust
+project MCP servers the first time they see that file.
 
 ## Claude Code Plugin
 
@@ -345,14 +390,12 @@ handlers.
 
 ## Verify End To End
 
-Restart Claude Code after setup, then run:
+Restart or reload your MCP client after setup, then confirm the `vectorworks`
+server is trusted and loaded. In Claude Code, `/mcp` should list
+`vectorworks`; in Codex or another MCP client, use that client's server status
+view or make the first tool call.
 
-```text
-/mcp
-```
-
-Confirm `vectorworks` is listed. With Vectorworks open and the listener running,
-try:
+With Vectorworks open and the listener running, try:
 
 ```text
 Use vw_ping.
@@ -360,8 +403,8 @@ Use vw_get_document_info.
 Create a 500x300 rectangle at position 0,0.
 ```
 
-If `vw_ping` fails, Claude Code can start the MCP server, but the Vectorworks
-listener is not reachable on `127.0.0.1:9877`.
+If `vw_ping` fails, the MCP client may have started the host server correctly,
+but the Vectorworks listener is not reachable on `127.0.0.1:9877`.
 
 ## No-Vectorworks Verification
 
@@ -430,8 +473,8 @@ Architectural:
 
 ## Agent Handoff
 
-Project instructions are in `AGENTS.md`; Claude Code imports them through
-`CLAUDE.md`.
+Project instructions are in `AGENTS.md`; client-specific entrypoints are
+`CLAUDE.md` for Claude Code and `CODEX.md` for Codex.
 
 Known-good host checks:
 
@@ -444,7 +487,7 @@ End-to-end requires:
 - Vectorworks 2024/2025 open
 - listener started through the generated `vw_load_listener_2024.py`; leave the `VW MCP Listener` dialog open while the agent works
 - MCP client restarted after registration
-- `/mcp` showing `vectorworks`
+- `vectorworks` trusted/loaded in the MCP client; Claude Code users can confirm this with `/mcp`
 - first tool call: `vw_ping`
 
 ## Troubleshooting
@@ -463,7 +506,7 @@ End-to-end requires:
 
 Vectorworks hangs after running the listener script:
 
-- Regenerate `vw_start_listener_2024.py` with `.\scripts\bootstrap-claude-code.ps1 -Verify`.
+- Regenerate `vw_start_listener_2024.py` with `.\scripts\bootstrap-agent.ps1 -Verify` or, for host-only clients, `.\scripts\bootstrap-agent.ps1 -Client HostOnly -Verify`.
 - Run `.\scripts\copy-vectorworks-loader.ps1`, then replace any old pasted Vectorworks script with the clipboard contents from `vw_load_listener_2024.py`; it loads the current launcher from disk and prevents stale pasted listener code from lingering in a menu command.
 - Confirm the generated launcher contains `os.environ["VW_MCP_MODE"] = "dialog"`.
 - Confirm `vw_ping` reports `dispatch_mode=dialog`,

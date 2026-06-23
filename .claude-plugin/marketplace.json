@@ -8,8 +8,8 @@
     {
       "name": "vectorworks",
       "source": "./plugins/vectorworks",
-      "description": "Connect Claude Code to Vectorworks 2024/2025 through the local vectorworks-mcp connector.",
-      "version": "0.3.0",
+      "description": "Connect Claude Code to Vectorworks 2024/2025 through the production vectorworks-mcp connector.",
+      "version": "0.4.0",
       "author": {
         "name": "BhaveshY"
       },
