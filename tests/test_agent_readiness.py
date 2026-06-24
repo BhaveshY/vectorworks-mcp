@@ -89,7 +89,10 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("-Client HostOnly -Verify", agent_install)
         self.assertIn("Codex", agent_install)
         self.assertIn("setup_complete", agent_install)
+        self.assertIn("install_complete", agent_install)
+        self.assertIn("usable_now", agent_install)
         self.assertIn("requires_action", agent_install)
+        self.assertIn("native_requires_action", agent_install)
         self.assertIn("native_summary.missing_allow_flags", agent_install)
         self.assertIn("/plugin marketplace add BhaveshY/vectorworks-mcp", agent_install)
 

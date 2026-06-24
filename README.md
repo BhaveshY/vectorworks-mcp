@@ -258,8 +258,10 @@ py -3 .\plugins\vectorworks\bin\vectorworksctl doctor --repo-path $PWD --json
 ```
 
 `agent-install` prepares the Python dialog fallback and returns the guarded
-native SDK bridge plan in one JSON payload. See `AGENT_INSTALL.md` for the full
-fresh-PC flow.
+native SDK bridge plan in one JSON payload. `setup_complete: true` means the
+MCP install is usable now; `native_requires_action: true` means only the
+optional non-modal native bridge still has follow-up work. See
+`AGENT_INSTALL.md` for the full fresh-PC flow.
 
 Claude Code-specific setup:
 

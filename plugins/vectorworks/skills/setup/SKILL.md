@@ -23,9 +23,13 @@ py -3 "${CLAUDE_PLUGIN_ROOT}\bin\vectorworksctl" agent-install --json
 ```
 
 This command resolves or installs the companion `vectorworks-mcp` checkout,
-checks the current contract, and asks the native bridge doctor for a structured
-next step. Follow `native_plan.nextCommandSpec`; do not improvise SDK, Visual
-Studio, or Vectorworks plug-in install commands.
+checks the current contract, installs the usable Python dialog fallback by
+default, and asks the native bridge doctor for a structured next step. If the
+JSON reports `setup_complete: true` with `native_requires_action: true`, do not
+call it an install failure; native bridge setup is only an optional non-modal
+upgrade. Follow `native_plan.nextCommandSpec` only when native setup is
+requested; do not improvise SDK, Visual Studio, or Vectorworks plug-in install
+commands.
 
 For Codex or non-Claude host-only setup, use the companion repo command:
 

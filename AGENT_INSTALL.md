@@ -83,6 +83,9 @@ py -3 .\plugins\vectorworks\bin\vectorworksctl doctor --repo-path $PWD --json
 
 `agent-install` prepares the MCP server and generated Vectorworks loader through
 the Python dialog fallback while also returning the guarded native bridge plan.
+If the JSON says `setup_complete: true` and `native_requires_action: true`, the
+install is usable now; the native SDK bridge is only an optional non-modal
+upgrade path.
 
 ## Native Long-Term Setup
 
@@ -121,10 +124,15 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke-
 
 Agents should parse:
 
-- `setup_complete`: long-term native setup is complete.
-- `requires_action`: more native setup/install steps are still required.
+- `setup_complete` / `install_complete` / `usable_now`: the MCP install is
+  usable now. This can be true with the Python dialog fallback even when native
+  SDK setup is still pending.
+- `user_message`: short install status string safe to show to users.
+- `requires_action`: the usable MCP install still needs more action.
 - `cad_ready`: Python fallback listener is running and safe for CAD handlers.
 - `native_ready`: native bridge setup is complete according to the runner.
+- `native_setup_complete`: native bridge setup is complete according to the runner.
+- `native_requires_action`: native bridge setup still has optional follow-up work.
 - `native_summary.next_stage`: the next native setup stage.
 - `native_summary.missing_allow_flags`: required opt-in switches.
 - `python_fallback_ready`: Python fallback launcher/loader setup succeeded.
@@ -132,7 +140,9 @@ Agents should parse:
 - `listener_doctor.overall`: current Python fallback session state.
 
 Treat `ok: true` as "the control command ran and returned a plan", not as full
-CAD readiness. Do not call CAD tools unless `cad_ready` is true or a
+CAD readiness. Do not report `native_requires_action: true` as an install
+failure when `setup_complete` is true. Do not call CAD tools unless `cad_ready`
+is true or a
 smoke-tested native bridge reports `cad_api_safe: true`, `transport_only:
 false`, `main_context_pump_ready: true`, and supports the requested
 `implemented_actions` entry.

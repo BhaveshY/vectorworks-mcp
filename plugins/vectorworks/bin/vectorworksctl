@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Deterministic local helper for the Vectorworks Claude Code plugin.
+"""Deterministic local helper for the Vectorworks MCP plugin.
 
 This mirrors the RADAR `radarctl` pattern: expose one stable, plugin-packaged
 command for setup, doctor, native next-step planning, and ping checks. The
@@ -279,14 +279,41 @@ def cmd_setup_runtime(args: argparse.Namespace) -> int:
     if args.json:
         summary = native_summary(native_plan)
         python_fallback_ready = bool(fallback_result and fallback_result.returncode == 0)
-        setup_complete = bool(summary["ready"])
+        native_setup_complete = bool(summary["ready"])
+        setup_complete = bool(native_setup_complete or python_fallback_ready)
+        native_requires_action = not native_setup_complete
+        if setup_complete and native_requires_action:
+            user_message = (
+                "Installed and usable now with the Python dialog fallback. "
+                "Native SDK bridge setup is optional and still has follow-up work."
+            )
+            next_action = (
+                "Install is usable now with the Python dialog fallback. "
+                "Native SDK bridge setup is an optional non-modal upgrade; follow "
+                "native_summary.next_command and native_summary.missing_allow_flags only when native setup is requested."
+            )
+        elif setup_complete:
+            user_message = "Installed and native SDK bridge setup is complete."
+            next_action = "Install is complete and the native SDK bridge plan is ready."
+        else:
+            user_message = "Install is not usable yet; follow the reported next action."
+            next_action = (
+                "Install is not usable yet. Follow native_summary.next_command and "
+                "native_summary.missing_allow_flags, or rerun agent-install without --skip-python-fallback."
+            )
         payload = {
             "ok": bool((native_plan and not native_error) or (fallback_result and fallback_result.returncode == 0)),
             "mode": "native-first",
+            "user_message": user_message,
             "setup_complete": setup_complete,
+            "install_complete": setup_complete,
+            "usable_now": setup_complete,
             "requires_action": not setup_complete,
             "cad_ready": False,
-            "native_ready": summary["ready"],
+            "native_ready": native_setup_complete,
+            "native_setup_complete": native_setup_complete,
+            "native_requires_action": native_requires_action,
+            "native_optional_upgrade": native_requires_action,
             "python_fallback_ready": python_fallback_ready,
             "native_summary": summary,
             "native_plan": native_plan,
@@ -298,7 +325,7 @@ def cmd_setup_runtime(args: argparse.Namespace) -> int:
                 "stdout": fallback_result.stdout,
                 "stderr": fallback_result.stderr,
             },
-            "next_action": "If setup_complete is false, follow native_summary.next_command and native_summary.missing_allow_flags. Use python_fallback_ready only as a temporary compatibility path.",
+            "next_action": next_action,
         }
         print(json.dumps(payload, indent=2))
         return 0 if payload["ok"] else 1
