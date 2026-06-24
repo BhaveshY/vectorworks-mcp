@@ -145,6 +145,56 @@ def listener_cad_ready(listener_doctor: Any) -> bool:
     return isinstance(listener_doctor, dict) and listener_doctor.get("overall") == "cad-ready"
 
 
+def looks_like_companion_repo(path: str | Path) -> bool:
+    root = Path(path).expanduser()
+    return (
+        root.exists()
+        and (root / "server.py").exists()
+        and (root / ".mcp.json").exists()
+        and (root / "scripts" / "run-mcp-server.ps1").exists()
+    )
+
+
+def repo_root_from_setup_stdout(stdout: str) -> str:
+    for line in stdout.splitlines():
+        prefix = "Vectorworks MCP repo:"
+        if line.startswith(prefix):
+            value = line[len(prefix) :].strip()
+            if value:
+                return value
+    return ""
+
+
+def resolve_setup_repo_root(args: argparse.Namespace, fallback_result: subprocess.CompletedProcess[str] | None) -> str:
+    candidates = [
+        getattr(args, "repo_path", ""),
+        repo_root_from_setup_stdout(fallback_result.stdout or "") if fallback_result else "",
+        os.environ.get("VW_MCP_REPO", ""),
+        os.environ.get("VECTORWORKS_MCP_REPO", ""),
+    ]
+    for candidate in candidates:
+        if candidate and looks_like_companion_repo(candidate):
+            return str(Path(candidate).resolve())
+    return str(Path(candidates[0]).resolve()) if candidates[0] else ""
+
+
+def companion_paths(repo_root: str) -> dict[str, str]:
+    if not repo_root:
+        return {
+            "mcp_config_path": "",
+            "runner_path": "",
+            "launcher_path": "",
+            "loader_path": "",
+        }
+    root = Path(repo_root)
+    return {
+        "mcp_config_path": str(root / ".mcp.json"),
+        "runner_path": str(root / "scripts" / "run-mcp-server.ps1"),
+        "launcher_path": str(root / "vw_start_listener_2024.py"),
+        "loader_path": str(root / "vw_load_listener_2024.py"),
+    }
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     ps_args = ["-TimeoutMilliseconds", str(args.timeout_ms)]
     ps_args = add_repo_path(ps_args, args.repo_path)
@@ -282,6 +332,9 @@ def cmd_setup_runtime(args: argparse.Namespace) -> int:
         native_setup_complete = bool(summary["ready"])
         setup_complete = bool(native_setup_complete or python_fallback_ready)
         native_requires_action = not native_setup_complete
+        repo_root = resolve_setup_repo_root(args, fallback_result)
+        paths = companion_paths(repo_root)
+        command_ok = bool((native_plan and not native_error) or python_fallback_ready)
         if setup_complete and native_requires_action:
             user_message = (
                 "Installed and usable now with the Python dialog fallback. "
@@ -301,8 +354,14 @@ def cmd_setup_runtime(args: argparse.Namespace) -> int:
                 "Install is not usable yet. Follow native_summary.next_command and "
                 "native_summary.missing_allow_flags, or rerun agent-install without --skip-python-fallback."
             )
+        next_user_step = (
+            "Trust/add mcp_config_path in the MCP client, run loader_path in Vectorworks, then call vw_ping."
+            if setup_complete
+            else "Rerun agent-install with the Python fallback enabled, or complete the native setup plan."
+        )
         payload = {
-            "ok": bool((native_plan and not native_error) or (fallback_result and fallback_result.returncode == 0)),
+            "ok": setup_complete,
+            "command_ok": command_ok,
             "mode": "native-first",
             "user_message": user_message,
             "setup_complete": setup_complete,
@@ -315,6 +374,11 @@ def cmd_setup_runtime(args: argparse.Namespace) -> int:
             "native_requires_action": native_requires_action,
             "native_optional_upgrade": native_requires_action,
             "python_fallback_ready": python_fallback_ready,
+            "repo_root": repo_root,
+            "mcp_config_path": paths["mcp_config_path"],
+            "runner_path": paths["runner_path"],
+            "launcher_path": paths["launcher_path"],
+            "loader_path": paths["loader_path"],
             "native_summary": summary,
             "native_plan": native_plan,
             "native_error": native_error,
@@ -325,10 +389,11 @@ def cmd_setup_runtime(args: argparse.Namespace) -> int:
                 "stdout": fallback_result.stdout,
                 "stderr": fallback_result.stderr,
             },
+            "next_user_step": next_user_step,
             "next_action": next_action,
         }
         print(json.dumps(payload, indent=2))
-        return 0 if payload["ok"] else 1
+        return 0 if setup_complete else 1
 
     print("Vectorworks runtime setup")
     print("mode: native-first")
@@ -344,7 +409,7 @@ def cmd_setup_runtime(args: argparse.Namespace) -> int:
     if fallback_result is not None:
         print(f"python fallback setup: exit {fallback_result.returncode}")
     print("Normal daily use should not run setup-runtime; use doctor only for troubleshooting.")
-    return 0 if (native_plan or (fallback_result and fallback_result.returncode == 0)) else 1
+    return 0 if (native_summary(native_plan)["ready"] or (fallback_result and fallback_result.returncode == 0)) else 1
 
 
 def cmd_agent_install(args: argparse.Namespace) -> int:

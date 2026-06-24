@@ -17,9 +17,10 @@ switch ($Client) {
         exit $LASTEXITCODE
     }
     "HostOnly" {
-        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "run-mcp-server.ps1") -SetupOnly
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "verify-no-vectorworks.ps1")
+        $RegisterArgs = @("-NoClaudeConfig")
+        if ($Verify) { $RegisterArgs += "-Verify" }
+        if (-not $SkipClipboard) { $RegisterArgs += @("-CopyLoaderToClipboard", "-BestEffortClipboard") }
+        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "register-claude-code.ps1") @RegisterArgs
         exit $LASTEXITCODE
     }
 }

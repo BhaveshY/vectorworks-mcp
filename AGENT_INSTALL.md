@@ -24,6 +24,32 @@ winget install --id Python.Python.3.12 --exact --source winget --accept-package-
 Open a new PowerShell after installing host tools so `git`, `py`, and `python`
 are visible on PATH.
 
+## One-Click Agent Install
+
+Use this as the default Codex/direct MCP install command:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/BhaveshY/vectorworks-mcp/main/install.ps1 | iex"
+```
+
+The one-click installer clones or updates the repo at
+`$env:USERPROFILE\repos\vectorworks-mcp`, installs the repo-local Python
+runtime, generates durable Vectorworks handoff files, runs host verification,
+and leaves `.mcp.json` ready for the MCP client to trust. It defaults to
+`-Client HostOnly`, so it does not write Claude Code user config.
+
+From an existing checkout:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+For machine-readable agent output:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Json
+```
+
 ## Preferred Claude Code Plugin Path
 
 Inside Claude Code:
@@ -60,7 +86,7 @@ other MCP client:
 ```powershell
 git clone https://github.com/BhaveshY/vectorworks-mcp.git $env:USERPROFILE\repos\vectorworks-mcp
 cd $env:USERPROFILE\repos\vectorworks-mcp
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-agent.ps1 -Verify
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 For Codex/non-Claude installs where you do not want to touch Claude Code config:
@@ -124,11 +150,21 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke-
 
 Agents should parse:
 
+- `ok`: the install is usable now. For `agent-install --json`, this matches
+  `setup_complete` and exits nonzero when the MCP install is not usable.
+- `command_ok`: the helper command ran far enough to return diagnostics or a
+  native setup plan. This can be true while `setup_complete` is false.
 - `setup_complete` / `install_complete` / `usable_now`: the MCP install is
   usable now. This can be true with the Python dialog fallback even when native
   SDK setup is still pending.
 - `user_message`: short install status string safe to show to users.
 - `requires_action`: the usable MCP install still needs more action.
+- `repo_root`: resolved companion checkout.
+- `mcp_config_path`: MCP client config file to trust or add.
+- `runner_path`: stdio runner path inside the companion checkout.
+- `launcher_path`: generated machine-specific Vectorworks launcher.
+- `loader_path`: stable Vectorworks script/menu loader to run in Vectorworks.
+- `next_user_step`: concise next human-facing install step.
 - `cad_ready`: Python fallback listener is running and safe for CAD handlers.
 - `native_ready`: native bridge setup is complete according to the runner.
 - `native_setup_complete`: native bridge setup is complete according to the runner.

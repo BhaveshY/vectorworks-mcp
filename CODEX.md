@@ -2,10 +2,16 @@
 
 Use `AGENTS.md` as the main operating guide.
 
-For host-only setup from a fresh checkout:
+For one-click host-only setup:
 
 ```powershell
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-agent.ps1 -Client HostOnly -Verify
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/BhaveshY/vectorworks-mcp/main/install.ps1 | iex"
+```
+
+From an existing checkout:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 The project `.mcp.json` is intentionally client-neutral and points at

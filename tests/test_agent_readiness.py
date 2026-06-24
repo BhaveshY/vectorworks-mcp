@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 import unittest
@@ -77,20 +78,28 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertTrue((ROOT / "CODEX.md").exists())
         self.assertTrue((ROOT / "AGENT_INSTALL.md").exists())
         self.assertIn("@AGENTS.md", (ROOT / "CLAUDE.md").read_text(encoding="utf-8"))
-        self.assertIn("AGENTS.md", (ROOT / "CODEX.md").read_text(encoding="utf-8"))
-        self.assertIn("-Client HostOnly -Verify", (ROOT / "CODEX.md").read_text(encoding="utf-8"))
+        codex = (ROOT / "CODEX.md").read_text(encoding="utf-8")
+        self.assertIn("AGENTS.md", codex)
+        self.assertIn("raw.githubusercontent.com/BhaveshY/vectorworks-mcp/main/install.ps1", codex)
+        self.assertIn("-File .\\install.ps1", codex)
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
         self.assertIn("AGENT_INSTALL.md", agents)
-        self.assertIn("bootstrap-agent.ps1` is the primary Windows setup command", agents)
+        self.assertIn("install.ps1` is the primary one-click Windows installer", agents)
+        self.assertIn("bootstrap-agent.ps1` is the checkout-level setup implementation", agents)
         self.assertIn("Claude Code registration helper", agents)
         agent_install = (ROOT / "AGENT_INSTALL.md").read_text(encoding="utf-8")
         self.assertIn("winget install --id Python.Python.3.12", agent_install)
         self.assertIn("vectorworksctl agent-install", agent_install)
+        self.assertIn("raw.githubusercontent.com/BhaveshY/vectorworks-mcp/main/install.ps1", agent_install)
+        self.assertIn("-File .\\install.ps1", agent_install)
         self.assertIn("-Client HostOnly -Verify", agent_install)
         self.assertIn("Codex", agent_install)
         self.assertIn("setup_complete", agent_install)
         self.assertIn("install_complete", agent_install)
         self.assertIn("usable_now", agent_install)
+        self.assertIn("command_ok", agent_install)
+        self.assertIn("loader_path", agent_install)
+        self.assertIn("mcp_config_path", agent_install)
         self.assertIn("requires_action", agent_install)
         self.assertIn("native_requires_action", agent_install)
         self.assertIn("native_summary.missing_allow_flags", agent_install)
@@ -123,6 +132,7 @@ class AgentReadinessTests(unittest.TestCase):
     def test_bootstrap_scripts_exist(self):
         for relative_path in (
             "AGENT_INSTALL.md",
+            "install.ps1",
             "scripts/bootstrap-agent.ps1",
             "scripts/bootstrap-claude-code.ps1",
             "scripts/bootstrap-native-bridge.ps1",
@@ -144,6 +154,159 @@ class AgentReadinessTests(unittest.TestCase):
             ".github/workflows/verify.yml",
         ):
             self.assertTrue((ROOT / relative_path).exists(), relative_path)
+
+    def test_root_install_script_is_agent_parseable_and_host_only_by_default(self):
+        install = (ROOT / "install.ps1").read_text(encoding="utf-8")
+        bootstrap = (ROOT / "scripts/bootstrap-agent.ps1").read_text(encoding="utf-8")
+
+        self.assertIn('https://github.com/BhaveshY/vectorworks-mcp.git', install)
+        self.assertIn('https://raw.githubusercontent.com/BhaveshY/vectorworks-mcp/main/install.ps1', install)
+        self.assertIn('[string]$Client = "HostOnly"', install)
+        self.assertIn("git", install)
+        self.assertIn("clone", install)
+        self.assertIn("pull", install)
+        self.assertIn("--ff-only", install)
+        self.assertIn("scripts\\bootstrap-agent.ps1", install)
+        self.assertIn("setup_complete", install)
+        self.assertIn("install_complete", install)
+        self.assertIn("usable_now", install)
+        self.assertIn("vw_load_listener_2024.py", install)
+        self.assertIn(".mcp.json", install)
+
+        self.assertIn('"HostOnly"', bootstrap)
+        self.assertIn("-NoClaudeConfig", bootstrap)
+        self.assertIn("-CopyLoaderToClipboard", bootstrap)
+        self.assertIn("-BestEffortClipboard", bootstrap)
+        self.assertIn("register-claude-code.ps1", bootstrap)
+
+    def test_root_install_json_from_checkout_creates_persistent_loader(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise install.ps1")
+        if not os.environ.get("USERPROFILE"):
+            self.skipTest("USERPROFILE is required for the generated Windows launcher")
+
+        result = subprocess.run(
+            [
+                powershell,
+                "-NoLogo",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(ROOT / "install.ps1"),
+                "-NoVerify",
+                "-SkipClipboard",
+                "-Json",
+            ],
+            cwd=str(ROOT),
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        payload = json.loads(result.stdout)
+
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["setup_complete"])
+        self.assertTrue(payload["install_complete"])
+        self.assertTrue(payload["usable_now"])
+        self.assertFalse(payload["requires_action"])
+        _assert_same_path(self, payload["repo_root"], ROOT)
+        _assert_same_path(self, payload["mcp_config"], ROOT / ".mcp.json")
+        _assert_same_path(self, payload["vectorworks_loader"], ROOT / "vw_load_listener_2024.py")
+        _assert_same_path(self, payload["vectorworks_launcher"], ROOT / "vw_start_listener_2024.py")
+        self.assertTrue((ROOT / "vw_load_listener_2024.py").exists())
+        self.assertTrue((ROOT / "vw_start_listener_2024.py").exists())
+        _assert_path_in_text(
+            self,
+            ROOT / "vw_start_listener_2024.py",
+            (ROOT / "vw_load_listener_2024.py").read_text(encoding="utf-8"),
+        )
+
+    def test_host_only_bootstrap_generates_loader_without_claude_config(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise HostOnly bootstrap")
+
+        with tempfile.TemporaryDirectory() as temp_profile:
+            env = os.environ.copy()
+            env["USERPROFILE"] = temp_profile
+            env.pop("VW_MCP_AUTH_TOKEN", None)
+            env.pop("VW_MCP_AUTH_TOKEN_FILE", None)
+            env.pop("VW_MCP_INSECURE_NO_AUTH", None)
+
+            subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts" / "bootstrap-agent.ps1"),
+                    "-Client",
+                    "HostOnly",
+                    "-SkipClipboard",
+                ],
+                cwd=str(ROOT),
+                env=env,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertFalse((Path(temp_profile) / ".claude.json").exists())
+            self.assertTrue((Path(temp_profile) / ".vectorworks-mcp" / "auth-token").exists())
+            self.assertTrue((ROOT / "vw_start_listener_2024.py").exists())
+            self.assertTrue((ROOT / "vw_load_listener_2024.py").exists())
+            launcher_text = (ROOT / "vw_start_listener_2024.py").read_text(encoding="utf-8")
+            loader_text = (ROOT / "vw_load_listener_2024.py").read_text(encoding="utf-8")
+            self.assertIn('os.environ["VW_MCP_MODE"] = "dialog"', launcher_text)
+            _assert_path_in_text(self, ROOT / "vw_start_listener_2024.py", loader_text)
+
+    def test_vectorworksctl_agent_install_json_distinguishes_command_from_readiness(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise vectorworksctl agent-install")
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "plugins" / "vectorworks" / "bin" / "vectorworksctl"),
+                "agent-install",
+                "--repo-path",
+                str(ROOT),
+                "--skip-python-fallback",
+                "--json",
+            ],
+            cwd=str(ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        payload = json.loads(result.stdout)
+        if payload["setup_complete"]:
+            self.skipTest("Native setup is complete on this machine; skip-fallback install is genuinely usable")
+
+        self.assertNotEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["setup_complete"])
+        self.assertFalse(payload["install_complete"])
+        self.assertFalse(payload["usable_now"])
+        self.assertTrue(payload["requires_action"])
+        self.assertIn("command_ok", payload)
+        self.assertIn("repo_root", payload)
+        self.assertIn("mcp_config_path", payload)
+        self.assertIn("runner_path", payload)
+        self.assertIn("launcher_path", payload)
+        self.assertIn("loader_path", payload)
+        self.assertIn("next_user_step", payload)
+        _assert_same_path(self, payload["repo_root"], ROOT)
+        _assert_same_path(self, payload["mcp_config_path"], ROOT / ".mcp.json")
+        _assert_same_path(self, payload["runner_path"], ROOT / "scripts" / "run-mcp-server.ps1")
+        _assert_same_path(self, payload["loader_path"], ROOT / "vw_load_listener_2024.py")
 
     def test_mcp_runner_recovers_stale_virtualenv_python(self):
         runner = (ROOT / "scripts" / "run-mcp-server.ps1").read_text(encoding="utf-8")

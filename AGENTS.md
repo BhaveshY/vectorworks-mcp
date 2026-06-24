@@ -14,7 +14,8 @@ For fresh Windows PC onboarding, follow `AGENT_INSTALL.md` first.
 - `native_bridge/mock/mock_bridge.py` is a no-SDK contract harness for host/native protocol compatibility.
 - `native_bridge/src/` contains SDK-agnostic native source scaffold files. They are not a standalone build and intentionally avoid Vectorworks SDK includes.
 - `scripts/run-mcp-server.ps1` is the self-bootstrapping MCP entrypoint. It creates `.venv`, installs `requirements.txt`, then launches `server.py`.
-- `scripts/bootstrap-agent.ps1` is the primary Windows setup command for a checkout. It refreshes dependencies, generates `vw_start_listener_2024.py` plus the stable `vw_load_listener_2024.py` Vectorworks loader, can copy the loader text to the clipboard, and updates client registration unless `-Client HostOnly` is used.
+- `install.ps1` is the primary one-click Windows installer. It can run from a checkout or from the raw GitHub URL, clones/updates the repo when needed, then calls the checkout bootstrap path.
+- `scripts/bootstrap-agent.ps1` is the checkout-level setup implementation. It refreshes dependencies, generates `vw_start_listener_2024.py` plus the stable `vw_load_listener_2024.py` Vectorworks loader, can copy the loader text to the clipboard, and updates client registration unless `-Client HostOnly` is used.
 - `scripts/register-claude-code.ps1` is the Claude Code registration helper used by the Claude-specific bootstrap path.
 - `scripts/copy-vectorworks-loader.ps1` is the first-class Vectorworks handoff helper. Use it whenever the user or an agent is unsure what to paste into Vectorworks.
 - `plugins/vectorworks/bin/vectorworksctl` is the stable RADAR-style helper.
@@ -37,7 +38,7 @@ Use this when an agent is pointed at a fresh checkout and only the connector is
 being installed:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-agent.ps1 -Verify
+powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 Use this when the bundled plugin helper is available:

@@ -189,18 +189,30 @@ it in `sdkArchiveCandidates`, and the guarded doctor/runner will prefer
 
 ## Agent-Ready Universal Setup
 
-Fresh Windows 11 checkout for any agent or MCP client:
+One-command install from any PowerShell on Windows 11:
 
 ```powershell
-cd C:\path\to\vectorworks-mcp
-powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-agent.ps1 -Verify
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/BhaveshY/vectorworks-mcp/main/install.ps1 | iex"
 ```
 
-For Codex or another non-Claude MCP client that only needs the stdio server and
-repo verification, use the host-only path:
+The installer clones or updates `BhaveshY/vectorworks-mcp` under
+`$env:USERPROFILE\repos\vectorworks-mcp`, installs Python dependencies,
+generates the durable `vw_start_listener_2024.py` launcher and
+`vw_load_listener_2024.py` Vectorworks loader, runs host verification, and
+leaves the repo `.mcp.json` ready for Codex, Claude Code project MCP, or any
+stdio MCP client. The default is `-Client HostOnly`, so it does not modify
+Claude Code user config.
+
+From an existing checkout:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-agent.ps1 -Client HostOnly -Verify
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+If you specifically want Claude Code user registration from the checkout:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Client ClaudeCode
 ```
 
 Then point the client at the project `.mcp.json` from this repo, or configure
@@ -260,7 +272,10 @@ py -3 .\plugins\vectorworks\bin\vectorworksctl doctor --repo-path $PWD --json
 `agent-install` prepares the Python dialog fallback and returns the guarded
 native SDK bridge plan in one JSON payload. `setup_complete: true` means the
 MCP install is usable now; `native_requires_action: true` means only the
-optional non-modal native bridge still has follow-up work. See
+optional non-modal native bridge still has follow-up work. JSON also includes
+top-level `repo_root`, `mcp_config_path`, `runner_path`, `launcher_path`,
+`loader_path`, and `next_user_step` so agents do not need to scrape PowerShell
+output. See
 `AGENT_INSTALL.md` for the full fresh-PC flow.
 
 Claude Code-specific setup:
@@ -481,6 +496,7 @@ Project instructions are in `AGENTS.md`; client-specific entrypoints are
 Known-good host checks:
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-agent.ps1 -Verify
 ```
 

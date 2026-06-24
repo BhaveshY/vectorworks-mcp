@@ -27,14 +27,17 @@ checks the current contract, installs the usable Python dialog fallback by
 default, and asks the native bridge doctor for a structured next step. If the
 JSON reports `setup_complete: true` with `native_requires_action: true`, do not
 call it an install failure; native bridge setup is only an optional non-modal
-upgrade. Follow `native_plan.nextCommandSpec` only when native setup is
-requested; do not improvise SDK, Visual Studio, or Vectorworks plug-in install
-commands.
+upgrade. `command_ok` only means the helper produced diagnostics; `ok`,
+`setup_complete`, and `usable_now` mean the install can actually be used. Use
+top-level `mcp_config_path`, `loader_path`, `runner_path`, and `next_user_step`
+for the user handoff. Follow `native_plan.nextCommandSpec` only when native
+setup is requested; do not improvise SDK, Visual Studio, or Vectorworks plug-in
+install commands.
 
 For Codex or non-Claude host-only setup, use the companion repo command:
 
 ```powershell
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-agent.ps1 -Client HostOnly -Verify
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 Then use the repo `.mcp.json`, or configure the same `powershell.exe -File
