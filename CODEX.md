@@ -14,6 +14,13 @@ From an existing checkout:
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
+For a full non-technical PC install attempt, including dependency checks and
+native bridge build/install up to the Vectorworks UI boundary:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -FullNative -Json
+```
+
 The project `.mcp.json` is intentionally client-neutral and points at
 `scripts/run-mcp-server.ps1` with a repo-relative path. If Codex runs MCP
 servers from outside the checkout root, configure the same server with an

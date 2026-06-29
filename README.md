@@ -209,6 +209,21 @@ From an existing checkout:
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
+For a non-technical Windows PC where the agent should also attempt the native
+SDK bridge setup in one run, use:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/BhaveshY/vectorworks-mcp/main/install.ps1 -OutFile $env:TEMP\vectorworks-mcp-install.ps1; powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $env:TEMP\vectorworks-mcp-install.ps1 -FullNative"
+```
+
+`-FullNative` first checks/installs base tools (`Git` and `Python 3.12`) when
+winget is available, then runs the guarded native bridge loop with the required
+network/software/download/plugin-write allow flags. It stops cleanly at the
+Vectorworks interaction boundary instead of reporting a generic failure:
+open/restart Vectorworks, load the installed native plug-in, then run the smoke
+command reported in `native_summary.next_command`. Native production readiness
+is not claimed until Vectorworks smoke tests pass.
+
 If you specifically want Claude Code user registration from the checkout:
 
 ```powershell

@@ -40,6 +40,17 @@ For Codex or non-Claude host-only setup, use the companion repo command:
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
+For a non-technical PC full install attempt including native bridge setup:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -FullNative -Json
+```
+
+If the result has `setup_complete: true` but `native_summary.next_stage:
+smoke-phase-0`, the MCP is usable and the native bridge has reached the
+Vectorworks UI boundary. Tell the user to open/restart Vectorworks, load the
+native plug-in, then run `native_summary.next_command`.
+
 Then use the repo `.mcp.json`, or configure the same `powershell.exe -File
 scripts\run-mcp-server.ps1` stdio server with an absolute path if the client
 does not launch from the repo root.

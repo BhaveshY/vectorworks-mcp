@@ -8,13 +8,14 @@ repair the Vectorworks MCP workflow without guessing script order.
 Required:
 
 - Windows 11 PowerShell
-- Git
-- Python 3.10 or newer
+- Git, auto-installed by `install.ps1` with winget when missing
+- Python 3.10 or newer, auto-installed as Python 3.12 by `install.ps1` with
+  winget when missing
 - Codex, Claude Code, or another stdio MCP client
 - Claude Code with plugin support when using `/plugin` or `/vectorworks:*`
 - Vectorworks 2024 or 2025 for real CAD work
 
-If Git or Python are missing, install them first:
+If winget is blocked by policy, install Git or Python manually first:
 
 ```powershell
 winget install --id Git.Git --exact --source winget --accept-package-agreements --accept-source-agreements
@@ -49,6 +50,23 @@ For machine-readable agent output:
 ```powershell
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Json
 ```
+
+For a non-technical Windows PC where the agent should install/check base
+dependencies and attempt the native SDK bridge too:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -FullNative -Json
+```
+
+`-FullNative` is intentionally a single-shot agent path. It checks or installs
+Git and Python first, then drives the guarded native runner with opt-ins for
+network access, Visual Studio Build Tools install, large SDK downloads, native
+plug-in folder writes, and reboot risk. It still cannot click inside
+Vectorworks for the user. If JSON reports
+`native_summary.next_stage: "smoke-phase-0"` with
+`native_summary.vectorworks_interaction_required: true`, the remaining action
+is to open/restart Vectorworks, load/enable the installed native plug-in, and
+run the reported smoke command.
 
 ## Preferred Claude Code Plugin Path
 
@@ -167,6 +185,13 @@ Agents should parse:
 - `next_user_step`: concise next human-facing install step.
 - `cad_ready`: Python fallback listener is running and safe for CAD handlers.
 - `native_ready`: native bridge setup is complete according to the runner.
+- `native_summary`: root installer/native status summary. For `install.ps1
+  -FullNative -Json`, parse `native_summary.next_stage`,
+  `native_summary.next_command`, `native_summary.missing_allow_flags`,
+  `native_summary.bridge_built`, `native_summary.bridge_installed`,
+  `native_summary.phase0_smoke_tested`,
+  `native_summary.phase2_smoke_tested`, and
+  `native_summary.vectorworks_interaction_required`.
 - `native_setup_complete`: native bridge setup is complete according to the runner.
 - `native_requires_action`: native bridge setup still has optional follow-up work.
 - `native_summary.next_stage`: the next native setup stage.
