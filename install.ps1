@@ -80,6 +80,91 @@ function Resolve-CommandPath {
     return ""
 }
 
+function Join-ProcessArguments {
+    param([string[]]$ArgumentList)
+
+    $Quoted = foreach ($Argument in $ArgumentList) {
+        if ($null -eq $Argument) {
+            '""'
+            continue
+        }
+        if ($Argument -notmatch '[\s"]') {
+            $Argument
+            continue
+        }
+
+        $Builder = [System.Text.StringBuilder]::new()
+        [void]$Builder.Append('"')
+        $Backslashes = 0
+        foreach ($Character in $Argument.ToCharArray()) {
+            if ($Character -eq '\') {
+                $Backslashes += 1
+                continue
+            }
+            if ($Character -eq '"') {
+                if ($Backslashes -gt 0) {
+                    [void]$Builder.Append(('\' * ($Backslashes * 2 + 1)))
+                    $Backslashes = 0
+                } else {
+                    [void]$Builder.Append('\')
+                }
+                [void]$Builder.Append('"')
+                continue
+            }
+            if ($Backslashes -gt 0) {
+                [void]$Builder.Append(('\' * $Backslashes))
+                $Backslashes = 0
+            }
+            [void]$Builder.Append($Character)
+        }
+        if ($Backslashes -gt 0) {
+            [void]$Builder.Append(('\' * ($Backslashes * 2)))
+        }
+        [void]$Builder.Append('"')
+        $Builder.ToString()
+    }
+
+    return ($Quoted -join " ")
+}
+
+function Invoke-ProcessCapture {
+    param(
+        [string]$FilePath,
+        [string[]]$ArgumentList,
+        [string]$WorkingDirectory = ""
+    )
+
+    $ProcessInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $ProcessInfo.FileName = $FilePath
+    $ProcessInfo.Arguments = Join-ProcessArguments -ArgumentList $ArgumentList
+    if ($WorkingDirectory) {
+        $ProcessInfo.WorkingDirectory = $WorkingDirectory
+    }
+    $ProcessInfo.UseShellExecute = $false
+    $ProcessInfo.RedirectStandardOutput = $true
+    $ProcessInfo.RedirectStandardError = $true
+
+    $Process = [System.Diagnostics.Process]::new()
+    $Process.StartInfo = $ProcessInfo
+    [void]$Process.Start()
+    $StdoutTask = $Process.StandardOutput.ReadToEndAsync()
+    $StderrTask = $Process.StandardError.ReadToEndAsync()
+    $Process.WaitForExit()
+    $Stdout = $StdoutTask.Result
+    $Stderr = $StderrTask.Result
+
+    $OutputParts = @()
+    if (-not [string]::IsNullOrEmpty($Stderr)) { $OutputParts += $Stderr.TrimEnd() }
+    if (-not [string]::IsNullOrEmpty($Stdout)) { $OutputParts += $Stdout.TrimEnd() }
+
+    return [pscustomobject]@{
+        exitCode = [int]$Process.ExitCode
+        stdout = [string]$Stdout
+        stderr = [string]$Stderr
+        output = if ($OutputParts.Count -gt 0) { [string]($OutputParts -join [Environment]::NewLine) } else { "" }
+    }
+}
+
 function Invoke-External {
     param(
         [string]$FilePath,
@@ -87,18 +172,17 @@ function Invoke-External {
         [string]$StepName,
         [switch]$AllowFailure
     )
-    $Output = & $FilePath @ArgumentList 2>&1
-    $Exit = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
-    if (-not $Json -and $Output) {
-        $Output | ForEach-Object { Write-Host $_ }
+    $Result = Invoke-ProcessCapture -FilePath $FilePath -ArgumentList $ArgumentList
+    if (-not $Json -and $Result.output) {
+        $Result.output -split "\r?\n" | ForEach-Object { Write-Host $_ }
     }
-    if ($Exit -ne 0 -and -not $AllowFailure) {
-        throw "$StepName failed with exit code $Exit. Output: $($Output -join [Environment]::NewLine)"
+    if ($Result.exitCode -ne 0 -and -not $AllowFailure) {
+        throw "$StepName failed with exit code $($Result.exitCode). Output: $($Result.output)"
     }
     return [pscustomobject]@{
         step = $StepName
-        exitCode = $Exit
-        output = ($Output -join [Environment]::NewLine)
+        exitCode = $Result.exitCode
+        output = $Result.output
     }
 }
 
@@ -275,17 +359,18 @@ function Invoke-NativeRunnerJson {
     if (-not (Test-Path -LiteralPath $RunnerPath -PathType Leaf)) {
         throw "Native runner was not found at $RunnerPath"
     }
-    $Output = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $RunnerPath @Arguments 2>&1 | Out-String
-    $Exit = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+    $Result = Invoke-ProcessCapture -FilePath "powershell.exe" -ArgumentList (@("-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $RunnerPath) + @($Arguments))
+    $Output = if ($Result.stdout.Trim()) { $Result.stdout } else { $Result.output }
+    $Exit = $Result.exitCode
     try {
         $Payload = $Output | ConvertFrom-Json
     } catch {
-        throw "Native runner did not emit valid JSON. Exit=$Exit Output=$Output"
+        throw "Native runner did not emit valid JSON. Exit=$Exit Output=$($Result.output)"
     }
     return [pscustomobject]@{
         exitCode = $Exit
         payload = $Payload
-        raw = $Output
+        raw = $Result.output
     }
 }
 
@@ -298,9 +383,10 @@ function Get-NativeDoctorJson {
     if ($SdkExamplesDir) { $Args += @("-SdkExamplesDir", $SdkExamplesDir) }
     if ($WorktreeRoot) { $Args += @("-WorktreeRoot", $WorktreeRoot) }
     if ($NativeInstallDir) { $Args += @("-InstallDir", $NativeInstallDir) }
-    $Output = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $DoctorPath @Args 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 0) {
-        throw "Native doctor failed with exit code $LASTEXITCODE. Output: $Output"
+    $Result = Invoke-ProcessCapture -FilePath "powershell.exe" -ArgumentList (@("-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $DoctorPath) + @($Args))
+    $Output = if ($Result.stdout.Trim()) { $Result.stdout } else { $Result.output }
+    if ($Result.exitCode -ne 0) {
+        throw "Native doctor failed with exit code $($Result.exitCode). Output: $($Result.output)"
     }
     return $Output | ConvertFrom-Json
 }
@@ -432,8 +518,9 @@ function Invoke-Phase2NativeSmoke {
         "-AllowWriteFixture",
         "-Json"
     )
-    $Output = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $StartSmokePath @Args 2>&1 | Out-String
-    $Exit = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+    $Result = Invoke-ProcessCapture -FilePath "powershell.exe" -ArgumentList (@("-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $StartSmokePath) + @($Args))
+    $Output = if ($Result.stdout.Trim()) { $Result.stdout } else { $Result.output }
+    $Exit = $Result.exitCode
     $Payload = $null
     try {
         $Payload = $Output | ConvertFrom-Json
@@ -441,14 +528,14 @@ function Invoke-Phase2NativeSmoke {
         $Payload = [pscustomobject]@{
             ok = $false
             failures = @("Phase-2 smoke helper did not emit valid JSON.")
-            raw = $Output
+            raw = $Result.output
         }
     }
     return [pscustomobject]@{
         status = "phase2_smoke_attempt"
         exitCode = $Exit
         payload = $Payload
-        raw = $Output
+        raw = $Result.output
     }
 }
 
@@ -616,21 +703,21 @@ try {
     if (-not $NoVerify) { $BootstrapArgs += "-Verify" }
     if ($SkipClipboard) { $BootstrapArgs += "-SkipClipboard" }
 
-    Push-Location $RepoRoot
-    try {
-        if ($Json) {
-            $BootstrapOutput = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $BootstrapPath @BootstrapArgs 2>&1
-            if ($LASTEXITCODE -ne 0) {
-                throw "bootstrap-agent.ps1 failed with exit code $LASTEXITCODE. Output: $($BootstrapOutput -join [Environment]::NewLine)"
-            }
-        } else {
+    if ($Json) {
+        $BootstrapResult = Invoke-ProcessCapture -FilePath "powershell.exe" -ArgumentList (@("-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $BootstrapPath) + @($BootstrapArgs)) -WorkingDirectory $RepoRoot
+        if ($BootstrapResult.exitCode -ne 0) {
+            throw "bootstrap-agent.ps1 failed with exit code $($BootstrapResult.exitCode). Output: $($BootstrapResult.output)"
+        }
+    } else {
+        Push-Location $RepoRoot
+        try {
             & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $BootstrapPath @BootstrapArgs
             if ($LASTEXITCODE -ne 0) {
                 throw "bootstrap-agent.ps1 failed with exit code $LASTEXITCODE"
             }
+        } finally {
+            Pop-Location
         }
-    } finally {
-        Pop-Location
     }
 
     $NativeSummary = $null
