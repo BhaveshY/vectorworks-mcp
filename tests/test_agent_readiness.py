@@ -109,13 +109,18 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("native_summary.next_command", agent_install)
         self.assertIn("vectorworks_interaction_required", agent_install)
         self.assertIn("native_summary.missing_allow_flags", agent_install)
+        self.assertIn("native_summary.acceptance_next_command", agent_install)
+        self.assertIn("vectorworks_automation_attempted", agent_install)
+        setup_skill = (ROOT / "plugins/vectorworks/skills/setup/SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("automatically opens or restarts Vectorworks", setup_skill)
+        self.assertIn("native_summary.acceptance_next_command", setup_skill)
         self.assertIn("/plugin marketplace add BhaveshY/vectorworks-mcp", agent_install)
 
     def test_companion_contract_marker_exists(self):
         marker = json.loads((ROOT / ".vectorworks-mcp-contract.json").read_text(encoding="utf-8"))
 
         self.assertEqual(marker["name"], "vectorworks-mcp")
-        self.assertGreaterEqual(marker["contractVersion"], 13)
+        self.assertGreaterEqual(marker["contractVersion"], 14)
         for feature in (
             "stable-loader",
             "loader-clipboard-copy",
@@ -127,6 +132,7 @@ class AgentReadinessTests(unittest.TestCase):
             "native-doctor-next-runner",
             "native-runner-spec-validation",
             "native-sdk-archive-reuse",
+            "native-vectorworks-auto-smoke",
             "native-phase0-transport",
             "native-phase1-cad-handlers",
             "native-phase2-cad-handlers",
@@ -154,6 +160,7 @@ class AgentReadinessTests(unittest.TestCase):
             "scripts/register-claude-code.ps1",
             "scripts/run-mcp-server.ps1",
             "scripts/smoke-native-bridge.ps1",
+            "scripts/start-vectorworks-native-smoke.ps1",
             "scripts/test-native-bridge-scaffold.ps1",
             "scripts/verify-no-vectorworks.ps1",
             "scripts/wire-native-bridge-project.ps1",
@@ -189,9 +196,17 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("AllowDownloadLargeFiles", install)
         self.assertIn("AllowModifyVectorworksUserPlugins", install)
         self.assertIn("AllowRebootRisk", install)
+        self.assertIn("SkipVectorworksAutomation", install)
+        self.assertIn("ForceVectorworksRestart", install)
+        self.assertIn('"-AllowVectorworksRestartStep"', install)
+        self.assertNotIn('if ($AllowVectorworksSmoke) { $BaseArgs += "-AllowVectorworksRestartStep" }', install)
+        self.assertIn("start-vectorworks-native-smoke.ps1", install)
+        self.assertIn("vectorworks_automation_attempted", install)
         self.assertIn("vectorworks_interaction_required", install)
         self.assertIn("native_production_ready", install)
+        self.assertIn("acceptance_next_command", install)
         self.assertIn("phase0_smoke_tested", install)
+        self.assertIn("phase2_smoke_attempted", install)
         self.assertIn("phase2_smoke_tested", install)
         self.assertIn("vw_load_listener_2024.py", install)
         self.assertIn(".mcp.json", install)
@@ -541,7 +556,7 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIn("runpy.run_path", loader_text)
             _assert_path_in_text(self, launcher_path, loader_text)
             self.assertIn("VW_MCP_LOADER_METADATA", loader_text)
-            self.assertIn('"contractVersion": 13', loader_text)
+            self.assertIn('"contractVersion": 14', loader_text)
             self.assertIn('"native-bridge-scaffold-copy"', loader_text)
             self.assertIn('"native-doctor-next-command"', loader_text)
             self.assertIn('"native-doctor-command-spec"', loader_text)
@@ -549,6 +564,7 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIn('"native-doctor-next-runner"', loader_text)
             self.assertIn('"native-runner-spec-validation"', loader_text)
             self.assertIn('"native-sdk-archive-reuse"', loader_text)
+            self.assertIn('"native-vectorworks-auto-smoke"', loader_text)
             self.assertIn('"native-phase0-transport"', loader_text)
             self.assertIn('"native-phase1-cad-handlers"', loader_text)
             self.assertIn('"native-phase2-cad-handlers"', loader_text)
@@ -661,6 +677,7 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("kCadHandlersImplemented", combined)
         self.assertIn("IsUserVisibleObjectType", combined)
         self.assertIn("kUndoPlaceholderNode", combined)
+        self.assertIn("OpenDocumentPath(nullptr, false)", combined)
         self.assertIn('GetBoundedIntParam(params, "limit", 1000, 1, 1000)', combined)
         self.assertIn("native bridge phase 0 CAD handlers are not implemented", combined)
         self.assertIn("native bridge CAD handlers are not ready: main context pump is not running", combined)
@@ -1563,6 +1580,7 @@ if ($Json) {
 
     def test_native_smoke_script_is_documented(self):
         smoke_script = (ROOT / "scripts/smoke-native-bridge.ps1").read_text(encoding="utf-8")
+        start_smoke_script = (ROOT / "scripts/start-vectorworks-native-smoke.ps1").read_text(encoding="utf-8")
         acceptance = (ROOT / "native_bridge/ACCEPTANCE.md").read_text(encoding="utf-8")
         native_readme = (ROOT / "native_bridge/README.md").read_text(encoding="utf-8")
         protocol = (ROOT / "native_bridge/PROTOCOL.md").read_text(encoding="utf-8")
@@ -1576,6 +1594,11 @@ if ($Json) {
         self.assertIn("--max-read-ms", smoke_script)
         self.assertIn("--phase", smoke_script)
         self.assertIn("--allow-write-fixture", smoke_script)
+        self.assertIn("Start-Process", start_smoke_script)
+        self.assertIn("Resolve-VectorworksExe", start_smoke_script)
+        self.assertIn("Wait-PortOpen", start_smoke_script)
+        self.assertIn("smoke-native-bridge.ps1", start_smoke_script)
+        self.assertIn("RunPhase2", start_smoke_script)
         self.assertIn("smoke-native-bridge.ps1", acceptance)
         self.assertIn("schema failures", acceptance)
         self.assertIn("main_context_pump_ready: true", acceptance)
@@ -1606,12 +1629,12 @@ if ($Json) {
             root_readme,
         )
         self.assertIn(
-            "powershell -ExecutionPolicy Bypass -File .\\scripts\\doctor-native-bridge.ps1 -BuiltArtifact C:\\path\\to\\ObjectExample.vlb -Install\n# Restart Vectorworks",
+            "powershell -ExecutionPolicy Bypass -File .\\scripts\\doctor-native-bridge.ps1 -BuiltArtifact C:\\path\\to\\ObjectExample.vlb -Install\n# Start/restart Vectorworks",
             root_readme,
         )
-        self.assertIn("enable/load the installed plug-in", root_readme)
+        self.assertIn("waits for the native bridge socket", root_readme)
         self.assertIn("ObjectExample.vlb", root_readme)
-        self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", root_readme)
+        self.assertIn("start-vectorworks-native-smoke.ps1 -VectorworksVersion", root_readme)
         self.assertIn("wire-native-bridge-project.ps1", root_readme)
         self.assertIn("nextCommand", root_readme)
         self.assertIn("nextCommandReason", root_readme)
@@ -1627,7 +1650,7 @@ if ($Json) {
             "doctor-native-bridge.ps1 -BuiltArtifact C:\\path\\to\\ObjectExample.vlb -Install",
             agents,
         )
-        self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", agents)
+        self.assertIn("start-vectorworks-native-smoke.ps1 -VectorworksVersion", agents)
         self.assertIn("wire-native-bridge-project.ps1", agents)
         self.assertIn("nextCommand", agents)
         self.assertIn("nextCommandReason", agents)
@@ -1658,7 +1681,7 @@ if ($Json) {
         self.assertIn("wire-native-bridge-project.ps1", doctor)
         self.assertIn("wire-native-project", doctor)
         self.assertIn("without -WhatIf", doctor)
-        self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", doctor)
+        self.assertIn("start-vectorworks-native-smoke.ps1", doctor)
 
         runner = (ROOT / "scripts/invoke-native-bridge-next.ps1").read_text(encoding="utf-8")
         self.assertIn("doctor-native-bridge.ps1", runner)
@@ -1804,11 +1827,12 @@ if ($Json) {
             self.assertTrue(report["installPerformed"])
             self.assertFalse(report["installWhatIf"])
             self.assertTrue(report["installedArtifactMatchesCandidate"])
-            self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", "\n".join(report["nextActions"]))
+            self.assertIn("start-vectorworks-native-smoke.ps1 -VectorworksVersion 2025 -RestartIfRunning -Json", "\n".join(report["nextActions"]))
             self.assertIn("nextCommand", report)
             self.assertIn("nextCommandReason", report)
-            self.assertIn("smoke-native-bridge.ps1 -Phase 0 -Stop -Json", report["nextCommand"])
-            self.assertIn("Restart Vectorworks", report["nextCommandReason"])
+            self.assertIn("start-vectorworks-native-smoke.ps1", report["nextCommand"])
+            self.assertIn("-VectorworksVersion 2025", report["nextCommand"])
+            self.assertIn("Open or restart Vectorworks automatically", report["nextCommandReason"])
             self.assertEqual(report["nextCommandSpec"]["stage"], "smoke-phase-0")
             self.assertTrue(report["nextCommandSpec"]["requiresVectorworksRestartBeforeRun"])
 
@@ -1860,6 +1884,7 @@ if ($Json) {
             self.assertNotIn("-Install -WhatIf", report["nextCommand"])
             self.assertEqual(report["nextCommandSpec"]["stage"], "smoke-phase-0")
             self.assertIn("already matches the installed", report["nextCommandReason"])
+            self.assertIn("start-vectorworks-native-smoke.ps1", report["nextCommand"])
 
     def test_native_doctor_whatif_install_is_non_mutating(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")

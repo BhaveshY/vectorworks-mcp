@@ -21,6 +21,7 @@ $PreparePath = Join-Path $PSScriptRoot "prepare-native-bridge-source.ps1"
 $BuildPath = Join-Path $PSScriptRoot "build-native-bridge.ps1"
 $WirePath = Join-Path $PSScriptRoot "wire-native-bridge-project.ps1"
 $SmokePath = Join-Path $PSScriptRoot "smoke-native-bridge.ps1"
+$StartSmokePath = Join-Path $PSScriptRoot "start-vectorworks-native-smoke.ps1"
 $WorktreeRootWasExplicit = -not [string]::IsNullOrWhiteSpace($WorktreeRoot)
 if (-not $WorktreeRoot) {
     $WorktreeRoot = Join-Path $RepoRoot "native_bridge\worktree\SDKExamples"
@@ -241,6 +242,9 @@ if (-not (Test-Path -LiteralPath $PrereqPath)) {
 if (-not (Test-Path -LiteralPath $WirePath)) {
     throw "Native project wiring helper not found at $WirePath"
 }
+if (-not (Test-Path -LiteralPath $StartSmokePath)) {
+    throw "Native Vectorworks launch/smoke helper not found at $StartSmokePath"
+}
 
 $PrereqArgs = @("-VectorworksVersion", $VectorworksVersion, "-Advisory", "-Json")
 if ($SdkDirWasExplicit) { $PrereqArgs += @("-SdkDir", $SdkDir) }
@@ -366,7 +370,7 @@ if ($SourcePrepared -and $SolutionPath -and $ScaffoldCopied -and -not $ProjectWi
     Add-NextAction $NextActions "Run scripts\wire-native-bridge-project.ps1 -VectorworksVersion $VectorworksVersion"
 }
 if ($InstallCandidate -and $InstalledArtifactMatchesCandidate -and -not $Install -and -not $InstallPerformed) {
-    Add-NextAction $NextActions "Restart Vectorworks $VectorworksVersion, enable/load the native bridge plug-in, then run scripts\smoke-native-bridge.ps1 -Phase 0 -Stop -Json first."
+    Add-NextAction $NextActions "Run scripts\start-vectorworks-native-smoke.ps1 -VectorworksVersion $VectorworksVersion -RestartIfRunning -Json to restart/open Vectorworks and run the phase-0 transport smoke automatically."
 }
 if ($InstallCandidate -and -not $Install -and -not $InstalledArtifactMatchesCandidate) {
     Add-NextAction $NextActions "Dry-run install: scripts\doctor-native-bridge.ps1 -BuiltArtifact `"$InstallCandidate`" -Install -WhatIf"
@@ -376,7 +380,7 @@ if ($Install -and $InstallArtifact -and -not $InstallPerformed) {
     Add-NextAction $NextActions "Dry-run only: rerun scripts\doctor-native-bridge.ps1 -BuiltArtifact `"$InstallArtifact`" -Install without -WhatIf to copy the bridge artifact."
 }
 if ($InstallPerformed) {
-    Add-NextAction $NextActions "Restart Vectorworks $VectorworksVersion, enable/load the native bridge plug-in, then run scripts\smoke-native-bridge.ps1 -Phase 0 -Stop -Json first."
+    Add-NextAction $NextActions "Run scripts\start-vectorworks-native-smoke.ps1 -VectorworksVersion $VectorworksVersion -RestartIfRunning -Json to restart/open Vectorworks and run the phase-0 transport smoke automatically."
 }
 if ($NextActions.Count -eq 0) {
     Add-NextAction $NextActions "Complete native bridge source, build it, then rerun this doctor with -BuiltArtifact."
@@ -388,15 +392,15 @@ $NextCommandSpec = $null
 
 if ($InstallPerformed -or ($InstallCandidate -and $InstalledArtifactMatchesCandidate -and -not $Install)) {
     $SmokeArgs = [System.Collections.Generic.List[string]]::new()
-    Add-NamedCommandArgument $SmokeArgs "Phase" "0"
-    Add-SwitchCommandArgument $SmokeArgs "Stop" $true
+    Add-NamedCommandArgument $SmokeArgs "VectorworksVersion" $VectorworksVersion
+    Add-SwitchCommandArgument $SmokeArgs "RestartIfRunning" $true
     Add-SwitchCommandArgument $SmokeArgs "Json" $true
     $SmokeReason = if ($InstallPerformed) {
-        "The native bridge artifact was installed. Restart Vectorworks, load the plug-in, then run the phase-0 transport smoke."
+        "The native bridge artifact was installed. Open or restart Vectorworks automatically, wait for the native plug-in, then run the phase-0 transport smoke."
     } else {
-        "The native bridge artifact already matches the installed Vectorworks plug-in. Restart Vectorworks, load the plug-in, then run the phase-0 transport smoke."
+        "The native bridge artifact already matches the installed Vectorworks plug-in. Open or restart Vectorworks automatically, wait for the native plug-in, then run the phase-0 transport smoke."
     }
-    Set-NextCommandPlan -ScriptName "smoke-native-bridge.ps1" -Arguments $SmokeArgs -Stage "smoke-phase-0" -Reason $SmokeReason -RequiresVectorworksRestartBeforeRun $true
+    Set-NextCommandPlan -ScriptName "start-vectorworks-native-smoke.ps1" -Arguments $SmokeArgs -Stage "smoke-phase-0" -Reason $SmokeReason -RequiresVectorworksRestartBeforeRun $true
 } elseif ($Install -and $InstallArtifact -and -not $InstallPerformed) {
     $DoctorArgs = [System.Collections.Generic.List[string]]::new()
     Add-NamedCommandArgument $DoctorArgs "VectorworksVersion" $VectorworksVersion

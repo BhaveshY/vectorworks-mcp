@@ -47,9 +47,10 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -F
 ```
 
 If the result has `setup_complete: true` but `native_summary.next_stage:
-smoke-phase-0`, the MCP is usable and the native bridge has reached the
-Vectorworks UI boundary. Tell the user to open/restart Vectorworks, load the
-native plug-in, then run `native_summary.next_command`.
+smoke-phase-0`, the MCP is usable and the installer already automatically opens or restarts Vectorworks and attempts native smoke. If Vectorworks blocks
+automation with license, recovery, startup, or plug-in approval prompts, report
+`native_summary.next_command` or `native_summary.acceptance_next_command` as
+the exact resume command after the prompt is cleared.
 
 Then use the repo `.mcp.json`, or configure the same `powershell.exe -File
 scripts\run-mcp-server.ps1` stdio server with an absolute path if the client

@@ -6,7 +6,7 @@ param(
     [string]$InstallRepoUrl = "https://github.com/BhaveshY/vectorworks-mcp.git",
     [switch]$RequireContract,
     [ValidateRange(1, 100)]
-    [int]$MinimumContractVersion = 13,
+    [int]$MinimumContractVersion = 14,
     [string[]]$RequiredFeatures = @("stable-loader", "loader-clipboard-copy", "native-bridge-scaffold", "native-bridge-scaffold-copy", "native-doctor-next-command", "native-doctor-command-spec", "native-bridge-project-wire", "native-doctor-next-runner", "native-runner-spec-validation", "native-sdk-archive-reuse", "native-phase0-transport", "native-phase1-cad-handlers", "native-phase2-cad-handlers", "local-auth-token-required", "client-neutral-project-mcp")
 )
 

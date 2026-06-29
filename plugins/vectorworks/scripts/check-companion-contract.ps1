@@ -41,11 +41,12 @@ $RequiredScripts = @(
     "scripts\build-native-bridge.ps1",
     "scripts\wire-native-bridge-project.ps1",
     "scripts\smoke-native-bridge.ps1",
+    "scripts\start-vectorworks-native-smoke.ps1",
     "scripts\copy-native-bridge-scaffold.ps1",
     "scripts\test-native-bridge-scaffold.ps1"
 )
 
-$RequiredFeatures = @("stable-loader", "loader-clipboard-copy", "native-bridge-scaffold", "native-bridge-scaffold-copy", "native-doctor-next-command", "native-doctor-command-spec", "native-bridge-project-wire", "native-doctor-next-runner", "native-runner-spec-validation", "native-sdk-archive-reuse", "native-phase0-transport", "native-phase1-cad-handlers", "native-phase2-cad-handlers", "local-auth-token-required", "client-neutral-project-mcp")
+$RequiredFeatures = @("stable-loader", "loader-clipboard-copy", "native-bridge-scaffold", "native-bridge-scaffold-copy", "native-doctor-next-command", "native-doctor-command-spec", "native-bridge-project-wire", "native-doctor-next-runner", "native-runner-spec-validation", "native-sdk-archive-reuse", "native-vectorworks-auto-smoke", "native-phase0-transport", "native-phase1-cad-handlers", "native-phase2-cad-handlers", "local-auth-token-required", "client-neutral-project-mcp")
 
 $ContractMarker = Join-Path $RepoRoot ".vectorworks-mcp-contract.json"
 if (-not (Test-Path -LiteralPath $ContractMarker)) {
@@ -59,10 +60,10 @@ try {
 try {
     $ContractVersion = [int]$Contract.contractVersion
 } catch {
-    throw "Companion repo contract marker is incompatible. Expected numeric contractVersion >= 13."
+    throw "Companion repo contract marker is incompatible. Expected numeric contractVersion >= 14."
 }
-if ($Contract.name -ne "vectorworks-mcp" -or $ContractVersion -lt 13) {
-    throw "Companion repo contract marker is incompatible. Expected vectorworks-mcp contractVersion >= 13."
+if ($Contract.name -ne "vectorworks-mcp" -or $ContractVersion -lt 14) {
+    throw "Companion repo contract marker is incompatible. Expected vectorworks-mcp contractVersion >= 14."
 }
 $ContractFeatures = @($Contract.requiredFeatures | ForEach-Object { [string]$_ })
 foreach ($RequiredFeature in $RequiredFeatures) {
@@ -453,6 +454,7 @@ $WrapperParamContracts = @{
     "scripts\wire-native-bridge-project.ps1" = "scripts\wire-native-bridge-project.ps1"
     "scripts\invoke-native-bridge-next.ps1" = "scripts\invoke-native-bridge-next.ps1"
     "scripts\smoke-native-bridge.ps1" = "scripts\smoke-native-bridge.ps1"
+    "scripts\start-vectorworks-native-smoke.ps1" = "scripts\start-vectorworks-native-smoke.ps1"
     "scripts\copy-native-bridge-scaffold.ps1" = "scripts\copy-native-bridge-scaffold.ps1"
 }
 foreach ($RelativeWrapper in $WrapperParamContracts.Keys) {

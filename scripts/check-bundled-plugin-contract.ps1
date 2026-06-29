@@ -72,6 +72,7 @@ $RequiredFiles = @(
     "scripts\build-native-bridge.ps1",
     "scripts\wire-native-bridge-project.ps1",
     "scripts\smoke-native-bridge.ps1",
+    "scripts\start-vectorworks-native-smoke.ps1",
     "skills\setup\SKILL.md",
     "skills\ping\SKILL.md",
     "skills\diagnose\SKILL.md",
@@ -143,7 +144,8 @@ foreach ($RelativePath in @(
     "scripts\prepare-native-bridge-source.ps1",
     "scripts\build-native-bridge.ps1",
     "scripts\wire-native-bridge-project.ps1",
-    "scripts\smoke-native-bridge.ps1"
+    "scripts\smoke-native-bridge.ps1",
+    "scripts\start-vectorworks-native-smoke.ps1"
 )) {
     $Text = Get-Content -Raw -LiteralPath (Join-Path $BundledPlugin $RelativePath)
     if ($Text -notmatch "RequireContract") {
@@ -204,6 +206,7 @@ if ($StandalonePluginPath) {
         "scripts\build-native-bridge.ps1",
         "scripts\wire-native-bridge-project.ps1",
         "scripts\smoke-native-bridge.ps1",
+        "scripts\start-vectorworks-native-smoke.ps1",
         "skills\setup\SKILL.md",
         "skills\ping\SKILL.md",
         "skills\diagnose\SKILL.md",

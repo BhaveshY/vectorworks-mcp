@@ -1248,6 +1248,15 @@ MCObjectHandle EnsureWritableLayer() {
         layer = gSDK->GetCurrentLayer();
     }
     if (!layer) {
+        // Vectorworks can start on the Home/no-document screen. Open the
+        // default blank document before write smoke or production writes.
+        gSDK->OpenDocumentPath(nullptr, false);
+        layer = gSDK->GetActiveLayer();
+        if (!layer) {
+            layer = gSDK->GetCurrentLayer();
+        }
+    }
+    if (!layer) {
         const auto layers = CollectLayerHandles();
         if (!layers.empty()) {
             layer = layers.front();

@@ -18,6 +18,8 @@ param(
     [string]$WorktreeRoot = "",
     [string]$NativeInstallDir = "",
     [switch]$AllowVectorworksSmoke,
+    [switch]$SkipVectorworksAutomation,
+    [switch]$ForceVectorworksRestart,
     [switch]$Json
 )
 
@@ -311,6 +313,20 @@ function Get-LastNativeStep {
     return $null
 }
 
+function Test-NativeStepSucceeded {
+    param(
+        [object]$NativeRunnerResult,
+        [string]$Stage
+    )
+    $LastStep = Get-LastNativeStep $NativeRunnerResult
+    return [bool](
+        $LastStep -and
+        [string]$LastStep.stage -eq $Stage -and
+        [bool]$LastStep.executed -and
+        [int]$LastStep.exitCode -eq 0
+    )
+}
+
 function Test-VectorworksInteractionBoundary {
     param(
         [object]$NativeRunnerResult,
@@ -330,12 +346,20 @@ function New-NativeSummary {
         [object]$NativeRunnerResult,
         [int]$NativeExitCode,
         [object]$Doctor,
-        [object[]]$Runs
+        [object[]]$Runs,
+        [object]$Phase2SmokeResult = $null
     )
     $LastStep = Get-LastNativeStep $NativeRunnerResult
     $InteractionBoundary = Test-VectorworksInteractionBoundary -NativeRunnerResult $NativeRunnerResult -Doctor $Doctor
-    $Phase0SmokeTested = [bool]($LastStep -and [string]$LastStep.stage -eq "smoke-phase-0" -and [bool]$LastStep.executed -and [int]$LastStep.exitCode -eq 0)
-    $Phase2SmokeTested = $false
+    $VectorworksAutomationAttempted = [bool]($LastStep -and [string]$LastStep.stage -eq "smoke-phase-0" -and [bool]$LastStep.executed)
+    $Phase0SmokeTested = Test-NativeStepSucceeded -NativeRunnerResult $NativeRunnerResult -Stage "smoke-phase-0"
+    $Phase2SmokeAttempted = [bool]$Phase2SmokeResult
+    $Phase2SmokeTested = [bool](
+        $Phase2SmokeResult -and
+        [int]$Phase2SmokeResult.exitCode -eq 0 -and
+        $Phase2SmokeResult.payload -and
+        [bool]$Phase2SmokeResult.payload.ok
+    )
     $NativeProductionReady = [bool]($Phase0SmokeTested -and $Phase2SmokeTested)
     $NativeFatal = [bool]($NativeExitCode -ne 0 -and -not $InteractionBoundary)
     $Installed = [bool]($Doctor.installedArtifactMatchesCandidate -or $Doctor.installedPath)
@@ -355,7 +379,9 @@ function New-NativeSummary {
         bridge_built = $Built
         bridge_installed = $Installed
         bridge_smoke_tested = $Phase0SmokeTested -or $Phase2SmokeTested
+        vectorworks_automation_attempted = $VectorworksAutomationAttempted
         phase0_smoke_tested = $Phase0SmokeTested
+        phase2_smoke_attempted = $Phase2SmokeAttempted
         phase2_smoke_tested = $Phase2SmokeTested
         native_production_ready = $NativeProductionReady
         vectorworks_interaction_required = ($InteractionBoundary -or $Phase0SmokeTested) -and -not $NativeProductionReady
@@ -364,16 +390,22 @@ function New-NativeSummary {
         installed_path = [string]$Doctor.installedPath
         next_command = [string]$Doctor.nextCommand
         next_reason = [string]$Doctor.nextCommandReason
-        acceptance_next_command = if ($Phase0SmokeTested -and -not $Phase2SmokeTested) {
-            "Reload/enable the native bridge plug-in in Vectorworks, then run: powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Phase 2 -PingCount 3 -ReadCount 2 -IncludeObjects -AllowWriteFixture -Json"
+        acceptance_next_command = if ($NativeProductionReady) {
+            ""
+        } elseif ($Phase0SmokeTested -and -not $Phase2SmokeTested) {
+            "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-vectorworks-native-smoke.ps1 -VectorworksVersion $VectorworksVersion -RestartIfRunning -RunPhase2 -AllowWriteFixture -Json"
         } else {
             [string]$Doctor.nextCommand
         }
         next_actions = @($Doctor.nextActions | ForEach-Object { [string]$_ })
-        exact_remaining_action = if ($Phase0SmokeTested -and -not $Phase2SmokeTested) {
-            "Phase-0 native transport smoke passed and stopped the bridge. Reload/enable the native plug-in in Vectorworks, then run the phase-2 disposable-document smoke command in native.acceptance_next_command before claiming native production readiness."
+        exact_remaining_action = if ($Phase0SmokeTested -and $Phase2SmokeAttempted -and -not $Phase2SmokeTested) {
+            "Phase-0 native transport smoke passed, then automated phase-2 production smoke was attempted but did not pass. Open Vectorworks $VectorworksVersion to a usable document, resolve any startup/license prompts, then rerun native.acceptance_next_command."
+        } elseif ($Phase0SmokeTested -and -not $Phase2SmokeTested) {
+            "Phase-0 native transport smoke passed and stopped the bridge. Run native.acceptance_next_command to restart/open Vectorworks and attempt the phase-2 disposable-document production smoke before claiming native production readiness."
+        } elseif ($InteractionBoundary -and -not $NativeProductionReady -and $VectorworksAutomationAttempted) {
+            "The installer attempted to open/restart Vectorworks $VectorworksVersion and run smoke. Resolve any Vectorworks startup/license/plugin prompts, then rerun the smoke command from native.next_command."
         } elseif ($InteractionBoundary -and -not $NativeProductionReady) {
-            "Open or restart Vectorworks $VectorworksVersion, load/enable the installed native plug-in, then run the smoke command from native.next_command."
+            "Vectorworks automation was skipped or blocked by safety flags. Run native.next_command to let the agent open/restart Vectorworks and run native smoke."
         } elseif ($NativeFatal) {
             "Fix the native runner failure in native.runs[-1], then rerun install.ps1 -FullNative."
         } elseif ($NativeProductionReady) {
@@ -382,7 +414,41 @@ function New-NativeSummary {
             [string]$Doctor.nextActions[0]
         }
         runs = @($Runs)
+        phase2_smoke = $Phase2SmokeResult
         doctor = $Doctor
+    }
+}
+
+function Invoke-Phase2NativeSmoke {
+    param([string]$RepoRoot)
+    $StartSmokePath = Join-Path $RepoRoot "scripts\start-vectorworks-native-smoke.ps1"
+    if (-not (Test-Path -LiteralPath $StartSmokePath -PathType Leaf)) {
+        throw "Native Vectorworks launch/smoke helper was not found at $StartSmokePath"
+    }
+    $Args = @(
+        "-VectorworksVersion", $VectorworksVersion,
+        "-RestartIfRunning",
+        "-RunPhase2",
+        "-AllowWriteFixture",
+        "-Json"
+    )
+    $Output = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $StartSmokePath @Args 2>&1 | Out-String
+    $Exit = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+    $Payload = $null
+    try {
+        $Payload = $Output | ConvertFrom-Json
+    } catch {
+        $Payload = [pscustomobject]@{
+            ok = $false
+            failures = @("Phase-2 smoke helper did not emit valid JSON.")
+            raw = $Output
+        }
+    }
+    return [pscustomobject]@{
+        status = "phase2_smoke_attempt"
+        exitCode = $Exit
+        payload = $Payload
+        raw = $Output
     }
 }
 
@@ -399,7 +465,7 @@ function Invoke-FullNativeInstall {
         "-AllowModifyVectorworksUserPlugins",
         "-AllowRebootRisk"
     )
-    if ($AllowVectorworksSmoke) { $BaseArgs += "-AllowVectorworksRestartStep" }
+    if (-not $SkipVectorworksAutomation) { $BaseArgs += "-AllowVectorworksRestartStep" }
     if ($SdkDir) { $BaseArgs += @("-SdkDir", $SdkDir) }
     if ($SdkArchivePath) { $BaseArgs += @("-SdkArchivePath", $SdkArchivePath) }
     if ($SdkExamplesDir) { $BaseArgs += @("-SdkExamplesDir", $SdkExamplesDir) }
@@ -407,22 +473,41 @@ function Invoke-FullNativeInstall {
     if ($NativeInstallDir) { $BaseArgs += @("-InstallDir", $NativeInstallDir) }
 
     $Runs = [System.Collections.Generic.List[object]]::new()
-    $First = Invoke-NativeRunnerJson -RepoRoot $RepoRoot -Arguments $BaseArgs
-    $Runs.Add($First.payload) | Out-Null
-    $Doctor = Get-NativeDoctorJson -RepoRoot $RepoRoot
-    $FinalPayload = $First.payload
-    $FinalExit = $First.exitCode
+    $OldForceRestart = $env:VW_MCP_FORCE_VECTORWORKS_RESTART
+    try {
+        if ($ForceVectorworksRestart) {
+            $env:VW_MCP_FORCE_VECTORWORKS_RESTART = "1"
+        }
 
-    if ([string]$First.payload.status -eq "dry_run_executed" -and $Doctor.builtArtifactCandidate) {
-        $InstallArgs = @($BaseArgs) + @("-BuiltArtifact", [string]$Doctor.builtArtifactCandidate, "-Install")
-        $Second = Invoke-NativeRunnerJson -RepoRoot $RepoRoot -Arguments $InstallArgs
-        $Runs.Add($Second.payload) | Out-Null
+        $First = Invoke-NativeRunnerJson -RepoRoot $RepoRoot -Arguments $BaseArgs
+        $Runs.Add($First.payload) | Out-Null
         $Doctor = Get-NativeDoctorJson -RepoRoot $RepoRoot
-        $FinalPayload = $Second.payload
-        $FinalExit = $Second.exitCode
-    }
+        $FinalPayload = $First.payload
+        $FinalExit = $First.exitCode
 
-    return New-NativeSummary -NativeRunnerResult $FinalPayload -NativeExitCode $FinalExit -Doctor $Doctor -Runs @($Runs)
+        if ([string]$First.payload.status -eq "dry_run_executed" -and $Doctor.builtArtifactCandidate) {
+            $InstallArgs = @($BaseArgs) + @("-BuiltArtifact", [string]$Doctor.builtArtifactCandidate, "-Install")
+            $Second = Invoke-NativeRunnerJson -RepoRoot $RepoRoot -Arguments $InstallArgs
+            $Runs.Add($Second.payload) | Out-Null
+            $Doctor = Get-NativeDoctorJson -RepoRoot $RepoRoot
+            $FinalPayload = $Second.payload
+            $FinalExit = $Second.exitCode
+        }
+
+        $Phase2SmokeResult = $null
+        if (-not $SkipVectorworksAutomation -and (Test-NativeStepSucceeded -NativeRunnerResult $FinalPayload -Stage "smoke-phase-0")) {
+            $Phase2SmokeResult = Invoke-Phase2NativeSmoke -RepoRoot $RepoRoot
+            $Runs.Add($Phase2SmokeResult) | Out-Null
+        }
+
+        return New-NativeSummary -NativeRunnerResult $FinalPayload -NativeExitCode $FinalExit -Doctor $Doctor -Runs @($Runs) -Phase2SmokeResult $Phase2SmokeResult
+    } finally {
+        if ($null -eq $OldForceRestart) {
+            Remove-Item Env:\VW_MCP_FORCE_VECTORWORKS_RESTART -ErrorAction SilentlyContinue
+        } else {
+            $env:VW_MCP_FORCE_VECTORWORKS_RESTART = $OldForceRestart
+        }
+    }
 }
 
 function New-InstallPayload {
@@ -444,11 +529,14 @@ function New-InstallPayload {
             next_stage = [string]$Native.current_stage
             next_command = [string]$Native.next_command
             next_reason = [string]$Native.next_reason
+            acceptance_next_command = [string]$Native.acceptance_next_command
             missing_allow_flags = @($Native.missing_allow_flags)
             prereqs_ready = [bool]$Native.prereqs_ready
             bridge_built = [bool]$Native.bridge_built
             bridge_installed = [bool]$Native.bridge_installed
+            vectorworks_automation_attempted = [bool]$Native.vectorworks_automation_attempted
             phase0_smoke_tested = [bool]$Native.phase0_smoke_tested
+            phase2_smoke_attempted = [bool]$Native.phase2_smoke_attempted
             phase2_smoke_tested = [bool]$Native.phase2_smoke_tested
             vectorworks_interaction_required = [bool]$Native.vectorworks_interaction_required
         }
@@ -474,7 +562,9 @@ function New-InstallPayload {
         native_summary = $NativeSummary
         native = $Native
         user_message = $Message
-        next_action = if ($Ok -and $Native -and $Native.vectorworks_interaction_required) {
+        next_action = if ($Ok -and $Native -and $Native.native_production_ready) {
+            "Native bridge acceptance smoke passed. Trust or reload the MCP client, then use vw_ping and production CAD tools."
+        } elseif ($Ok -and $Native -and $Native.vectorworks_interaction_required) {
             $Native.exact_remaining_action
         } elseif ($Ok) {
             "Trust or add the repo .mcp.json in your MCP client, run vw_load_listener_2024.py in Vectorworks, then call vw_ping."
@@ -482,7 +572,7 @@ function New-InstallPayload {
             "Fix the reported installer error, then rerun install.ps1."
         }
         native_note = if ($FullNative) {
-            "Full native setup is attempted up to the Vectorworks UI boundary. The installer does not claim native production readiness until the smoke test passes after Vectorworks loads the plug-in."
+            "Full native setup attempts to open/restart Vectorworks and run native smoke automatically. The installer does not claim native production readiness until phase-0 and phase-2 smoke pass."
         } else {
             "The native SDK bridge is an optional non-modal upgrade. Run install.ps1 -FullNative to build/install it on this PC."
         }
@@ -551,7 +641,9 @@ try {
         }
     }
 
-    $Message = if ($FullNative -and $NativeSummary.vectorworks_interaction_required) {
+    $Message = if ($FullNative -and $NativeSummary.native_production_ready) {
+        "Vectorworks MCP installed. Native bridge is built, installed, and smoke-tested."
+    } elseif ($FullNative -and $NativeSummary.vectorworks_interaction_required) {
         "Vectorworks MCP installed. Native bridge is built/installed and waiting for Vectorworks plug-in load plus smoke test."
     } else {
         "Vectorworks MCP installed and usable now with the Python dialog fallback."

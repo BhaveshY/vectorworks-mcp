@@ -14,7 +14,7 @@ param(
     [double]$MaxPingMilliseconds = 0,
     [ValidateRange(0, 600000)]
     [double]$MaxReadMilliseconds = 0,
-    [ValidateRange(0, 1)]
+    [ValidateRange(0, 2)]
     [int]$Phase = 1,
     [switch]$AllowNonNative,
     [switch]$IncludeObjects,

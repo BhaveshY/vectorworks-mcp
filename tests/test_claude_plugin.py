@@ -81,6 +81,7 @@ class ClaudePluginTests(unittest.TestCase):
             "scripts/build-native-bridge.ps1",
             "scripts/wire-native-bridge-project.ps1",
             "scripts/smoke-native-bridge.ps1",
+            "scripts/start-vectorworks-native-smoke.ps1",
         ):
             self.assertTrue((PLUGIN / relative_path).exists(), relative_path)
 
@@ -267,6 +268,7 @@ class ClaudePluginTests(unittest.TestCase):
             "scripts/build-native-bridge.ps1",
             "scripts/wire-native-bridge-project.ps1",
             "scripts/smoke-native-bridge.ps1",
+            "scripts/start-vectorworks-native-smoke.ps1",
         ):
             text = (PLUGIN / relative_path).read_text(encoding="utf-8")
             self.assertIn("-RequireContract", text, relative_path)
@@ -284,9 +286,9 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("-LoaderPath", bootstrap)
         self.assertIn("copy-vectorworks-loader.ps1", bootstrap)
         self.assertIn("SkipClipboard", bootstrap)
-        self.assertIn("[int]$MinimumContractVersion = 13", resolver)
+        self.assertIn("[int]$MinimumContractVersion = 14", resolver)
         self.assertIn("requiredFeatures", resolver)
-        self.assertIn("contractVersion >= 13", contract)
+        self.assertIn("contractVersion >= 14", contract)
         self.assertIn("native-bridge-scaffold-copy", contract)
         self.assertIn("native-doctor-next-command", contract)
         self.assertIn("native-doctor-command-spec", contract)
@@ -294,6 +296,7 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("native-doctor-next-runner", contract)
         self.assertIn("native-runner-spec-validation", contract)
         self.assertIn("native-sdk-archive-reuse", contract)
+        self.assertIn("native-vectorworks-auto-smoke", contract)
         self.assertIn("native-phase0-transport", contract)
         self.assertIn("native-phase1-cad-handlers", contract)
         self.assertIn("native-phase2-cad-handlers", contract)
@@ -316,6 +319,7 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("CopyLoaderToClipboard", contract)
         self.assertIn("MaxPingMilliseconds", smoke)
         self.assertIn("MaxReadMilliseconds", smoke)
+        self.assertIn("[ValidateRange(0, 2)]", smoke)
         for text in (contract, bundled_contract):
             self.assertIn(".venv\\Scripts\\python.exe", text)
             self.assertIn("Run scripts\\bootstrap-agent.ps1 first or install Python 3", text)

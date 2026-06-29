@@ -61,12 +61,15 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -F
 `-FullNative` is intentionally a single-shot agent path. It checks or installs
 Git and Python first, then drives the guarded native runner with opt-ins for
 network access, Visual Studio Build Tools install, large SDK downloads, native
-plug-in folder writes, and reboot risk. It still cannot click inside
-Vectorworks for the user. If JSON reports
-`native_summary.next_stage: "smoke-phase-0"` with
-`native_summary.vectorworks_interaction_required: true`, the remaining action
-is to open/restart Vectorworks, load/enable the installed native plug-in, and
-run the reported smoke command.
+plug-in folder writes, and reboot risk. After the bridge is installed, it
+automatically opens or restarts Vectorworks, waits for the native bridge socket,
+runs phase-0 transport smoke, and attempts phase-2 production smoke. If
+Vectorworks is on the Home/no-document screen, the native bridge opens a
+default blank document before write fixtures. If Vectorworks blocks automation
+with license, recovery, plug-in approval, or startup prompts, JSON reports
+`native_summary.vectorworks_automation_attempted: true` plus the exact
+`native_summary.next_command` or `native_summary.acceptance_next_command` to
+resume after the prompt is cleared.
 
 ## Preferred Claude Code Plugin Path
 
@@ -156,12 +159,12 @@ py -3 .\plugins\vectorworks\bin\vectorworksctl native-next --repo-path $PWD --js
 ```
 
 After a native artifact is built, install only through the guarded doctor/native
-runner, then restart/load Vectorworks, run phase-0 stop/port-release smoke, load
-the bridge again, run the default phase-1 read smoke, and run the phase-2 write
-smoke in a disposable document before claiming native production readiness:
+runner, then use the launch/smoke helper to restart/open Vectorworks and run
+phase-0 stop/port-release smoke. Phase 2 should run in a disposable document
+before claiming native production readiness:
 
 ```powershell
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Phase 2 -PingCount 3 -ReadCount 2 -IncludeObjects -AllowWriteFixture -Json
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-vectorworks-native-smoke.ps1 -VectorworksVersion 2024 -RestartIfRunning -RunPhase2 -AllowWriteFixture -Json
 ```
 
 ## Result Fields
@@ -189,12 +192,17 @@ Agents should parse:
   -FullNative -Json`, parse `native_summary.next_stage`,
   `native_summary.next_command`, `native_summary.missing_allow_flags`,
   `native_summary.bridge_built`, `native_summary.bridge_installed`,
+  `native_summary.vectorworks_automation_attempted`,
   `native_summary.phase0_smoke_tested`,
+  `native_summary.phase2_smoke_attempted`,
   `native_summary.phase2_smoke_tested`, and
-  `native_summary.vectorworks_interaction_required`.
+  `native_summary.vectorworks_interaction_required`. If phase 0 passes but
+  phase 2 needs a retry, use `native_summary.acceptance_next_command`.
 - `native_setup_complete`: native bridge setup is complete according to the runner.
 - `native_requires_action`: native bridge setup still has optional follow-up work.
 - `native_summary.next_stage`: the next native setup stage.
+- `native_summary.acceptance_next_command`: the command to resume final native
+  production smoke after Vectorworks prompts are cleared.
 - `native_summary.missing_allow_flags`: required opt-in switches.
 - `python_fallback_ready`: Python fallback launcher/loader setup succeeded.
 - `python_fallback_setup`: fallback launcher/loader setup result.

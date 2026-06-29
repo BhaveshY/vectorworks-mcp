@@ -99,6 +99,9 @@ Native bridge planning aids:
   -AllowWriteFixture` wall/text/dimension write checks, and `-Phase 0 -Stop`
   port release checks. Write fixtures must run in a disposable active document,
   not on the Vectorworks Home/no-document screen.
+- `scripts/start-vectorworks-native-smoke.ps1` discovers, starts, or gracefully
+  restarts Vectorworks, waits for the native bridge socket, then runs the native
+  smoke script. It only force-kills Vectorworks when explicitly allowed.
 
 Native bridge prerequisite check:
 
@@ -160,8 +163,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\wire-native-bridge-project.ps
 powershell -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\ObjectExample.vlb -Install -WhatIf
 powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\ObjectExample.vlb -Install
-# Restart Vectorworks, enable/load the installed plug-in, then run the phase-0 stop smoke first.
-powershell -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Phase 0 -Stop -Json
+# Start/restart Vectorworks and run the phase-0 stop smoke automatically.
+powershell -ExecutionPolicy Bypass -File .\scripts\start-vectorworks-native-smoke.ps1 -VectorworksVersion 2024 -RestartIfRunning -Json
 ```
 
 The official SDK example scaffold currently emits `ObjectExample.vlb`; the
@@ -218,11 +221,16 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "irm https://
 
 `-FullNative` first checks/installs base tools (`Git` and `Python 3.12`) when
 winget is available, then runs the guarded native bridge loop with the required
-network/software/download/plugin-write allow flags. It stops cleanly at the
-Vectorworks interaction boundary instead of reporting a generic failure:
-open/restart Vectorworks, load the installed native plug-in, then run the smoke
-command reported in `native_summary.next_command`. Native production readiness
-is not claimed until Vectorworks smoke tests pass.
+network/software/download/plugin-write allow flags. After the native artifact is
+installed, the installer automatically opens or restarts Vectorworks, waits for
+the native plug-in socket, runs phase-0 transport smoke, and then attempts the
+phase-2 production smoke. If Vectorworks opens on the Home/no-document screen,
+the native bridge opens a default blank document before write fixtures. If
+Vectorworks blocks automation with a license, recovery, plug-in approval, or
+startup prompt, JSON reports
+`native_summary.vectorworks_automation_attempted`, `native_summary.next_command`,
+and `native_summary.acceptance_next_command` so the agent can resume exactly.
+Native production readiness is not claimed until both smoke stages pass.
 
 If you specifically want Claude Code user registration from the checkout:
 

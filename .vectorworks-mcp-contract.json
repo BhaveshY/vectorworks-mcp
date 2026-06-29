@@ -1,6 +1,6 @@
 {
   "name": "vectorworks-mcp",
-  "contractVersion": 13,
+  "contractVersion": 14,
   "requiredFeatures": [
     "stable-loader",
     "loader-clipboard-copy",
@@ -12,6 +12,7 @@
     "native-doctor-next-runner",
     "native-runner-spec-validation",
     "native-sdk-archive-reuse",
+    "native-vectorworks-auto-smoke",
     "native-phase0-transport",
     "native-phase1-cad-handlers",
     "native-phase2-cad-handlers",

@@ -14,8 +14,9 @@ From an existing checkout:
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-For a full non-technical PC install attempt, including dependency checks and
-native bridge build/install up to the Vectorworks UI boundary:
+For a full non-technical PC install attempt, including dependency checks,
+native bridge build/install, automatic Vectorworks launch/restart, and native
+smoke attempts:
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -FullNative -Json

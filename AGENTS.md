@@ -14,7 +14,7 @@ For fresh Windows PC onboarding, follow `AGENT_INSTALL.md` first.
 - `native_bridge/mock/mock_bridge.py` is a no-SDK contract harness for host/native protocol compatibility.
 - `native_bridge/src/` contains SDK-agnostic native source scaffold files. They are not a standalone build and intentionally avoid Vectorworks SDK includes.
 - `scripts/run-mcp-server.ps1` is the self-bootstrapping MCP entrypoint. It creates `.venv`, installs `requirements.txt`, then launches `server.py`.
-- `install.ps1` is the primary one-click Windows installer. It can run from a checkout or from the raw GitHub URL, checks/installs base Git/Python dependencies, clones/updates the repo when needed, then calls the checkout bootstrap path. Use `-FullNative` when the agent should also drive the guarded native SDK bridge setup until it reaches the Vectorworks UI/smoke-test boundary.
+- `install.ps1` is the primary one-click Windows installer. It can run from a checkout or from the raw GitHub URL, checks/installs base Git/Python dependencies, clones/updates the repo when needed, then calls the checkout bootstrap path. Use `-FullNative` when the agent should also drive the guarded native SDK bridge setup, open/restart Vectorworks, and attempt native smoke automatically.
 - `scripts/bootstrap-agent.ps1` is the checkout-level setup implementation. It refreshes dependencies, generates `vw_start_listener_2024.py` plus the stable `vw_load_listener_2024.py` Vectorworks loader, can copy the loader text to the clipboard, and updates client registration unless `-Client HostOnly` is used.
 - `scripts/register-claude-code.ps1` is the Claude Code registration helper used by the Claude-specific bootstrap path.
 - `scripts/copy-vectorworks-loader.ps1` is the first-class Vectorworks handoff helper. Use it whenever the user or an agent is unsure what to paste into Vectorworks.
@@ -161,8 +161,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\wire-native-bridge-project.ps
 powershell -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
 powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\ObjectExample.vlb -Install -WhatIf
 powershell -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\ObjectExample.vlb -Install
-# Restart Vectorworks, enable/load the installed plug-in, then prove phase-0 stop/release first.
-powershell -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Phase 0 -Stop -Json
+# Start/restart Vectorworks and prove phase-0 stop/release first.
+powershell -ExecutionPolicy Bypass -File .\scripts\start-vectorworks-native-smoke.ps1 -VectorworksVersion 2024 -RestartIfRunning -Json
 ```
 
 The installer flags are opt-in because they can download large SDK files and
@@ -170,9 +170,9 @@ launch the Visual Studio Build Tools installer.
 If `check-native-bridge-prereqs.ps1 -Json` reports `sdkArchiveCandidates`, pass
 the candidate through `-SdkArchivePath` so setup reuses the downloaded SDK ZIP
 instead of downloading it again.
-After phase 0 passes, load the native bridge again, run the default phase-1 read
-smoke, and run `-Phase 2 -AllowWriteFixture` in a disposable document before claiming
-native production write readiness. Do not run the default native smoke against a
+After phase 0 passes, run `scripts\start-vectorworks-native-smoke.ps1
+-RunPhase2 -AllowWriteFixture` in a disposable document before claiming native
+production write readiness. Do not run the default native smoke against a
 non-SDK/transport-only build; it is only valid after the SDK-backed project is
 wired and built.
 
