@@ -5,6 +5,7 @@ Core health and escape hatch:
 - `vw_ping`: confirm the listener and MCP server are connected; check bridge mode and CAD safety before real work.
 - `vw_bridge_status`: same listener status payload as `vw_ping`, named for agent preflight checks.
 - `vw_preflight_for_cad`: structured JSON go/no-go check before real CAD/API handlers.
+- `vw_agent_context`: one-call compact Codex planning snapshot with preflight, key capabilities, and bounded drawing summary.
 - `vw_capabilities`: bridge capability report plus current native/tool support.
 - `vw_tool_safety`: structured read/write/destructive metadata for every tool.
 - `vw_run_script`: run trusted Python inside Vectorworks; requires `confirm="RUN_TRUSTED_CODE"`.
@@ -15,8 +16,8 @@ Document context:
 - `vw_get_document_info`: active document metadata and object counts.
 - `vw_get_layers`: list layers.
 - `vw_get_objects`: list objects filtered by layer/type.
-- `vw_drawing_summary`: bounded document/layer/object inventory for planning and verification.
-- `vw_find_objects`: Vectorworks criteria search, such as `T=WALL`.
+- `vw_drawing_summary`: bounded document/layer/object inventory for planning and verification. Use `include_examples=false` or a small `example_limit` for fast, token-efficient large-project context.
+- `vw_find_objects`: Vectorworks criteria search, such as `T=WALL`. On the native bridge, simple `ALL`, `T=...`, `C=...`, and exact-name `((N='Name'))` criteria are resolved through bounded `get_objects` when the dedicated listener search handler is unavailable.
 - `vw_inspect_object`: discover object/plugin parameters; plugin probing creates a temporary object and requires `confirm="PROBE_PLUGIN"`.
 
 Create and edit:
@@ -68,6 +69,7 @@ Rules:
 
 | Tool | Category | Wire action | Read-only | Destructive | Idempotent | Open-world | CAD preflight |
 |------|----------|-------------|-----------|-------------|------------|------------|---------------|
+| `vw_agent_context` | `metadata` | `` | `true` | `false` | `true` | `true` | `false` |
 | `vw_batch_create_objects` | `document-write` | `batch_create_objects` | `false` | `false` | `false` | `true` | `true` |
 | `vw_bridge_status` | `health` | `ping` | `true` | `false` | `true` | `true` | `false` |
 | `vw_capabilities` | `metadata` | `ping` | `true` | `false` | `true` | `true` | `false` |

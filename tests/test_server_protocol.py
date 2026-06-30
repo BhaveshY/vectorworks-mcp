@@ -178,6 +178,19 @@ def _native_phase_two_status():
     }
 
 
+def _python_dialog_status():
+    return {
+        "pong": True,
+        "cad_api_safe": True,
+        "transport_only": False,
+        "native_bridge": False,
+        "bridge_kind": "python_dialog_agent_session",
+        "dispatch_mode": "dialog",
+        "mode": "dialog",
+        "version": "python-dialog",
+    }
+
+
 class ServerProtocolTests(unittest.TestCase):
     def tearDown(self):
         server._close()
@@ -478,14 +491,14 @@ class ServerProtocolTests(unittest.TestCase):
 
         with FakeListener(handler, max_requests=1) as listener:
             _configure_server(listener.port)
-            result = server.vw_find_objects("ALL", limit=1)
+            result = server.vw_inspect_object(handle="0x1")
 
         blocked = json.loads(result)
         self.assertFalse(blocked["ok"])
         self.assertTrue(blocked["blocked"])
-        self.assertEqual(blocked["blocked_action"], "find_objects")
+        self.assertEqual(blocked["blocked_action"], "inspect_object")
         self.assertEqual(blocked["reason"], "native_bridge_action_not_implemented")
-        self.assertIn("action is not implemented by native bridge: find_objects", blocked["native_readiness_errors"])
+        self.assertIn("action is not implemented by native bridge: inspect_object", blocked["native_readiness_errors"])
         self.assertEqual([request["action"] for request in listener.requests], ["ping"])
 
     def test_send_tool_blocks_unimplemented_native_create_variant_before_dispatch(self):
@@ -611,6 +624,61 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertFalse(result["host_capabilities"]["native_text_creation"])
         self.assertFalse(result["host_capabilities"]["native_linear_dimension_creation"])
         self.assertFalse(result["host_capabilities"]["true_bim_objects"])
+
+    def test_agent_context_returns_compact_preflight_capabilities_and_summary(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_two_status()}
+            if request["action"] == "get_document_info":
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {"filename": "Demo.vwx", "layers": ["Layer 1"], "layer_count": 1, "total_objects": 2},
+                }
+            if request["action"] == "get_layers":
+                return {"id": request["id"], "success": True, "result": [{"name": "Layer 1", "visible": True}]}
+            if request["action"] == "get_objects":
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": [
+                        {"handle": "h1", "type": "wall", "name": "Wall", "layer": "Layer 1"},
+                        {"handle": "h2", "type": "text", "name": "Label", "layer": "Layer 1"},
+                    ],
+                }
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=4) as listener:
+            _configure_server(listener.port)
+            result = json.loads(server.vw_agent_context())
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["profile"], "production")
+        self.assertTrue(result["preflight"]["ok"])
+        self.assertTrue(result["host_capabilities"]["atomic_mixed_production_batch_creation"])
+        self.assertEqual(result["drawing_summary"]["counts_by_type"], {"text": 1, "wall": 1})
+        self.assertNotIn("examples", result["drawing_summary"])
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_document_info", "get_layers", "get_objects"])
+
+    def test_agent_context_does_not_read_drawing_when_preflight_blocks(self):
+        unsafe_status = _native_phase_two_status()
+        unsafe_status["cad_api_safe"] = False
+        unsafe_status["transport_only"] = True
+
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": unsafe_status}
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=1) as listener:
+            _configure_server(listener.port)
+            result = json.loads(server.vw_agent_context())
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["preflight"]["ok"])
+        self.assertFalse(result["host_capabilities"]["drawing_summary"])
+        self.assertIsNone(result["drawing_summary"])
+        self.assertEqual([request["action"] for request in listener.requests], ["ping"])
 
     def test_phase_two_direct_text_and_dimension_actions(self):
         def handler(request):
@@ -1009,6 +1077,81 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertEqual(result["counts_by_layer_type"], {"Layer 1": {"line": 1, "rect": 1}})
         self.assertEqual(result["bounds"], {"left": 0.0, "top": -10.0, "right": 200.0, "bottom": 100.0})
         self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_document_info", "get_layers", "get_objects"])
+
+    def test_find_objects_uses_get_objects_for_exact_name_on_native_bridge(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_one_status()}
+            if request["action"] == "get_objects":
+                self.assertEqual(request["params"], {"layer": "", "object_type": "", "limit": 10})
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": [
+                        {"handle": "h1", "type": "rect", "name": "Target", "class": "A-Test"},
+                        {"handle": "h2", "type": "line", "name": "Other", "class": "A-Test"},
+                    ],
+                }
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=2) as listener:
+            _configure_server(listener.port)
+            result = json.loads(server.vw_find_objects("((N='Target'))", limit=10))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["fallback_action"], "get_objects")
+        self.assertEqual(result["matched"], 1)
+        self.assertEqual(result["objects"][0]["handle"], "h1")
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_objects"])
+
+    def test_drawing_summary_can_omit_examples_for_compact_agent_context(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_one_status()}
+            if request["action"] == "get_document_info":
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {"filename": "Demo.vwx", "layers": ["Layer 1"], "layer_count": 1, "total_objects": 1},
+                }
+            if request["action"] == "get_layers":
+                return {"id": request["id"], "success": True, "result": [{"name": "Layer 1", "visible": True}]}
+            if request["action"] == "get_objects":
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": [{"handle": "h1", "type": "rect", "name": "Room", "layer": "Layer 1"}],
+                }
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=4) as listener:
+            _configure_server(listener.port)
+            result = json.loads(server.vw_drawing_summary(limit=100, include_examples=False))
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["query"]["include_examples"])
+        self.assertNotIn("examples", result)
+        self.assertEqual(result["counts_by_type"], {"rect": 1})
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_document_info", "get_layers", "get_objects"])
+
+    def test_find_objects_preserves_listener_path_for_complex_criteria(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _python_dialog_status()}
+            if request["action"] == "find_objects":
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": [{"handle": "h1", "type": "rect", "name": "Target"}],
+                }
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=2) as listener:
+            _configure_server(listener.port)
+            result = json.loads(server.vw_find_objects("((T=RECT) & (C='A-Test'))", limit=10))
+
+        self.assertEqual(result[0]["handle"], "h1")
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "find_objects"])
 
     def test_destructive_and_trusted_code_tools_require_explicit_confirmation(self):
         run_script = json.loads(server.vw_run_script("print('hi')"))
@@ -1502,12 +1645,15 @@ class ServerProtocolTests(unittest.TestCase):
         safety = json.loads(server.vw_tool_safety())
 
         self.assertIn("vw_run_script", safety)
+        self.assertIn("vw_agent_context", safety)
         self.assertIn("vw_capabilities", safety)
         self.assertIn("vw_batch_create_objects", safety)
         self.assertIn("vw_plan_schematic_floor_plan", safety)
         self.assertIn("vw_create_schematic_floor_plan", safety)
         self.assertIn("vw_drawing_summary", safety)
         self.assertTrue(safety["vw_ping"]["readOnlyHint"])
+        self.assertTrue(safety["vw_agent_context"]["readOnlyHint"])
+        self.assertEqual(safety["vw_agent_context"]["composes_actions"], ["ping", "get_document_info", "get_layers", "get_objects"])
         self.assertTrue(safety["vw_capabilities"]["readOnlyHint"])
         self.assertFalse(safety["vw_preflight_for_cad"]["requires_cad_preflight"])
         self.assertTrue(safety["vw_get_layers"]["requires_cad_preflight"])
@@ -1522,6 +1668,8 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertEqual(safety["vw_create_schematic_floor_plan"]["composes_actions"], ["create_object"])
         self.assertIsNone(safety["vw_drawing_summary"]["wire_action"])
         self.assertEqual(safety["vw_drawing_summary"]["composes_actions"], ["get_document_info", "get_layers", "get_objects"])
+        self.assertEqual(safety["vw_find_objects"]["wire_action"], "find_objects")
+        self.assertEqual(safety["vw_find_objects"]["composes_actions"], ["get_objects"])
         self.assertTrue(safety["vw_selection"]["actions"]["get"]["readOnlyHint"])
         self.assertTrue(safety["vw_selection"]["actions"]["delete"]["destructiveHint"])
         self.assertTrue(safety["vw_selection"]["actions"]["delete"]["confirmationRequired"])

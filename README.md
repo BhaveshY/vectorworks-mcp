@@ -475,6 +475,7 @@ Core:
 | `vw_ping` | Health check, including bridge mode and CAD safety status |
 | `vw_bridge_status` | Same status payload as `vw_ping`, named for agent preflight checks |
 | `vw_preflight_for_cad` | Structured JSON go/no-go check before real CAD/API handlers |
+| `vw_agent_context` | One-call compact Codex planning snapshot with preflight, key capabilities, and token-efficient drawing summary |
 | `vw_capabilities` | Current bridge capabilities, native phase-1/phase-2 support, and tool surface |
 | `vw_tool_safety` | Structured safety metadata for all tools |
 | `vw_run_script` | Execute trusted Python inside Vectorworks; requires `confirm="RUN_TRUSTED_CODE"` |
@@ -488,9 +489,9 @@ Core:
 | `vw_create_schematic_window` | Draw a schematic double-line window marker from native 2D primitives |
 | `vw_get_layers` | List layers |
 | `vw_get_objects` | List objects filtered by layer/type |
-| `vw_drawing_summary` | Summarize document, layers, object counts, examples, and bounds |
+| `vw_drawing_summary` | Summarize document, layers, object counts, optional examples, and bounds; use `include_examples=false` for compact large-project context |
 | `vw_set_object_property` | Change name, class, color, line weight, opacity |
-| `vw_find_objects` | Criteria-based search such as `T=WALL` |
+| `vw_find_objects` | Criteria-based search such as `T=WALL`; native bridge can resolve simple `ALL`, `T=...`, `C=...`, and exact-name `((N='Name'))` lookups via bounded `get_objects` |
 | `vw_manage_classes` | List, create, delete classes; delete requires `confirm="DELETE_CLASS"` |
 | `vw_worksheet` | Read/write worksheet cells and ranges |
 | `vw_symbol` | List and insert symbols |

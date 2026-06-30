@@ -272,11 +272,56 @@ except ConfigError as exc:
 PREFLIGHT_CACHE_SECONDS = PREFLIGHT_CACHE_MS / 1000.0
 AUTH_TOKEN = _load_auth_token()
 ALLOW_INSECURE_NO_AUTH = _truthy_env("VW_MCP_INSECURE_NO_AUTH")
-_EXACT_NAME_CRITERIA_RE = re.compile(r"^\(\(N='[^']{1,255}'\)\)$")
+_EXACT_NAME_CRITERIA_RE = re.compile(r"^\(\(N='([^']{1,255})'\)\)$")
+_SIMPLE_FIND_CRITERIA_RE = re.compile(
+    r"^(?P<key>[NTC])\s*=\s*(?:'(?P<quoted>[^']{1,255})'|(?P<bare>[A-Za-z0-9_. -]{1,255}))$",
+    re.IGNORECASE,
+)
 
 
 def _is_exact_name_criteria(criteria: str) -> bool:
     return bool(_EXACT_NAME_CRITERIA_RE.fullmatch(str(criteria or "").strip()))
+
+
+def _exact_name_from_criteria(criteria: str) -> Optional[str]:
+    match = _EXACT_NAME_CRITERIA_RE.fullmatch(str(criteria or "").strip())
+    if not match:
+        return None
+    return match.group(1)
+
+
+def _unwrap_simple_criteria(criteria: str) -> str:
+    text = str(criteria or "").strip()
+    for _ in range(2):
+        if text.startswith("(") and text.endswith(")"):
+            text = text[1:-1].strip()
+    return text
+
+
+def _parse_simple_find_criteria(criteria: str) -> Optional[tuple[str, str]]:
+    text = str(criteria or "").strip()
+    if text.upper() == "ALL":
+        return ("all", "")
+
+    exact_name = _exact_name_from_criteria(text)
+    if exact_name is not None:
+        return ("name", exact_name)
+
+    match = _SIMPLE_FIND_CRITERIA_RE.fullmatch(_unwrap_simple_criteria(text))
+    if not match:
+        return None
+
+    key = match.group("key").upper()
+    value = (match.group("quoted") or match.group("bare") or "").strip()
+    if not value:
+        return None
+    if key == "N":
+        return ("name", value)
+    if key == "T":
+        return ("type", value.lower())
+    if key == "C":
+        return ("class", value)
+    return None
 
 
 mcp = FastMCP("Vectorworks 2024/2025") if FastMCP is not None else _MissingFastMCP("Vectorworks 2024/2025")
@@ -311,8 +356,10 @@ SymbolAction = Literal["list", "insert"]
 ExportFormat = Literal["pdf", "dxf", "dwg", "image"]
 ImportFormat = Literal["auto", "dxf", "dwg", "png", "jpg", "jpeg", "tif", "tiff", "bmp"]
 SelectionAction = Literal["get", "select", "clear", "delete", "move", "duplicate"]
+AgentContextProfile = Literal["brief", "production", "full"]
 MAX_OBJECT_QUERY_LIMIT = 1000
 ObjectQueryLimit = Annotated[int, Field(ge=1, le=MAX_OBJECT_QUERY_LIMIT)]
+SummaryExampleLimit = Annotated[int, Field(ge=0, le=100)]
 WorksheetRow = Annotated[int, Field(ge=1, le=1_048_576)]
 WorksheetColumn = Annotated[int, Field(ge=1, le=16_384)]
 WorksheetRowCount = Annotated[int, Field(ge=1, le=500)]
@@ -342,6 +389,16 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
     "vw_capabilities": {
         "category": "metadata",
         "wire_action": "ping",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+        "requires_cad_preflight": False,
+    },
+    "vw_agent_context": {
+        "category": "metadata",
+        "wire_action": None,
+        "composes_actions": ["ping", "get_document_info", "get_layers", "get_objects"],
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,
@@ -415,6 +472,7 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
     "vw_find_objects": {
         "category": "document-read",
         "wire_action": "find_objects",
+        "composes_actions": ["get_objects"],
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,
@@ -1462,6 +1520,97 @@ def vw_capabilities(include_tools: bool = True) -> str:
     if include_tools:
         payload["tools"] = sorted(TOOL_SAFETY)
         payload["tool_safety"] = TOOL_SAFETY
+    return json.dumps(payload, indent=2, sort_keys=True)
+
+
+@_tool("vw_agent_context")
+def vw_agent_context(
+    profile: AgentContextProfile = "production",
+    limit: ObjectQueryLimit = 1000,
+    include_examples: bool = False,
+    example_limit: SummaryExampleLimit = 5,
+) -> str:
+    """Return one compact Codex planning snapshot: preflight, key capabilities, and drawing summary."""
+    raw_status = _send_health("ping")
+    decoded_status = _decode_tool_result(raw_status)
+    status_ok = not _tool_result_failed(raw_status, decoded_status)
+    if isinstance(decoded_status, dict):
+        preflight = _evaluate_cad_preflight_status(decoded_status)
+        if preflight.get("ok"):
+            _remember_cad_safe_status(decoded_status)
+    else:
+        preflight = _cad_preflight_ping_error_payload(decoded_status)
+        preflight["reason"] = "ping_failed_or_non_json"
+
+    implemented_actions = (
+        set(decoded_status.get("implemented_actions") or [])
+        if isinstance(decoded_status, dict) and isinstance(decoded_status.get("implemented_actions"), list)
+        else set()
+    )
+    native_ready = bool(preflight.get("ok"))
+    phase_two_ready = (
+        native_ready
+        and isinstance(decoded_status, dict)
+        and _native_phase(decoded_status) >= 2
+        and NATIVE_PHASE_TWO_REQUIRED_ACTIONS <= implemented_actions
+    )
+    bridge: dict[str, Any] = {
+        "ok": status_ok,
+        "cad_api_safe": preflight.get("cad_api_safe"),
+        "transport_only": preflight.get("transport_only"),
+        "native_bridge": decoded_status.get("native_bridge") if isinstance(decoded_status, dict) else None,
+        "native_phase": _native_phase(decoded_status) if isinstance(decoded_status, dict) else 0,
+        "bridge_kind": decoded_status.get("bridge_kind") if isinstance(decoded_status, dict) else None,
+        "dispatch_mode": decoded_status.get("dispatch_mode") if isinstance(decoded_status, dict) else None,
+        "main_context_pump_ready": (
+            decoded_status.get("main_context_pump_ready") if isinstance(decoded_status, dict) else None
+        ),
+        "implemented_actions": sorted(implemented_actions),
+    }
+
+    summary: Any = None
+    if preflight.get("ok"):
+        summary = _decode_tool_result(
+            vw_drawing_summary(
+                limit=limit,
+                include_examples=(include_examples or profile == "full"),
+                example_limit=example_limit,
+            )
+        )
+
+    payload: dict[str, Any] = {
+        "ok": status_ok and bool(preflight.get("ok")),
+        "tool": "vw_agent_context",
+        "profile": profile,
+        "bridge": bridge,
+        "preflight": preflight,
+        "host_capabilities": {
+            "compact_context": True,
+            "drawing_summary": bool(preflight.get("ok")),
+            "exact_name_lookup": True,
+            "batch_primitive_creation": True,
+            "atomic_batch_primitive_creation": native_ready and "batch_create_objects" in implemented_actions,
+            "atomic_mixed_production_batch_creation": phase_two_ready,
+            "native_wall_creation": phase_two_ready,
+            "native_text_creation": phase_two_ready,
+            "native_linear_dimension_creation": phase_two_ready,
+            "true_bim_wall_layouts": phase_two_ready,
+            "native_doors_windows_spaces": False,
+        },
+        "drawing_summary": summary,
+        "recommended_workflow": [
+            "Use this compact context before planning large edits.",
+            "Use vw_find_objects with exact-name criteria for deterministic follow-up edits.",
+            "Use vw_batch_create_objects for repeated creation; avoid retrying writes after unknown commit state.",
+            "Ask for focused object detail only after counts/classes/layers identify the target area.",
+        ],
+    }
+    if profile == "full":
+        payload["tool_safety"] = TOOL_SAFETY
+        payload["bridge_status"] = decoded_status
+    elif profile == "brief":
+        payload.pop("recommended_workflow", None)
+
     return json.dumps(payload, indent=2, sort_keys=True)
 
 
@@ -2983,7 +3132,13 @@ def vw_get_objects(layer: str = "", object_type: str = "", limit: ObjectQueryLim
 
 
 @_tool("vw_drawing_summary")
-def vw_drawing_summary(layer: str = "", object_type: str = "", limit: ObjectQueryLimit = 1000) -> str:
+def vw_drawing_summary(
+    layer: str = "",
+    object_type: str = "",
+    limit: ObjectQueryLimit = 1000,
+    include_examples: bool = True,
+    example_limit: SummaryExampleLimit = 20,
+) -> str:
     """Summarize document, layers, and a bounded object inventory for production planning/verification."""
     steps = [
         ("document_info", lambda: _send_tool("vw_get_document_info")),
@@ -3029,7 +3184,7 @@ def vw_drawing_summary(layer: str = "", object_type: str = "", limit: ObjectQuer
         layer_counts[obj_type] = layer_counts.get(obj_type, 0) + 1
         if str(obj.get("name") or "").strip():
             named_count += 1
-        if len(examples) < 20:
+        if include_examples and len(examples) < example_limit:
             examples.append(
                 {
                     key: obj.get(key)
@@ -3061,30 +3216,35 @@ def vw_drawing_summary(layer: str = "", object_type: str = "", limit: ObjectQuer
                     bounds["right"] = max(bounds["right"], right)
                     bounds["bottom"] = max(bounds["bottom"], bottom)
 
-    return json.dumps(
-        {
-            "ok": True,
-            "tool": "vw_drawing_summary",
-            "query": {"layer": layer, "object_type": object_type, "limit": limit},
-            "document": document_info,
-            "layer_count": len(layers),
-            "layers": layers,
-            "objects_returned": len(objects),
-            "document_total_objects": document_info.get("total_objects"),
-            "possibly_truncated": len(objects) >= limit,
-            "named_objects_returned": named_count,
-            "counts_by_type": dict(sorted(by_type.items())),
-            "counts_by_layer": dict(sorted(by_layer.items())),
-            "counts_by_layer_type": {
-                layer_name: dict(sorted(type_counts.items()))
-                for layer_name, type_counts in sorted(by_layer_type.items())
-            },
-            "bounds": bounds,
-            "examples": examples,
+    payload = {
+        "ok": True,
+        "tool": "vw_drawing_summary",
+        "query": {
+            "layer": layer,
+            "object_type": object_type,
+            "limit": limit,
+            "include_examples": include_examples,
+            "example_limit": example_limit,
         },
-        indent=2,
-        sort_keys=True,
-    )
+        "document": document_info,
+        "layer_count": len(layers),
+        "layers": layers,
+        "objects_returned": len(objects),
+        "document_total_objects": document_info.get("total_objects"),
+        "possibly_truncated": len(objects) >= limit,
+        "named_objects_returned": named_count,
+        "counts_by_type": dict(sorted(by_type.items())),
+        "counts_by_layer": dict(sorted(by_layer.items())),
+        "counts_by_layer_type": {
+            layer_name: dict(sorted(type_counts.items()))
+            for layer_name, type_counts in sorted(by_layer_type.items())
+        },
+        "bounds": bounds,
+    }
+    if include_examples:
+        payload["examples"] = examples
+
+    return json.dumps(payload, indent=2, sort_keys=True)
 
 
 @_tool("vw_set_object_property")
@@ -3096,7 +3256,63 @@ def vw_set_object_property(handle: str, property_name: PropertyName, value: str)
 @_tool("vw_find_objects")
 def vw_find_objects(criteria: str, limit: ObjectQueryLimit = 100) -> str:
     """Find objects using VW criteria such as 'T=RECT', 'T=WALL', 'C=Furniture', or 'ALL'."""
-    return _send_tool("vw_find_objects", {"criteria": criteria, "limit": limit})
+    parsed = _parse_simple_find_criteria(criteria)
+    if parsed is None:
+        return _send_tool("vw_find_objects", {"criteria": criteria, "limit": limit})
+
+    field, value = parsed
+    object_type = value if field == "type" else ""
+    raw = _send("get_objects", {"layer": "", "object_type": object_type, "limit": limit}, require_cad_safe=True)
+    objects = _decode_tool_result(raw)
+    if _tool_result_failed(raw, objects):
+        return json.dumps(
+            {
+                "ok": False,
+                "tool": "vw_find_objects",
+                "criteria": criteria,
+                "fallback_action": "get_objects",
+                "result": objects,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    if not isinstance(objects, list):
+        return _json_error(
+            "vw_find_objects",
+            f"get_objects fallback returned {type(objects).__name__}, expected list",
+            criteria=criteria,
+            fallback_action="get_objects",
+        )
+
+    if field == "all":
+        matches = objects
+    elif field == "type":
+        matches = [obj for obj in objects if isinstance(obj, dict) and str(obj.get("type") or "").lower() == value]
+    elif field == "name":
+        matches = [obj for obj in objects if isinstance(obj, dict) and str(obj.get("name") or "") == value]
+    elif field == "class":
+        matches = [
+            obj
+            for obj in objects
+            if isinstance(obj, dict)
+            and str(obj.get("class") or obj.get("class_name") or "") == value
+        ]
+    else:
+        matches = []
+
+    return json.dumps(
+        {
+            "ok": True,
+            "tool": "vw_find_objects",
+            "criteria": criteria,
+            "fallback_action": "get_objects",
+            "matched": len(matches),
+            "truncated": len(objects) >= limit,
+            "objects": matches[:limit],
+        },
+        indent=2,
+        sort_keys=True,
+    )
 
 
 @_tool("vw_manage_classes")
