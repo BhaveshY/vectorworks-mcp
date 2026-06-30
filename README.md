@@ -491,6 +491,8 @@ Core:
 | `vw_get_objects` | List objects filtered by layer/type |
 | `vw_drawing_summary` | Summarize document, layers, object counts, optional examples, and bounds; use `include_examples=false` for compact large-project context |
 | `vw_set_object_property` | Change name, class, color, line weight, opacity |
+| `vw_lookup_objects` | Token-efficient object lookup with compact records and refs such as `uuid:...`, `name:...`, and `handle:...` |
+| `vw_batch_set_object_properties` | Resolve `uuid:...`, `name:...`, or `handle:...` refs, apply multiple property edits, and optionally verify readback; requires a bridge that supports `set_property` |
 | `vw_find_objects` | Criteria-based search such as `T=WALL`; native bridge can resolve simple `ALL`, `T=...`, `C=...`, and exact-name `((N='Name'))` lookups via bounded `get_objects` |
 | `vw_manage_classes` | List, create, delete classes; delete requires `confirm="DELETE_CLASS"` |
 | `vw_worksheet` | Read/write worksheet cells and ranges |

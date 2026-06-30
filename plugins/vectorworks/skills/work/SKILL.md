@@ -11,7 +11,7 @@ Before changing the drawing, confirm the connection:
 2. If `vw_ping` is unavailable, use `/vectorworks:ping` or `vectorworksctl ping`.
 3. Confirm the ping/status payload reports `cad_api_safe=true` and `transport_only=false`. Native bridge status is preferred when it is compiled and smoke-tested; the Python dialog listener is an acceptable fallback only when it is CAD-safe.
 4. Prefer the `vw_agent_context` payload for planning because it combines preflight, key capabilities, and compact drawing context in one call.
-5. If `vw_agent_context` is unavailable, call `vw_capabilities`, `vw_tool_safety`, and `vw_drawing_summary`. For large projects, start summaries with `include_examples=false` or a low `example_limit`, then ask for focused `vw_get_objects` / `vw_find_objects` details only where needed.
+5. If `vw_agent_context` is unavailable, call `vw_capabilities`, `vw_tool_safety`, and `vw_drawing_summary`. For large projects, start summaries with `include_examples=false` or a low `example_limit`, then use `vw_lookup_objects` for compact refs/details before falling back to raw `vw_get_objects` or complex `vw_find_objects` criteria.
 
 Use the MCP tools deliberately:
 
@@ -19,7 +19,8 @@ Use the MCP tools deliberately:
 - For repeated creation, prefer `vw_batch_create_objects` over many separate MCP calls. Use the default `atomic=true` when the native bridge reports `batch_create_objects`; phase 2 can atomically mix primitives, true walls, text, and linear dimensions. Use `atomic=false` only when deliberately accepting legacy non-atomic composition.
 - For floor plans, use `vw_create_bim_floor_plan` when the target is true wall-based layout work with optional labels/dimensions. Use `vw_plan_schematic_floor_plan` first for dry-run drafting geometry, then `vw_create_schematic_floor_plan` for schematic multi-room layouts. Use `vw_create_schematic_room`, `vw_create_schematic_door`, and `vw_create_schematic_window` for focused 2D drafting edits.
 - Use architectural tools deliberately: `vw_create_wall`, `vw_create_text`, and `vw_create_linear_dimension` are native phase-2 production tools; `vw_insert_door`, `vw_insert_window`, `vw_create_slab`, and `vw_create_roof` remain broader Python/legacy paths unless capabilities say otherwise.
-- Inspect and find existing objects with `vw_get_objects`, `vw_find_objects`, and `vw_inspect_object`. Prefer exact-name criteria like `((N='Name'))` for deterministic follow-up edits.
+- Inspect and find existing objects with `vw_lookup_objects`, `vw_get_objects`, `vw_find_objects`, and `vw_inspect_object`. Prefer `vw_lookup_objects` for token-efficient refs and exact-name criteria like `((N='Name'))` for deterministic follow-up edits.
+- For property edits, prefer `vw_batch_set_object_properties` when `vw_agent_context` or `vw_capabilities` reports `verified_batch_property_editing=true`. Use `uuid:...` refs first, `handle:...` only within the same live session, and `name:...` only when the name is known to be unique.
 - Manage organization with `vw_manage_classes`, layers, names, and properties before bulk edits.
 - Use `vw_run_script` only for trusted Python that the user would be comfortable running inside the active Vectorworks document; it requires `confirm="RUN_TRUSTED_CODE"`.
 

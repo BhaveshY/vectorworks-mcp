@@ -350,6 +350,7 @@ BatchObjectType = Literal[
 ]
 DoorSwing = Literal["left", "right"]
 PropertyName = Literal["name", "class", "fillColor", "penColor", "lineWeight", "opacity"]
+PROPERTY_NAME_VALUES = {"name", "class", "fillColor", "penColor", "lineWeight", "opacity"}
 ClassAction = Literal["list", "create", "delete"]
 WorksheetAction = Literal["list", "read", "write", "read_range"]
 SymbolAction = Literal["list", "insert"]
@@ -357,9 +358,12 @@ ExportFormat = Literal["pdf", "dxf", "dwg", "image"]
 ImportFormat = Literal["auto", "dxf", "dwg", "png", "jpg", "jpeg", "tif", "tiff", "bmp"]
 SelectionAction = Literal["get", "select", "clear", "delete", "move", "duplicate"]
 AgentContextProfile = Literal["brief", "production", "full"]
+LookupDetail = Literal["brief", "normal", "full"]
 MAX_OBJECT_QUERY_LIMIT = 1000
 ObjectQueryLimit = Annotated[int, Field(ge=1, le=MAX_OBJECT_QUERY_LIMIT)]
 SummaryExampleLimit = Annotated[int, Field(ge=0, le=100)]
+ObjectFieldList = Annotated[list[str], Field(max_length=20)]
+BatchPropertyEditList = Annotated[list[dict[str, Any]], Field(min_length=1, max_length=100)]
 WorksheetRow = Annotated[int, Field(ge=1, le=1_048_576)]
 WorksheetColumn = Annotated[int, Field(ge=1, le=16_384)]
 WorksheetRowCount = Annotated[int, Field(ge=1, le=500)]
@@ -585,6 +589,16 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
         "openWorldHint": True,
         "requires_cad_preflight": True,
     },
+    "vw_batch_set_object_properties": {
+        "category": "document-write",
+        "wire_action": None,
+        "composes_actions": ["get_objects", "set_property"],
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
     "vw_worksheet": {
         "category": "mixed-document-write",
         "wire_action": "worksheet",
@@ -681,6 +695,16 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
         "readOnlyHint": False,
         "destructiveHint": False,
         "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_lookup_objects": {
+        "category": "document-read",
+        "wire_action": None,
+        "composes_actions": ["get_objects"],
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
         "openWorldHint": True,
         "requires_cad_preflight": True,
     },
@@ -1481,6 +1505,8 @@ def vw_capabilities(include_tools: bool = True) -> str:
         if isinstance(decoded_status, dict) and isinstance(decoded_status.get("implemented_actions"), list)
         else set()
     )
+    bridge_is_native = bool(decoded_status.get("native_bridge")) if isinstance(decoded_status, dict) else False
+    property_editing_available = native_ready and (not bridge_is_native or "set_property" in implemented_actions)
     phase_two_ready = (
         native_ready
         and _native_phase(decoded_status) >= 2
@@ -1508,6 +1534,8 @@ def vw_capabilities(include_tools: bool = True) -> str:
             "native_text_creation": phase_two_ready,
             "native_linear_dimension_creation": phase_two_ready,
             "drawing_summary": True,
+            "compact_object_lookup": True,
+            "verified_batch_property_editing": property_editing_available,
             "true_bim_objects": phase_two_ready,
         },
         "notes": [
@@ -1548,6 +1576,8 @@ def vw_agent_context(
         else set()
     )
     native_ready = bool(preflight.get("ok"))
+    bridge_is_native = bool(decoded_status.get("native_bridge")) if isinstance(decoded_status, dict) else False
+    property_editing_available = native_ready and (not bridge_is_native or "set_property" in implemented_actions)
     phase_two_ready = (
         native_ready
         and isinstance(decoded_status, dict)
@@ -1588,6 +1618,8 @@ def vw_agent_context(
             "compact_context": True,
             "drawing_summary": bool(preflight.get("ok")),
             "exact_name_lookup": True,
+            "compact_object_lookup": True,
+            "verified_batch_property_editing": property_editing_available,
             "batch_primitive_creation": True,
             "atomic_batch_primitive_creation": native_ready and "batch_create_objects" in implemented_actions,
             "atomic_mixed_production_batch_creation": phase_two_ready,
@@ -1600,7 +1632,8 @@ def vw_agent_context(
         "drawing_summary": summary,
         "recommended_workflow": [
             "Use this compact context before planning large edits.",
-            "Use vw_find_objects with exact-name criteria for deterministic follow-up edits.",
+            "Use vw_lookup_objects for compact object refs, then vw_batch_set_object_properties for verified ref-based edits when available.",
+            "Use vw_find_objects only for complex Vectorworks criteria.",
             "Use vw_batch_create_objects for repeated creation; avoid retrying writes after unknown commit state.",
             "Ask for focused object detail only after counts/classes/layers identify the target area.",
         ],
@@ -1765,6 +1798,196 @@ def _confirmation_error(tool: str, required_confirmation: str, reason: str) -> s
 
 def _is_real_number(value: Any) -> bool:
     return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(float(value))
+
+
+def _object_refs(obj: dict[str, Any]) -> list[str]:
+    refs: list[str] = []
+    for key in ("uuid", "name", "handle"):
+        value = str(obj.get(key) or "").strip()
+        if value:
+            refs.append(f"{key}:{value}")
+    return refs
+
+
+def _compact_object_record(
+    obj: Any,
+    *,
+    detail: str = "brief",
+    include_refs: bool = True,
+    fields: Optional[list[str]] = None,
+) -> Any:
+    if not isinstance(obj, dict):
+        return obj
+    if detail == "full":
+        compact = dict(obj)
+    else:
+        base_fields = (
+            ("type", "name", "layer")
+            if detail == "brief"
+            else ("handle", "uuid", "type", "type_id", "name", "layer", "class", "class_name", "bounds")
+        )
+        selected = tuple(fields or base_fields)
+        compact = {key: obj.get(key) for key in selected if key in obj}
+
+    if include_refs:
+        refs = _object_refs(obj)
+        compact["refs"] = refs
+        compact["ref"] = refs[0] if refs else None
+    return compact
+
+
+def _parse_object_ref(ref: Any) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    text = str(ref or "").strip()
+    if not text:
+        return None, None, "ref is required"
+    if ":" not in text:
+        return "handle", text, None
+    kind, value = text.split(":", 1)
+    kind = kind.strip().lower()
+    value = value.strip()
+    if kind not in {"uuid", "name", "handle"}:
+        return None, None, "ref must use uuid:, name:, or handle:"
+    if not value:
+        return None, None, "ref value is required"
+    return kind, value, None
+
+
+def _object_matches_expectations(
+    obj: dict[str, Any],
+    *,
+    expected_type: str = "",
+    expected_layer: str = "",
+    expected_name: str = "",
+) -> bool:
+    if expected_type and str(obj.get("type") or "").lower() != expected_type.lower():
+        return False
+    if expected_layer and str(obj.get("layer") or "") != expected_layer:
+        return False
+    if expected_name and str(obj.get("name") or "") != expected_name:
+        return False
+    return True
+
+
+def _resolve_object_target(
+    ref: str,
+    *,
+    expected_type: str = "",
+    expected_layer: str = "",
+    expected_name: str = "",
+    lookup_limit: int = MAX_OBJECT_QUERY_LIMIT,
+) -> dict[str, Any]:
+    ref_kind, ref_value, ref_error = _parse_object_ref(ref)
+    if ref_error:
+        return {"ok": False, "error": ref_error, "ref": ref}
+
+    raw = _send(
+        "get_objects",
+        {"layer": expected_layer, "object_type": expected_type, "limit": lookup_limit},
+        require_cad_safe=True,
+    )
+    objects = _decode_tool_result(raw)
+    if _tool_result_failed(raw, objects):
+        return {"ok": False, "error": "object lookup failed", "ref": ref, "result": objects}
+    if not isinstance(objects, list):
+        return {
+            "ok": False,
+            "error": f"get_objects returned {type(objects).__name__}, expected list",
+            "ref": ref,
+            "result": objects,
+        }
+
+    matches: list[dict[str, Any]] = []
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        if str(obj.get(ref_kind) or "") != ref_value:
+            continue
+        if not _object_matches_expectations(
+            obj,
+            expected_type=expected_type,
+            expected_layer=expected_layer,
+            expected_name=expected_name,
+        ):
+            continue
+        matches.append(obj)
+
+    if len(matches) != 1:
+        return {
+            "ok": False,
+            "error": "object ref did not resolve to exactly one object",
+            "ref": ref,
+            "match_count": len(matches),
+            "possibly_truncated": len(objects) >= lookup_limit,
+            "matches": [
+                _compact_object_record(obj, detail="normal", include_refs=True)
+                for obj in matches[:10]
+            ],
+        }
+
+    target = matches[0]
+    handle = str(target.get("handle") or "").strip()
+    if not handle:
+        return {
+            "ok": False,
+            "error": "resolved object has no handle; property writes require a Vectorworks handle",
+            "ref": ref,
+            "target": _compact_object_record(target, detail="normal", include_refs=True),
+        }
+    return {
+        "ok": True,
+        "ref": ref,
+        "ref_kind": ref_kind,
+        "ref_value": ref_value,
+        "target": target,
+        "handle": handle,
+        "possibly_truncated": len(objects) >= lookup_limit,
+    }
+
+
+def _readback_object_snapshot(target: dict[str, Any], *, lookup_limit: int) -> dict[str, Any]:
+    for key in ("uuid", "handle", "name"):
+        value = str(target.get(key) or "").strip()
+        if value:
+            return _resolve_object_target(
+                f"{key}:{value}",
+                expected_type=str(target.get("type") or ""),
+                expected_layer=str(target.get("layer") or ""),
+                lookup_limit=lookup_limit,
+            )
+    return {"ok": False, "error": "resolved object has no uuid, handle, or name for readback"}
+
+
+def _object_property_value(obj: dict[str, Any], property_name: str) -> Any:
+    if property_name == "class":
+        return obj.get("class") if "class" in obj else obj.get("class_name")
+    return obj.get(property_name)
+
+
+def _verify_property_changes(after: Any, properties: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(after, dict):
+        return {"verified": False, "failures": ["readback object is not a JSON object"], "checks": []}
+
+    failures: list[str] = []
+    checks: list[dict[str, Any]] = []
+    for property_name, expected in properties.items():
+        actual = _object_property_value(after, property_name)
+        present = actual is not None
+        matched = present and str(actual) == str(expected)
+        if not matched:
+            if present:
+                failures.append(f"{property_name} readback mismatch: expected {expected!r}, got {actual!r}")
+            else:
+                failures.append(f"{property_name} was not present in readback object")
+        checks.append(
+            {
+                "property_name": property_name,
+                "expected": expected,
+                "actual": actual,
+                "present": present,
+                "matched": matched,
+            }
+        )
+    return {"verified": not failures, "failures": failures, "checks": checks}
 
 
 def _coerce_number(
@@ -3131,6 +3354,104 @@ def vw_get_objects(layer: str = "", object_type: str = "", limit: ObjectQueryLim
     return _send_tool("vw_get_objects", {"layer": layer, "object_type": object_type, "limit": limit})
 
 
+@_tool("vw_lookup_objects")
+def vw_lookup_objects(
+    criteria: str = "",
+    layer: str = "",
+    object_type: str = "",
+    name: str = "",
+    class_name: str = "",
+    limit: ObjectQueryLimit = 100,
+    detail: LookupDetail = "brief",
+    include_refs: bool = True,
+    fields: Optional[ObjectFieldList] = None,
+) -> str:
+    """Token-efficient object lookup with stable agent refs for follow-up planning."""
+    parsed = _parse_simple_find_criteria(criteria) if criteria else None
+    if criteria and parsed is None:
+        return _json_error(
+            "vw_lookup_objects",
+            "criteria must be ALL, T=TYPE, C=Class, N=Name, or exact-name ((N='Name')); use vw_find_objects for complex criteria",
+            criteria=criteria,
+        )
+
+    parsed_field, parsed_value = parsed or ("", "")
+    effective_type = object_type or (parsed_value if parsed_field == "type" else "")
+    effective_name = name or (parsed_value if parsed_field == "name" else "")
+    effective_class = class_name or (parsed_value if parsed_field == "class" else "")
+
+    raw = _send(
+        "get_objects",
+        {"layer": layer, "object_type": effective_type, "limit": limit},
+        require_cad_safe=True,
+    )
+    objects = _decode_tool_result(raw)
+    if _tool_result_failed(raw, objects):
+        return json.dumps(
+            {
+                "ok": False,
+                "tool": "vw_lookup_objects",
+                "query": {
+                    "criteria": criteria,
+                    "layer": layer,
+                    "object_type": object_type,
+                    "name": name,
+                    "class_name": class_name,
+                    "limit": limit,
+                },
+                "result": objects,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    if not isinstance(objects, list):
+        return _json_error(
+            "vw_lookup_objects",
+            f"get_objects returned {type(objects).__name__}, expected list",
+            result=objects,
+        )
+
+    matches = []
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        if effective_name and str(obj.get("name") or "") != effective_name:
+            continue
+        if effective_class and str(obj.get("class") or obj.get("class_name") or "") != effective_class:
+            continue
+        if effective_type and str(obj.get("type") or "").lower() != effective_type.lower():
+            continue
+        matches.append(obj)
+
+    compact_objects = [
+        _compact_object_record(obj, detail=detail, include_refs=include_refs, fields=fields)
+        for obj in matches[:limit]
+    ]
+    return json.dumps(
+        {
+            "ok": True,
+            "tool": "vw_lookup_objects",
+            "query": {
+                "criteria": criteria,
+                "layer": layer,
+                "object_type": object_type,
+                "name": name,
+                "class_name": class_name,
+                "limit": limit,
+                "detail": detail,
+                "include_refs": include_refs,
+                "fields": fields or [],
+            },
+            "matched": len(matches),
+            "returned": len(compact_objects),
+            "possibly_truncated": len(objects) >= limit,
+            "objects": compact_objects,
+        },
+        indent=2,
+        sort_keys=True,
+    )
+
+
 @_tool("vw_drawing_summary")
 def vw_drawing_summary(
     layer: str = "",
@@ -3251,6 +3572,264 @@ def vw_drawing_summary(
 def vw_set_object_property(handle: str, property_name: PropertyName, value: str) -> str:
     """Set an object property. Colors use 'r,g,b' values in Vectorworks 0-65535 color range."""
     return _send_tool("vw_set_object_property", {"handle": handle, "property_name": property_name, "value": value})
+
+
+@_tool("vw_batch_set_object_properties")
+def vw_batch_set_object_properties(
+    edits: BatchPropertyEditList,
+    verify: bool = True,
+    lookup_limit: ObjectQueryLimit = MAX_OBJECT_QUERY_LIMIT,
+    stop_on_failure: bool = True,
+) -> str:
+    """Resolve object refs and set multiple object properties with optional readback verification.
+
+    Each edit is {"ref": "uuid:...|name:...|handle:...", "properties": {"name": "..."}}.
+    Optional guards per edit: expected_type, expected_layer, expected_name.
+    """
+    validation_failures: list[dict[str, Any]] = []
+    normalized_edits: list[dict[str, Any]] = []
+    for index, edit in enumerate(edits, start=1):
+        if not isinstance(edit, dict):
+            validation_failures.append({"index": index, "error": "edit must be a JSON object"})
+            continue
+
+        ref = str(edit.get("ref") or "").strip()
+        properties = edit.get("properties")
+        if not ref:
+            validation_failures.append({"index": index, "error": "ref is required"})
+        if not isinstance(properties, dict) or not properties:
+            validation_failures.append({"index": index, "ref": ref, "error": "properties must be a non-empty object"})
+            continue
+        if len(properties) > 20:
+            validation_failures.append({"index": index, "ref": ref, "error": "properties is limited to 20 keys"})
+            continue
+
+        normalized_properties: dict[str, str] = {}
+        for property_name, value in properties.items():
+            property_name = str(property_name)
+            if property_name not in PROPERTY_NAME_VALUES:
+                validation_failures.append(
+                    {
+                        "index": index,
+                        "ref": ref,
+                        "error": "unsupported property",
+                        "property_name": property_name,
+                        "allowed_properties": sorted(PROPERTY_NAME_VALUES),
+                    }
+                )
+                continue
+            if value is None or isinstance(value, (dict, list, tuple)):
+                validation_failures.append(
+                    {
+                        "index": index,
+                        "ref": ref,
+                        "error": "property value must be a scalar",
+                        "property_name": property_name,
+                    }
+                )
+                continue
+            normalized_properties[property_name] = str(value)
+
+        if normalized_properties:
+            normalized_edits.append(
+                {
+                    "index": index,
+                    "ref": ref,
+                    "expected_type": str(edit.get("expected_type") or ""),
+                    "expected_layer": str(edit.get("expected_layer") or ""),
+                    "expected_name": str(edit.get("expected_name") or ""),
+                    "properties": normalized_properties,
+                }
+            )
+
+    if validation_failures:
+        return json.dumps(
+            {
+                "ok": False,
+                "tool": "vw_batch_set_object_properties",
+                "phase": "validate",
+                "writes_started": False,
+                "failures": validation_failures,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+
+    raw_status = _send_health("ping")
+    decoded_status = _decode_tool_result(raw_status)
+    if _tool_result_failed(raw_status, decoded_status):
+        return json.dumps(
+            {
+                "ok": False,
+                "tool": "vw_batch_set_object_properties",
+                "phase": "write_preflight",
+                "writes_started": False,
+                "result": decoded_status,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    if not isinstance(decoded_status, dict):
+        return _json_error(
+            "vw_batch_set_object_properties",
+            f"ping returned {type(decoded_status).__name__}, expected object",
+            phase="write_preflight",
+        )
+
+    preflight = _evaluate_cad_preflight_status(
+        decoded_status,
+        blocked_action="set_property",
+        blocked_params={"handle": "", "property_name": "name", "value": ""},
+    )
+    if preflight.get("ok") and isinstance(decoded_status, dict):
+        _remember_cad_safe_status(decoded_status)
+    else:
+        return json.dumps(
+            {
+                "ok": False,
+                "tool": "vw_batch_set_object_properties",
+                "phase": "write_preflight",
+                "writes_started": False,
+                "preflight": preflight,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+
+    resolution_failures: list[dict[str, Any]] = []
+    prepared_edits: list[dict[str, Any]] = []
+    for edit in normalized_edits:
+        resolved = _resolve_object_target(
+            edit["ref"],
+            expected_type=edit["expected_type"],
+            expected_layer=edit["expected_layer"],
+            expected_name=edit["expected_name"],
+            lookup_limit=lookup_limit,
+        )
+        if resolved.get("ok") is not True:
+            resolution_failures.append({"index": edit["index"], **resolved})
+            continue
+        prepared_edits.append({**edit, "resolved": resolved})
+
+    if resolution_failures:
+        return json.dumps(
+            {
+                "ok": False,
+                "tool": "vw_batch_set_object_properties",
+                "phase": "resolve",
+                "writes_started": False,
+                "failures": resolution_failures,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+
+    edit_results: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    unknown_commit_state = False
+    write_attempts = 0
+    stop_batch = False
+
+    for edit in prepared_edits:
+        resolved = edit["resolved"]
+        before = resolved["target"]
+        edit_result: dict[str, Any] = {
+            "index": edit["index"],
+            "ref": edit["ref"],
+            "target_ref": _compact_object_record(before, detail="normal", include_refs=True).get("ref"),
+            "before": _compact_object_record(before, detail="normal", include_refs=True),
+            "properties": edit["properties"],
+            "property_results": [],
+            "verified": None,
+        }
+
+        edit_failed = False
+        for property_name, value in edit["properties"].items():
+            write_attempts += 1
+            raw = _send(
+                "set_property",
+                {"handle": resolved["handle"], "property_name": property_name, "value": value},
+                require_cad_safe=True,
+            )
+            decoded = _decode_tool_result(raw)
+            property_failed = _tool_result_failed(raw, decoded)
+            property_result = {
+                "property_name": property_name,
+                "value": value,
+                "ok": not property_failed,
+                "result": decoded,
+            }
+            if property_failed:
+                property_result["unknown_commit_state"] = raw.startswith("Unknown commit state")
+                if property_result["unknown_commit_state"]:
+                    unknown_commit_state = True
+                failure = {
+                    "index": edit["index"],
+                    "ref": edit["ref"],
+                    "property_name": property_name,
+                    "result": decoded,
+                    "unknown_commit_state": property_result["unknown_commit_state"],
+                }
+                failures.append(failure)
+                edit_failed = True
+                if stop_on_failure:
+                    stop_batch = True
+            edit_result["property_results"].append(property_result)
+            if edit_failed and stop_on_failure:
+                break
+
+        if verify and not edit_failed:
+            readback = _readback_object_snapshot(before, lookup_limit=lookup_limit)
+            if readback.get("ok") is True:
+                after = readback["target"]
+                verification = _verify_property_changes(after, edit["properties"])
+                edit_result["after"] = _compact_object_record(after, detail="normal", include_refs=True)
+                edit_result["verification"] = verification
+                edit_result["verified"] = bool(verification["verified"])
+                if not verification["verified"]:
+                    failures.append(
+                        {
+                            "index": edit["index"],
+                            "ref": edit["ref"],
+                            "error": "readback verification failed",
+                            "verification": verification,
+                        }
+                    )
+            else:
+                edit_result["readback_error"] = readback
+                edit_result["verified"] = False
+                failures.append(
+                    {
+                        "index": edit["index"],
+                        "ref": edit["ref"],
+                        "error": "readback lookup failed",
+                        "readback": readback,
+                    }
+                )
+        elif not verify:
+            edit_result["verified"] = None
+
+        edit_results.append(edit_result)
+        if stop_batch:
+            break
+
+    return json.dumps(
+        {
+            "ok": not failures and not unknown_commit_state,
+            "tool": "vw_batch_set_object_properties",
+            "verify": verify,
+            "lookup_limit": lookup_limit,
+            "edits_requested": len(edits),
+            "edits_prepared": len(prepared_edits),
+            "edits_completed": len(edit_results),
+            "write_attempts": write_attempts,
+            "unknown_commit_state": unknown_commit_state,
+            "failures": failures,
+            "edits": edit_results,
+        },
+        indent=2,
+        sort_keys=True,
+    )
 
 
 @_tool("vw_find_objects")

@@ -64,6 +64,8 @@ class McpStdioContractTests(unittest.TestCase):
                                 "vw_create_text",
                                 "vw_create_linear_dimension",
                                 "vw_drawing_summary",
+                                "vw_lookup_objects",
+                                "vw_batch_set_object_properties",
                                 "vw_agent_context",
                                 "vw_capabilities",
                                 "vw_get_layers",
@@ -79,6 +81,16 @@ class McpStdioContractTests(unittest.TestCase):
                             self.assertIn("include_examples", drawing_summary_schema["properties"])
                             self.assertEqual(drawing_summary_schema["properties"]["example_limit"]["minimum"], 0)
                             self.assertEqual(drawing_summary_schema["properties"]["example_limit"]["maximum"], 100)
+
+                            lookup_schema = by_name["vw_lookup_objects"].inputSchema
+                            self.assertIn("detail", lookup_schema["properties"])
+                            self.assertIn("fields", lookup_schema["properties"])
+                            self.assertEqual(lookup_schema["properties"]["limit"]["maximum"], 1000)
+
+                            batch_property_schema = by_name["vw_batch_set_object_properties"].inputSchema
+                            self.assertEqual(batch_property_schema["properties"]["edits"]["minItems"], 1)
+                            self.assertEqual(batch_property_schema["properties"]["edits"]["maxItems"], 100)
+                            self.assertEqual(batch_property_schema["properties"]["lookup_limit"]["maximum"], 1000)
 
                             agent_context_schema = by_name["vw_agent_context"].inputSchema
                             self.assertIn("profile", agent_context_schema["properties"])

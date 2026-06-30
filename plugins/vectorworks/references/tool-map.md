@@ -17,6 +17,7 @@ Document context:
 - `vw_get_layers`: list layers.
 - `vw_get_objects`: list objects filtered by layer/type.
 - `vw_drawing_summary`: bounded document/layer/object inventory for planning and verification. Use `include_examples=false` or a small `example_limit` for fast, token-efficient large-project context.
+- `vw_lookup_objects`: compact object lookup for large files. Returns agent refs such as `uuid:...`, `name:...`, and `handle:...` plus caller-selected fields/detail.
 - `vw_find_objects`: Vectorworks criteria search, such as `T=WALL`. On the native bridge, simple `ALL`, `T=...`, `C=...`, and exact-name `((N='Name'))` criteria are resolved through bounded `get_objects` when the dedicated listener search handler is unavailable.
 - `vw_inspect_object`: discover object/plugin parameters; plugin probing creates a temporary object and requires `confirm="PROBE_PLUGIN"`.
 
@@ -31,6 +32,7 @@ Create and edit:
 - `vw_create_schematic_door`: schematic door leaf and swing arc from native 2D primitives.
 - `vw_create_schematic_window`: schematic double-line window marker from native 2D primitives.
 - `vw_set_object_property`: name, class, color, line weight, opacity.
+- `vw_batch_set_object_properties`: resolve `uuid:...`, `name:...`, or `handle:...` refs, reject ambiguous/stale refs before writing, apply multiple property edits, and optionally verify readback. Requires `set_property` support in the active bridge.
 - `vw_selection`: get, select, clear, delete, move, or duplicate selected objects; selected-object delete requires `confirm="DELETE_SELECTED"` and exact-name criteria delete requires `confirm="DELETE_EXACT_NAME"`.
 
 Architecture:
@@ -71,6 +73,7 @@ Rules:
 |------|----------|-------------|-----------|-------------|------------|------------|---------------|
 | `vw_agent_context` | `metadata` | `` | `true` | `false` | `true` | `true` | `false` |
 | `vw_batch_create_objects` | `document-write` | `batch_create_objects` | `false` | `false` | `false` | `true` | `true` |
+| `vw_batch_set_object_properties` | `document-write` | `` | `false` | `false` | `false` | `true` | `true` |
 | `vw_bridge_status` | `health` | `ping` | `true` | `false` | `true` | `true` | `false` |
 | `vw_capabilities` | `metadata` | `ping` | `true` | `false` | `true` | `true` | `false` |
 | `vw_create_bim_floor_plan` | `bim-floor-plan` | `` | `false` | `false` | `false` | `true` | `true` |
@@ -94,6 +97,7 @@ Rules:
 | `vw_insert_door` | `document-write` | `insert_door` | `false` | `false` | `false` | `true` | `true` |
 | `vw_insert_window` | `document-write` | `insert_window` | `false` | `false` | `false` | `true` | `true` |
 | `vw_inspect_object` | `document-write` | `inspect_object` | `false` | `false` | `false` | `true` | `true` |
+| `vw_lookup_objects` | `document-read` | `` | `true` | `false` | `true` | `true` | `true` |
 | `vw_manage_classes` | `mixed-destructive` | `manage_classes` | `false` | `true` | `false` | `true` | `true` |
 | `vw_ping` | `health` | `ping` | `true` | `false` | `true` | `true` | `false` |
 | `vw_plan_schematic_floor_plan` | `schematic-floor-plan` | `` | `true` | `false` | `true` | `false` | `false` |

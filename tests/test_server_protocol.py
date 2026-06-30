@@ -178,6 +178,13 @@ def _native_phase_two_status():
     }
 
 
+def _native_phase_two_with_set_property_status():
+    status = _native_phase_two_status()
+    status["implemented_actions"] = sorted(set(status["implemented_actions"]) | {"set_property"})
+    status["handlers"] = status["handlers"] + 1
+    return status
+
+
 def _python_dialog_status():
     return {
         "pong": True,
@@ -1104,6 +1111,184 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertEqual(result["objects"][0]["handle"], "h1")
         self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_objects"])
 
+    def test_lookup_objects_returns_compact_refs_from_get_objects(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_one_status()}
+            if request["action"] == "get_objects":
+                self.assertEqual(request["params"], {"layer": "", "object_type": "wall", "limit": 10})
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": [
+                        {
+                            "handle": "h1",
+                            "uuid": "u1",
+                            "type": "wall",
+                            "name": "Target Wall",
+                            "layer": "Layer 1",
+                            "bounds": {"top_left": [0, 100], "bottom_right": [100, 0]},
+                        },
+                        {"handle": "h2", "uuid": "u2", "type": "wall", "name": "Other", "layer": "Layer 1"},
+                    ],
+                }
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=2) as listener:
+            _configure_server(listener.port)
+            result = json.loads(server.vw_lookup_objects(criteria="T=WALL", name="Target Wall", limit=10))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["matched"], 1)
+        self.assertEqual(result["objects"][0]["ref"], "uuid:u1")
+        self.assertEqual(result["objects"][0]["refs"], ["uuid:u1", "name:Target Wall", "handle:h1"])
+        self.assertEqual(result["objects"][0]["type"], "wall")
+        self.assertNotIn("bounds", result["objects"][0])
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_objects"])
+
+    def test_lookup_objects_supports_field_limited_normal_detail(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_one_status()}
+            if request["action"] == "get_objects":
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": [
+                        {"handle": "h1", "type": "rect", "name": "Room", "layer": "Layer 1", "bounds": {"top_left": [0, 1], "bottom_right": [1, 0]}},
+                    ],
+                }
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=2) as listener:
+            _configure_server(listener.port)
+            result = json.loads(
+                server.vw_lookup_objects(
+                    criteria="ALL",
+                    limit=5,
+                    detail="normal",
+                    fields=["handle", "bounds"],
+                    include_refs=False,
+                )
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["objects"], [{"handle": "h1", "bounds": {"top_left": [0, 1], "bottom_right": [1, 0]}}])
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_objects"])
+
+    def test_lookup_objects_rejects_complex_criteria_before_connecting(self):
+        result = json.loads(server.vw_lookup_objects("((T=RECT) & (C='A-Test'))"))
+
+        self.assertFalse(result["ok"])
+        self.assertIn("use vw_find_objects", result["error"])
+
+    def test_batch_set_object_properties_resolves_writes_and_verifies(self):
+        get_objects_calls = 0
+
+        def handler(request):
+            nonlocal get_objects_calls
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_two_with_set_property_status()}
+            if request["action"] == "get_objects":
+                get_objects_calls += 1
+                self.assertEqual(request["params"], {"layer": "Layer 1", "object_type": "rect", "limit": 1000})
+                objects = (
+                    [{"handle": "h1", "uuid": "u1", "type": "rect", "name": "Old", "layer": "Layer 1", "class": "None"}]
+                    if get_objects_calls == 1
+                    else [{"handle": "h1", "uuid": "u1", "type": "rect", "name": "New", "layer": "Layer 1", "class": "A-Casework"}]
+                )
+                return {"id": request["id"], "success": True, "result": objects}
+            if request["action"] == "set_property":
+                self.assertEqual(request["params"]["handle"], "h1")
+                self.assertIn(request["params"], [
+                    {"handle": "h1", "property_name": "name", "value": "New"},
+                    {"handle": "h1", "property_name": "class", "value": "A-Casework"},
+                ])
+                return {"id": request["id"], "success": True, "result": {"changed": True}}
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=5) as listener:
+            _configure_server(listener.port)
+            result = json.loads(
+                server.vw_batch_set_object_properties(
+                    edits=[
+                        {
+                            "ref": "uuid:u1",
+                            "expected_type": "rect",
+                            "expected_layer": "Layer 1",
+                            "properties": {"name": "New", "class": "A-Casework"},
+                        }
+                    ]
+                )
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["write_attempts"], 2)
+        self.assertEqual(result["edits"][0]["target_ref"], "uuid:u1")
+        self.assertTrue(result["edits"][0]["verified"])
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_objects", "set_property", "set_property", "get_objects"])
+
+    def test_batch_set_object_properties_rejects_ambiguous_name_before_write(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_two_with_set_property_status()}
+            if request["action"] == "get_objects":
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": [
+                        {"handle": "h1", "uuid": "u1", "type": "rect", "name": "Door", "layer": "Layer 1"},
+                        {"handle": "h2", "uuid": "u2", "type": "rect", "name": "Door", "layer": "Layer 1"},
+                    ],
+                }
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=2) as listener:
+            _configure_server(listener.port)
+            result = json.loads(
+                server.vw_batch_set_object_properties(
+                    edits=[{"ref": "name:Door", "properties": {"class": "A-Door"}}]
+                )
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["phase"], "resolve")
+        self.assertFalse(result["writes_started"])
+        self.assertEqual(result["failures"][0]["match_count"], 2)
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_objects"])
+
+    def test_batch_set_object_properties_rejects_invalid_property_before_connecting(self):
+        result = json.loads(
+            server.vw_batch_set_object_properties(
+                edits=[{"ref": "uuid:u1", "properties": {"fill_colour": "red"}}]
+            )
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["phase"], "validate")
+        self.assertFalse(result["writes_started"])
+        self.assertEqual(result["failures"][0]["property_name"], "fill_colour")
+
+    def test_batch_set_object_properties_blocks_native_bridge_without_set_property(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_two_status()}
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=1) as listener:
+            _configure_server(listener.port)
+            result = json.loads(
+                server.vw_batch_set_object_properties(
+                    edits=[{"ref": "uuid:u1", "properties": {"name": "New"}}]
+                )
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["phase"], "write_preflight")
+        self.assertFalse(result["writes_started"])
+        self.assertEqual(result["preflight"]["reason"], "native_bridge_action_not_implemented")
+        self.assertEqual([request["action"] for request in listener.requests], ["ping"])
+
     def test_drawing_summary_can_omit_examples_for_compact_agent_context(self):
         def handler(request):
             if request["action"] == "ping":
@@ -1651,6 +1836,8 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertIn("vw_plan_schematic_floor_plan", safety)
         self.assertIn("vw_create_schematic_floor_plan", safety)
         self.assertIn("vw_drawing_summary", safety)
+        self.assertIn("vw_lookup_objects", safety)
+        self.assertIn("vw_batch_set_object_properties", safety)
         self.assertTrue(safety["vw_ping"]["readOnlyHint"])
         self.assertTrue(safety["vw_agent_context"]["readOnlyHint"])
         self.assertEqual(safety["vw_agent_context"]["composes_actions"], ["ping", "get_document_info", "get_layers", "get_objects"])
@@ -1670,6 +1857,10 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertEqual(safety["vw_drawing_summary"]["composes_actions"], ["get_document_info", "get_layers", "get_objects"])
         self.assertEqual(safety["vw_find_objects"]["wire_action"], "find_objects")
         self.assertEqual(safety["vw_find_objects"]["composes_actions"], ["get_objects"])
+        self.assertIsNone(safety["vw_lookup_objects"]["wire_action"])
+        self.assertEqual(safety["vw_lookup_objects"]["composes_actions"], ["get_objects"])
+        self.assertIsNone(safety["vw_batch_set_object_properties"]["wire_action"])
+        self.assertEqual(safety["vw_batch_set_object_properties"]["composes_actions"], ["get_objects", "set_property"])
         self.assertTrue(safety["vw_selection"]["actions"]["get"]["readOnlyHint"])
         self.assertTrue(safety["vw_selection"]["actions"]["delete"]["destructiveHint"])
         self.assertTrue(safety["vw_selection"]["actions"]["delete"]["confirmationRequired"])
