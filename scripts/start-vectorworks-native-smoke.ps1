@@ -48,6 +48,11 @@ $SmokeAttempted = $false
 $SmokeExitCode = $null
 $SmokePayload = $null
 $SmokeRaw = ""
+$ReusedExistingBridge = $false
+$InitialSmokeAttempted = $false
+$InitialSmokeExitCode = $null
+$InitialSmokePayload = $null
+$InitialSmokeRaw = ""
 
 function Add-Failure {
     param([string]$Message)
@@ -141,7 +146,8 @@ function Test-PortOpen {
 }
 
 function Wait-PortOpen {
-    $Deadline = (Get-Date).AddSeconds($StartupTimeoutSeconds)
+    param([int]$TimeoutSeconds = $StartupTimeoutSeconds)
+    $Deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $Deadline) {
         if (Test-PortOpen -TimeoutMilliseconds 500) {
             return $true
@@ -149,6 +155,39 @@ function Wait-PortOpen {
         Start-Sleep -Milliseconds $ProbeIntervalMilliseconds
     }
     return $false
+}
+
+function Invoke-NativeSmokeAttempt {
+    $SmokeArgs = @(
+        "-HostName", $HostName,
+        "-Port", [string]$Port,
+        "-TimeoutSeconds", "8",
+        "-PingCount", $(if ($RunPhase2) { "3" } else { "10" }),
+        "-ReadCount", $(if ($RunPhase2) { "2" } else { "1" }),
+        "-Phase", $(if ($RunPhase2) { "2" } else { "0" }),
+        "-Json"
+    )
+    if ($RunPhase2) {
+        $SmokeArgs += "-IncludeObjects"
+        if ($AllowWriteFixture) { $SmokeArgs += "-AllowWriteFixture" }
+    } else {
+        $SmokeArgs += "-Stop"
+    }
+
+    $Raw = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $SmokePath @SmokeArgs 2>&1 | Out-String
+    $ExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+    $Payload = $null
+    try {
+        $Payload = $Raw | ConvertFrom-Json
+    } catch {
+        $Payload = $null
+    }
+    return [pscustomobject]@{
+        exitCode = $ExitCode
+        payload = $Payload
+        raw = $Raw
+        ok = [bool]($ExitCode -eq 0 -and $Payload -and [bool]$Payload.ok)
+    }
 }
 
 function Stop-RunningVectorworksForRestart {
@@ -208,6 +247,7 @@ function New-Report {
         port = $Port
         startupTimeoutSeconds = $StartupTimeoutSeconds
         restartIfRunning = [bool]$RestartIfRunning
+        reusedExistingBridge = [bool]$ReusedExistingBridge
         forceKillIfCloseFails = [bool]$ForceKillIfCloseFails
         noStart = [bool]$NoStart
         runningBefore = @($RunningBefore | ForEach-Object { [ordered]@{ id = $_.Id; processName = $_.ProcessName } })
@@ -221,6 +261,10 @@ function New-Report {
         smokeExitCode = $SmokeExitCode
         smoke = $SmokePayload
         smokeRaw = $SmokeRaw
+        initialSmokeAttempted = [bool]$InitialSmokeAttempted
+        initialSmokeExitCode = $InitialSmokeExitCode
+        initialSmoke = $InitialSmokePayload
+        initialSmokeRaw = $InitialSmokeRaw
         failures = @($Failures)
         nextActions = @($Actions)
         nextAction = if ($Actions.Count -gt 0) { [string]$Actions[0] } else { "" }
@@ -230,63 +274,65 @@ function New-Report {
 $ResolvedVectorworksExe = Resolve-VectorworksExe
 $RunningBefore = @(Get-VectorworksProcesses)
 $PortAlreadyOpen = Test-PortOpen -TimeoutMilliseconds 300
-
-if ($RestartIfRunning -and $RunningBefore.Count -gt 0) {
-    [void](Stop-RunningVectorworksForRestart -Processes $RunningBefore)
+if (-not $PortAlreadyOpen -and $RunningBefore.Count -gt 0 -and $RunPhase2) {
+    $PortAlreadyOpen = Wait-PortOpen -TimeoutSeconds ([Math]::Min(10, $StartupTimeoutSeconds))
 }
 
-if (-not (Test-PortOpen -TimeoutMilliseconds 300)) {
-    if ($NoStart) {
-        Add-Failure "Native bridge port $HostName`:$Port is not open and -NoStart was supplied."
-        Add-Action "Start Vectorworks $VectorworksVersion or rerun without -NoStart so the agent can launch it."
-    } elseif (-not $ResolvedVectorworksExe -or -not (Test-Path -LiteralPath $ResolvedVectorworksExe -PathType Leaf)) {
-        Add-Failure "Vectorworks $VectorworksVersion executable was not found. Set VW_MCP_VECTORWORKS_EXE or pass -VectorworksExe."
-        Add-Action "Install Vectorworks $VectorworksVersion or set VW_MCP_VECTORWORKS_EXE to the full Vectorworks.exe path, then rerun install.ps1 -FullNative."
-    } elseif ($Failures.Count -eq 0) {
-        try {
-            $Process = Start-Process -FilePath $ResolvedVectorworksExe -PassThru
-            $Started = $true
-            $StartedProcessId = $Process.Id
-        } catch {
-            Add-Failure "Could not start Vectorworks $VectorworksVersion from $ResolvedVectorworksExe`: $($_.Exception.Message)"
-            Add-Action "Start Vectorworks $VectorworksVersion manually, then rerun install.ps1 -FullNative."
+if ($PortAlreadyOpen -and $RunPhase2) {
+    $InitialSmokeAttempted = $true
+    $InitialSmoke = Invoke-NativeSmokeAttempt
+    $InitialSmokeExitCode = $InitialSmoke.exitCode
+    $InitialSmokePayload = $InitialSmoke.payload
+    $InitialSmokeRaw = $InitialSmoke.raw
+    if ($InitialSmoke.ok) {
+        $ReusedExistingBridge = $true
+        $PortOpened = $true
+        $SmokeAttempted = $true
+        $SmokeExitCode = $InitialSmoke.exitCode
+        $SmokePayload = $InitialSmoke.payload
+        $SmokeRaw = $InitialSmoke.raw
+    }
+}
+
+if (-not $ReusedExistingBridge) {
+    if ($RestartIfRunning -and $RunningBefore.Count -gt 0) {
+        [void](Stop-RunningVectorworksForRestart -Processes $RunningBefore)
+    }
+
+    if (-not (Test-PortOpen -TimeoutMilliseconds 300)) {
+        if ($NoStart) {
+            Add-Failure "Native bridge port $HostName`:$Port is not open and -NoStart was supplied."
+            Add-Action "Start Vectorworks $VectorworksVersion or rerun without -NoStart so the agent can launch it."
+        } elseif (-not $ResolvedVectorworksExe -or -not (Test-Path -LiteralPath $ResolvedVectorworksExe -PathType Leaf)) {
+            Add-Failure "Vectorworks $VectorworksVersion executable was not found. Set VW_MCP_VECTORWORKS_EXE or pass -VectorworksExe."
+            Add-Action "Install Vectorworks $VectorworksVersion or set VW_MCP_VECTORWORKS_EXE to the full Vectorworks.exe path, then rerun install.ps1 -FullNative."
+        } elseif ($Failures.Count -eq 0) {
+            try {
+                $Process = Start-Process -FilePath $ResolvedVectorworksExe -PassThru
+                $Started = $true
+                $StartedProcessId = $Process.Id
+            } catch {
+                Add-Failure "Could not start Vectorworks $VectorworksVersion from $ResolvedVectorworksExe`: $($_.Exception.Message)"
+                Add-Action "Start Vectorworks $VectorworksVersion manually, then rerun install.ps1 -FullNative."
+            }
+        }
+    }
+
+    if ($Failures.Count -eq 0) {
+        $PortOpened = if ($PortAlreadyOpen -and -not $RestartIfRunning) { $true } else { Wait-PortOpen }
+        if (-not $PortOpened) {
+            Add-Failure "Vectorworks started or was already running, but the native bridge did not open $HostName`:$Port within $StartupTimeoutSeconds seconds."
+            Add-Action "Confirm Vectorworks $VectorworksVersion opens without license/startup prompts and that the installed native plug-in is enabled, then rerun install.ps1 -FullNative."
         }
     }
 }
 
-if ($Failures.Count -eq 0) {
-    $PortOpened = if ($PortAlreadyOpen -and -not $RestartIfRunning) { $true } else { Wait-PortOpen }
-    if (-not $PortOpened) {
-        Add-Failure "Vectorworks started or was already running, but the native bridge did not open $HostName`:$Port within $StartupTimeoutSeconds seconds."
-        Add-Action "Confirm Vectorworks $VectorworksVersion opens without license/startup prompts and that the installed native plug-in is enabled, then rerun install.ps1 -FullNative."
-    }
-}
-
-if ($Failures.Count -eq 0 -and $PortOpened) {
+if ($Failures.Count -eq 0 -and $PortOpened -and -not $SmokeAttempted) {
     $SmokeAttempted = $true
-    $SmokeArgs = @(
-        "-HostName", $HostName,
-        "-Port", [string]$Port,
-        "-TimeoutSeconds", "8",
-        "-PingCount", $(if ($RunPhase2) { "3" } else { "10" }),
-        "-ReadCount", $(if ($RunPhase2) { "2" } else { "1" }),
-        "-Phase", $(if ($RunPhase2) { "2" } else { "0" }),
-        "-Json"
-    )
-    if ($RunPhase2) {
-        $SmokeArgs += "-IncludeObjects"
-        if ($AllowWriteFixture) { $SmokeArgs += "-AllowWriteFixture" }
-    } else {
-        $SmokeArgs += "-Stop"
-    }
-
-    $SmokeRaw = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $SmokePath @SmokeArgs 2>&1 | Out-String
-    $SmokeExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
-    try {
-        $SmokePayload = $SmokeRaw | ConvertFrom-Json
-    } catch {
-        $SmokePayload = $null
-    }
+    $SmokeAttempt = Invoke-NativeSmokeAttempt
+    $SmokeExitCode = $SmokeAttempt.exitCode
+    $SmokePayload = $SmokeAttempt.payload
+    $SmokeRaw = $SmokeAttempt.raw
     if ($SmokeExitCode -ne 0) {
         Add-Failure "Native bridge smoke failed with exit code $SmokeExitCode."
         Add-Action "Open Vectorworks $VectorworksVersion, confirm the native plug-in is loaded, then run the command in native_summary.next_command."

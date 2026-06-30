@@ -14,10 +14,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class McpStdioContractTests(unittest.TestCase):
     def test_server_starts_over_stdio_and_exposes_expected_contract(self):
-        contract_completed = False
+        contract_checked = False
 
         async def run_contract():
-            nonlocal contract_completed
+            nonlocal contract_checked
             env = os.environ.copy()
             env.update(
                 {
@@ -100,7 +100,7 @@ class McpStdioContractTests(unittest.TestCase):
                         self.assertEqual(dimension_schema["minimum"], 0)
                         self.assertEqual(dimension_schema["maximum"], 2)
 
-                        contract_completed = True
+                        contract_checked = True
                         ping = await session.call_tool("vw_ping", {})
                         self.assertFalse(ping.isError)
                         ping_text = ping.content[0].text
@@ -110,7 +110,7 @@ class McpStdioContractTests(unittest.TestCase):
         try:
             anyio.run(run_contract)
         except* anyio.BrokenResourceError:
-            if not contract_completed:
+            if not contract_checked:
                 raise
 
 

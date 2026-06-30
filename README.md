@@ -101,7 +101,10 @@ Native bridge planning aids:
   not on the Vectorworks Home/no-document screen.
 - `scripts/start-vectorworks-native-smoke.ps1` discovers, starts, or gracefully
   restarts Vectorworks, waits for the native bridge socket, then runs the native
-  smoke script. It only force-kills Vectorworks when explicitly allowed.
+  smoke script. Phase-2 runs first reuse an already healthy bridge instead of
+  reopening Vectorworks; restart is used only when the bridge is missing/stale or
+  an explicit force-restart path is requested. It only force-kills Vectorworks
+  when explicitly allowed.
 
 Native bridge prerequisite check:
 
