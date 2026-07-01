@@ -21,6 +21,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #if defined(SDK_VERSION)
@@ -747,13 +748,13 @@ bool RequestAuthAccepted(const Protocol::RequestEnvelope& request) {
 Protocol::ResponseEnvelope HandlePingOnTransportThread(const Protocol::RequestEnvelope& request) {
 #if VECTORWORKS_MCP_HAS_SDK
     const bool ready = CadHandlersRuntimeReady();
-    std::string payload = R"({"pong":true,"version":"native-sdk-bridge-phase2","bridge_kind":"native_sdk_bridge_phase2","dispatch_mode":"native_sdk","handlers":11)";
+    std::string payload = R"({"pong":true,"version":"native-sdk-bridge-phase2","bridge_kind":"native_sdk_bridge_phase2","dispatch_mode":"native_sdk","handlers":12)";
     payload += ",\"cad_api_safe\":";
     payload += ready ? "true" : "false";
     payload += ",\"transport_only\":";
     payload += ready ? "false" : "true";
     payload += R"(,"native_bridge":true,"native_phase":2)";
-    payload += ",\"implemented_actions\":[\"ping\",\"stop\",\"get_document_info\",\"get_layers\",\"get_objects\",\"selection\",\"create_object\",\"batch_create_objects\",\"create_wall\",\"create_text\",\"create_linear_dimension\"]";
+    payload += ",\"implemented_actions\":[\"ping\",\"stop\",\"get_document_info\",\"get_layers\",\"get_objects\",\"selection\",\"create_object\",\"batch_create_objects\",\"create_wall\",\"create_text\",\"create_linear_dimension\",\"set_property\"]";
     payload += ",\"cad_handlers_implemented\":true";
     payload += ",\"main_context_pump\":";
     payload += JsonString(MainContextPumpName());
@@ -782,10 +783,21 @@ std::string TxToUtf8(const TXString& value) {
     return value.GetStdString();
 }
 
-std::string HandleId(MCObjectHandle handle) {
+std::unordered_set<std::string> gKnownObjectHandleIds;
+constexpr std::size_t kMaxPropertyValueChars = 1024;
+
+std::string HandleIdFromRaw(std::uintptr_t raw) {
     std::ostringstream out;
-    out << "0x" << std::hex << reinterpret_cast<std::uintptr_t>(handle);
+    out << "0x" << std::hex << raw;
     return out.str();
+}
+
+std::string HandleId(MCObjectHandle handle) {
+    const auto id = HandleIdFromRaw(reinterpret_cast<std::uintptr_t>(handle));
+    if (handle) {
+        gKnownObjectHandleIds.insert(id);
+    }
+    return id;
 }
 
 std::string ObjectUuidString(MCObjectHandle handle) {
@@ -867,6 +879,27 @@ std::string LayerNameForObject(MCObjectHandle object) {
     return TxToUtf8(name);
 }
 
+std::string ClassNameForObject(MCObjectHandle object) {
+    if (!object) {
+        return "";
+    }
+    const InternalIndex classId = gSDK->GetObjectClass(object);
+    if (!gSDK->ValidClass(classId)) {
+        return "";
+    }
+    TXString name;
+    gSDK->ClassIDToName(classId, name);
+    return TxToUtf8(name);
+}
+
+std::string RgbStringFromColorRef(ColorRef colorRef) {
+    RGBColor rgb = {};
+    gSDK->ColorIndexToRGB(colorRef, rgb);
+    return std::to_string(static_cast<unsigned int>(rgb.red)) + "," +
+        std::to_string(static_cast<unsigned int>(rgb.green)) + "," +
+        std::to_string(static_cast<unsigned int>(rgb.blue));
+}
+
 std::string ObjectJson(MCObjectHandle object) {
     const short type = gSDK->GetObjectTypeN(object);
     TXString name;
@@ -891,6 +924,25 @@ std::string ObjectJson(MCObjectHandle object) {
         json += ",\"layer\":";
         json += JsonString(layerName);
     }
+    const auto className = ClassNameForObject(object);
+    if (!className.empty()) {
+        json += ",\"class\":";
+        json += JsonString(className);
+        json += ",\"class_name\":";
+        json += JsonString(className);
+    }
+
+    ObjectColorType colors = {};
+    if (gSDK->GetColor(object, colors)) {
+        json += ",\"fillColor\":";
+        json += JsonString(RgbStringFromColorRef(colors.fillFore));
+        json += ",\"penColor\":";
+        json += JsonString(RgbStringFromColorRef(colors.penFore));
+    }
+    json += ",\"lineWeight\":";
+    json += std::to_string(static_cast<int>(gSDK->GetLineWeight(object)));
+    json += ",\"opacity\":";
+    json += std::to_string(static_cast<int>(gSDK->GetOpacity(object)));
 
     WorldRect bounds;
     gSDK->GetObjectBounds(object, bounds);
@@ -1613,6 +1665,166 @@ std::string HandleCreateLinearDimension(const Params& params) {
     return HandleCreateTypedObject(params, "create_linear_dimension", TXString("Vectorworks MCP create dimension"));
 }
 
+int ParseIntegerString(const std::string& rawValue, const std::string& label, int minValue, int maxValue) {
+    const std::string value = TrimCopy(rawValue);
+    if (value.empty()) {
+        throw std::invalid_argument(label + " is required");
+    }
+    std::size_t parsedChars = 0u;
+    long parsed = 0;
+    try {
+        parsed = std::stol(value, &parsedChars, 10);
+    } catch (...) {
+        throw std::invalid_argument(label + " must be an integer");
+    }
+    if (parsedChars != value.size()) {
+        throw std::invalid_argument(label + " must be an integer");
+    }
+    if (parsed < minValue || parsed > maxValue) {
+        throw std::invalid_argument(label + " must be between " + std::to_string(minValue) + " and " + std::to_string(maxValue));
+    }
+    return static_cast<int>(parsed);
+}
+
+ColorRef ColorRefFromRgbString(const std::string& value) {
+    std::vector<int> components;
+    std::stringstream input(value);
+    std::string part;
+    while (std::getline(input, part, ',')) {
+        components.push_back(ParseIntegerString(part, "color component", 0, 65535));
+    }
+    if (components.size() != 3u) {
+        throw std::invalid_argument("color must be r,g,b with components in 0..65535");
+    }
+
+    RGBColor rgb = {};
+    rgb.red = static_cast<unsigned short>(components[0]);
+    rgb.green = static_cast<unsigned short>(components[1]);
+    rgb.blue = static_cast<unsigned short>(components[2]);
+    ColorRef colorRef = 0;
+    gSDK->RGBToColorIndexN(rgb, colorRef, false);
+    return colorRef;
+}
+
+MCObjectHandle ObjectHandleFromSessionId(const std::string& handleId) {
+    const std::string value = TrimCopy(handleId);
+    if (value.empty()) {
+        throw std::invalid_argument("handle is required");
+    }
+    std::size_t parsedChars = 0u;
+    unsigned long long raw = 0u;
+    try {
+        raw = std::stoull(value, &parsedChars, 0);
+    } catch (...) {
+        throw std::invalid_argument("handle must be a session handle returned by get_objects");
+    }
+    if (parsedChars != value.size() || raw == 0u) {
+        throw std::invalid_argument("handle must be a session handle returned by get_objects");
+    }
+    const auto canonicalHandleId = HandleIdFromRaw(static_cast<std::uintptr_t>(raw));
+    if (gKnownObjectHandleIds.find(canonicalHandleId) == gKnownObjectHandleIds.end()) {
+        throw std::invalid_argument("handle was not returned by this native bridge session; resolve the object with get_objects first");
+    }
+    return reinterpret_cast<MCObjectHandle>(static_cast<std::uintptr_t>(raw));
+}
+
+void ApplyObjectProperty(MCObjectHandle object, const std::string& propertyName, const std::string& value) {
+    if (propertyName == "name") {
+        const GSError err = gSDK->SetObjectName(object, TXString(value.c_str()));
+        if (err != 0) {
+            throw std::runtime_error("Vectorworks rejected object name");
+        }
+        return;
+    }
+    if (propertyName == "class") {
+        if (value.empty()) {
+            throw std::invalid_argument("class value is required");
+        }
+        InternalIndex classId = gSDK->ClassNameToID(TXString(value.c_str()));
+        if (!gSDK->ValidClass(classId)) {
+            classId = gSDK->AddClass(TXString(value.c_str()));
+        }
+        if (!gSDK->ValidClass(classId)) {
+            throw std::runtime_error("Vectorworks rejected class: " + value);
+        }
+        gSDK->SetObjectClass(object, classId);
+        return;
+    }
+    if (propertyName == "lineWeight") {
+        const int lineWeight = ParseIntegerString(value, "lineWeight", 0, std::numeric_limits<short>::max());
+        gSDK->SetLineWeight(object, static_cast<short>(lineWeight));
+        return;
+    }
+    if (propertyName == "opacity") {
+        const int opacity = ParseIntegerString(value, "opacity", 0, 100);
+        gSDK->SetOpacity(object, static_cast<OpacityRef>(opacity));
+        return;
+    }
+    if (propertyName == "fillColor" || propertyName == "penColor") {
+        ObjectColorType colors = {};
+        if (!gSDK->GetColor(object, colors)) {
+            throw std::runtime_error("Vectorworks could not read object color");
+        }
+        const ColorRef colorRef = ColorRefFromRgbString(value);
+        if (propertyName == "fillColor") {
+            colors.fillFore = colorRef;
+            colors.fillBack = colorRef;
+        } else {
+            colors.penFore = colorRef;
+            colors.penBack = colorRef;
+        }
+        gSDK->SetColor(object, colors);
+        return;
+    }
+    throw std::invalid_argument("unsupported property: " + propertyName);
+}
+
+std::string HandleSetProperty(const Params& params) {
+    const std::string handleId = GetStringParam(params, "handle");
+    const std::string propertyName = GetStringParam(params, "property_name");
+    const std::string value = GetStringParam(params, "value");
+    if (propertyName.empty()) {
+        throw std::invalid_argument("property_name is required");
+    }
+    if (value.size() > kMaxPropertyValueChars) {
+        throw std::invalid_argument("property value is too long");
+    }
+
+    MCObjectHandle object = ObjectHandleFromSessionId(handleId);
+    const short type = gSDK->GetObjectTypeN(object);
+    if (!IsUserVisibleObjectType(type)) {
+        throw std::invalid_argument("handle does not refer to a user-visible object");
+    }
+
+    const std::string before = ObjectJson(object);
+    gSDK->SupportUndoAndRemove();
+    gSDK->SetUndoMethod(kUndoSwapObjects);
+    gSDK->NameUndoEvent(TXString("Vectorworks MCP set property"));
+    try {
+        gSDK->AddBeforeSwapObject(object);
+        ApplyObjectProperty(object, propertyName, value);
+        gSDK->ResetObject(object);
+        gSDK->AddAfterSwapObject(object);
+        gSDK->EndUndoEvent();
+    } catch (...) {
+        gSDK->UndoAndRemove();
+        throw;
+    }
+
+    std::string json = "{\"changed\":true,\"handle\":";
+    json += JsonString(handleId);
+    json += ",\"property_name\":";
+    json += JsonString(propertyName);
+    json += ",\"value\":";
+    json += JsonString(value);
+    json += ",\"before\":";
+    json += before;
+    json += ",\"after\":";
+    json += ObjectJson(object);
+    json += "}";
+    return json;
+}
+
 std::string HandleBatchCreateObjects(const Params& params) {
     const int objectCount = GetRequiredBoundedIntParam(params, "object_count", 1, 250);
     std::vector<PrimitiveSpec> specs;
@@ -1685,6 +1897,9 @@ Protocol::ResponseEnvelope DispatchCadRequestOnVectorworksMainContext(const Prot
         }
         if (request.action == "create_linear_dimension") {
             return {request.id, true, HandleCreateLinearDimension(params), ""};
+        }
+        if (request.action == "set_property") {
+            return {request.id, true, HandleSetProperty(params), ""};
         }
         return {request.id, false, "", "unknown native bridge CAD action: " + request.action};
     } catch (const std::exception& exc) {

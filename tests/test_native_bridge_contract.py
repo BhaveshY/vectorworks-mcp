@@ -573,6 +573,35 @@ class NativeBridgeContractTests(unittest.TestCase):
         self.assertIn('requestedType == "linear_dimension"', matches_block)
         self.assertIn('requestedType = "dimension"', matches_block)
 
+    def test_native_set_property_is_advertised_allowlisted_and_dispatched(self):
+        bridge_source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
+        dispatcher_source = (ROOT / "native_bridge" / "src" / "BridgeDispatcher.hpp").read_text(encoding="utf-8")
+
+        self.assertIn('"set_property"', bridge_source)
+        self.assertIn("HandleSetProperty", bridge_source)
+        self.assertIn('request.action == "set_property"', bridge_source)
+        self.assertIn('{"set_property", ExecutionContext::VectorworksMainPluginContext, true, false}', dispatcher_source)
+
+    def test_native_set_property_has_bounded_property_allowlist(self):
+        source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
+        apply_block = source[source.index("void ApplyObjectProperty"):]
+        set_property_block = source[source.index("std::string HandleSetProperty"):]
+
+        for property_name in ("name", "class", "lineWeight", "opacity", "fillColor", "penColor"):
+            self.assertIn(f'propertyName == "{property_name}"', apply_block)
+        self.assertIn('throw std::invalid_argument("unsupported property: " + propertyName)', apply_block)
+        self.assertIn("kMaxPropertyValueChars", set_property_block)
+        self.assertIn("property value is too long", set_property_block)
+
+    def test_native_set_property_requires_returned_session_handle(self):
+        source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
+        handle_block = source[source.index("std::string HandleId"):]
+        parse_block = source[source.index("MCObjectHandle ObjectHandleFromSessionId"):]
+
+        self.assertIn("gKnownObjectHandleIds.insert(id)", handle_block)
+        self.assertIn("gKnownObjectHandleIds.find(canonicalHandleId)", parse_block)
+        self.assertIn("resolve the object with get_objects first", parse_block)
+
     def test_native_writable_layer_fallback_creates_design_layer(self):
         source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
         layer_block = source[source.index("MCObjectHandle EnsureWritableLayer()"):]

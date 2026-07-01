@@ -124,8 +124,8 @@ responses must satisfy these minimum shapes:
   also report `native_phase >= 1` and `implemented_actions` containing `ping`,
   `stop`, `get_document_info`, `get_layers`, `get_objects`, `selection`,
   `create_object`, and `batch_create_objects`. A phase-2 bridge must additionally
-  report `native_phase >= 2` and include `create_wall`, `create_text`, and
-  `create_linear_dimension`. Windows SDK builds must also report
+  report `native_phase >= 2` and include `create_wall`, `create_text`,
+  `create_linear_dimension`, and `set_property`. Windows SDK builds must also report
   `main_context_pump: "win32_ui_timer"` and
   `main_context_pump_ready: true`; otherwise CAD requests are not considered
   safe even when the handler list is complete.
@@ -161,6 +161,10 @@ responses must satisfy these minimum shapes:
   origin, optional width, rotation, class/name, and point text size.
 - `create_linear_dimension`: object with `type: "linear_dimension"` and
   `handle`; accepts start/end coordinates and dimension offset.
+- `set_property`: object with `changed: true`, `handle`, `property_name`,
+  `value`, and `before`/`after` object records. The native allowlist is
+  `name`, `class`, `fillColor`, `penColor`, `lineWeight`, and `opacity`; host
+  tools resolve refs through `get_objects` and verify readback after writes.
 
 The harness also cross-checks the first successful phase-1 read snapshots:
 

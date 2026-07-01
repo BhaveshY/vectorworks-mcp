@@ -31,10 +31,11 @@ constexpr std::array<ActionSpec, 6> kPhaseOneActions = {{
     {"batch_create_objects", ExecutionContext::VectorworksMainPluginContext, true, false},
 }};
 
-constexpr std::array<ActionSpec, 3> kPhaseTwoActions = {{
+constexpr std::array<ActionSpec, 4> kPhaseTwoActions = {{
     {"create_wall", ExecutionContext::VectorworksMainPluginContext, true, false},
     {"create_text", ExecutionContext::VectorworksMainPluginContext, true, false},
     {"create_linear_dimension", ExecutionContext::VectorworksMainPluginContext, true, false},
+    {"set_property", ExecutionContext::VectorworksMainPluginContext, true, false},
 }};
 
 inline bool RequiresCadMainContext(std::string_view action) {

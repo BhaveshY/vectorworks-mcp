@@ -49,8 +49,11 @@ Native phase 1 implements `get_document_info`, `get_layers`,
 `create_object` for `rect`, `rectangle`, `box`, `circle`, `oval`, `line`, and
 `arc`, plus atomic `batch_create_objects` for multiple phase-1 primitives in
 one native undo event. Native phase 2 adds true wall objects, text blocks,
-linear dimensions, and mixed atomic batches, including `vw_create_bim_floor_plan`
-for wall-based rectangular room layouts. Write tools require an active
+linear dimensions, mixed atomic batches, and verified property edits for name,
+class, fill/pen color, line weight, and opacity. This includes
+`vw_create_bim_floor_plan` for wall-based rectangular room layouts and
+`vw_lookup_objects` -> `vw_batch_set_object_properties` for compact,
+readback-verified edits. Write tools require an active
 Vectorworks document; the Home/no-document screen can answer read health checks
 but is not a valid drawing target. In an active document with no current
 writable design layer, native creation attempts to create/select a default
@@ -490,7 +493,7 @@ Core:
 | `vw_get_layers` | List layers |
 | `vw_get_objects` | List objects filtered by layer/type |
 | `vw_drawing_summary` | Summarize document, layers, object counts, optional examples, and bounds; use `include_examples=false` for compact large-project context |
-| `vw_set_object_property` | Change name, class, color, line weight, opacity |
+| `vw_set_object_property` | Change one property through the verified object resolver |
 | `vw_lookup_objects` | Token-efficient object lookup with compact records and refs such as `uuid:...`, `name:...`, and `handle:...` |
 | `vw_batch_set_object_properties` | Resolve `uuid:...`, `name:...`, or `handle:...` refs, apply multiple property edits, and optionally verify readback; requires a bridge that supports `set_property` |
 | `vw_find_objects` | Criteria-based search such as `T=WALL`; native bridge can resolve simple `ALL`, `T=...`, `C=...`, and exact-name `((N='Name'))` lookups via bounded `get_objects` |

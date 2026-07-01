@@ -351,6 +351,7 @@ BatchObjectType = Literal[
 DoorSwing = Literal["left", "right"]
 PropertyName = Literal["name", "class", "fillColor", "penColor", "lineWeight", "opacity"]
 PROPERTY_NAME_VALUES = {"name", "class", "fillColor", "penColor", "lineWeight", "opacity"}
+MAX_PROPERTY_VALUE_CHARS = 1024
 ClassAction = Literal["list", "create", "delete"]
 WorksheetAction = Literal["list", "read", "write", "read_range"]
 SymbolAction = Literal["list", "insert"]
@@ -3570,8 +3571,11 @@ def vw_drawing_summary(
 
 @_tool("vw_set_object_property")
 def vw_set_object_property(handle: str, property_name: PropertyName, value: str) -> str:
-    """Set an object property. Colors use 'r,g,b' values in Vectorworks 0-65535 color range."""
-    return _send_tool("vw_set_object_property", {"handle": handle, "property_name": property_name, "value": value})
+    """Set one object property after resolving the handle and verifying readback."""
+    return vw_batch_set_object_properties(
+        [{"ref": f"handle:{handle}", "properties": {property_name: value}}],
+        verify=True,
+    )
 
 
 @_tool("vw_batch_set_object_properties")
@@ -3624,6 +3628,16 @@ def vw_batch_set_object_properties(
                         "index": index,
                         "ref": ref,
                         "error": "property value must be a scalar",
+                        "property_name": property_name,
+                    }
+                )
+                continue
+            if len(str(value)) > MAX_PROPERTY_VALUE_CHARS:
+                validation_failures.append(
+                    {
+                        "index": index,
+                        "ref": ref,
+                        "error": f"property value is limited to {MAX_PROPERTY_VALUE_CHARS} characters",
                         "property_name": property_name,
                     }
                 )

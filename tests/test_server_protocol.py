@@ -1228,6 +1228,40 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertTrue(result["edits"][0]["verified"])
         self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_objects", "set_property", "set_property", "get_objects"])
 
+    def test_set_object_property_resolves_handle_before_write(self):
+        get_objects_calls = 0
+
+        def handler(request):
+            nonlocal get_objects_calls
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_two_with_set_property_status()}
+            if request["action"] == "get_objects":
+                get_objects_calls += 1
+                expected_params = (
+                    {"layer": "", "object_type": "", "limit": 1000}
+                    if get_objects_calls == 1
+                    else {"layer": "Layer 1", "object_type": "rect", "limit": 1000}
+                )
+                self.assertEqual(request["params"], expected_params)
+                objects = (
+                    [{"handle": "h1", "uuid": "u1", "type": "rect", "name": "Old", "layer": "Layer 1"}]
+                    if get_objects_calls == 1
+                    else [{"handle": "h1", "uuid": "u1", "type": "rect", "name": "New", "layer": "Layer 1"}]
+                )
+                return {"id": request["id"], "success": True, "result": objects}
+            if request["action"] == "set_property":
+                self.assertEqual(request["params"], {"handle": "h1", "property_name": "name", "value": "New"})
+                return {"id": request["id"], "success": True, "result": {"changed": True}}
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=4) as listener:
+            _configure_server(listener.port)
+            result = json.loads(server.vw_set_object_property("h1", "name", "New"))
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["edits"][0]["verified"])
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_objects", "set_property", "get_objects"])
+
     def test_batch_set_object_properties_rejects_ambiguous_name_before_write(self):
         def handler(request):
             if request["action"] == "ping":
@@ -1268,6 +1302,19 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertEqual(result["phase"], "validate")
         self.assertFalse(result["writes_started"])
         self.assertEqual(result["failures"][0]["property_name"], "fill_colour")
+
+    def test_batch_set_object_properties_rejects_oversized_value_before_connecting(self):
+        result = json.loads(
+            server.vw_batch_set_object_properties(
+                edits=[{"ref": "uuid:u1", "properties": {"name": "x" * (server.MAX_PROPERTY_VALUE_CHARS + 1)}}]
+            )
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["phase"], "validate")
+        self.assertFalse(result["writes_started"])
+        self.assertEqual(result["failures"][0]["property_name"], "name")
+        self.assertIn("limited", result["failures"][0]["error"])
 
     def test_batch_set_object_properties_blocks_native_bridge_without_set_property(self):
         def handler(request):
