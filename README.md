@@ -50,10 +50,14 @@ Native phase 1 implements `get_document_info`, `get_layers`,
 `arc`, plus atomic `batch_create_objects` for multiple phase-1 primitives in
 one native undo event. Native phase 2 adds true wall objects, text blocks,
 linear dimensions, mixed atomic batches, and verified property edits for name,
-class, fill/pen color, line weight, and opacity. This includes
+class, fill/pen color, line weight, and opacity, plus production class
+management. This includes
 `vw_create_bim_floor_plan` for wall-based rectangular room layouts and
 `vw_lookup_objects` -> `vw_batch_set_object_properties` for compact,
-readback-verified edits. Write tools require an active
+readback-verified edits, and `vw_manage_classes` for native class
+list/create/delete workflows. Native phase 3 adds compact drawing summaries and
+criteria search so agents can inspect large drawings without fetching thousands
+of full object records. Write tools require an active
 Vectorworks document; the Home/no-document screen can answer read health checks
 but is not a valid drawing target. In an active document with no current
 writable design layer, native creation attempts to create/select a default
@@ -99,9 +103,9 @@ Native bridge planning aids:
 - `scripts/smoke-native-bridge.ps1` verifies a loaded native bridge with
   repeated raw-protocol phase-1 read checks by default, optional
   `-AllowWriteFixture` create/select/delete cleanup, `-Phase 2
-  -AllowWriteFixture` wall/text/dimension write checks, and `-Phase 0 -Stop`
-  port release checks. Write fixtures must run in a disposable active document,
-  not on the Vectorworks Home/no-document screen.
+  -AllowWriteFixture` wall/text/dimension/property/class-management write
+  checks, and `-Phase 0 -Stop` port release checks. Write fixtures must run in
+  a disposable active document, not on the Vectorworks Home/no-document screen.
 - `scripts/start-vectorworks-native-smoke.ps1` discovers, starts, or gracefully
   restarts Vectorworks, waits for the native bridge socket, then runs the native
   smoke script. Phase-2 runs first reuse an already healthy bridge instead of
@@ -180,7 +184,8 @@ plug-in again and run the default phase-1 read smoke. In a disposable test
 document, add `-AllowWriteFixture` to prove create/select/delete cleanup; the
 delete runs only after the fixture identity and exact selection are verified.
 Run `-Phase 2 -AllowWriteFixture` in a disposable document to prove native wall,
-text, linear dimension, and mixed-batch creation.
+text, linear dimension, set-property readback, class management, and mixed-batch
+creation.
 
 The Python listener also applies conservative resource guards for long agent
 sessions: `VW_MCP_MAX_CLIENTS`, `VW_MCP_CLIENT_IDLE_SECONDS`,
@@ -481,7 +486,7 @@ Core:
 | `vw_agent_context` | One-call compact Codex planning snapshot with preflight, key capabilities, and token-efficient drawing summary |
 | `vw_capabilities` | Current bridge capabilities, native phase-1/phase-2 support, and tool surface |
 | `vw_tool_safety` | Structured safety metadata for all tools |
-| `vw_run_script` | Execute trusted Python inside Vectorworks; requires `confirm="RUN_TRUSTED_CODE"` |
+| `vw_run_script` | Disabled by default; execute trusted Python inside Vectorworks only after `VW_MCP_ENABLE_RUN_SCRIPT=1` and `confirm="RUN_TRUSTED_CODE"` |
 | `vw_create_object` | Create rect/rectangle/box, circle, oval, line, arc; phase-2 batches also support wall, text, and linear_dimension |
 | `vw_batch_create_objects` | Create many native objects; `atomic=true` uses native all-or-none batch creation, `atomic=false` uses legacy non-atomic composition |
 | `vw_plan_schematic_floor_plan` | Dry-run a multi-room schematic floor plan and return the native primitives |
@@ -492,12 +497,12 @@ Core:
 | `vw_create_schematic_window` | Draw a schematic double-line window marker from native 2D primitives |
 | `vw_get_layers` | List layers |
 | `vw_get_objects` | List objects filtered by layer/type |
-| `vw_drawing_summary` | Summarize document, layers, object counts, optional examples, and bounds; use `include_examples=false` for compact large-project context |
+| `vw_drawing_summary` | Summarize document, layers, object counts, optional examples, and bounds; upgraded native bridges return compact counts without dumping every object |
 | `vw_set_object_property` | Change one property through the verified object resolver |
 | `vw_lookup_objects` | Token-efficient object lookup with compact records and refs such as `uuid:...`, `name:...`, and `handle:...` |
 | `vw_batch_set_object_properties` | Resolve `uuid:...`, `name:...`, or `handle:...` refs, apply multiple property edits, and optionally verify readback; requires a bridge that supports `set_property` |
-| `vw_find_objects` | Criteria-based search such as `T=WALL`; native bridge can resolve simple `ALL`, `T=...`, `C=...`, and exact-name `((N='Name'))` lookups via bounded `get_objects` |
-| `vw_manage_classes` | List, create, delete classes; delete requires `confirm="DELETE_CLASS"` |
+| `vw_find_objects` | Criteria-based search such as `T=WALL`; upgraded native bridges run criteria search directly and older bridges fall back to bounded `get_objects` for simple lookups |
+| `vw_manage_classes` | Native phase-2 class management; list, create, delete classes; delete requires `confirm="DELETE_CLASS"` |
 | `vw_worksheet` | Read/write worksheet cells and ranges |
 | `vw_symbol` | List and insert symbols |
 | `vw_export` | Open the matching Vectorworks export dialog and report that manual save confirmation is required |
@@ -598,9 +603,12 @@ transport has the same local-bind policy. Setup writes a per-user token to
 Frames without the token are rejected before dispatch. `VW_MCP_INSECURE_NO_AUTH=1`
 exists only for local diagnostics/tests.
 
-`vw_run_script` can execute arbitrary Python inside Vectorworks. Destructive or
-trusted-code paths require explicit confirmation arguments, and the listener
-enforces the same confirmations for raw TCP requests. `vw_selection` delete
+`vw_run_script` can execute arbitrary Python inside Vectorworks and is disabled
+by default. To use it for trusted local debugging, start both the MCP server and
+listener with `VW_MCP_ENABLE_RUN_SCRIPT=1`, then still pass
+`confirm="RUN_TRUSTED_CODE"`. Destructive paths require explicit confirmation
+arguments, and the listener enforces the same confirmations for raw TCP
+requests. `vw_selection` delete
 without criteria deletes only the current selection with
 `confirm="DELETE_SELECTED"`; criteria-based delete is restricted to exact object
 name criteria such as `((N='Fixture'))` and requires

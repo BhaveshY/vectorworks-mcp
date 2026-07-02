@@ -31,11 +31,17 @@ constexpr std::array<ActionSpec, 6> kPhaseOneActions = {{
     {"batch_create_objects", ExecutionContext::VectorworksMainPluginContext, true, false},
 }};
 
-constexpr std::array<ActionSpec, 4> kPhaseTwoActions = {{
+constexpr std::array<ActionSpec, 5> kPhaseTwoActions = {{
     {"create_wall", ExecutionContext::VectorworksMainPluginContext, true, false},
     {"create_text", ExecutionContext::VectorworksMainPluginContext, true, false},
     {"create_linear_dimension", ExecutionContext::VectorworksMainPluginContext, true, false},
     {"set_property", ExecutionContext::VectorworksMainPluginContext, true, false},
+    {"manage_classes", ExecutionContext::VectorworksMainPluginContext, true, false},
+}};
+
+constexpr std::array<ActionSpec, 2> kPhaseThreeActions = {{
+    {"find_objects", ExecutionContext::VectorworksMainPluginContext, false, false},
+    {"drawing_summary", ExecutionContext::VectorworksMainPluginContext, false, false},
 }};
 
 inline bool RequiresCadMainContext(std::string_view action) {
@@ -45,6 +51,11 @@ inline bool RequiresCadMainContext(std::string_view action) {
         }
     }
     for (const auto& spec : kPhaseTwoActions) {
+        if (spec.action == action) {
+            return true;
+        }
+    }
+    for (const auto& spec : kPhaseThreeActions) {
         if (spec.action == action) {
             return true;
         }
@@ -64,6 +75,11 @@ inline const ActionSpec* FindActionSpec(std::string_view action) {
         }
     }
     for (const auto& spec : kPhaseTwoActions) {
+        if (spec.action == action) {
+            return &spec;
+        }
+    }
+    for (const auto& spec : kPhaseThreeActions) {
         if (spec.action == action) {
             return &spec;
         }

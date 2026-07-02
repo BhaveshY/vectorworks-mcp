@@ -12,7 +12,7 @@ from typing import Any
 
 PHASE_ZERO_MIN_HANDLER_COUNT = 2
 PHASE_ONE_MIN_HANDLER_COUNT = 8
-PHASE_TWO_MIN_HANDLER_COUNT = 11
+PHASE_TWO_MIN_HANDLER_COUNT = 13
 PHASE_ONE_REQUIRED_ACTIONS = {
     "ping",
     "stop",
@@ -27,6 +27,8 @@ PHASE_TWO_REQUIRED_ACTIONS = PHASE_ONE_REQUIRED_ACTIONS | {
     "create_wall",
     "create_text",
     "create_linear_dimension",
+    "set_property",
+    "manage_classes",
 }
 PHASE_ONE_READ_ACTIONS = ("get_document_info", "get_layers", "get_objects", "selection")
 UNSAFE_DISPATCH_MODES = {"background", "foreground", "win_timer"}
@@ -480,8 +482,158 @@ def _extract_created_handle(result: Any) -> str | None:
     return None
 
 
+def _cleanup_fixture_by_exact_name(
+    sock: socket.socket,
+    report: dict[str, Any],
+    label: str,
+    fixture_name: str,
+    fixture_handle: str | None = None,
+) -> bool:
+    selection_cleared = _record_call(sock, report, "selection", "{0}-clear".format(label), params={"action": "clear"}) is not None
+    selection_select_sent = _record_call(
+        sock,
+        report,
+        "selection",
+        "{0}-select".format(label),
+        params={"action": "select", "criteria": "((N='{0}'))".format(fixture_name)},
+    ) is not None
+    selection_response = _record_call(sock, report, "selection", "{0}-get".format(label), params={"action": "get"})
+    fixture_selected = False
+    if selection_response is not None:
+        fixture_selected = _validate_fixture_selected_any_type(report, selection_response.get("result"), fixture_name, fixture_handle)
+
+    if not (selection_cleared and selection_select_sent and fixture_selected):
+        report["failures"].append("skipped {0} delete because exact-name fixture selection was not proven".format(label))
+        _record_call(sock, report, "selection", "{0}-clear-after-skip".format(label), params={"action": "clear"})
+        return False
+
+    delete_response = _record_call(
+        sock,
+        report,
+        "selection",
+        "{0}-delete".format(label),
+        params={
+            "action": "delete",
+            "criteria": "((N='{0}'))".format(fixture_name),
+            "confirm": "DELETE_EXACT_NAME",
+        },
+    )
+    if delete_response is not None:
+        _validate_fixture_delete_result(report, delete_response.get("result"))
+    cleanup_response = _record_call(sock, report, "get_objects", "{0}-cleanup".format(label), params={"limit": 500})
+    if cleanup_response is not None:
+        _validate_fixture_absent(report, cleanup_response.get("result"), fixture_name, fixture_handle, object_type=None)
+    return True
+
+
 def _run_phase_two_write_fixture(sock: socket.socket, report: dict[str, Any]) -> None:
     fixture_prefix = "VW_MCP_NATIVE_PHASE2_SMOKE_{0}".format(int(time.time() * 1000))
+    class_fixture = fixture_prefix + "_CLASS"
+    create_class_response = _record_call(
+        sock,
+        report,
+        "manage_classes",
+        "class-fixture-create",
+        params={"action": "create", "class_name": class_fixture},
+    )
+    if create_class_response is not None:
+        create_result = create_class_response.get("result")
+        if not isinstance(create_result, dict) or create_result.get("class_name") != class_fixture:
+            report["failures"].append("manage_classes create fixture did not return the class name")
+        list_response = _record_call(
+            sock,
+            report,
+            "manage_classes",
+            "class-fixture-list",
+            params={"action": "list"},
+        )
+        if list_response is not None:
+            list_result = list_response.get("result")
+            if not isinstance(list_result, list) or class_fixture not in list_result:
+                report["failures"].append("manage_classes list did not include the created fixture class")
+        delete_response = _record_call(
+            sock,
+            report,
+            "manage_classes",
+            "class-fixture-delete",
+            params={"action": "delete", "class_name": class_fixture, "confirm": "DELETE_CLASS"},
+        )
+        if delete_response is not None:
+            delete_result = delete_response.get("result")
+            if not isinstance(delete_result, dict) or delete_result.get("deleted") is not True:
+                report["failures"].append("manage_classes delete fixture did not report deleted=true")
+
+    property_fixture = fixture_prefix + "_PROPERTY"
+    property_fixture_renamed = fixture_prefix + "_PROPERTY_EDITED"
+    property_response = _record_call(
+        sock,
+        report,
+        "create_object",
+        "property-fixture-create",
+        params={
+            "object_type": "rect",
+            "x1": 0,
+            "y1": 1200,
+            "x2": 300,
+            "y2": 1500,
+            "name": property_fixture,
+        },
+    )
+    if property_response is not None:
+        property_result = property_response.get("result")
+        if not isinstance(property_result, dict):
+            report["failures"].append("property fixture create_object result was not an object")
+        else:
+            property_handle = _extract_created_handle(property_result)
+            if not property_handle:
+                report["failures"].append("property fixture create_object result did not include a handle")
+            else:
+                set_property_response = _record_call(
+                    sock,
+                    report,
+                    "set_property",
+                    "property-fixture-set-name",
+                    params={"handle": property_handle, "property_name": "name", "value": property_fixture_renamed},
+                )
+                cleanup_name = property_fixture
+                if set_property_response is not None:
+                    set_property_result = set_property_response.get("result")
+                    if not isinstance(set_property_result, dict) or set_property_result.get("changed") is not True:
+                        report["failures"].append("set_property fixture did not report changed=true")
+                    else:
+                        cleanup_name = property_fixture_renamed
+                    readback_response = _record_call(
+                        sock,
+                        report,
+                        "get_objects",
+                        "property-fixture-readback",
+                        params={"limit": 500},
+                    )
+                    if readback_response is not None:
+                        readback_result = readback_response.get("result")
+                        if _validate_object_list(report, "set_property readback", readback_result):
+                            renamed_matches = [
+                                obj
+                                for obj in readback_result
+                                if isinstance(obj, dict)
+                                and obj.get("handle") == property_handle
+                                and obj.get("name") == property_fixture_renamed
+                            ]
+                            stale_matches = [
+                                obj
+                                for obj in readback_result
+                                if isinstance(obj, dict)
+                                and obj.get("handle") == property_handle
+                                and obj.get("name") == property_fixture
+                            ]
+                            if not renamed_matches:
+                                report["failures"].append("set_property readback did not include the renamed fixture")
+                            if stale_matches:
+                                report["failures"].append("set_property readback still showed the original fixture name")
+                cleaned_property_fixture = _cleanup_fixture_by_exact_name(sock, report, "property-fixture", cleanup_name, property_handle)
+                if not cleaned_property_fixture and cleanup_name != property_fixture:
+                    _cleanup_fixture_by_exact_name(sock, report, "property-fixture-original-name", property_fixture, property_handle)
+
     fixtures = [
         (
             "create_wall",

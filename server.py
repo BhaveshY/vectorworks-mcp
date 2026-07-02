@@ -16,6 +16,8 @@ Environment variables, all optional:
   VW_MCP_AUTH_TOKEN       local protocol auth token; defaults to the token file
   VW_MCP_AUTH_TOKEN_FILE  auth token file path; default ~/.vectorworks-mcp/auth-token
   VW_MCP_INSECURE_NO_AUTH set to 1 only for local diagnostics/tests
+  VW_MCP_ENABLE_RUN_SCRIPT
+                          set to 1 to expose trusted Python execution
   VW_MCP_PREFLIGHT_CACHE_MS
                           safe-CAD preflight success cache in ms, default 750
 """
@@ -74,6 +76,8 @@ NATIVE_PHASE_TWO_REQUIRED_ACTIONS = NATIVE_PHASE_ONE_REQUIRED_ACTIONS | {
     "create_wall",
     "create_text",
     "create_linear_dimension",
+    "set_property",
+    "manage_classes",
 }
 NATIVE_PHASE_ONE_CREATE_OBJECT_TYPES = {
     "arc",
@@ -272,6 +276,7 @@ except ConfigError as exc:
 PREFLIGHT_CACHE_SECONDS = PREFLIGHT_CACHE_MS / 1000.0
 AUTH_TOKEN = _load_auth_token()
 ALLOW_INSECURE_NO_AUTH = _truthy_env("VW_MCP_INSECURE_NO_AUTH")
+ENABLE_RUN_SCRIPT = _truthy_env("VW_MCP_ENABLE_RUN_SCRIPT")
 _EXACT_NAME_CRITERIA_RE = re.compile(r"^\(\(N='([^']{1,255})'\)\)$")
 _SIMPLE_FIND_CRITERIA_RE = re.compile(
     r"^(?P<key>[NTC])\s*=\s*(?:'(?P<quoted>[^']{1,255})'|(?P<bare>[A-Za-z0-9_. -]{1,255}))$",
@@ -363,8 +368,50 @@ LookupDetail = Literal["brief", "normal", "full"]
 MAX_OBJECT_QUERY_LIMIT = 1000
 ObjectQueryLimit = Annotated[int, Field(ge=1, le=MAX_OBJECT_QUERY_LIMIT)]
 SummaryExampleLimit = Annotated[int, Field(ge=0, le=100)]
+SummaryScanLimit = Annotated[int, Field(ge=1, le=100_000)]
 ObjectFieldList = Annotated[list[str], Field(max_length=20)]
-BatchPropertyEditList = Annotated[list[dict[str, Any]], Field(min_length=1, max_length=100)]
+BatchPropertyEditList = Annotated[
+    list[dict[str, Any]],
+    Field(
+        min_length=1,
+        max_length=100,
+        description=(
+            "Property edits of the form "
+            '{"ref":"uuid:...|name:...|handle:...","properties":{"name":"..."}}. '
+            "Supported properties: name, class, fillColor, penColor, lineWeight, opacity."
+        ),
+        json_schema_extra={
+            "items": {
+                "type": "object",
+                "required": ["ref", "properties"],
+                "additionalProperties": False,
+                "properties": {
+                    "ref": {
+                        "type": "string",
+                        "description": "Object reference: uuid:..., name:..., or handle:...",
+                    },
+                    "expected_type": {"type": "string"},
+                    "expected_layer": {"type": "string"},
+                    "expected_name": {"type": "string"},
+                    "properties": {
+                        "type": "object",
+                        "minProperties": 1,
+                        "maxProperties": 20,
+                        "additionalProperties": False,
+                        "properties": {
+                            "name": {"type": "string", "maxLength": MAX_PROPERTY_VALUE_CHARS},
+                            "class": {"type": "string", "minLength": 1, "maxLength": MAX_PROPERTY_VALUE_CHARS},
+                            "fillColor": {"type": "string", "pattern": r"^\d{1,5},\d{1,5},\d{1,5}$"},
+                            "penColor": {"type": "string", "pattern": r"^\d{1,5},\d{1,5},\d{1,5}$"},
+                            "lineWeight": {"type": "integer", "minimum": 0, "maximum": 32767},
+                            "opacity": {"type": "integer", "minimum": 0, "maximum": 100},
+                        },
+                    },
+                },
+            }
+        },
+    ),
+]
 WorksheetRow = Annotated[int, Field(ge=1, le=1_048_576)]
 WorksheetColumn = Annotated[int, Field(ge=1, le=16_384)]
 WorksheetRowCount = Annotated[int, Field(ge=1, le=500)]
@@ -466,8 +513,8 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
     },
     "vw_drawing_summary": {
         "category": "document-read",
-        "wire_action": None,
-        "composes_actions": ["get_document_info", "get_layers", "get_objects"],
+        "wire_action": "drawing_summary",
+        "composes_actions": ["drawing_summary", "get_document_info", "get_layers", "get_objects"],
         "readOnlyHint": True,
         "destructiveHint": False,
         "idempotentHint": True,
@@ -1494,9 +1541,14 @@ def vw_tool_safety() -> str:
 @_tool("vw_capabilities")
 def vw_capabilities(include_tools: bool = True) -> str:
     """Return current bridge capabilities and the MCP tool surface agents can safely plan against."""
-    raw_status = _send_health("ping")
-    decoded_status = _decode_tool_result(raw_status)
-    status_ok = not _tool_result_failed(raw_status, decoded_status)
+    cached_status = _cached_cad_safe_status()
+    if cached_status is not None:
+        decoded_status = cached_status
+        status_ok = True
+    else:
+        raw_status = _send_health("ping")
+        decoded_status = _decode_tool_result(raw_status)
+        status_ok = not _tool_result_failed(raw_status, decoded_status)
     native_ready = (
         isinstance(decoded_status, dict)
         and _evaluate_cad_preflight_status(decoded_status).get("ok") is True
@@ -1508,6 +1560,7 @@ def vw_capabilities(include_tools: bool = True) -> str:
     )
     bridge_is_native = bool(decoded_status.get("native_bridge")) if isinstance(decoded_status, dict) else False
     property_editing_available = native_ready and (not bridge_is_native or "set_property" in implemented_actions)
+    class_management_available = native_ready and (not bridge_is_native or "manage_classes" in implemented_actions)
     phase_two_ready = (
         native_ready
         and _native_phase(decoded_status) >= 2
@@ -1537,11 +1590,12 @@ def vw_capabilities(include_tools: bool = True) -> str:
             "drawing_summary": True,
             "compact_object_lookup": True,
             "verified_batch_property_editing": property_editing_available,
+            "native_class_management": class_management_available,
             "true_bim_objects": phase_two_ready,
         },
         "notes": [
             "Native phase 1 supports 2D primitives, reads, and bounded selection operations.",
-            "Native phase 2 adds true wall objects, text annotations, linear dimensions, and mixed atomic batches when the upgraded bridge is installed.",
+            "Native phase 2 adds true wall objects, text annotations, linear dimensions, class management, verified property edits, and mixed atomic batches when the upgraded bridge is installed.",
             "Schematic floor-plan tools create drafting geometry, not BIM wall/door/window objects.",
             "Door/window/space automation stays behind plugin inspection because Vectorworks plugin parameters and wall-hosting behavior are version-sensitive.",
         ],
@@ -1560,9 +1614,14 @@ def vw_agent_context(
     example_limit: SummaryExampleLimit = 5,
 ) -> str:
     """Return one compact Codex planning snapshot: preflight, key capabilities, and drawing summary."""
-    raw_status = _send_health("ping")
-    decoded_status = _decode_tool_result(raw_status)
-    status_ok = not _tool_result_failed(raw_status, decoded_status)
+    cached_status = _cached_cad_safe_status()
+    if cached_status is not None:
+        decoded_status = cached_status
+        status_ok = True
+    else:
+        raw_status = _send_health("ping")
+        decoded_status = _decode_tool_result(raw_status)
+        status_ok = not _tool_result_failed(raw_status, decoded_status)
     if isinstance(decoded_status, dict):
         preflight = _evaluate_cad_preflight_status(decoded_status)
         if preflight.get("ok"):
@@ -1579,6 +1638,7 @@ def vw_agent_context(
     native_ready = bool(preflight.get("ok"))
     bridge_is_native = bool(decoded_status.get("native_bridge")) if isinstance(decoded_status, dict) else False
     property_editing_available = native_ready and (not bridge_is_native or "set_property" in implemented_actions)
+    class_management_available = native_ready and (not bridge_is_native or "manage_classes" in implemented_actions)
     phase_two_ready = (
         native_ready
         and isinstance(decoded_status, dict)
@@ -1601,6 +1661,8 @@ def vw_agent_context(
 
     summary: Any = None
     if preflight.get("ok"):
+        if isinstance(decoded_status, dict):
+            _remember_cad_safe_status(decoded_status)
         summary = _decode_tool_result(
             vw_drawing_summary(
                 limit=limit,
@@ -1621,6 +1683,7 @@ def vw_agent_context(
             "exact_name_lookup": True,
             "compact_object_lookup": True,
             "verified_batch_property_editing": property_editing_available,
+            "native_class_management": class_management_available,
             "batch_primitive_creation": True,
             "atomic_batch_primitive_creation": native_ready and "batch_create_objects" in implemented_actions,
             "atomic_mixed_production_batch_creation": phase_two_ready,
@@ -1652,8 +1715,21 @@ def vw_agent_context(
 def vw_run_script(code: str, confirm: str = "") -> str:
     """Execute Python inside Vectorworks. The 'vs' module is available.
     Use print() to return output. Escape hatch for anything other tools do not cover.
-    Requires confirm='RUN_TRUSTED_CODE'. Example:
+    Disabled by default; requires VW_MCP_ENABLE_RUN_SCRIPT=1 and confirm='RUN_TRUSTED_CODE'. Example:
     vw_run_script("h = vs.FSActLayer()\\nprint(vs.GetName(h))", confirm="RUN_TRUSTED_CODE")"""
+    if not ENABLE_RUN_SCRIPT:
+        return json.dumps(
+            {
+                "ok": False,
+                "tool": "vw_run_script",
+                "blocked": True,
+                "reason": "run_script_disabled",
+                "message": "vw_run_script is disabled by default. Set VW_MCP_ENABLE_RUN_SCRIPT=1 only for trusted local debugging.",
+                "writes_started": False,
+            },
+            indent=2,
+            sort_keys=True,
+        )
     if confirm != "RUN_TRUSTED_CODE":
         return _confirmation_error(
             "vw_run_script",
@@ -1962,6 +2038,42 @@ def _object_property_value(obj: dict[str, Any], property_name: str) -> Any:
     if property_name == "class":
         return obj.get("class") if "class" in obj else obj.get("class_name")
     return obj.get(property_name)
+
+
+def _normalize_property_value(property_name: str, value: Any) -> tuple[str | None, str | None]:
+    if value is None or isinstance(value, (dict, list, tuple)):
+        return None, "property value must be a scalar"
+
+    value_text = str(value)
+    if len(value_text) > MAX_PROPERTY_VALUE_CHARS:
+        return None, f"property value is limited to {MAX_PROPERTY_VALUE_CHARS} characters"
+
+    if property_name == "class":
+        class_name = value_text.strip()
+        if not class_name:
+            return None, "class value is required"
+        return class_name, None
+
+    if property_name in {"lineWeight", "opacity"}:
+        trimmed = value_text.strip()
+        if not re.fullmatch(r"[+-]?\d+", trimmed):
+            return None, f"{property_name} must be an integer"
+        parsed = int(trimmed, 10)
+        max_value = 32767 if property_name == "lineWeight" else 100
+        if parsed < 0 or parsed > max_value:
+            return None, f"{property_name} must be between 0 and {max_value}"
+        return str(parsed), None
+
+    if property_name in {"fillColor", "penColor"}:
+        parts = [part.strip() for part in value_text.split(",")]
+        if len(parts) != 3 or any(not re.fullmatch(r"\d+", part) for part in parts):
+            return None, "color must be r,g,b with components in 0..65535"
+        components = [int(part, 10) for part in parts]
+        if any(component < 0 or component > 65535 for component in components):
+            return None, "color must be r,g,b with components in 0..65535"
+        return ",".join(str(component) for component in components), None
+
+    return value_text, None
 
 
 def _verify_property_changes(after: Any, properties: dict[str, Any]) -> dict[str, Any]:
@@ -3355,6 +3467,15 @@ def vw_get_objects(layer: str = "", object_type: str = "", limit: ObjectQueryLim
     return _send_tool("vw_get_objects", {"layer": layer, "object_type": object_type, "limit": limit})
 
 
+def _status_supports_direct_action(status: Any, action: str) -> bool:
+    if not isinstance(status, dict):
+        return False
+    if status.get("native_bridge") is True:
+        implemented_actions = status.get("implemented_actions")
+        return isinstance(implemented_actions, list) and action in set(str(item) for item in implemented_actions)
+    return status.get("cad_api_safe") is True and status.get("transport_only") is not True
+
+
 @_tool("vw_lookup_objects")
 def vw_lookup_objects(
     criteria: str = "",
@@ -3460,8 +3581,40 @@ def vw_drawing_summary(
     limit: ObjectQueryLimit = 1000,
     include_examples: bool = True,
     example_limit: SummaryExampleLimit = 20,
+    scan_limit: SummaryScanLimit = 50_000,
 ) -> str:
     """Summarize document, layers, and a bounded object inventory for production planning/verification."""
+    direct_params = {
+        "layer": layer,
+        "object_type": object_type,
+        "limit": limit,
+        "include_examples": include_examples,
+        "example_limit": example_limit,
+        "scan_limit": scan_limit,
+    }
+    cached_status = _cached_cad_safe_status()
+    if cached_status is not None:
+        decoded_status = cached_status
+        status_ok = True
+    else:
+        raw_status = _send_health("ping")
+        decoded_status = _decode_tool_result(raw_status)
+        status_ok = not _tool_result_failed(raw_status, decoded_status)
+    if status_ok and isinstance(decoded_status, dict) and _evaluate_cad_preflight_status(decoded_status).get("ok") is True:
+        _remember_cad_safe_status(decoded_status)
+    if status_ok and _status_supports_direct_action(decoded_status, "drawing_summary"):
+        preflight = _evaluate_cad_preflight_status(
+            decoded_status,
+            blocked_action="drawing_summary",
+            blocked_params=direct_params,
+        )
+        if preflight.get("ok") and isinstance(decoded_status, dict):
+            _remember_cad_safe_status(decoded_status)
+            raw_summary = _send("drawing_summary", direct_params, require_cad_safe=True)
+            direct_summary = _decode_tool_result(raw_summary)
+            if not _tool_result_failed(raw_summary, direct_summary) and isinstance(direct_summary, dict):
+                return json.dumps(direct_summary, indent=2, sort_keys=True)
+
     steps = [
         ("document_info", lambda: _send_tool("vw_get_document_info")),
         ("layers", lambda: _send_tool("vw_get_layers")),
@@ -3547,6 +3700,8 @@ def vw_drawing_summary(
             "limit": limit,
             "include_examples": include_examples,
             "example_limit": example_limit,
+            "scan_limit": scan_limit,
+            "source": "composed_get_objects",
         },
         "document": document_info,
         "layer_count": len(layers),
@@ -3622,27 +3777,18 @@ def vw_batch_set_object_properties(
                     }
                 )
                 continue
-            if value is None or isinstance(value, (dict, list, tuple)):
+            normalized_value, value_error = _normalize_property_value(property_name, value)
+            if value_error is not None:
                 validation_failures.append(
                     {
                         "index": index,
                         "ref": ref,
-                        "error": "property value must be a scalar",
+                        "error": value_error,
                         "property_name": property_name,
                     }
                 )
                 continue
-            if len(str(value)) > MAX_PROPERTY_VALUE_CHARS:
-                validation_failures.append(
-                    {
-                        "index": index,
-                        "ref": ref,
-                        "error": f"property value is limited to {MAX_PROPERTY_VALUE_CHARS} characters",
-                        "property_name": property_name,
-                    }
-                )
-                continue
-            normalized_properties[property_name] = str(value)
+            normalized_properties[property_name] = str(normalized_value)
 
         if normalized_properties:
             normalized_edits.append(
@@ -3854,6 +4000,22 @@ def vw_find_objects(criteria: str, limit: ObjectQueryLimit = 100) -> str:
         return _send_tool("vw_find_objects", {"criteria": criteria, "limit": limit})
 
     field, value = parsed
+    if field in {"name", "class"}:
+        raw_status = _send_health("ping")
+        decoded_status = _decode_tool_result(raw_status)
+        status_ok = not _tool_result_failed(raw_status, decoded_status)
+        if status_ok and isinstance(decoded_status, dict) and _evaluate_cad_preflight_status(decoded_status).get("ok") is True:
+            _remember_cad_safe_status(decoded_status)
+        if status_ok and _status_supports_direct_action(decoded_status, "find_objects"):
+            preflight = _evaluate_cad_preflight_status(
+                decoded_status,
+                blocked_action="find_objects",
+                blocked_params={"criteria": criteria, "limit": limit},
+            )
+            if preflight.get("ok") and isinstance(decoded_status, dict):
+                _remember_cad_safe_status(decoded_status)
+                return _send_tool("vw_find_objects", {"criteria": criteria, "limit": limit})
+
     object_type = value if field == "type" else ""
     raw = _send("get_objects", {"layer": "", "object_type": object_type, "limit": limit}, require_cad_safe=True)
     objects = _decode_tool_result(raw)
@@ -3911,13 +4073,24 @@ def vw_find_objects(criteria: str, limit: ObjectQueryLimit = 100) -> str:
 @_tool("vw_manage_classes")
 def vw_manage_classes(action: ClassAction, class_name: str = "", confirm: str = "") -> str:
     """List, create, or delete classes. class_name is ignored for list. Delete requires confirm='DELETE_CLASS'."""
+    normalized_class_name = str(class_name or "").strip()
+    if action in {"create", "delete"}:
+        if not normalized_class_name:
+            return _json_error("vw_manage_classes", "class_name is required", phase="validate", writes_started=False)
+        if len(normalized_class_name) > MAX_PROPERTY_VALUE_CHARS:
+            return _json_error(
+                "vw_manage_classes",
+                f"class_name is limited to {MAX_PROPERTY_VALUE_CHARS} characters",
+                phase="validate",
+                writes_started=False,
+            )
     if action == "delete" and confirm != "DELETE_CLASS":
         return _confirmation_error(
             "vw_manage_classes",
             "DELETE_CLASS",
             "class deletion is destructive and requires explicit confirmation",
         )
-    return _send_tool("vw_manage_classes", {"action": action, "class_name": class_name, "confirm": confirm})
+    return _send_tool("vw_manage_classes", {"action": action, "class_name": normalized_class_name, "confirm": confirm})
 
 
 @_tool("vw_worksheet")

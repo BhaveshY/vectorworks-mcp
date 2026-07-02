@@ -36,7 +36,7 @@ Follow `nextCommandSpec` and safety fields. `missingAllowFlags`,
   structured next command.
 - Native production readiness means `native_phase >= 2`, `cad_api_safe: true`,
   `transport_only: false`, `main_context_pump_ready: true`, and implemented
-  actions for the requested wall/text/dimension/batch work.
+  actions for the requested wall/text/dimension/property/class/batch work.
 - `sdkArchiveCandidates` exists: reuse the downloaded SDK ZIP with
   `--sdk-archive-path` / `-SdkArchivePath`; do not download another copy.
 - `vw_ping` or raw ping reports `cad_api_safe: false` or

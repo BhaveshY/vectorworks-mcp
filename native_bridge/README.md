@@ -170,8 +170,9 @@ to fail bridges that are functionally correct but too slow for agent loops. Add
 named rectangle with `create_object`, creates a second fixture through atomic
 `batch_create_objects`, and deletes each only after fixture identity, object
 schema, and exact selection are verified. Use `-Phase 2 -AllowWriteFixture` to
-also create and delete one true wall, one text block, and one linear dimension
-through their native handlers. Use `-Phase 0 -Stop` for
+also create and delete one true wall, one text block, one linear dimension, one
+verified property edit, and one temporary class through their native handlers.
+Use `-Phase 0 -Stop` for
 transport-only shutdown/port-release verification. Phase 0 accepts the reviewed native
 scaffold's honest `cad_api_safe: false` / `transport_only: true` ping, but the
 default phase-1 smoke still requires a real CAD-safe bridge.
@@ -181,7 +182,11 @@ writable design layer target.
 The host-side `vw_preflight_for_cad` blocks native bridges that claim
 `cad_api_safe: true` before reporting phase-1 capabilities and a ready
 main-context pump, and it blocks phase-2 tools when a bridge has not advertised
-the corresponding implemented action.
+the corresponding implemented action. Production phase 2 requires
+`create_wall`, `create_text`, `create_linear_dimension`, `set_property`, and
+`manage_classes` in `implemented_actions`.
+Native phase 3 adds read-only production helpers: `find_objects` for criteria
+search and `drawing_summary` for compact counts/bounds/examples in large files.
 The SDK scaffold queue applies bounded backpressure and rejects duplicate
 request ids before work is handed to the Vectorworks main/plugin event context.
 While the copied scaffold is still phase 0, CAD actions fail immediately with

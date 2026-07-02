@@ -5,7 +5,7 @@ param(
     [string]$SdkExamplesDir = "",
     [string]$WorktreeRoot = "",
     [ValidateSet("Debug", "Release")]
-    [string]$Configuration = "Debug",
+    [string]$Configuration = "Release",
     [switch]$CloneSdkExamples,
     [switch]$Force
 )

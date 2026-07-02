@@ -58,6 +58,65 @@ def _assert_path_in_collection(testcase, path, values):
     )
 
 
+def _assert_token_file_user_only(testcase, powershell, token_path):
+    if os.name != "nt":
+        return
+
+    token_literal = str(token_path).replace("'", "''")
+    command = "$TokenPath = '{0}'\n".format(token_literal) + r"""
+$Acl = Get-Acl -LiteralPath $TokenPath
+$CurrentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$AllowRules = @($Acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' })
+if (-not $Acl.AreAccessRulesProtected) { throw 'token file ACL inheritance is enabled' }
+if ($AllowRules.Count -ne 1) { throw "expected one allow rule, found $($AllowRules.Count)" }
+$RuleSid = $AllowRules[0].IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+if ($RuleSid -ne $CurrentSid) { throw "token file ACL is not restricted to the current user: $RuleSid" }
+$Required = [System.Security.AccessControl.FileSystemRights]::FullControl
+if (($AllowRules[0].FileSystemRights -band $Required) -ne $Required) { throw 'token file ACL does not grant FullControl' }
+"""
+    result = subprocess.run(
+        [
+            powershell,
+            "-NoLogo",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            command,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    testcase.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+
+
+def _assert_canonical_install_schema(testcase, payload):
+    marker = json.loads((ROOT / ".vectorworks-mcp-contract.json").read_text(encoding="utf-8"))
+    for key in (
+        "mcp_config_path",
+        "loader_path",
+        "launcher_path",
+        "runner_path",
+        "contract_version",
+        "required_features",
+        "production_ready",
+        "native_ready",
+        "native_requires_action",
+        "requires_action",
+    ):
+        testcase.assertIn(key, payload)
+    testcase.assertEqual(payload["contract_version"], marker["contractVersion"])
+    testcase.assertEqual(payload["required_features"], marker["requiredFeatures"])
+    _assert_same_path(testcase, payload["mcp_config_path"], ROOT / ".mcp.json")
+    _assert_same_path(testcase, payload["runner_path"], ROOT / "scripts" / "run-mcp-server.ps1")
+    _assert_same_path(testcase, payload["launcher_path"], ROOT / "vw_start_listener_2024.py")
+    _assert_same_path(testcase, payload["loader_path"], ROOT / "vw_load_listener_2024.py")
+    testcase.assertEqual(payload.get("mcp_config"), payload["mcp_config_path"])
+    testcase.assertEqual(payload.get("vectorworks_launcher"), payload["launcher_path"])
+    testcase.assertEqual(payload.get("vectorworks_loader"), payload["loader_path"])
+
+
 class AgentReadinessTests(unittest.TestCase):
     def test_project_mcp_config_uses_bootstrap_runner(self):
         config = json.loads((ROOT / ".mcp.json").read_text(encoding="utf-8"))
@@ -70,6 +129,7 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertEqual(server["env"]["VW_MCP_PORT"], "9877")
         self.assertEqual(server["env"]["VW_MCP_PREFLIGHT_CACHE_MS"], "750")
         self.assertNotIn("CLAUDE_PROJECT_DIR", (ROOT / ".mcp.json").read_text(encoding="utf-8"))
+        self.assertNotIn("VW_MCP_AUTH_TOKEN", (ROOT / ".mcp.json").read_text(encoding="utf-8"))
         self.assertNotIn(":-", (ROOT / ".mcp.json").read_text(encoding="utf-8"))
 
     def test_agent_instruction_files_exist(self):
@@ -120,7 +180,7 @@ class AgentReadinessTests(unittest.TestCase):
         marker = json.loads((ROOT / ".vectorworks-mcp-contract.json").read_text(encoding="utf-8"))
 
         self.assertEqual(marker["name"], "vectorworks-mcp")
-        self.assertGreaterEqual(marker["contractVersion"], 14)
+        self.assertGreaterEqual(marker["contractVersion"], 15)
         for feature in (
             "stable-loader",
             "loader-clipboard-copy",
@@ -136,6 +196,8 @@ class AgentReadinessTests(unittest.TestCase):
             "native-phase0-transport",
             "native-phase1-cad-handlers",
             "native-phase2-cad-handlers",
+            "native-phase2-set-property",
+            "native-phase2-manage-classes",
             "local-auth-token-required",
             "client-neutral-project-mcp",
         ):
@@ -212,6 +274,13 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("phase0_smoke_tested", install)
         self.assertIn("phase2_smoke_attempted", install)
         self.assertIn("phase2_smoke_tested", install)
+        self.assertIn('[string]$NativeConfiguration = "Release"', install)
+        self.assertIn("mcp_config_path", install)
+        self.assertIn("loader_path", install)
+        self.assertIn("launcher_path", install)
+        self.assertIn("runner_path", install)
+        self.assertIn("contract_version", install)
+        self.assertIn("required_features", install)
         self.assertIn("vw_load_listener_2024.py", install)
         self.assertIn(".mcp.json", install)
         self.assertNotIn("@BootstrapArgs 2>&1", install)
@@ -223,6 +292,25 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("-CopyLoaderToClipboard", bootstrap)
         self.assertIn("-BestEffortClipboard", bootstrap)
         self.assertIn("register-claude-code.ps1", bootstrap)
+
+    def test_native_install_entrypoints_default_to_release(self):
+        for relative_path in (
+            "scripts/bootstrap-native-bridge.ps1",
+            "scripts/prepare-native-bridge-source.ps1",
+            "scripts/build-native-bridge.ps1",
+            "scripts/doctor-native-bridge.ps1",
+            "scripts/invoke-native-bridge-next.ps1",
+            "plugins/vectorworks/scripts/bootstrap-native-bridge.ps1",
+            "plugins/vectorworks/scripts/prepare-native-bridge-source.ps1",
+            "plugins/vectorworks/scripts/build-native-bridge.ps1",
+            "plugins/vectorworks/scripts/doctor-native-bridge.ps1",
+            "plugins/vectorworks/scripts/invoke-native-bridge-next.ps1",
+        ):
+            script = (ROOT / relative_path).read_text(encoding="utf-8")
+            self.assertIn('[string]$Configuration = "Release"', script, relative_path)
+
+        helper = (ROOT / "plugins" / "vectorworks" / "bin" / "vectorworksctl").read_text(encoding="utf-8")
+        self.assertIn('DEFAULT_NATIVE_CONFIGURATION = "Release"', helper)
 
     def test_root_install_json_from_checkout_creates_persistent_loader(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
@@ -259,6 +347,8 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertTrue(payload["usable_now"])
         self.assertFalse(payload["requires_action"])
         self.assertIn("production_ready", payload)
+        self.assertTrue(payload["production_ready"])
+        _assert_canonical_install_schema(self, payload)
         self.assertIn("dependency_checks", payload)
         self.assertTrue(any(check["name"] == "Git" and check["ok"] for check in payload["dependency_checks"]))
         self.assertTrue(any(check["name"] == "Python 3.10+" and check["ok"] for check in payload["dependency_checks"]))
@@ -277,6 +367,127 @@ class AgentReadinessTests(unittest.TestCase):
             ROOT / "vw_start_listener_2024.py",
             (ROOT / "vw_load_listener_2024.py").read_text(encoding="utf-8"),
         )
+
+    def test_root_full_native_json_requires_phase2_smoke_for_success(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise install.ps1")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            scripts = temp_root / "scripts"
+            scripts.mkdir()
+            shutil.copy2(ROOT / "install.ps1", temp_root / "install.ps1")
+            (temp_root / "server.py").write_text("# fake repo marker\n", encoding="utf-8")
+            (temp_root / ".mcp.json").write_text("{}\n", encoding="utf-8")
+            shutil.copy2(ROOT / ".vectorworks-mcp-contract.json", temp_root / ".vectorworks-mcp-contract.json")
+            (scripts / "bootstrap-agent.ps1").write_text("param([string]$Client = '', [switch]$Verify, [switch]$SkipClipboard)\nexit 0\n", encoding="utf-8")
+            (scripts / "invoke-native-bridge-next.ps1").write_text(
+                """
+param(
+    [string]$VectorworksVersion = '',
+    [string]$Configuration = '',
+    [int]$MaxSteps = 1,
+    [string]$BuiltArtifact = '',
+    [string]$SdkDir = '',
+    [string]$SdkArchivePath = '',
+    [string]$SdkExamplesDir = '',
+    [string]$WorktreeRoot = '',
+    [string]$InstallDir = '',
+    [switch]$Json,
+    [switch]$AllowNetwork,
+    [switch]$AllowInstallSoftware,
+    [switch]$AllowDownloadLargeFiles,
+    [switch]$AllowModifyVectorworksUserPlugins,
+    [switch]$AllowVectorworksRestartStep,
+    [switch]$AllowRebootRisk,
+    [switch]$Install
+)
+$Payload = [pscustomobject]@{
+    status = 'completed'
+    missingAllowFlags = @()
+    steps = @([pscustomobject]@{
+        stage = 'smoke-phase-0'
+        executed = $true
+        exitCode = 0
+    })
+}
+if ($Json) { $Payload | ConvertTo-Json -Depth 8 }
+exit 0
+""",
+                encoding="utf-8",
+            )
+            (scripts / "doctor-native-bridge.ps1").write_text(
+                """
+param(
+    [string]$VectorworksVersion = '',
+    [string]$Configuration = '',
+    [string]$SdkDir = '',
+    [string]$SdkArchivePath = '',
+    [string]$SdkExamplesDir = '',
+    [string]$WorktreeRoot = '',
+    [string]$InstallDir = '',
+    [switch]$Json
+)
+$Payload = [pscustomobject]@{
+    prereqsReady = $true
+    sourcePrepared = $true
+    projectWired = $true
+    installedArtifactMatchesCandidate = $true
+    builtArtifact = 'C:\\fake\\VectorworksMCPBridge.vwlibrary'
+    builtArtifactCandidate = 'C:\\fake\\VectorworksMCPBridge.vwlibrary'
+    installedPath = 'C:\\fake\\Plug-ins\\VectorworksMCPBridge.vwlibrary'
+    nextCommand = 'powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\start-vectorworks-native-smoke.ps1 -VectorworksVersion 2024 -RestartIfRunning -Json'
+    nextCommandReason = 'Run native smoke.'
+    nextActions = @('Run phase-2 production smoke before claiming native readiness.')
+    nextCommandSpec = [pscustomobject]@{
+        stage = 'smoke-phase-0'
+    }
+}
+if ($Json) { $Payload | ConvertTo-Json -Depth 8 }
+exit 0
+""",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(temp_root / "install.ps1"),
+                    "-NoVerify",
+                    "-SkipClipboard",
+                    "-SkipDependencyInstall",
+                    "-FullNative",
+                    "-SkipVectorworksAutomation",
+                    "-Json",
+                ],
+                cwd=str(temp_root),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+        payload = json.loads(result.stdout)
+        self.assertNotEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["setup_complete"])
+        self.assertFalse(payload["install_complete"])
+        self.assertFalse(payload["usable_now"])
+        self.assertFalse(payload["production_ready"])
+        self.assertFalse(payload["native_ready"])
+        self.assertTrue(payload["requires_action"])
+        self.assertTrue(payload["native_requires_action"])
+        self.assertEqual(payload["native_summary"]["configuration"], "Release")
+        self.assertTrue(payload["native_summary"]["phase0_smoke_tested"])
+        self.assertFalse(payload["native_summary"]["phase2_smoke_tested"])
+        self.assertFalse(payload["native_summary"]["native_smoke_ready"])
+        self.assertIn("-RunPhase2", payload["native_summary"]["acceptance_next_command"])
+        self.assertIn("phase-2", payload["next_action"].lower())
 
     def test_host_only_bootstrap_generates_loader_without_claude_config(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
@@ -312,12 +523,16 @@ class AgentReadinessTests(unittest.TestCase):
             )
 
             self.assertFalse((Path(temp_profile) / ".claude.json").exists())
-            self.assertTrue((Path(temp_profile) / ".vectorworks-mcp" / "auth-token").exists())
+            token_path = Path(temp_profile) / ".vectorworks-mcp" / "auth-token"
+            self.assertTrue(token_path.exists())
+            _assert_token_file_user_only(self, powershell, token_path)
             self.assertTrue((ROOT / "vw_start_listener_2024.py").exists())
             self.assertTrue((ROOT / "vw_load_listener_2024.py").exists())
             launcher_text = (ROOT / "vw_start_listener_2024.py").read_text(encoding="utf-8")
             loader_text = (ROOT / "vw_load_listener_2024.py").read_text(encoding="utf-8")
             self.assertIn('os.environ["VW_MCP_MODE"] = "dialog"', launcher_text)
+            self.assertIn('os.environ["VW_MCP_AUTH_TOKEN_FILE"]', launcher_text)
+            self.assertNotIn('os.environ["VW_MCP_AUTH_TOKEN"]', launcher_text)
             _assert_path_in_text(self, ROOT / "vw_start_listener_2024.py", loader_text)
 
     def test_vectorworksctl_agent_install_json_distinguishes_command_from_readiness(self):
@@ -350,6 +565,12 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertFalse(payload["install_complete"])
         self.assertFalse(payload["usable_now"])
         self.assertTrue(payload["requires_action"])
+        self.assertFalse(payload["production_ready"])
+        self.assertFalse(payload["native_ready"])
+        self.assertTrue(payload["native_requires_action"])
+        self.assertEqual(payload["native_configuration"], "Release")
+        self.assertEqual(payload["native_summary"]["configuration"], "Release")
+        _assert_canonical_install_schema(self, payload)
         self.assertIn("command_ok", payload)
         self.assertIn("repo_root", payload)
         self.assertIn("mcp_config_path", payload)
@@ -376,6 +597,11 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("$FallbackVenvDir", runner)
         self.assertIn("Using fallback virtual environment", runner)
         self.assertIn("Remove-Item -LiteralPath $VenvDir -Recurse -Force", runner)
+        self.assertIn("function Protect-AuthTokenFile", runner)
+        self.assertIn("Protect-AuthTokenFile -Path $AuthTokenPath", runner)
+        self.assertIn('$env:VW_MCP_AUTH_TOKEN_FILE = $AuthTokenPath', runner)
+        self.assertIn("Remove-Item Env:\\VW_MCP_AUTH_TOKEN", runner)
+        self.assertNotIn('$env:VW_MCP_AUTH_TOKEN = $Token', runner)
 
         verifier = (ROOT / "scripts" / "verify-no-vectorworks.ps1").read_text(encoding="utf-8")
         self.assertIn("Resolve-ActiveVenvPython", verifier)
@@ -408,12 +634,21 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("copy-vectorworks-loader.ps1", register_script)
         self.assertIn("VW_MCP_LOADER_METADATA", register_script)
         self.assertIn("requiredFeatures", register_script)
+        self.assertIn('$ServerEnv["VW_MCP_AUTH_TOKEN_FILE"]', register_script)
+        self.assertNotIn('$ServerEnv["VW_MCP_AUTH_TOKEN"]', register_script)
+        self.assertNotIn('os.environ["VW_MCP_AUTH_TOKEN"] =', register_script)
+        self.assertNotIn('$env:VW_MCP_AUTH_TOKEN = $Token', register_script)
+        self.assertIn("Remove-Item Env:\\VW_MCP_AUTH_TOKEN", register_script)
+        self.assertIn("function Protect-AuthTokenFile", register_script)
+        self.assertIn("Protect-AuthTokenFile -Path $AuthTokenPath", register_script)
 
         launcher_path = ROOT / "vw_start_listener_2024.py"
         if launcher_path.exists():
             launcher_text = launcher_path.read_text(encoding="utf-8")
             self.assertIn('os.environ["VW_MCP_MODE"] = "dialog"', launcher_text)
             self.assertIn('os.environ["VW_MCP_DIALOG_TIMER_MS"] = "50"', launcher_text)
+            self.assertIn('os.environ["VW_MCP_AUTH_TOKEN_FILE"]', launcher_text)
+            self.assertNotIn('os.environ["VW_MCP_AUTH_TOKEN"]', launcher_text)
 
         loader_path = ROOT / "vw_load_listener_2024.py"
         if loader_path.exists():
@@ -526,8 +761,15 @@ class AgentReadinessTests(unittest.TestCase):
             self.skipTest("USERPROFILE is required for the generated Windows launcher")
 
         with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            temp_profile = temp_root / "profile"
             launcher_path = Path(temp_dir) / "vw_start_listener_2024.py"
             loader_path = Path(temp_dir) / "vw_load_listener_2024.py"
+            env = os.environ.copy()
+            env["USERPROFILE"] = str(temp_profile)
+            env["VW_MCP_AUTH_TOKEN"] = "unit-test-secret-token"
+            env.pop("VW_MCP_AUTH_TOKEN_FILE", None)
+            env.pop("VW_MCP_INSECURE_NO_AUTH", None)
             subprocess.run(
                 [
                     powershell,
@@ -551,19 +793,26 @@ class AgentReadinessTests(unittest.TestCase):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                env=env,
             )
 
+            token_path = temp_profile / ".vectorworks-mcp" / "auth-token"
+            self.assertEqual(token_path.read_text(encoding="utf-8"), "unit-test-secret-token")
+            _assert_token_file_user_only(self, powershell, token_path)
             launcher_text = launcher_path.read_text(encoding="utf-8")
             self.assertIn('os.environ["VW_MCP_HOST"] = "127.0.0.1"', launcher_text)
             self.assertIn('os.environ["VW_MCP_PORT"] = "19877"', launcher_text)
             self.assertIn('os.environ["VW_MCP_MODE"] = "dialog"', launcher_text)
             self.assertIn('os.environ["VW_MCP_DIALOG_TIMER_MS"] = "50"', launcher_text)
+            self.assertIn('os.environ["VW_MCP_AUTH_TOKEN_FILE"]', launcher_text)
+            self.assertNotIn("unit-test-secret-token", launcher_text)
+            self.assertNotIn('os.environ["VW_MCP_AUTH_TOKEN"]', launcher_text)
 
             loader_text = loader_path.read_text(encoding="utf-8")
             self.assertIn("runpy.run_path", loader_text)
             _assert_path_in_text(self, launcher_path, loader_text)
             self.assertIn("VW_MCP_LOADER_METADATA", loader_text)
-            self.assertIn('"contractVersion": 14', loader_text)
+            self.assertIn('"contractVersion": 15', loader_text)
             self.assertIn('"native-bridge-scaffold-copy"', loader_text)
             self.assertIn('"native-doctor-next-command"', loader_text)
             self.assertIn('"native-doctor-command-spec"', loader_text)
@@ -575,8 +824,62 @@ class AgentReadinessTests(unittest.TestCase):
             self.assertIn('"native-phase0-transport"', loader_text)
             self.assertIn('"native-phase1-cad-handlers"', loader_text)
             self.assertIn('"native-phase2-cad-handlers"', loader_text)
+            self.assertIn('"native-phase2-set-property"', loader_text)
+            self.assertIn('"native-phase2-manage-classes"', loader_text)
             self.assertIn('"local-auth-token-required"', loader_text)
             self.assertIn('"client-neutral-project-mcp"', loader_text)
+
+    def test_register_script_writes_claude_config_with_token_file_only(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise the Claude config writer")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            temp_profile = temp_root / "profile"
+            launcher_path = temp_root / "vw_start_listener_2024.py"
+            loader_path = temp_root / "vw_load_listener_2024.py"
+            env = os.environ.copy()
+            env["USERPROFILE"] = str(temp_profile)
+            env["VW_MCP_AUTH_TOKEN"] = "client-config-secret-token"
+            env.pop("VW_MCP_AUTH_TOKEN_FILE", None)
+            env.pop("VW_MCP_INSECURE_NO_AUTH", None)
+            system_root = os.environ.get("SystemRoot", r"C:\Windows")
+            env["PATH"] = os.pathsep.join([str(Path(system_root) / "System32"), system_root])
+
+            subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/register-claude-code.ps1"),
+                    "-SkipInstall",
+                    "-LauncherPath",
+                    str(launcher_path),
+                    "-LoaderPath",
+                    str(loader_path),
+                ],
+                cwd=str(ROOT),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+
+            token_path = temp_profile / ".vectorworks-mcp" / "auth-token"
+            claude_json_path = temp_profile / ".claude.json"
+            claude_text = claude_json_path.read_text(encoding="utf-8-sig")
+            config = json.loads(claude_text)
+            server_env = config["mcpServers"]["vectorworks"]["env"]
+            self.assertEqual(token_path.read_text(encoding="utf-8"), "client-config-secret-token")
+            _assert_token_file_user_only(self, powershell, token_path)
+            _assert_same_path(self, server_env["VW_MCP_AUTH_TOKEN_FILE"], token_path)
+            self.assertNotIn("VW_MCP_AUTH_TOKEN", server_env)
+            self.assertNotIn("client-config-secret-token", claude_text)
 
     def test_native_bridge_scaffold_is_explicitly_not_default(self):
         expected_files = (
@@ -610,6 +913,7 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("native-sdk-bridge-phase1", root_readme)
         self.assertIn("native-sdk-bridge-phase2", root_readme)
         self.assertIn("main_context_pump_ready=true", root_readme)
+        self.assertIn("production class", root_readme)
         self.assertIn("Host preflight blocks broader MCP tools", root_readme)
         self.assertIn("Why this is not as simple as a Revit-style setup yet", root_readme)
         self.assertIn("bridge_kind=python_dialog_agent_session", root_readme)
@@ -619,10 +923,13 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("4-byte big-endian", protocol)
         self.assertIn("must not call", protocol)
         self.assertIn("Vectorworks document APIs directly", protocol)
+        self.assertIn("`set_property`, and `manage_classes`", protocol)
+        self.assertIn("Native class management is part of the required phase-2", protocol)
 
         matrix = (ROOT / "native_bridge/HANDLER_MATRIX.md").read_text(encoding="utf-8")
         self.assertIn("Native phase", matrix)
         self.assertIn("main/plugin event context", matrix)
+        self.assertIn("| `manage_classes` | `handle_manage_classes` | mixed/destructive | main/plugin event context | 2 |", matrix)
 
     def test_native_bridge_source_scaffold_encodes_threading_contract(self):
         src = ROOT / "native_bridge" / "src"

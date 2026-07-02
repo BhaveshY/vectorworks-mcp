@@ -171,7 +171,7 @@ def _native_phase_two_status():
         "implemented_actions": sorted(server.NATIVE_PHASE_TWO_REQUIRED_ACTIONS),
         "bridge_kind": "native_sdk_bridge_phase2",
         "dispatch_mode": "native_sdk",
-        "handlers": 11,
+        "handlers": 13,
         "version": "native-sdk-bridge-phase2",
         "main_context_pump": "win32_ui_timer",
         "main_context_pump_ready": True,
@@ -180,8 +180,23 @@ def _native_phase_two_status():
 
 def _native_phase_two_with_set_property_status():
     status = _native_phase_two_status()
-    status["implemented_actions"] = sorted(set(status["implemented_actions"]) | {"set_property"})
-    status["handlers"] = status["handlers"] + 1
+    return status
+
+
+def _native_phase_two_without_set_property_status():
+    status = _native_phase_two_status()
+    status["implemented_actions"] = sorted(set(status["implemented_actions"]) - {"set_property"})
+    status["handlers"] = status["handlers"] - 1
+    return status
+
+
+def _native_phase_three_status():
+    status = _native_phase_two_status()
+    status["native_phase"] = 3
+    status["version"] = "native-sdk-bridge-phase3"
+    status["bridge_kind"] = "native_sdk_bridge_phase3"
+    status["implemented_actions"] = sorted(set(status["implemented_actions"]) | {"find_objects", "drawing_summary"})
+    status["handlers"] = 15
     return status
 
 
@@ -609,6 +624,7 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertTrue(result["host_capabilities"]["true_bim_objects"])
         self.assertTrue(result["host_capabilities"]["native_text_creation"])
         self.assertTrue(result["host_capabilities"]["native_linear_dimension_creation"])
+        self.assertTrue(result["host_capabilities"]["native_class_management"])
 
     def test_capabilities_do_not_advertise_native_writes_when_bridge_is_not_cad_safe(self):
         unsafe_status = _native_phase_two_status()
@@ -630,6 +646,7 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertFalse(result["host_capabilities"]["native_wall_creation"])
         self.assertFalse(result["host_capabilities"]["native_text_creation"])
         self.assertFalse(result["host_capabilities"]["native_linear_dimension_creation"])
+        self.assertFalse(result["host_capabilities"]["native_class_management"])
         self.assertFalse(result["host_capabilities"]["true_bim_objects"])
 
     def test_agent_context_returns_compact_preflight_capabilities_and_summary(self):
@@ -663,6 +680,7 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertEqual(result["profile"], "production")
         self.assertTrue(result["preflight"]["ok"])
         self.assertTrue(result["host_capabilities"]["atomic_mixed_production_batch_creation"])
+        self.assertTrue(result["host_capabilities"]["native_class_management"])
         self.assertEqual(result["drawing_summary"]["counts_by_type"], {"text": 1, "wall": 1})
         self.assertNotIn("examples", result["drawing_summary"])
         self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_document_info", "get_layers", "get_objects"])
@@ -1085,6 +1103,44 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertEqual(result["bounds"], {"left": 0.0, "top": -10.0, "right": 200.0, "bottom": 100.0})
         self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_document_info", "get_layers", "get_objects"])
 
+    def test_drawing_summary_prefers_native_compact_summary_when_advertised(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_three_status()}
+            if request["action"] == "drawing_summary":
+                self.assertEqual(
+                    request["params"],
+                    {
+                        "layer": "Layer 1",
+                        "object_type": "wall",
+                        "limit": 1000,
+                        "include_examples": False,
+                        "example_limit": 0,
+                        "scan_limit": 50000,
+                    },
+                )
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {
+                        "ok": True,
+                        "tool": "vw_drawing_summary",
+                        "native_summary": True,
+                        "objects_scanned": 2500,
+                        "counts_by_type": {"wall": 2500},
+                    },
+                }
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=2) as listener:
+            _configure_server(listener.port)
+            result = json.loads(server.vw_drawing_summary(layer="Layer 1", object_type="wall", include_examples=False, example_limit=0))
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["native_summary"])
+        self.assertEqual(result["objects_scanned"], 2500)
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "drawing_summary"])
+
     def test_find_objects_uses_get_objects_for_exact_name_on_native_bridge(self):
         def handler(request):
             if request["action"] == "ping":
@@ -1110,6 +1166,26 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertEqual(result["matched"], 1)
         self.assertEqual(result["objects"][0]["handle"], "h1")
         self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_objects"])
+
+    def test_find_objects_uses_native_criteria_for_exact_name_when_advertised(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_three_status()}
+            if request["action"] == "find_objects":
+                self.assertEqual(request["params"], {"criteria": "((N='Target'))", "limit": 10})
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": [{"handle": "h-2501", "type": "rect", "name": "Target"}],
+                }
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=2) as listener:
+            _configure_server(listener.port)
+            result = json.loads(server.vw_find_objects("((N='Target'))", limit=10))
+
+        self.assertEqual(result[0]["handle"], "h-2501")
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "find_objects"])
 
     def test_lookup_objects_returns_compact_refs_from_get_objects(self):
         def handler(request):
@@ -1316,10 +1392,74 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertEqual(result["failures"][0]["property_name"], "name")
         self.assertIn("limited", result["failures"][0]["error"])
 
+    def test_batch_set_object_properties_rejects_invalid_values_before_connecting(self):
+        result = json.loads(
+            server.vw_batch_set_object_properties(
+                edits=[
+                    {"ref": "uuid:u1", "properties": {"name": "Valid Name"}},
+                    {"ref": "uuid:u2", "properties": {"opacity": "101"}},
+                    {"ref": "uuid:u3", "properties": {"lineWeight": "-1"}},
+                    {"ref": "uuid:u4", "properties": {"fillColor": "65536,0,0"}},
+                    {"ref": "uuid:u5", "properties": {"class": "  "}},
+                ]
+            )
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["phase"], "validate")
+        self.assertFalse(result["writes_started"])
+        self.assertEqual(
+            [(failure["ref"], failure["property_name"]) for failure in result["failures"]],
+            [
+                ("uuid:u2", "opacity"),
+                ("uuid:u3", "lineWeight"),
+                ("uuid:u4", "fillColor"),
+                ("uuid:u5", "class"),
+            ],
+        )
+
+    def test_batch_set_object_properties_normalizes_numeric_and_color_values(self):
+        get_objects_calls = 0
+
+        def handler(request):
+            nonlocal get_objects_calls
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_two_with_set_property_status()}
+            if request["action"] == "get_objects":
+                get_objects_calls += 1
+                objects = (
+                    [{"handle": "h1", "uuid": "u1", "type": "rect", "name": "Old", "layer": "Layer 1"}]
+                    if get_objects_calls == 1
+                    else [{"handle": "h1", "uuid": "u1", "type": "rect", "name": "Old", "layer": "Layer 1", "opacity": 5, "fillColor": "1,2,3"}]
+                )
+                return {"id": request["id"], "success": True, "result": objects}
+            if request["action"] == "set_property":
+                self.assertIn(
+                    request["params"],
+                    [
+                        {"handle": "h1", "property_name": "opacity", "value": "5"},
+                        {"handle": "h1", "property_name": "fillColor", "value": "1,2,3"},
+                    ],
+                )
+                return {"id": request["id"], "success": True, "result": {"changed": True}}
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=5) as listener:
+            _configure_server(listener.port)
+            result = json.loads(
+                server.vw_batch_set_object_properties(
+                    edits=[{"ref": "uuid:u1", "properties": {"opacity": "005", "fillColor": "1, 2, 3"}}]
+                )
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["edits"][0]["verified"])
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_objects", "set_property", "set_property", "get_objects"])
+
     def test_batch_set_object_properties_blocks_native_bridge_without_set_property(self):
         def handler(request):
             if request["action"] == "ping":
-                return {"id": request["id"], "success": True, "result": _native_phase_two_status()}
+                return {"id": request["id"], "success": True, "result": _native_phase_two_without_set_property_status()}
             self.fail(f"Unexpected action: {request['action']}")
 
         with FakeListener(handler, max_requests=1) as listener:
@@ -1386,16 +1526,59 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertEqual([request["action"] for request in listener.requests], ["ping", "find_objects"])
 
     def test_destructive_and_trusted_code_tools_require_explicit_confirmation(self):
-        run_script = json.loads(server.vw_run_script("print('hi')"))
         delete_selection = json.loads(server.vw_selection("delete"))
         delete_class = json.loads(server.vw_manage_classes("delete", "A-Demo"))
 
-        self.assertFalse(run_script["ok"])
-        self.assertEqual(run_script["required_confirmation"], "RUN_TRUSTED_CODE")
         self.assertFalse(delete_selection["ok"])
         self.assertEqual(delete_selection["required_confirmation"], "DELETE_SELECTED")
         self.assertFalse(delete_class["ok"])
         self.assertEqual(delete_class["required_confirmation"], "DELETE_CLASS")
+
+    def test_run_script_is_disabled_by_default_before_confirmation(self):
+        result = json.loads(server.vw_run_script("print('hi')", confirm="RUN_TRUSTED_CODE"))
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["blocked"])
+        self.assertEqual(result["reason"], "run_script_disabled")
+        self.assertFalse(result["writes_started"])
+
+    def test_run_script_requires_confirmation_when_env_gate_enabled(self):
+        original = server.ENABLE_RUN_SCRIPT
+        try:
+            server.ENABLE_RUN_SCRIPT = True
+            result = json.loads(server.vw_run_script("print('hi')"))
+        finally:
+            server.ENABLE_RUN_SCRIPT = original
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["required_confirmation"], "RUN_TRUSTED_CODE")
+
+    def test_manage_classes_validates_class_name_before_connecting(self):
+        missing = json.loads(server.vw_manage_classes("create", "  "))
+        too_long = json.loads(server.vw_manage_classes("create", "x" * (server.MAX_PROPERTY_VALUE_CHARS + 1)))
+
+        self.assertFalse(missing["ok"])
+        self.assertEqual(missing["phase"], "validate")
+        self.assertFalse(missing["writes_started"])
+        self.assertFalse(too_long["ok"])
+        self.assertEqual(too_long["phase"], "validate")
+        self.assertFalse(too_long["writes_started"])
+
+    def test_manage_classes_trims_class_name_before_sending(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_two_status()}
+            if request["action"] == "manage_classes":
+                self.assertEqual(request["params"], {"action": "create", "class_name": "A-Wall", "confirm": ""})
+                return {"id": request["id"], "success": True, "result": {"class_name": "A-Wall", "created": True}}
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=2) as listener:
+            _configure_server(listener.port)
+            result = json.loads(server.vw_manage_classes("create", "  A-Wall  "))
+
+        self.assertEqual(result["class_name"], "A-Wall")
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "manage_classes"])
 
     def test_selection_delete_blocks_arbitrary_criteria(self):
         result = json.loads(server.vw_selection("delete", "ALL", confirm="DELETE_EXACT_NAME"))
@@ -1900,8 +2083,8 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertTrue(safety["vw_plan_schematic_floor_plan"]["readOnlyHint"])
         self.assertIsNone(safety["vw_create_schematic_floor_plan"]["wire_action"])
         self.assertEqual(safety["vw_create_schematic_floor_plan"]["composes_actions"], ["create_object"])
-        self.assertIsNone(safety["vw_drawing_summary"]["wire_action"])
-        self.assertEqual(safety["vw_drawing_summary"]["composes_actions"], ["get_document_info", "get_layers", "get_objects"])
+        self.assertEqual(safety["vw_drawing_summary"]["wire_action"], "drawing_summary")
+        self.assertEqual(safety["vw_drawing_summary"]["composes_actions"], ["drawing_summary", "get_document_info", "get_layers", "get_objects"])
         self.assertEqual(safety["vw_find_objects"]["wire_action"], "find_objects")
         self.assertEqual(safety["vw_find_objects"]["composes_actions"], ["get_objects"])
         self.assertIsNone(safety["vw_lookup_objects"]["wire_action"])

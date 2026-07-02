@@ -1,6 +1,6 @@
 {
   "name": "vectorworks-mcp",
-  "contractVersion": 14,
+  "contractVersion": 15,
   "requiredFeatures": [
     "stable-loader",
     "loader-clipboard-copy",
@@ -16,6 +16,8 @@
     "native-phase0-transport",
     "native-phase1-cad-handlers",
     "native-phase2-cad-handlers",
+    "native-phase2-set-property",
+    "native-phase2-manage-classes",
     "local-auth-token-required",
     "client-neutral-project-mcp"
   ],

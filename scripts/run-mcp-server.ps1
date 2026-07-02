@@ -59,6 +59,35 @@ function Invoke-Logged {
     }
 }
 
+function Protect-AuthTokenFile {
+    param([string]$Path)
+
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return
+    }
+
+    try {
+        $ResolvedPath = (Resolve-Path -LiteralPath $Path).ProviderPath
+        $Identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        if ($null -eq $Identity -or $null -eq $Identity.User) {
+            return
+        }
+
+        $Acl = New-Object System.Security.AccessControl.FileSecurity
+        $Rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+            $Identity.User,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        )
+        $Acl.SetOwner($Identity.User)
+        $Acl.SetAccessRuleProtection($true, $false)
+        $Acl.AddAccessRule($Rule)
+        Set-Acl -LiteralPath $ResolvedPath -AclObject $Acl
+    } catch {
+        return
+    }
+}
+
 function Get-HostPythonCommand {
     $Py = Get-Command py -ErrorAction SilentlyContinue
     if ($Py) {
@@ -177,20 +206,26 @@ function Ensure-AuthToken {
     if ($env:VW_MCP_INSECURE_NO_AUTH) {
         return
     }
-    if ($env:VW_MCP_AUTH_TOKEN) {
-        return
-    }
-
     $AuthDir = Split-Path -Parent $AuthTokenPath
     if ($AuthDir) {
         New-Item -ItemType Directory -Force -Path $AuthDir *> $null
     }
-    if (-not (Test-Path -LiteralPath $AuthTokenPath -PathType Leaf)) {
+    if ($env:VW_MCP_AUTH_TOKEN) {
+        $Token = $env:VW_MCP_AUTH_TOKEN.Trim()
+    } elseif (Test-Path -LiteralPath $AuthTokenPath -PathType Leaf) {
+        $Token = (Get-Content -Raw -LiteralPath $AuthTokenPath).Trim()
+    } else {
         $Token = ([Guid]::NewGuid().ToString("N") + [Guid]::NewGuid().ToString("N"))
+    }
+    if (-not $Token) {
+        throw "Generated Vectorworks MCP auth token was empty."
+    }
+    if ((-not (Test-Path -LiteralPath $AuthTokenPath -PathType Leaf)) -or ((Get-Content -Raw -LiteralPath $AuthTokenPath).Trim() -ne $Token)) {
         Set-Content -LiteralPath $AuthTokenPath -Value $Token -Encoding ASCII -NoNewline
     }
+    Protect-AuthTokenFile -Path $AuthTokenPath
     $env:VW_MCP_AUTH_TOKEN_FILE = $AuthTokenPath
-    $env:VW_MCP_AUTH_TOKEN = (Get-Content -Raw -LiteralPath $AuthTokenPath).Trim()
+    Remove-Item Env:\VW_MCP_AUTH_TOKEN -ErrorAction SilentlyContinue
 }
 
 function Ensure-Requirements {

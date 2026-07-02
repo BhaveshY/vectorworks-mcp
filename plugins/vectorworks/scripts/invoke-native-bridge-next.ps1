@@ -10,7 +10,7 @@ param(
     [string]$InstallDir = "",
     [string]$DoctorPath = "",
     [ValidateSet("Debug", "Release")]
-    [string]$Configuration = "Debug",
+    [string]$Configuration = "Release",
     [switch]$Install,
     [ValidateRange(1, 20)]
     [int]$MaxSteps = 1,

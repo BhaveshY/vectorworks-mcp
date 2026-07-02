@@ -77,5 +77,6 @@ does not make the Python listener the long-term default.
 - Raw socket reachability is not enough. CAD work requires `cad_api_safe: true`
   and `transport_only: false`.
 - The production non-modal path is the compiled Vectorworks SDK bridge. Phase 2
-  supports native walls, text, linear dimensions, and mixed atomic batches.
-  Python loader repair is fallback only.
+  supports native walls, text, linear dimensions, verified property edits,
+  class management, and mixed atomic batches. Python loader repair is fallback
+  only.

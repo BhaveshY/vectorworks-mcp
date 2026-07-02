@@ -11,7 +11,7 @@ param(
     [switch]$PrepareSource,
     [switch]$Build,
     [ValidateSet("Debug", "Release")]
-    [string]$Configuration = "Debug",
+    [string]$Configuration = "Release",
     [switch]$Force
 )
 

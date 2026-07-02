@@ -26,8 +26,9 @@ Legend:
 | `create_text` | `handle_create_text` | write | main/plugin event context | 2 | Creates and deletes a temporary text label |
 | `create_linear_dimension` | `handle_create_linear_dimension` | write | main/plugin event context | 2 | Creates and deletes a temporary linear dimension |
 | `set_property` | `handle_set_property` | write | main/plugin event context | 2 | Changes name/class/fill color/pen color/line weight/opacity on a test object with host readback verification |
+| `manage_classes` | `handle_manage_classes` | mixed/destructive | main/plugin event context | 2 | Lists, creates, and deletes a temporary class; delete has separate destructive confirmation |
 | `find_objects` | `handle_find_objects` | read | main/plugin event context | 3 | Criteria search returns known test object |
-| `manage_classes` | `handle_manage_classes` | mixed/destructive | main/plugin event context | 3 | Lists and creates a temporary class; delete has separate destructive check |
+| `drawing_summary` | `handle_drawing_summary` | read | main/plugin event context | 3 | Returns compact counts by type/layer/class plus bounded examples without dumping every object |
 | `worksheet` | `handle_worksheet` | mixed/write | main/plugin event context | 3 | Lists worksheets and reads/writes a temporary cell |
 | `symbol` | `handle_symbol` | mixed/write | main/plugin event context | 3 | Lists symbols and inserts a known symbol in a test document |
 | `export` | `handle_export` | write | main/plugin event context | 3 | Exports test document to a temporary file or opens expected export dialog |

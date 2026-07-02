@@ -81,6 +81,7 @@ class McpStdioContractTests(unittest.TestCase):
                             self.assertIn("include_examples", drawing_summary_schema["properties"])
                             self.assertEqual(drawing_summary_schema["properties"]["example_limit"]["minimum"], 0)
                             self.assertEqual(drawing_summary_schema["properties"]["example_limit"]["maximum"], 100)
+                            self.assertEqual(drawing_summary_schema["properties"]["scan_limit"]["maximum"], 100000)
 
                             lookup_schema = by_name["vw_lookup_objects"].inputSchema
                             self.assertIn("detail", lookup_schema["properties"])
@@ -90,6 +91,10 @@ class McpStdioContractTests(unittest.TestCase):
                             batch_property_schema = by_name["vw_batch_set_object_properties"].inputSchema
                             self.assertEqual(batch_property_schema["properties"]["edits"]["minItems"], 1)
                             self.assertEqual(batch_property_schema["properties"]["edits"]["maxItems"], 100)
+                            self.assertIn("items", batch_property_schema["properties"]["edits"])
+                            self.assertEqual(batch_property_schema["properties"]["edits"]["items"]["required"], ["ref", "properties"])
+                            self.assertFalse(batch_property_schema["properties"]["edits"]["items"]["additionalProperties"])
+                            self.assertIn("fillColor", batch_property_schema["properties"]["edits"]["items"]["properties"]["properties"]["properties"])
                             self.assertEqual(batch_property_schema["properties"]["lookup_limit"]["maximum"], 1000)
 
                             agent_context_schema = by_name["vw_agent_context"].inputSchema

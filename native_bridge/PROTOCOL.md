@@ -87,9 +87,14 @@ The native bridge should initially implement these handlers first:
 - `create_wall`
 - `create_text`
 - `create_linear_dimension`
+- `set_property`
+- `manage_classes`
 
 Phase 1 is the minimum stable baseline. Phase 2 adds true wall objects, text
-annotations, linear dimensions, and mixed atomic batch creation. After those are
+annotations, linear dimensions, verified property edits, native class
+management, and mixed atomic batch creation. Phase 3 adds read-side production
+helpers such as native criteria search and compact drawing summaries so agents
+can inspect large files without dumping every object record. After those are
 stable, port the remaining handlers from `vw_listener.py` in small groups with
 smoke tests.
 
@@ -125,7 +130,7 @@ responses must satisfy these minimum shapes:
   `stop`, `get_document_info`, `get_layers`, `get_objects`, `selection`,
   `create_object`, and `batch_create_objects`. A phase-2 bridge must additionally
   report `native_phase >= 2` and include `create_wall`, `create_text`,
-  `create_linear_dimension`, and `set_property`. Windows SDK builds must also report
+  `create_linear_dimension`, `set_property`, and `manage_classes`. Windows SDK builds must also report
   `main_context_pump: "win32_ui_timer"` and
   `main_context_pump_ready: true`; otherwise CAD requests are not considered
   safe even when the handler list is complete.
@@ -165,6 +170,14 @@ responses must satisfy these minimum shapes:
   `value`, and `before`/`after` object records. The native allowlist is
   `name`, `class`, `fillColor`, `penColor`, `lineWeight`, and `opacity`; host
   tools resolve refs through `get_objects` and verify readback after writes.
+- `manage_classes`: `list` returns class names, `create` returns the created
+  class name, and `delete` returns `deleted: true` after `confirm:
+  "DELETE_CLASS"`. Native class management is part of the required phase-2
+  production surface; write variants are not retry-safe after response loss.
+- `find_objects`: returns object records matching a Vectorworks criteria string,
+  capped by `limit`.
+- `drawing_summary`: returns a compact summary object with counts by type,
+  layer, class, layer/type, drawing bounds, and optional bounded examples.
 
 The harness also cross-checks the first successful phase-1 read snapshots:
 

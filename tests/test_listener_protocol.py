@@ -200,6 +200,14 @@ class ListenerProtocolTests(unittest.TestCase):
     def test_raw_destructive_handlers_require_confirmation(self):
         listener, _alerts = self.load_listener()
 
+        run_script_disabled = listener.dispatch({"id": "script-disabled", "action": "run_script", "params": {"code": "print('x')", "confirm": "RUN_TRUSTED_CODE"}})
+        old_enable_run_script = os.environ.get("VW_MCP_ENABLE_RUN_SCRIPT", MISSING)
+        os.environ["VW_MCP_ENABLE_RUN_SCRIPT"] = "1"
+        self.addCleanup(
+            lambda: os.environ.pop("VW_MCP_ENABLE_RUN_SCRIPT", None)
+            if old_enable_run_script is MISSING
+            else os.environ.__setitem__("VW_MCP_ENABLE_RUN_SCRIPT", old_enable_run_script)
+        )
         run_script = listener.dispatch({"id": "script", "action": "run_script", "params": {"code": "print('x')"}})
         delete_class = listener.dispatch(
             {"id": "class", "action": "manage_classes", "params": {"action": "delete", "class_name": "A-Test"}}
@@ -209,6 +217,8 @@ class ListenerProtocolTests(unittest.TestCase):
             {"id": "inspect", "action": "inspect_object", "params": {"plugin_name": "Door"}}
         )
 
+        self.assertFalse(run_script_disabled["success"])
+        self.assertIn("disabled", run_script_disabled["error"])
         self.assertFalse(run_script["success"])
         self.assertIn("confirm", run_script["error"])
         self.assertFalse(delete_class["success"])

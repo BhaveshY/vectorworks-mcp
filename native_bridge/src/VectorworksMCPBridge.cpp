@@ -15,6 +15,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <map>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -748,13 +749,13 @@ bool RequestAuthAccepted(const Protocol::RequestEnvelope& request) {
 Protocol::ResponseEnvelope HandlePingOnTransportThread(const Protocol::RequestEnvelope& request) {
 #if VECTORWORKS_MCP_HAS_SDK
     const bool ready = CadHandlersRuntimeReady();
-    std::string payload = R"({"pong":true,"version":"native-sdk-bridge-phase2","bridge_kind":"native_sdk_bridge_phase2","dispatch_mode":"native_sdk","handlers":12)";
+    std::string payload = R"({"pong":true,"version":"native-sdk-bridge-phase3","bridge_kind":"native_sdk_bridge_phase3","dispatch_mode":"native_sdk","handlers":15)";
     payload += ",\"cad_api_safe\":";
     payload += ready ? "true" : "false";
     payload += ",\"transport_only\":";
     payload += ready ? "false" : "true";
-    payload += R"(,"native_bridge":true,"native_phase":2)";
-    payload += ",\"implemented_actions\":[\"ping\",\"stop\",\"get_document_info\",\"get_layers\",\"get_objects\",\"selection\",\"create_object\",\"batch_create_objects\",\"create_wall\",\"create_text\",\"create_linear_dimension\",\"set_property\"]";
+    payload += R"(,"native_bridge":true,"native_phase":3)";
+    payload += ",\"implemented_actions\":[\"ping\",\"stop\",\"get_document_info\",\"get_layers\",\"get_objects\",\"selection\",\"create_object\",\"batch_create_objects\",\"create_wall\",\"create_text\",\"create_linear_dimension\",\"set_property\",\"manage_classes\",\"find_objects\",\"drawing_summary\"]";
     payload += ",\"cad_handlers_implemented\":true";
     payload += ",\"main_context_pump\":";
     payload += JsonString(MainContextPumpName());
@@ -971,6 +972,38 @@ std::string ObjectListJson(const std::vector<MCObjectHandle>& objects) {
     return json;
 }
 
+std::string CountMapJson(const std::map<std::string, int>& counts) {
+    std::string json = "{";
+    bool first = true;
+    for (const auto& [key, value] : counts) {
+        if (!first) {
+            json += ",";
+        }
+        first = false;
+        json += JsonString(key);
+        json += ":";
+        json += std::to_string(value);
+    }
+    json += "}";
+    return json;
+}
+
+std::string NestedCountMapJson(const std::map<std::string, std::map<std::string, int>>& counts) {
+    std::string json = "{";
+    bool first = true;
+    for (const auto& [key, nested] : counts) {
+        if (!first) {
+            json += ",";
+        }
+        first = false;
+        json += JsonString(key);
+        json += ":";
+        json += CountMapJson(nested);
+    }
+    json += "}";
+    return json;
+}
+
 std::vector<MCObjectHandle> CollectLayerHandles() {
     std::vector<MCObjectHandle> layers;
     gSDK->ForEachLayerN([&](MCObjectHandle layer) {
@@ -1116,6 +1149,144 @@ std::string HandleGetObjects(const Params& params) {
     return ObjectListJson(objects);
 }
 
+std::string HandleDrawingSummary(const Params& params) {
+    const int scanLimit = GetBoundedIntParam(params, "scan_limit", GetBoundedIntParam(params, "limit", 1000, 1, 100000), 1, 100000);
+    const bool includeExamples = GetBoolParam(params, "include_examples", true);
+    const int exampleLimit = GetBoundedIntParam(params, "example_limit", 20, 0, 100);
+    const std::string layerFilter = GetStringParam(params, "layer");
+    const std::string objectTypeFilter = GetStringParam(params, "object_type");
+
+    std::map<std::string, int> byType;
+    std::map<std::string, int> byLayer;
+    std::map<std::string, int> byClass;
+    std::map<std::string, std::map<std::string, int>> byLayerType;
+    std::vector<MCObjectHandle> examples;
+    int scanned = 0;
+    int namedCount = 0;
+    bool truncated = false;
+    bool hasBounds = false;
+    double left = 0.0;
+    double top = 0.0;
+    double right = 0.0;
+    double bottom = 0.0;
+
+    for (MCObjectHandle layer : CollectLayerHandles()) {
+        TXString txLayerName;
+        gSDK->GetObjectName(layer, txLayerName);
+        const std::string layerName = TxToUtf8(txLayerName);
+        if (!layerFilter.empty() && layerName != layerFilter) {
+            continue;
+        }
+        for (MCObjectHandle object = gSDK->FirstMemberObj(layer);
+             object && gSDK->GetObjectTypeN(object) != kTermNode;
+             object = gSDK->NextObject(object)) {
+            const short type = gSDK->GetObjectTypeN(object);
+            if (!IsUserVisibleObjectType(type) || !MatchesObjectType(type, objectTypeFilter)) {
+                continue;
+            }
+            if (scanned >= scanLimit) {
+                truncated = true;
+                break;
+            }
+            ++scanned;
+            const std::string objectType = ObjectTypeName(type);
+            ++byType[objectType];
+            ++byLayer[layerName.empty() ? "unknown" : layerName];
+            ++byLayerType[layerName.empty() ? "unknown" : layerName][objectType];
+            const std::string className = ClassNameForObject(object);
+            if (!className.empty()) {
+                ++byClass[className];
+            }
+            TXString txName;
+            gSDK->GetObjectName(object, txName);
+            if (!TxToUtf8(txName).empty()) {
+                ++namedCount;
+            }
+            if (includeExamples && static_cast<int>(examples.size()) < exampleLimit) {
+                examples.push_back(object);
+            }
+
+            WorldRect bounds;
+            gSDK->GetObjectBounds(object, bounds);
+            const double objLeft = std::min(bounds.Left(), bounds.Right());
+            const double objRight = std::max(bounds.Left(), bounds.Right());
+            const double objTop = std::min(bounds.Top(), bounds.Bottom());
+            const double objBottom = std::max(bounds.Top(), bounds.Bottom());
+            if (!hasBounds) {
+                left = objLeft;
+                right = objRight;
+                top = objTop;
+                bottom = objBottom;
+                hasBounds = true;
+            } else {
+                left = std::min(left, objLeft);
+                right = std::max(right, objRight);
+                top = std::min(top, objTop);
+                bottom = std::max(bottom, objBottom);
+            }
+        }
+        if (truncated) {
+            break;
+        }
+    }
+
+    const auto layers = CollectLayerHandles();
+    std::string json = "{\"ok\":true,\"tool\":\"vw_drawing_summary\",\"native_summary\":true";
+    json += ",\"query\":{\"layer\":";
+    json += JsonString(layerFilter);
+    json += ",\"object_type\":";
+    json += JsonString(objectTypeFilter);
+    json += ",\"scan_limit\":";
+    json += std::to_string(scanLimit);
+    json += ",\"include_examples\":";
+    json += includeExamples ? "true" : "false";
+    json += ",\"example_limit\":";
+    json += std::to_string(exampleLimit);
+    json += ",\"source\":\"native_drawing_summary\"}";
+    json += ",\"document\":";
+    json += HandleGetDocumentInfo();
+    json += ",\"layers\":";
+    json += HandleGetLayers();
+    json += ",\"layer_count\":";
+    json += std::to_string(layers.size());
+    json += ",\"objects_returned\":";
+    json += std::to_string(scanned);
+    json += ",\"objects_scanned\":";
+    json += std::to_string(scanned);
+    json += ",\"possibly_truncated\":";
+    json += truncated ? "true" : "false";
+    json += ",\"named_objects_returned\":";
+    json += std::to_string(namedCount);
+    json += ",\"counts_by_type\":";
+    json += CountMapJson(byType);
+    json += ",\"counts_by_layer\":";
+    json += CountMapJson(byLayer);
+    json += ",\"counts_by_layer_type\":";
+    json += NestedCountMapJson(byLayerType);
+    json += ",\"counts_by_class\":";
+    json += CountMapJson(byClass);
+    json += ",\"bounds\":";
+    if (hasBounds) {
+        json += "{\"left\":";
+        json += JsonNumber(left);
+        json += ",\"top\":";
+        json += JsonNumber(top);
+        json += ",\"right\":";
+        json += JsonNumber(right);
+        json += ",\"bottom\":";
+        json += JsonNumber(bottom);
+        json += "}";
+    } else {
+        json += "null";
+    }
+    if (includeExamples) {
+        json += ",\"examples\":";
+        json += ObjectListJson(examples);
+    }
+    json += "}";
+    return json;
+}
+
 std::vector<MCObjectHandle> CollectSelectedObjects() {
     std::vector<MCObjectHandle> selected;
     gSDK->ForEachObjectN(allObjects + descendIntoAll + descendIntoViewports + descendIntoAuxLists, [&](MCObjectHandle object) {
@@ -1126,9 +1297,12 @@ std::vector<MCObjectHandle> CollectSelectedObjects() {
     return selected;
 }
 
-std::vector<MCObjectHandle> CollectObjectsByCriteria(const std::string& criteria) {
+std::vector<MCObjectHandle> CollectObjectsByCriteria(const std::string& criteria, int limit = 1000) {
     std::vector<MCObjectHandle> objects;
     gSDK->ForEachObjectInCriteria(TXString(criteria.c_str()), [&](MCObjectHandle object) {
+        if (static_cast<int>(objects.size()) >= limit) {
+            return;
+        }
         if (!object || !IsUserVisibleObjectType(gSDK->GetObjectTypeN(object))) {
             return;
         }
@@ -1137,6 +1311,15 @@ std::vector<MCObjectHandle> CollectObjectsByCriteria(const std::string& criteria
         }
     });
     return objects;
+}
+
+std::string HandleFindObjects(const Params& params) {
+    const std::string criteria = TrimCopy(GetStringParam(params, "criteria", "ALL"));
+    const int limit = GetBoundedIntParam(params, "limit", 100, 1, 1000);
+    if (criteria.empty()) {
+        throw std::invalid_argument("criteria is required");
+    }
+    return ObjectListJson(CollectObjectsByCriteria(criteria, limit));
 }
 
 std::optional<std::string> ExactNameFromCriteria(const std::string& criteria) {
@@ -1825,6 +2008,84 @@ std::string HandleSetProperty(const Params& params) {
     return json;
 }
 
+std::string ClassListJson() {
+    std::vector<std::string> classNames;
+    VWClass::ForEachClass(false, [&](const VWClass& clas) {
+        const auto name = TxToUtf8(clas.GetName());
+        if (!name.empty()) {
+            classNames.push_back(name);
+        }
+    });
+    std::sort(classNames.begin(), classNames.end());
+    return JsonStringArray(classNames);
+}
+
+std::string HandleManageClasses(const Params& params) {
+    const std::string action = ToLower(GetStringParam(params, "action", "list"));
+    const std::string className = TrimCopy(GetStringParam(params, "class_name"));
+    if (action == "list") {
+        return ClassListJson();
+    }
+
+    if (action != "create" && action != "delete") {
+        throw std::invalid_argument("unknown class action. Use: list, create, delete");
+    }
+    if (className.empty()) {
+        throw std::invalid_argument("class_name is required");
+    }
+    if (className.size() > kMaxPropertyValueChars) {
+        throw std::invalid_argument("class_name is too long");
+    }
+
+    const TXString txClassName(className.c_str());
+    InternalIndex classId = gSDK->ClassNameToID(txClassName);
+    const bool existed = gSDK->ValidClass(classId);
+    if (action == "create") {
+        bool created = false;
+        if (!existed) {
+            gSDK->SupportUndoAndRemove();
+            gSDK->NameUndoEvent(TXString("Vectorworks MCP create class"));
+            classId = gSDK->AddClass(txClassName);
+            created = gSDK->ValidClass(classId);
+            if (!created) {
+                gSDK->UndoAndRemove();
+                throw std::runtime_error("Vectorworks rejected class: " + className);
+            }
+            gSDK->EndUndoEvent();
+        }
+        std::string json = "{\"action\":\"create\",\"class_name\":";
+        json += JsonString(className);
+        json += ",\"created\":";
+        json += created ? "true" : "false";
+        json += ",\"existed\":";
+        json += existed ? "true" : "false";
+        json += "}";
+        return json;
+    }
+
+    if (GetStringParam(params, "confirm") != "DELETE_CLASS") {
+        throw std::invalid_argument("class deletion requires confirm='DELETE_CLASS'");
+    }
+    if (!existed) {
+        throw std::invalid_argument("class not found: " + className);
+    }
+    if (className == "None") {
+        throw std::invalid_argument("refusing to delete the None class");
+    }
+
+    gSDK->SupportUndoAndRemove();
+    gSDK->NameUndoEvent(TXString("Vectorworks MCP delete class"));
+    gSDK->DeleteClass(txClassName);
+    gSDK->EndUndoEvent();
+    const bool stillExists = gSDK->ValidClass(gSDK->ClassNameToID(txClassName));
+    std::string json = "{\"action\":\"delete\",\"class_name\":";
+    json += JsonString(className);
+    json += ",\"deleted\":";
+    json += stillExists ? "false" : "true";
+    json += "}";
+    return json;
+}
+
 std::string HandleBatchCreateObjects(const Params& params) {
     const int objectCount = GetRequiredBoundedIntParam(params, "object_count", 1, 250);
     std::vector<PrimitiveSpec> specs;
@@ -1880,6 +2141,12 @@ Protocol::ResponseEnvelope DispatchCadRequestOnVectorworksMainContext(const Prot
         if (request.action == "get_objects") {
             return {request.id, true, HandleGetObjects(params), ""};
         }
+        if (request.action == "drawing_summary") {
+            return {request.id, true, HandleDrawingSummary(params), ""};
+        }
+        if (request.action == "find_objects") {
+            return {request.id, true, HandleFindObjects(params), ""};
+        }
         if (request.action == "selection") {
             return {request.id, true, HandleSelection(params), ""};
         }
@@ -1900,6 +2167,9 @@ Protocol::ResponseEnvelope DispatchCadRequestOnVectorworksMainContext(const Prot
         }
         if (request.action == "set_property") {
             return {request.id, true, HandleSetProperty(params), ""};
+        }
+        if (request.action == "manage_classes") {
+            return {request.id, true, HandleManageClasses(params), ""};
         }
         return {request.id, false, "", "unknown native bridge CAD action: " + request.action};
     } catch (const std::exception& exc) {

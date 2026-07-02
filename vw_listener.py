@@ -411,6 +411,8 @@ def _bool_param(value, default=False):
 # === HANDLERS ===
 
 def handle_run_script(p):
+    if str(os.environ.get("VW_MCP_ENABLE_RUN_SCRIPT", "")).lower() not in ("1", "true", "yes", "on"):
+        return _err("run_script is disabled by default. Set VW_MCP_ENABLE_RUN_SCRIPT=1 only for trusted local debugging.")
     if p.get("confirm") != "RUN_TRUSTED_CODE":
         return _err("run_script requires confirm='RUN_TRUSTED_CODE'")
     old = sys.stdout
@@ -528,6 +530,108 @@ def handle_get_objects(p):
         while lh is not None and len(objs) < limit:
             collect(lh); lh = vs.NextLayer(lh)
     return _ok(objs)
+
+def _document_info():
+    info = {"filename": vs.GetFName() or "Untitled", "filepath": vs.GetFPathName() or "",
+            "layers": [], "layer_count": 0, "total_objects": 0}
+    lh = vs.FLayer()
+    while lh is not None:
+        info["layer_count"] += 1
+        info["layers"].append(vs.GetLName(lh))
+        oh = vs.FInLayer(lh)
+        while oh is not None:
+            info["total_objects"] += 1
+            oh = vs.NextObj(oh)
+        lh = vs.NextLayer(lh)
+    return info
+
+def handle_drawing_summary(p):
+    try:
+        scan_limit = _bounded_int(p.get("scan_limit", p.get("limit", MAX_OBJECT_QUERY_LIMIT)), MAX_OBJECT_QUERY_LIMIT, 1, 100000, "scan_limit")
+        example_limit = _bounded_int(p.get("example_limit", 20), 20, 0, 100, "example_limit")
+    except ValueError as e:
+        return _err(str(e))
+    layer_filter = str(p.get("layer", "") or "")
+    object_type = str(p.get("object_type", "") or "").lower()
+    include_examples = bool(p.get("include_examples", True))
+    layers = handle_get_layers({}).get("result", [])
+    try:
+        document = _document_info()
+    except Exception:
+        document = {}
+    objects = []
+    def collect(lh):
+        obj = vs.FInLayer(lh)
+        while obj is not None and len(objects) < scan_limit:
+            info = _obj_info(obj)
+            if (not object_type or info["type"] == object_type):
+                objects.append(info)
+            obj = vs.NextObj(obj)
+    if layer_filter:
+        lh = vs.GetObject(layer_filter)
+        if lh is None: return _err(f"Layer '{layer_filter}' not found")
+        collect(lh)
+    else:
+        lh = vs.FLayer()
+        while lh is not None and len(objects) < scan_limit:
+            collect(lh); lh = vs.NextLayer(lh)
+
+    by_type, by_layer, by_class, by_layer_type = {}, {}, {}, {}
+    named_count, bounds = 0, None
+    for info in objects:
+        obj_type = str(info.get("type") or "unknown")
+        obj_layer = str(info.get("layer") or "unknown")
+        obj_class = str(info.get("class") or info.get("class_name") or "")
+        by_type[obj_type] = by_type.get(obj_type, 0) + 1
+        by_layer[obj_layer] = by_layer.get(obj_layer, 0) + 1
+        by_layer_type.setdefault(obj_layer, {})[obj_type] = by_layer_type.setdefault(obj_layer, {}).get(obj_type, 0) + 1
+        if obj_class:
+            by_class[obj_class] = by_class.get(obj_class, 0) + 1
+        if str(info.get("name") or "").strip():
+            named_count += 1
+        obj_bounds = info.get("bounds")
+        if isinstance(obj_bounds, dict):
+            tl, br = obj_bounds.get("top_left"), obj_bounds.get("bottom_right")
+            if isinstance(tl, list) and isinstance(br, list) and len(tl) >= 2 and len(br) >= 2:
+                left, right = sorted([float(tl[0]), float(br[0])])
+                top, bottom = sorted([float(tl[1]), float(br[1])])
+                if bounds is None:
+                    bounds = {"left": left, "top": top, "right": right, "bottom": bottom}
+                else:
+                    bounds["left"] = min(bounds["left"], left)
+                    bounds["top"] = min(bounds["top"], top)
+                    bounds["right"] = max(bounds["right"], right)
+                    bounds["bottom"] = max(bounds["bottom"], bottom)
+
+    payload = {
+        "ok": True,
+        "tool": "vw_drawing_summary",
+        "native_summary": False,
+        "query": {
+            "layer": layer_filter,
+            "object_type": object_type,
+            "scan_limit": scan_limit,
+            "include_examples": include_examples,
+            "example_limit": example_limit,
+            "source": "python_drawing_summary",
+        },
+        "document": document,
+        "layer_count": len(layers),
+        "layers": layers,
+        "objects_returned": len(objects),
+        "objects_scanned": len(objects),
+        "document_total_objects": document.get("total_objects") if isinstance(document, dict) else None,
+        "possibly_truncated": len(objects) >= scan_limit,
+        "named_objects_returned": named_count,
+        "counts_by_type": dict(sorted(by_type.items())),
+        "counts_by_layer": dict(sorted(by_layer.items())),
+        "counts_by_layer_type": {k: dict(sorted(v.items())) for k, v in sorted(by_layer_type.items())},
+        "counts_by_class": dict(sorted(by_class.items())),
+        "bounds": bounds,
+    }
+    if include_examples:
+        payload["examples"] = objects[:example_limit]
+    return _ok(payload)
 
 def handle_set_property(p):
     h = _get(p.get("handle", ""))
@@ -662,16 +766,7 @@ def handle_import_file(p):
 
 def handle_get_document_info(p):
     try:
-        info = {"filename": vs.GetFName() or "Untitled", "filepath": vs.GetFPathName() or "",
-                "layers": [], "layer_count": 0, "total_objects": 0}
-        lh = vs.FLayer()
-        while lh is not None:
-            info["layer_count"] += 1
-            info["layers"].append(vs.GetLName(lh))
-            oh = vs.FInLayer(lh)
-            while oh is not None: info["total_objects"] += 1; oh = vs.NextObj(oh)
-            lh = vs.NextLayer(lh)
-        return _ok(info)
+        return _ok(_document_info())
     except Exception: return _err(traceback.format_exc())
 
 def handle_screenshot(p):
@@ -960,6 +1055,7 @@ HANDLERS = {
     "run_script": handle_run_script, "create_object": handle_create_object,
     "batch_create_objects": handle_batch_create_objects,
     "get_layers": handle_get_layers, "get_objects": handle_get_objects,
+    "drawing_summary": handle_drawing_summary,
     "set_property": handle_set_property, "find_objects": handle_find_objects,
     "manage_classes": handle_manage_classes, "worksheet": handle_worksheet,
     "symbol": handle_symbol, "export": handle_export,

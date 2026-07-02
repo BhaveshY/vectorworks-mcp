@@ -30,7 +30,7 @@ Interpretation:
   `transport_only: true`: transport is alive, but CAD handlers are not ready.
   Do not call CAD tools.
 - For native phase-2 production work, also confirm the ping/capabilities payload
-  includes `create_wall`, `create_text`, `create_linear_dimension`, and
-  `batch_create_objects`.
+  includes `create_wall`, `create_text`, `create_linear_dimension`,
+  `set_property`, `manage_classes`, and `batch_create_objects`.
 
 Use `vw_ping` with an underscore. `/mcp vw-ping` is not the right call pattern.

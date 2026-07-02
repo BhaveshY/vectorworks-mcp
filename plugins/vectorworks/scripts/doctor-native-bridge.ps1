@@ -9,7 +9,7 @@ param(
     [string]$WorktreeRoot = "",
     [string]$InstallDir = "",
     [ValidateSet("Debug", "Release")]
-    [string]$Configuration = "Debug",
+    [string]$Configuration = "Release",
     [switch]$Install,
     [switch]$Json
 )

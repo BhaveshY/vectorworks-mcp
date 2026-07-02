@@ -64,6 +64,13 @@ cleanup. If any identity check fails, the smoke harness must skip deletion.
 8. Confirm the JSON report includes `"stop_port_released": true` for the phase-0
    shutdown check.
 
+9. Current production phase 2 is only accepted when the live smoke also proves
+   `create_wall`, `create_text`, `create_linear_dimension`, `set_property`, and
+   `manage_classes` through `implemented_actions` and disposable-document
+   write fixtures. The property fixture must verify host readback, and the
+   class fixture must list, create, and delete a temporary class with explicit
+   delete confirmation.
+
 Record:
 
 - Vectorworks version and update number.
@@ -94,7 +101,7 @@ Recorded on 2026-06-23 against Vectorworks Architect 2024 on Windows.
   -TimeoutSeconds 25 -IncludeObjects -AllowWriteFixture -Json` passed with
   `ok: true`, `cad_api_safe: true`, `transport_only: false`,
   `main_context_pump_ready: true`, and native actions for `create_wall`,
-  `create_text`, `create_linear_dimension`, `create_object`, and atomic
-  `batch_create_objects`.
+  `create_text`, `create_linear_dimension`, `set_property`, `manage_classes`,
+  `create_object`, and atomic `batch_create_objects`.
 - Cleanup: a follow-up exact-name cleanup pass removed four leftover smoke
   objects from an earlier failed cleanup attempt.

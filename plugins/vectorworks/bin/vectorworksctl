@@ -18,6 +18,9 @@ from pathlib import Path
 from typing import Any
 
 
+DEFAULT_NATIVE_CONFIGURATION = "Release"
+
+
 def plugin_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -76,7 +79,7 @@ def native_plan_namespace(args: argparse.Namespace, *, json_output: bool) -> arg
     return argparse.Namespace(
         repo_path=getattr(args, "repo_path", ""),
         vectorworks_version=getattr(args, "vectorworks_version", "2024"),
-        configuration=getattr(args, "configuration", "Debug"),
+        configuration=getattr(args, "configuration", DEFAULT_NATIVE_CONFIGURATION),
         built_artifact=getattr(args, "built_artifact", ""),
         sdk_dir=getattr(args, "sdk_dir", ""),
         sdk_archive_path=getattr(args, "sdk_archive_path", ""),
@@ -193,6 +196,20 @@ def companion_paths(repo_root: str) -> dict[str, str]:
         "launcher_path": str(root / "vw_start_listener_2024.py"),
         "loader_path": str(root / "vw_load_listener_2024.py"),
     }
+
+
+def companion_contract(repo_root: str) -> dict[str, Any]:
+    if not repo_root:
+        return {"contract_version": 0, "required_features": []}
+    marker = Path(repo_root) / ".vectorworks-mcp-contract.json"
+    try:
+        contract = json.loads(marker.read_text(encoding="utf-8"))
+        return {
+            "contract_version": int(contract.get("contractVersion") or 0),
+            "required_features": [str(feature) for feature in contract.get("requiredFeatures", [])],
+        }
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return {"contract_version": 0, "required_features": []}
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -329,12 +346,21 @@ def cmd_setup_runtime(args: argparse.Namespace) -> int:
     if args.json:
         summary = native_summary(native_plan)
         python_fallback_ready = bool(fallback_result and fallback_result.returncode == 0)
+        release_configuration = args.configuration == "Release"
         native_setup_complete = bool(summary["ready"])
-        setup_complete = bool(native_setup_complete or python_fallback_ready)
-        native_requires_action = not native_setup_complete
+        native_ready = bool(native_setup_complete and release_configuration)
+        setup_complete = bool(native_ready or python_fallback_ready)
+        native_requires_action = not native_ready
+        production_ready = bool(native_ready)
+        requires_action = bool(not setup_complete or native_requires_action or not production_ready)
         repo_root = resolve_setup_repo_root(args, fallback_result)
         paths = companion_paths(repo_root)
+        contract = companion_contract(repo_root)
         command_ok = bool((native_plan and not native_error) or python_fallback_ready)
+        summary["configuration"] = args.configuration
+        summary["release_configuration"] = release_configuration
+        summary["setup_complete"] = native_setup_complete
+        summary["production_ready"] = native_ready
         if setup_complete and native_requires_action:
             user_message = (
                 "Installed and usable now with the Python dialog fallback. "
@@ -367,18 +393,25 @@ def cmd_setup_runtime(args: argparse.Namespace) -> int:
             "setup_complete": setup_complete,
             "install_complete": setup_complete,
             "usable_now": setup_complete,
-            "requires_action": not setup_complete,
+            "requires_action": requires_action,
+            "production_ready": production_ready,
             "cad_ready": False,
-            "native_ready": native_setup_complete,
+            "native_ready": native_ready,
             "native_setup_complete": native_setup_complete,
             "native_requires_action": native_requires_action,
             "native_optional_upgrade": native_requires_action,
+            "native_configuration": args.configuration,
             "python_fallback_ready": python_fallback_ready,
             "repo_root": repo_root,
             "mcp_config_path": paths["mcp_config_path"],
             "runner_path": paths["runner_path"],
             "launcher_path": paths["launcher_path"],
             "loader_path": paths["loader_path"],
+            "contract_version": contract["contract_version"],
+            "required_features": contract["required_features"],
+            "mcp_config": paths["mcp_config_path"],
+            "vectorworks_loader": paths["loader_path"],
+            "vectorworks_launcher": paths["launcher_path"],
             "native_summary": summary,
             "native_plan": native_plan,
             "native_error": native_error,
@@ -422,7 +455,7 @@ def cmd_agent_install(args: argparse.Namespace) -> int:
 def add_native_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--repo-path", default=os.environ.get("VW_MCP_REPO", ""))
     parser.add_argument("--vectorworks-version", default="2024")
-    parser.add_argument("--configuration", choices=("Debug", "Release"), default="Debug")
+    parser.add_argument("--configuration", choices=("Debug", "Release"), default=DEFAULT_NATIVE_CONFIGURATION)
     parser.add_argument("--built-artifact", default="")
     parser.add_argument("--sdk-dir", default="")
     parser.add_argument("--sdk-archive-path", default="")
@@ -449,7 +482,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--repo-path", default=os.environ.get("VW_MCP_REPO", ""))
     doctor.add_argument("--timeout-ms", type=int, default=1200)
     doctor.add_argument("--vectorworks-version", default="2024")
-    doctor.add_argument("--configuration", choices=("Debug", "Release"), default="Debug")
+    doctor.add_argument("--configuration", choices=("Debug", "Release"), default=DEFAULT_NATIVE_CONFIGURATION)
     doctor.add_argument("--built-artifact", default="")
     doctor.add_argument("--sdk-dir", default="")
     doctor.add_argument("--sdk-archive-path", default="")

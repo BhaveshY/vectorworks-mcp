@@ -62,29 +62,59 @@ function Write-AtomicText {
     Move-Item -Force -Path $TempPath -Destination $Path
 }
 
+function Protect-AuthTokenFile {
+    param([string]$Path)
+
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return
+    }
+
+    try {
+        $ResolvedPath = (Resolve-Path -LiteralPath $Path).ProviderPath
+        $Identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        if ($null -eq $Identity -or $null -eq $Identity.User) {
+            return
+        }
+
+        $Acl = New-Object System.Security.AccessControl.FileSecurity
+        $Rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+            $Identity.User,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        )
+        $Acl.SetOwner($Identity.User)
+        $Acl.SetAccessRuleProtection($true, $false)
+        $Acl.AddAccessRule($Rule)
+        Set-Acl -LiteralPath $ResolvedPath -AclObject $Acl
+    } catch {
+        return
+    }
+}
+
 function Ensure-AuthToken {
     if ($env:VW_MCP_INSECURE_NO_AUTH) {
         return ""
     }
+    $AuthDir = Split-Path -Parent $AuthTokenPath
+    if ($AuthDir) {
+        New-Item -ItemType Directory -Force -Path $AuthDir | Out-Null
+    }
     if ($env:VW_MCP_AUTH_TOKEN) {
         $Token = $env:VW_MCP_AUTH_TOKEN.Trim()
+    } elseif (Test-Path -LiteralPath $AuthTokenPath -PathType Leaf) {
+        $Token = (Get-Content -Raw -LiteralPath $AuthTokenPath).Trim()
     } else {
-        $AuthDir = Split-Path -Parent $AuthTokenPath
-        if ($AuthDir) {
-            New-Item -ItemType Directory -Force -Path $AuthDir | Out-Null
-        }
-        if (-not (Test-Path -LiteralPath $AuthTokenPath -PathType Leaf)) {
-            $Token = ([Guid]::NewGuid().ToString("N") + [Guid]::NewGuid().ToString("N"))
-            Set-Content -LiteralPath $AuthTokenPath -Value $Token -Encoding ASCII -NoNewline
-        } else {
-            $Token = (Get-Content -Raw -LiteralPath $AuthTokenPath).Trim()
-        }
+        $Token = ([Guid]::NewGuid().ToString("N") + [Guid]::NewGuid().ToString("N"))
     }
     if (-not $Token) {
         throw "Generated Vectorworks MCP auth token was empty."
     }
+    if ((-not (Test-Path -LiteralPath $AuthTokenPath -PathType Leaf)) -or ((Get-Content -Raw -LiteralPath $AuthTokenPath).Trim() -ne $Token)) {
+        Set-Content -LiteralPath $AuthTokenPath -Value $Token -Encoding ASCII -NoNewline
+    }
+    Protect-AuthTokenFile -Path $AuthTokenPath
     $env:VW_MCP_AUTH_TOKEN_FILE = $AuthTokenPath
-    $env:VW_MCP_AUTH_TOKEN = $Token
+    Remove-Item Env:\VW_MCP_AUTH_TOKEN -ErrorAction SilentlyContinue
     return $Token
 }
 
@@ -93,17 +123,15 @@ function New-VectorworksLauncher {
         [string]$Path,
         [string]$HostName,
         [int]$ListenPort,
-        [string]$AuthToken
+        [bool]$AuthEnabled
     )
     $StopDir = $DefaultStateDir
     $ListenerLiteral = ConvertTo-PythonRawStringLiteral $ListenerPath
     $StopDirLiteral = ConvertTo-PythonRawStringLiteral $StopDir
-    $AuthTokenLiteral = ConvertTo-PythonRawStringLiteral $AuthToken
     $AuthTokenPathLiteral = ConvertTo-PythonRawStringLiteral $AuthTokenPath
-    $AuthLines = if ($AuthToken) {
+    $AuthLines = if ($AuthEnabled) {
 @"
 os.environ["VW_MCP_AUTH_TOKEN_FILE"] = $AuthTokenPathLiteral
-os.environ["VW_MCP_AUTH_TOKEN"] = $AuthTokenLiteral
 "@
     } else {
 @"
@@ -166,7 +194,8 @@ function New-ClaudeServerConfig {
     param(
         [string]$HostName,
         [int]$ListenPort,
-        [int]$ToolTimeoutSeconds
+        [int]$ToolTimeoutSeconds,
+        [bool]$AuthEnabled
     )
     $ServerEnv = [ordered]@{
         VW_MCP_HOST = $HostName
@@ -175,9 +204,8 @@ function New-ClaudeServerConfig {
         VW_MCP_PREFLIGHT_CACHE_MS = "750"
         VW_MCP_STOP_DIR = $DefaultStateDir
     }
-    if ($env:VW_MCP_AUTH_TOKEN) {
+    if ($AuthEnabled) {
         $ServerEnv["VW_MCP_AUTH_TOKEN_FILE"] = $AuthTokenPath
-        $ServerEnv["VW_MCP_AUTH_TOKEN"] = $env:VW_MCP_AUTH_TOKEN
     } elseif ($env:VW_MCP_INSECURE_NO_AUTH) {
         $ServerEnv["VW_MCP_INSECURE_NO_AUTH"] = "1"
     }
@@ -244,9 +272,10 @@ if (-not $SkipInstall) {
 }
 
 $AuthToken = Ensure-AuthToken
-$GeneratedLauncherPath = New-VectorworksLauncher -Path $LauncherPath -HostName $ListenHost -ListenPort $Port -AuthToken $AuthToken
+$AuthEnabled = [bool]$AuthToken
+$GeneratedLauncherPath = New-VectorworksLauncher -Path $LauncherPath -HostName $ListenHost -ListenPort $Port -AuthEnabled $AuthEnabled
 $GeneratedLoaderPath = New-VectorworksLoader -Path $LoaderPath -TargetLauncherPath $GeneratedLauncherPath
-$Config = New-ClaudeServerConfig -HostName $ListenHost -ListenPort $Port -ToolTimeoutSeconds $TimeoutSeconds
+$Config = New-ClaudeServerConfig -HostName $ListenHost -ListenPort $Port -ToolTimeoutSeconds $TimeoutSeconds -AuthEnabled $AuthEnabled
 $Json = $Config | ConvertTo-Json -Depth 10 -Compress
 
 if (-not $NoClaudeConfig) {

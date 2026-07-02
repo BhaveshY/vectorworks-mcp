@@ -4,7 +4,7 @@ param(
     [string]$SdkDir = "",
     [string]$SourceDir = "",
     [ValidateSet("Debug", "Release")]
-    [string]$Configuration = "Debug",
+    [string]$Configuration = "Release",
     [switch]$SkipPrereqCheck
 )
 

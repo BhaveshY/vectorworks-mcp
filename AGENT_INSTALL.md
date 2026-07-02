@@ -161,7 +161,9 @@ py -3 .\plugins\vectorworks\bin\vectorworksctl native-next --repo-path $PWD --js
 After a native artifact is built, install only through the guarded doctor/native
 runner, then use the launch/smoke helper to restart/open Vectorworks and run
 phase-0 stop/port-release smoke. Phase 2 should run in a disposable document
-before claiming native production readiness:
+before claiming native production readiness; the phase-2 gate includes native
+walls, text, dimensions, verified property edits, class management, and mixed
+atomic batches:
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-vectorworks-native-smoke.ps1 -VectorworksVersion 2024 -RestartIfRunning -RunPhase2 -AllowWriteFixture -Json
@@ -214,4 +216,6 @@ failure when `setup_complete` is true. Do not call CAD tools unless `cad_ready`
 is true or a
 smoke-tested native bridge reports `cad_api_safe: true`, `transport_only:
 false`, `main_context_pump_ready: true`, and supports the requested
-`implemented_actions` entry.
+`implemented_actions` entry. Current phase-2 production work requires
+`create_wall`, `create_text`, `create_linear_dimension`, `set_property`, and
+`manage_classes` when those tool families are requested.

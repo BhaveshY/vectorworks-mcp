@@ -8,7 +8,7 @@ Core health and escape hatch:
 - `vw_agent_context`: one-call compact Codex planning snapshot with preflight, key capabilities, and bounded drawing summary.
 - `vw_capabilities`: bridge capability report plus current native/tool support.
 - `vw_tool_safety`: structured read/write/destructive metadata for every tool.
-- `vw_run_script`: run trusted Python inside Vectorworks; requires `confirm="RUN_TRUSTED_CODE"`.
+- `vw_run_script`: disabled by default; run trusted Python inside Vectorworks only after `VW_MCP_ENABLE_RUN_SCRIPT=1` and `confirm="RUN_TRUSTED_CODE"`.
 - `vw_stop_listener`: ask the Vectorworks listener to stop gracefully.
 
 Document context:
@@ -32,7 +32,7 @@ Create and edit:
 - `vw_create_schematic_door`: schematic door leaf and swing arc from native 2D primitives.
 - `vw_create_schematic_window`: schematic double-line window marker from native 2D primitives.
 - `vw_set_object_property`: name, class, color, line weight, opacity.
-- `vw_batch_set_object_properties`: resolve `uuid:...`, `name:...`, or `handle:...` refs, reject ambiguous/stale refs before writing, apply multiple property edits, and optionally verify readback. Requires `set_property` support in the active bridge.
+- `vw_batch_set_object_properties`: resolve `uuid:...`, `name:...`, or `handle:...` refs, reject ambiguous/stale refs before writing, apply multiple property edits, and optionally verify readback. Requires `set_property`, a native phase-2 production action, in the active bridge.
 - `vw_selection`: get, select, clear, delete, move, or duplicate selected objects; selected-object delete requires `confirm="DELETE_SELECTED"` and exact-name criteria delete requires `confirm="DELETE_EXACT_NAME"`.
 
 Architecture:
@@ -47,7 +47,7 @@ Architecture:
 
 Resources and files:
 
-- `vw_manage_classes`: list/create/delete classes; delete requires `confirm="DELETE_CLASS"`.
+- `vw_manage_classes`: native phase-2 production class management; list/create/delete classes; delete requires `confirm="DELETE_CLASS"`.
 - `vw_worksheet`: read/write worksheet cells and ranges.
 - `vw_symbol`: list and insert symbols.
 - `vw_export`: export PDF, DXF, DWG, or image where supported.
@@ -87,7 +87,7 @@ Rules:
 | `vw_create_schematic_window` | `schematic-floor-plan` | `` | `false` | `false` | `false` | `true` | `true` |
 | `vw_create_text` | `document-write` | `create_text` | `false` | `false` | `false` | `true` | `true` |
 | `vw_create_wall` | `document-write` | `create_wall` | `false` | `false` | `false` | `true` | `true` |
-| `vw_drawing_summary` | `document-read` | `` | `true` | `false` | `true` | `true` | `true` |
+| `vw_drawing_summary` | `document-read` | `drawing_summary` | `true` | `false` | `true` | `true` | `true` |
 | `vw_export` | `file-write` | `export` | `false` | `false` | `false` | `true` | `true` |
 | `vw_find_objects` | `document-read` | `find_objects` | `true` | `false` | `true` | `true` | `true` |
 | `vw_get_document_info` | `document-read` | `get_document_info` | `true` | `false` | `true` | `true` | `true` |

@@ -511,6 +511,26 @@ class NativeBridgeContractTests(unittest.TestCase):
 
         def fake_record_call(_sock, _report, action, iteration, params=None):
             calls.append((action, iteration, params or {}))
+            if action == "manage_classes" and iteration == "class-fixture-create":
+                state["class_name"] = str((params or {}).get("class_name", ""))
+                return {"success": True, "result": {"class_name": (params or {}).get("class_name"), "created": True}}
+            if action == "manage_classes" and iteration == "class-fixture-list":
+                return {"success": True, "result": [state.get("class_name", "")]}
+            if action == "manage_classes" and iteration == "class-fixture-delete":
+                return {"success": True, "result": {"deleted": True}}
+            if action == "create_object" and iteration == "property-fixture-create":
+                state["fixture_name"] = str((params or {}).get("name", ""))
+                state["handle"] = "property-fixture-handle"
+                return {"success": True, "result": {"type": "rect", "handle": state["handle"], "name": state["fixture_name"]}}
+            if action == "set_property" and iteration == "property-fixture-set-name":
+                state["fixture_name"] = str((params or {}).get("value", ""))
+                state["property_renamed"] = state["fixture_name"]
+                return {"success": True, "result": {"changed": True}}
+            if action == "get_objects" and iteration == "property-fixture-readback":
+                return {
+                    "success": True,
+                    "result": [{"handle": state["handle"], "type": "rect", "name": state["fixture_name"]}],
+                }
             if action in result_types:
                 state["fixture_name"] = str((params or {}).get("name", ""))
                 state["handle"] = "{0}-handle".format(action)
@@ -547,9 +567,21 @@ class NativeBridgeContractTests(unittest.TestCase):
             for action, iteration, params in calls
             if action == "selection" and str(iteration).endswith("-delete")
         ]
-        self.assertEqual(len(phase_two_deletes), 3)
+        self.assertEqual(len(phase_two_deletes), 4)
         self.assertTrue(all(params.get("confirm") == "DELETE_EXACT_NAME" for params in phase_two_deletes))
         self.assertTrue(all(str(params.get("criteria", "")).startswith("((N='VW_MCP_NATIVE_PHASE2_SMOKE_") for params in phase_two_deletes))
+        self.assertIn(
+            (
+                "set_property",
+                "property-fixture-set-name",
+                {
+                    "handle": "property-fixture-handle",
+                    "property_name": "name",
+                    "value": state["property_renamed"],
+                },
+            ),
+            calls,
+        )
 
     def test_native_selection_delete_requires_raw_confirmation(self):
         source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
@@ -601,6 +633,32 @@ class NativeBridgeContractTests(unittest.TestCase):
         self.assertIn("gKnownObjectHandleIds.insert(id)", handle_block)
         self.assertIn("gKnownObjectHandleIds.find(canonicalHandleId)", parse_block)
         self.assertIn("resolve the object with get_objects first", parse_block)
+
+    def test_native_manage_classes_is_advertised_allowlisted_and_confirmed(self):
+        bridge_source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
+        dispatcher_source = (ROOT / "native_bridge" / "src" / "BridgeDispatcher.hpp").read_text(encoding="utf-8")
+        manage_block = bridge_source[bridge_source.index("std::string HandleManageClasses"):]
+
+        self.assertIn('"manage_classes"', bridge_source)
+        self.assertIn("HandleManageClasses", bridge_source)
+        self.assertIn('request.action == "manage_classes"', bridge_source)
+        self.assertIn('{"manage_classes", ExecutionContext::VectorworksMainPluginContext, true, false}', dispatcher_source)
+        self.assertIn('confirm") != "DELETE_CLASS"', manage_block)
+        self.assertIn("refusing to delete the None class", manage_block)
+
+    def test_native_phase_three_read_handlers_are_advertised_and_allowlisted(self):
+        bridge_source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
+        dispatcher_source = (ROOT / "native_bridge" / "src" / "BridgeDispatcher.hpp").read_text(encoding="utf-8")
+
+        self.assertIn('"native_phase":3', bridge_source)
+        self.assertIn('"find_objects"', bridge_source)
+        self.assertIn('"drawing_summary"', bridge_source)
+        self.assertIn("HandleFindObjects", bridge_source)
+        self.assertIn("HandleDrawingSummary", bridge_source)
+        self.assertIn('request.action == "find_objects"', bridge_source)
+        self.assertIn('request.action == "drawing_summary"', bridge_source)
+        self.assertIn('{"find_objects", ExecutionContext::VectorworksMainPluginContext, false, false}', dispatcher_source)
+        self.assertIn('{"drawing_summary", ExecutionContext::VectorworksMainPluginContext, false, false}', dispatcher_source)
 
     def test_native_writable_layer_fallback_creates_design_layer(self):
         source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")

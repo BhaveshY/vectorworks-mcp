@@ -9,7 +9,7 @@ param(
     [switch]$FullNative,
     [string]$VectorworksVersion = "2024",
     [ValidateSet("Debug", "Release")]
-    [string]$NativeConfiguration = "Debug",
+    [string]$NativeConfiguration = "Release",
     [ValidateRange(1, 20)]
     [int]$NativeMaxSteps = 12,
     [string]$SdkDir = "",
@@ -294,6 +294,30 @@ function Test-ConnectorRepoRoot {
     )
 }
 
+function Get-ContractInfo {
+    param([string]$RepoRoot)
+    $Empty = [ordered]@{
+        contract_version = 0
+        required_features = @()
+    }
+    if (-not $RepoRoot) {
+        return $Empty
+    }
+    $ContractPath = Join-Path $RepoRoot ".vectorworks-mcp-contract.json"
+    if (-not (Test-Path -LiteralPath $ContractPath -PathType Leaf)) {
+        return $Empty
+    }
+    try {
+        $Contract = Get-Content -Raw -LiteralPath $ContractPath | ConvertFrom-Json
+        return [ordered]@{
+            contract_version = [int]$Contract.contractVersion
+            required_features = @($Contract.requiredFeatures | ForEach-Object { [string]$_ })
+        }
+    } catch {
+        return $Empty
+    }
+}
+
 function Invoke-Git {
     param([string[]]$ArgumentList)
     if (-not $script:GitExe) {
@@ -446,7 +470,9 @@ function New-NativeSummary {
         $Phase2SmokeResult.payload -and
         [bool]$Phase2SmokeResult.payload.ok
     )
-    $NativeProductionReady = [bool]($Phase0SmokeTested -and $Phase2SmokeTested)
+    $ReleaseConfiguration = [string]$NativeConfiguration -eq "Release"
+    $NativeSmokeReady = [bool]($Phase0SmokeTested -and $Phase2SmokeTested)
+    $NativeProductionReady = [bool]($ReleaseConfiguration -and $NativeSmokeReady)
     $NativeFatal = [bool]($NativeExitCode -ne 0 -and -not $InteractionBoundary)
     $Installed = [bool]($Doctor.installedArtifactMatchesCandidate -or $Doctor.installedPath)
     $Built = [bool]($Doctor.builtArtifact -or $Doctor.builtArtifactCandidate)
@@ -460,6 +486,8 @@ function New-NativeSummary {
         missing_allow_flags = @($MissingAllowFlags)
         current_stage = if ($LastStep) { [string]$LastStep.stage } else { [string]$Doctor.nextCommandSpec.stage }
         prereqs_ready = [bool]$Doctor.prereqsReady
+        configuration = [string]$NativeConfiguration
+        release_configuration = $ReleaseConfiguration
         bridge_source_prepared = [bool]$Doctor.sourcePrepared
         bridge_project_wired = [bool]$Doctor.projectWired
         bridge_built = $Built
@@ -469,8 +497,11 @@ function New-NativeSummary {
         phase0_smoke_tested = $Phase0SmokeTested
         phase2_smoke_attempted = $Phase2SmokeAttempted
         phase2_smoke_tested = $Phase2SmokeTested
+        native_smoke_ready = $NativeSmokeReady
+        phase2_production_smoke_passed = $Phase2SmokeTested
+        production_ready = $NativeProductionReady
         native_production_ready = $NativeProductionReady
-        vectorworks_interaction_required = ($InteractionBoundary -or $Phase0SmokeTested) -and -not $NativeProductionReady
+        vectorworks_interaction_required = ($InteractionBoundary -or $Phase0SmokeTested) -and -not $NativeSmokeReady
         requires_action = (-not $NativeProductionReady)
         built_artifact = if ($Doctor.builtArtifact) { [string]$Doctor.builtArtifact } else { [string]$Doctor.builtArtifactCandidate }
         installed_path = [string]$Doctor.installedPath
@@ -478,13 +509,17 @@ function New-NativeSummary {
         next_reason = [string]$Doctor.nextCommandReason
         acceptance_next_command = if ($NativeProductionReady) {
             ""
+        } elseif (-not $ReleaseConfiguration) {
+            "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -FullNative -NativeConfiguration Release -Json"
         } elseif ($Phase0SmokeTested -and -not $Phase2SmokeTested) {
             "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-vectorworks-native-smoke.ps1 -VectorworksVersion $VectorworksVersion -RestartIfRunning -RunPhase2 -AllowWriteFixture -Json"
         } else {
             [string]$Doctor.nextCommand
         }
         next_actions = @($Doctor.nextActions | ForEach-Object { [string]$_ })
-        exact_remaining_action = if ($Phase0SmokeTested -and $Phase2SmokeAttempted -and -not $Phase2SmokeTested) {
+        exact_remaining_action = if (-not $ReleaseConfiguration) {
+            "Debug native builds are not production-ready. Rerun install.ps1 -FullNative -NativeConfiguration Release -Json, then pass phase-0 and phase-2 native smoke."
+        } elseif ($Phase0SmokeTested -and $Phase2SmokeAttempted -and -not $Phase2SmokeTested) {
             "Phase-0 native transport smoke passed, then automated phase-2 production smoke was attempted but did not pass. Open Vectorworks $VectorworksVersion to a usable document, resolve any startup/license prompts, then rerun native.acceptance_next_command."
         } elseif ($Phase0SmokeTested -and -not $Phase2SmokeTested) {
             "Phase-0 native transport smoke passed and stopped the bridge. Run native.acceptance_next_command to restart/open Vectorworks and attempt the phase-2 disposable-document production smoke before claiming native production readiness."
@@ -608,23 +643,29 @@ function New-InstallPayload {
     $LoaderPath = if ($RepoRoot) { Join-Path $RepoRoot "vw_load_listener_2024.py" } else { "" }
     $LauncherPath = if ($RepoRoot) { Join-Path $RepoRoot "vw_start_listener_2024.py" } else { "" }
     $McpConfigPath = if ($RepoRoot) { Join-Path $RepoRoot ".mcp.json" } else { "" }
+    $RunnerPath = if ($RepoRoot) { Join-Path $RepoRoot "scripts\run-mcp-server.ps1" } else { "" }
+    $ContractInfo = Get-ContractInfo -RepoRoot $RepoRoot
     $NativeRequiresAction = if ($Native) { [bool]$Native.requires_action } else { $false }
     $NativeReady = if ($Native) { [bool]$Native.native_production_ready } else { $false }
     $NativeSummary = if ($Native) {
         [ordered]@{
             ready = [bool]$Native.native_production_ready
+            production_ready = [bool]$Native.native_production_ready
             next_stage = [string]$Native.current_stage
             next_command = [string]$Native.next_command
             next_reason = [string]$Native.next_reason
             acceptance_next_command = [string]$Native.acceptance_next_command
             missing_allow_flags = @($Native.missing_allow_flags)
             prereqs_ready = [bool]$Native.prereqs_ready
+            configuration = [string]$Native.configuration
+            release_configuration = [bool]$Native.release_configuration
             bridge_built = [bool]$Native.bridge_built
             bridge_installed = [bool]$Native.bridge_installed
             vectorworks_automation_attempted = [bool]$Native.vectorworks_automation_attempted
             phase0_smoke_tested = [bool]$Native.phase0_smoke_tested
             phase2_smoke_attempted = [bool]$Native.phase2_smoke_attempted
             phase2_smoke_tested = [bool]$Native.phase2_smoke_tested
+            native_smoke_ready = [bool]$Native.native_smoke_ready
             vectorworks_interaction_required = [bool]$Native.vectorworks_interaction_required
         }
     } else {
@@ -639,6 +680,12 @@ function New-InstallPayload {
         production_ready = [bool]($Ok -and (-not $FullNative -or $NativeReady))
         client = $Client
         repo_root = $RepoRoot
+        mcp_config_path = $McpConfigPath
+        loader_path = $LoaderPath
+        launcher_path = $LauncherPath
+        runner_path = $RunnerPath
+        contract_version = [int]$ContractInfo.contract_version
+        required_features = @($ContractInfo.required_features)
         mcp_config = $McpConfigPath
         vectorworks_loader = $LoaderPath
         vectorworks_launcher = $LauncherPath
@@ -649,9 +696,9 @@ function New-InstallPayload {
         native_summary = $NativeSummary
         native = $Native
         user_message = $Message
-        next_action = if ($Ok -and $Native -and $Native.native_production_ready) {
+        next_action = if ($Native -and $Native.native_production_ready) {
             "Native bridge acceptance smoke passed. Trust or reload the MCP client, then use vw_ping and production CAD tools."
-        } elseif ($Ok -and $Native -and $Native.vectorworks_interaction_required) {
+        } elseif ($Native -and $Native.requires_action) {
             $Native.exact_remaining_action
         } elseif ($Ok) {
             "Trust or add the repo .mcp.json in your MCP client, run vw_load_listener_2024.py in Vectorworks, then call vw_ping."
@@ -728,16 +775,20 @@ try {
         }
     }
 
+    $InstallOk = [bool](-not $FullNative -or $NativeSummary.native_production_ready)
     $Message = if ($FullNative -and $NativeSummary.native_production_ready) {
         "Vectorworks MCP installed. Native bridge is built, installed, and smoke-tested."
     } elseif ($FullNative -and $NativeSummary.vectorworks_interaction_required) {
-        "Vectorworks MCP installed. Native bridge is built/installed and waiting for Vectorworks plug-in load plus smoke test."
+        "Vectorworks MCP base install completed, but native bridge production readiness still requires action."
+    } elseif ($FullNative) {
+        "Vectorworks MCP base install completed, but native bridge production readiness is not complete."
     } else {
         "Vectorworks MCP installed and usable now with the Python dialog fallback."
     }
-    $Payload = New-InstallPayload -Ok $true -RepoRoot $RepoRoot -Message $Message -Native $NativeSummary
+    $Payload = New-InstallPayload -Ok $InstallOk -RepoRoot $RepoRoot -Message $Message -Native $NativeSummary
     Write-InstallPayload $Payload
-    exit 0
+    if ($InstallOk) { exit 0 }
+    exit 1
 } catch {
     $Payload = New-InstallPayload -Ok $false -RepoRoot $RepoRoot -Message "Vectorworks MCP install failed." -ErrorMessage $_.Exception.Message
     Write-InstallPayload $Payload
