@@ -1,10 +1,14 @@
+import io
 import json
 import inspect
+import os
 import socket
 import struct
 import threading
 import time
 import unittest
+from contextlib import redirect_stderr
+from unittest.mock import patch
 
 import server
 
@@ -133,6 +137,7 @@ class ConcurrentFakeListener(FakeListener):
 def _configure_server(port, max_frame_bytes=1024 * 1024):
     server._close()
     server._clear_cad_safe_cache()
+    server._clear_operation_idempotency_cache()
     server.HOST = "127.0.0.1"
     server.PORT = port
     server.TIMEOUT = 1
@@ -200,6 +205,17 @@ def _native_phase_three_status():
     return status
 
 
+def _native_phase_four_status():
+    status = _native_phase_three_status()
+    status["native_phase"] = 4
+    status["version"] = "native-sdk-bridge-phase4"
+    status["bridge_kind"] = "native_sdk_bridge_phase4"
+    status["implemented_actions"] = sorted(set(status["implemented_actions"]) | {"apply_operations"})
+    status["create_object_types"] = sorted(server.NATIVE_PHASE_FOUR_CREATE_OBJECT_TYPES)
+    status["handlers"] = 16
+    return status
+
+
 def _python_dialog_status():
     return {
         "pong": True,
@@ -228,14 +244,17 @@ class ServerProtocolTests(unittest.TestCase):
         fake_mcp = FakeMCP()
         original_mcp = server.mcp
         original_config_error = server._CONFIG_ERROR
+        original_profile_applied = server._tool_profile_applied
         try:
             server.mcp = fake_mcp
             server._CONFIG_ERROR = None
-
-            self.assertEqual(server.main(), 0)
+            server._tool_profile_applied = False
+            with patch.dict(os.environ, {"VW_MCP_TOOL_PROFILE": "compat"}):
+                self.assertEqual(server.main(), 0)
         finally:
             server.mcp = original_mcp
             server._CONFIG_ERROR = original_config_error
+            server._tool_profile_applied = original_profile_applied
 
         self.assertEqual(fake_mcp.calls, [{"transport": "stdio", "show_banner": False}])
 
@@ -555,6 +574,30 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertIn("create_object object_type is not implemented by native bridge: polygon", blocked["native_readiness_errors"])
         self.assertEqual([request["action"] for request in listener.requests], ["ping"])
 
+    def test_send_tool_allows_phase_four_polygon_before_dispatch(self):
+        points = [[0, 0], [10, 0], [10, 10]]
+
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_four_status()}
+            if request["action"] == "create_object":
+                self.assertEqual(request["params"]["object_type"], "polygon")
+                self.assertEqual(request["params"]["points"], points)
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {"created": True, "object_type": "polygon", "handle": "poly-1"},
+                }
+            self.fail(f"Unexpected action: {request['action']}")
+
+        with FakeListener(handler, max_requests=2) as listener:
+            _configure_server(listener.port)
+            result = json.loads(server.vw_create_object("polygon", points=points))
+
+        self.assertTrue(result["created"])
+        self.assertEqual(result["handle"], "poly-1")
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "create_object"])
+
     def test_send_tool_blocks_unimplemented_native_selection_variant_from_cache(self):
         def handler(request):
             if request["action"] == "ping":
@@ -603,10 +646,13 @@ class ServerProtocolTests(unittest.TestCase):
             _configure_server(listener.port)
             result = json.loads(server.vw_capabilities(include_tools=False))
 
-        self.assertTrue(result["ok"])
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["profile_ready"])
         self.assertIn("rect", result["native_phase_one_create_object_types"])
         self.assertIn("selection", result["native_phase_one_required_actions"])
-        self.assertFalse(result["host_capabilities"]["true_bim_objects"])
+        self.assertTrue(result["host_capabilities"]["fast_native_required"])
+        self.assertFalse(result["host_capabilities"]["execute_operations_fast_path"])
+        self.assertNotIn("true_bim_objects", result["host_capabilities"])
         self.assertEqual([request["action"] for request in listener.requests], ["ping"])
 
     def test_capabilities_reports_native_phase_two_production_surface(self):
@@ -619,12 +665,12 @@ class ServerProtocolTests(unittest.TestCase):
             _configure_server(listener.port)
             result = json.loads(server.vw_capabilities(include_tools=False))
 
-        self.assertTrue(result["ok"])
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["profile_ready"])
         self.assertIn("wall", result["native_phase_two_create_object_types"])
-        self.assertTrue(result["host_capabilities"]["true_bim_objects"])
-        self.assertTrue(result["host_capabilities"]["native_text_creation"])
-        self.assertTrue(result["host_capabilities"]["native_linear_dimension_creation"])
+        self.assertFalse(result["host_capabilities"]["execute_operations_fast_path"])
         self.assertTrue(result["host_capabilities"]["native_class_management"])
+        self.assertNotIn("true_bim_objects", result["host_capabilities"])
 
     def test_capabilities_do_not_advertise_native_writes_when_bridge_is_not_cad_safe(self):
         unsafe_status = _native_phase_two_status()
@@ -641,13 +687,10 @@ class ServerProtocolTests(unittest.TestCase):
             _configure_server(listener.port)
             result = json.loads(server.vw_capabilities(include_tools=False))
 
-        self.assertTrue(result["ok"])
-        self.assertFalse(result["host_capabilities"]["atomic_mixed_production_batch_creation"])
-        self.assertFalse(result["host_capabilities"]["native_wall_creation"])
-        self.assertFalse(result["host_capabilities"]["native_text_creation"])
-        self.assertFalse(result["host_capabilities"]["native_linear_dimension_creation"])
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["host_capabilities"]["execute_operations_fast_path"])
         self.assertFalse(result["host_capabilities"]["native_class_management"])
-        self.assertFalse(result["host_capabilities"]["true_bim_objects"])
+        self.assertNotIn("atomic_mixed_production_batch_creation", result["host_capabilities"])
 
     def test_agent_context_returns_compact_preflight_capabilities_and_summary(self):
         def handler(request):
@@ -676,10 +719,11 @@ class ServerProtocolTests(unittest.TestCase):
             _configure_server(listener.port)
             result = json.loads(server.vw_agent_context())
 
-        self.assertTrue(result["ok"])
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["profile_ready"])
         self.assertEqual(result["profile"], "production")
         self.assertTrue(result["preflight"]["ok"])
-        self.assertTrue(result["host_capabilities"]["atomic_mixed_production_batch_creation"])
+        self.assertFalse(result["host_capabilities"]["execute_operations_fast_path"])
         self.assertTrue(result["host_capabilities"]["native_class_management"])
         self.assertEqual(result["drawing_summary"]["counts_by_type"], {"text": 1, "wall": 1})
         self.assertNotIn("examples", result["drawing_summary"])
@@ -705,6 +749,23 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertIsNone(result["drawing_summary"])
         self.assertEqual([request["action"] for request in listener.requests], ["ping"])
 
+    def test_agent_context_brief_skips_drawing_scan(self):
+        def handler(request):
+            self.assertEqual(request["action"], "ping")
+            return {"id": request["id"], "success": True, "result": _native_phase_four_status()}
+
+        with FakeListener(handler, max_requests=1) as listener:
+            _configure_server(listener.port)
+            result = json.loads(server.vw_agent_context(profile="brief"))
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["profile_ready"])
+        self.assertEqual(result["profile"], "brief")
+        self.assertIsNone(result["drawing_summary"])
+        self.assertFalse(result["host_capabilities"]["drawing_scan_performed"])
+        self.assertTrue(result["host_capabilities"]["execute_operations_fast_path"])
+        self.assertEqual([request["action"] for request in listener.requests], ["ping"])
+
     def test_phase_two_direct_text_and_dimension_actions(self):
         def handler(request):
             if request["action"] == "ping":
@@ -725,6 +786,178 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertEqual([request["action"] for request in listener.requests], ["ping", "create_text", "create_linear_dimension"])
         self.assertEqual(listener.requests[1]["params"]["text"], "Office")
         self.assertEqual(listener.requests[2]["params"]["end_x"], 4000)
+
+    def test_execute_operations_requires_phase_four_without_batch_fallback(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_two_status()}
+            self.fail(f"Unexpected action: {request['action']}")
+
+        operations = [
+            {"type": "create", "operation_id": "room", "params": {"object_type": "rect", "x1": 0, "y1": 0, "x2": 100, "y2": 80}},
+            {"type": "create", "params": {"object_type": "line", "x1": 0, "y1": 0, "x2": 100, "y2": 0}},
+        ]
+        with FakeListener(handler, max_requests=1) as listener:
+            _configure_server(listener.port)
+            result = json.loads(server.vw_execute_operations(operations, "draw-room-001"))
+
+        self.assertFalse(result["ok"])
+        self.assertIn("phase-4", result["error"])
+        self.assertIn("instead of using a compatibility fallback", result["error"])
+        self.assertEqual([request["action"] for request in listener.requests], ["ping"])
+
+    def test_execute_operations_uses_apply_operations_for_property_edits(self):
+        status = _native_phase_four_status()
+
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": status}
+            if request["action"] == "apply_operations":
+                self.assertEqual(request["params"]["idempotency_key"], "edit-wall-001")
+                self.assertEqual(request["params"]["operation_count"], 1)
+                operation = json.loads(request["params"]["operation_1_json"])
+                self.assertEqual(operation["op"], "set_property")
+                self.assertEqual(operation["target"], "uuid:wall-1")
+                self.assertEqual(operation["property_name"], "class")
+                self.assertEqual(operation["value"], "A-Wall")
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {
+                        "ok": True,
+                        "atomic": True,
+                        "replayed": False,
+                        "transaction": {
+                            "committed": True,
+                            "operation_count": 1,
+                            "operations": [
+                                {
+                                    "index": 1,
+                                    "op": "set_property",
+                                    "target": "uuid:wall-1",
+                                    "property_name": "class",
+                                    "value": "A-Wall",
+                                }
+                            ],
+                            "created": [],
+                            "changed": [{"handle": "wall-1", "property_name": "class"}],
+                        },
+                        "timing": {"queue_wait_ms": 1.5, "handler_ms": 2.0, "total_native_ms": 3.5},
+                    },
+                }
+            self.fail(f"Unexpected action: {request['action']}")
+
+        operations = [
+            {
+                "type": "set_properties",
+                "params": {
+                    "edits": [
+                        {
+                            "ref": "uuid:wall-1",
+                            "properties": {"class": "A-Wall"},
+                        }
+                    ]
+                },
+            }
+        ]
+        with FakeListener(handler, max_requests=2) as listener:
+            _configure_server(listener.port)
+            result = json.loads(server.vw_execute_operations(operations, "edit-wall-001"))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["execution_path"], "apply_operations")
+        self.assertTrue(result["verification"]["ok"])
+        self.assertEqual(result["verification"]["receipts"][0]["target"], "uuid:wall-1")
+        self.assertEqual(result["timing"]["native"]["total_native_ms"], 3.5)
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "apply_operations"])
+
+    def test_execute_operations_resends_identical_key_for_native_document_replay(self):
+        apply_requests = 0
+
+        def handler(request):
+            nonlocal apply_requests
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_four_status()}
+            if request["action"] == "apply_operations":
+                apply_requests += 1
+                self.assertEqual(request["params"]["idempotency_key"], "replay-create-001")
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {
+                        "ok": True,
+                        "atomic": True,
+                        "replayed": apply_requests == 2,
+                        "transaction": {
+                            "committed": True,
+                            "operation_count": 1,
+                            "operations": [{"index": 1, "op": "create", "handle": "h-1"}],
+                            "created": [{"index": 1, "handle": "h-1"}],
+                            "changed": [],
+                        },
+                    },
+                }
+            self.fail(f"Unexpected action: {request['action']}")
+
+        operations = [
+            {"type": "create", "params": {"object_type": "rect", "x1": 0, "y1": 0, "x2": 10, "y2": 10}}
+        ]
+        with FakeListener(handler, max_requests=3) as listener:
+            _configure_server(listener.port)
+            first = json.loads(server.vw_execute_operations(operations, "replay-create-001"))
+            second = json.loads(server.vw_execute_operations(operations, "replay-create-001"))
+
+        self.assertTrue(first["ok"])
+        self.assertFalse(first["idempotency_replay"])
+        self.assertTrue(second["ok"])
+        self.assertTrue(second["idempotency_replay"])
+        self.assertEqual(second["timing"]["attempts"], 1)
+        self.assertEqual(
+            [request["action"] for request in listener.requests],
+            ["ping", "apply_operations", "apply_operations"],
+        )
+
+    def test_execute_operations_rejects_invalid_plan_before_connecting(self):
+        result = json.loads(
+            server.vw_execute_operations(
+                [{"type": "set_properties", "params": {"edits": [{"ref": "bad", "properties": {"class": "A"}}]}}],
+                "invalid-plan-001",
+            )
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("uuid:", result["error"])
+        self.assertEqual(result["timing"]["attempts"], 0)
+
+    def test_request_trace_log_is_token_safe(self):
+        original_trace_enabled = server.TRACE_ENABLED
+        server.TRACE_ENABLED = True
+        stderr = io.StringIO()
+        try:
+            with redirect_stderr(stderr):
+                server.vw_execute_operations(
+                    [
+                        {
+                            "type": "create",
+                            "params": {
+                                "object_type": "text",
+                                "text": "TOP-SECRET",
+                                "x": 0,
+                                "y": 0,
+                                "unexpected": "TOP-SECRET",
+                            },
+                        }
+                    ],
+                    "trace-key-001",
+                )
+        finally:
+            server.TRACE_ENABLED = original_trace_enabled
+
+        trace_event = json.loads(stderr.getvalue())
+        self.assertEqual(trace_event["event"], "vectorworks_mcp_request")
+        self.assertEqual(trace_event["tool"], "vw_execute_operations")
+        self.assertNotIn("TOP-SECRET", stderr.getvalue())
+        self.assertNotIn("trace-key-001", stderr.getvalue())
 
     def test_batch_create_objects_accepts_phase_two_mixed_production_objects(self):
         def handler(request):
@@ -2059,48 +2292,54 @@ class ServerProtocolTests(unittest.TestCase):
     def test_tool_safety_tool_returns_structured_metadata(self):
         safety = json.loads(server.vw_tool_safety())
 
-        self.assertIn("vw_run_script", safety)
+        self.assertEqual(set(safety), set(server.FAST_NATIVE_TOOL_NAMES))
+        self.assertNotIn("vw_run_script", safety)
         self.assertIn("vw_agent_context", safety)
         self.assertIn("vw_capabilities", safety)
-        self.assertIn("vw_batch_create_objects", safety)
-        self.assertIn("vw_plan_schematic_floor_plan", safety)
-        self.assertIn("vw_create_schematic_floor_plan", safety)
+        self.assertIn("vw_execute_operations", safety)
         self.assertIn("vw_drawing_summary", safety)
         self.assertIn("vw_lookup_objects", safety)
-        self.assertIn("vw_batch_set_object_properties", safety)
         self.assertTrue(safety["vw_ping"]["readOnlyHint"])
         self.assertTrue(safety["vw_agent_context"]["readOnlyHint"])
         self.assertEqual(safety["vw_agent_context"]["composes_actions"], ["ping", "get_document_info", "get_layers", "get_objects"])
         self.assertTrue(safety["vw_capabilities"]["readOnlyHint"])
         self.assertFalse(safety["vw_preflight_for_cad"]["requires_cad_preflight"])
         self.assertTrue(safety["vw_get_layers"]["requires_cad_preflight"])
-        self.assertTrue(safety["vw_run_script"]["destructiveHint"])
-        self.assertTrue(safety["vw_create_object"]["requires_cad_preflight"])
-        self.assertEqual(safety["vw_batch_create_objects"]["wire_action"], "batch_create_objects")
-        self.assertNotIn("composes_actions", safety["vw_batch_create_objects"])
-        self.assertIsNone(safety["vw_plan_schematic_floor_plan"]["wire_action"])
-        self.assertFalse(safety["vw_plan_schematic_floor_plan"]["requires_cad_preflight"])
-        self.assertTrue(safety["vw_plan_schematic_floor_plan"]["readOnlyHint"])
-        self.assertIsNone(safety["vw_create_schematic_floor_plan"]["wire_action"])
-        self.assertEqual(safety["vw_create_schematic_floor_plan"]["composes_actions"], ["create_object"])
         self.assertEqual(safety["vw_drawing_summary"]["wire_action"], "drawing_summary")
         self.assertEqual(safety["vw_drawing_summary"]["composes_actions"], ["drawing_summary", "get_document_info", "get_layers", "get_objects"])
-        self.assertEqual(safety["vw_find_objects"]["wire_action"], "find_objects")
-        self.assertEqual(safety["vw_find_objects"]["composes_actions"], ["get_objects"])
+
+        with patch.dict(os.environ, {"VW_MCP_TOOL_PROFILE": "compat"}):
+            compat_safety = json.loads(server.vw_tool_safety())
+
+        self.assertTrue(compat_safety["vw_run_script"]["destructiveHint"])
+        self.assertTrue(compat_safety["vw_create_object"]["requires_cad_preflight"])
+        self.assertEqual(compat_safety["vw_batch_create_objects"]["wire_action"], "batch_create_objects")
+        self.assertNotIn("composes_actions", compat_safety["vw_batch_create_objects"])
+        self.assertIsNone(compat_safety["vw_plan_schematic_floor_plan"]["wire_action"])
+        self.assertFalse(compat_safety["vw_plan_schematic_floor_plan"]["requires_cad_preflight"])
+        self.assertTrue(compat_safety["vw_plan_schematic_floor_plan"]["readOnlyHint"])
+        self.assertIsNone(compat_safety["vw_create_schematic_floor_plan"]["wire_action"])
+        self.assertEqual(compat_safety["vw_create_schematic_floor_plan"]["composes_actions"], ["create_object"])
+        self.assertEqual(compat_safety["vw_find_objects"]["wire_action"], "find_objects")
+        self.assertEqual(compat_safety["vw_find_objects"]["composes_actions"], ["get_objects"])
         self.assertIsNone(safety["vw_lookup_objects"]["wire_action"])
         self.assertEqual(safety["vw_lookup_objects"]["composes_actions"], ["get_objects"])
-        self.assertIsNone(safety["vw_batch_set_object_properties"]["wire_action"])
-        self.assertEqual(safety["vw_batch_set_object_properties"]["composes_actions"], ["get_objects", "set_property"])
         self.assertTrue(safety["vw_selection"]["actions"]["get"]["readOnlyHint"])
         self.assertTrue(safety["vw_selection"]["actions"]["delete"]["destructiveHint"])
         self.assertTrue(safety["vw_selection"]["actions"]["delete"]["confirmationRequired"])
-        self.assertTrue(safety["vw_worksheet"]["actions"]["read_range"]["readOnlyHint"])
-        self.assertTrue(safety["vw_worksheet"]["actions"]["write"]["writesDocument"])
+        self.assertNotIn("move", safety["vw_selection"]["actions"])
+        self.assertNotIn("duplicate", safety["vw_selection"]["actions"])
+        self.assertIn("move", compat_safety["vw_selection"]["actions"])
+        self.assertIn("duplicate", compat_safety["vw_selection"]["actions"])
         self.assertTrue(safety["vw_manage_classes"]["actions"]["delete"]["destructiveHint"])
-        self.assertTrue(safety["vw_symbol"]["actions"]["list"]["readOnlyHint"])
-        self.assertTrue(safety["vw_symbol"]["actions"]["insert"]["writesDocument"])
-        self.assertTrue(safety["vw_run_script"]["executesCode"])
-        self.assertTrue(safety["vw_run_script"]["confirmationRequired"])
+        self.assertIsNone(compat_safety["vw_batch_set_object_properties"]["wire_action"])
+        self.assertEqual(compat_safety["vw_batch_set_object_properties"]["composes_actions"], ["get_objects", "set_property"])
+        self.assertTrue(compat_safety["vw_worksheet"]["actions"]["read_range"]["readOnlyHint"])
+        self.assertTrue(compat_safety["vw_worksheet"]["actions"]["write"]["writesDocument"])
+        self.assertTrue(compat_safety["vw_symbol"]["actions"]["list"]["readOnlyHint"])
+        self.assertTrue(compat_safety["vw_symbol"]["actions"]["insert"]["writesDocument"])
+        self.assertTrue(compat_safety["vw_run_script"]["executesCode"])
+        self.assertTrue(compat_safety["vw_run_script"]["confirmationRequired"])
 
     def test_annotations_for_read_only_tool(self):
         annotations = server._annotations_for("vw_get_layers")

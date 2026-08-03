@@ -32,8 +32,8 @@ Follow `nextCommandSpec` and safety fields. `missingAllowFlags`,
   `Generated loader metadata: stale` means regenerate the fallback, not that
   native setup is done.
 - `native_plan` or `native-next` reports a bootstrap/build/install stage:
-  report that native bridge setup is not complete yet and follow only the
-  structured next command.
+  report that required native bridge setup is not complete yet and follow only
+  the structured next command. Do not silently switch to Python.
 - Native production readiness means `native_phase >= 2`, `cad_api_safe: true`,
   `transport_only: false`, `main_context_pump_ready: true`, and implemented
   actions for the requested wall/text/dimension/property/class/batch work.
@@ -41,9 +41,11 @@ Follow `nextCommandSpec` and safety fields. `missingAllowFlags`,
   `--sdk-archive-path` / `-SdkArchivePath`; do not download another copy.
 - `vw_ping` or raw ping reports `cad_api_safe: false` or
   `transport_only: true`: do not call CAD handlers.
-- Python listener timeout while Vectorworks owns the port: use the STOP file and
-  restart Vectorworks if needed, but treat this as fallback listener recovery,
-  not the long-term fix.
+- Python listener timeout while Vectorworks owns the port: troubleshoot this
+  path only when the user explicitly enabled `-EnablePythonDialogFallback` or
+  `--allow-python-fallback`. Use the STOP file and restart Vectorworks if
+  needed, but treat this as modal fallback recovery; manual UI use is blocked
+  while its dialog is open.
 - MCP tools absent but raw listener works: the MCP client has not loaded the
   `vectorworks` server. In Claude Code, reload plugins or start Claude Code
   with this plugin. In Codex/direct clients, trust or add the repo `.mcp.json`.

@@ -89,6 +89,7 @@ The native bridge should initially implement these handlers first:
 - `create_linear_dimension`
 - `set_property`
 - `manage_classes`
+- `apply_operations`
 
 Phase 1 is the minimum stable baseline. Phase 2 adds true wall objects, text
 annotations, linear dimensions, verified property edits, native class
@@ -148,7 +149,8 @@ responses must satisfy these minimum shapes:
   object shape as `get_objects`. An empty list is valid.
 - `create_object`: object with non-empty string `type` and `handle`. Phase 1
   accepts `rect`, `circle`, `oval`, `line`, and `arc`. Phase 2 also accepts
-  `wall`, `text`, and `linear_dimension` through the same object schema. Write
+  `wall`, `text`, and `linear_dimension` through the same object schema. Phase 4
+  adds open/closed `polygon`/`polyline` creation with bounded point lists. Write
   actions require an active Vectorworks document. If the active document has no
   current writable design layer, the native bridge attempts to create/select
   `Vectorworks MCP Layer` before drawing.
@@ -159,6 +161,13 @@ responses must satisfy these minimum shapes:
   objects in one native undo event and roll back created objects on ordinary
   handler errors before returning failure. It uses the same no-layer bootstrap as
   `create_object`.
+- `apply_operations`: phase-4 atomic write transaction. The request contains
+  `idempotency_key`, `operation_count`, and `operation_N_json` entries. Supported
+  operations are `create` and `set_property`; targets may use transaction-local,
+  handle, UUID, or unambiguous exact-name references. The result reports
+  `committed`, `verified`, operation receipts, created/changed object snapshots,
+  replay status, and native timing. Reusing an idempotency key with a different
+  payload or active document must fail instead of replaying.
 - `create_wall`: object with `type: "wall"` and `handle`; accepts start/end
   coordinates, `height`, `thickness`, optional `class_name`, `name`, and optional
   existing `style_name`.

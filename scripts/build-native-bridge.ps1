@@ -34,6 +34,26 @@ function Get-CheckByName {
     return $Report.checks | Where-Object { $_.name -eq $Name } | Select-Object -First 1
 }
 
+function Repair-ProcessPathEnvironment {
+    # Some agent hosts inject both Path and PATH into the Windows environment
+    # block. MSBuild's ToolTask copies variables into a case-insensitive map and
+    # fails with MSB6001 before CL.exe starts when both spellings are present.
+    $CurrentPath = [Environment]::GetEnvironmentVariable(
+        "Path",
+        [EnvironmentVariableTarget]::Process
+    )
+    if (-not $CurrentPath) {
+        return
+    }
+    Remove-Item -LiteralPath "Env:\PATH" -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "Env:\Path" -ErrorAction SilentlyContinue
+    [Environment]::SetEnvironmentVariable(
+        "Path",
+        $CurrentPath,
+        [EnvironmentVariableTarget]::Process
+    )
+}
+
 $MSBuildPath = ""
 if (-not $SkipPrereqCheck) {
     if (-not (Test-Path -LiteralPath $CheckerPath)) {
@@ -117,5 +137,6 @@ Write-Host "Solution: $($Solution.FullName)"
 Write-Host "Configuration: $Configuration|x64"
 Write-Host "MSBuild: $MSBuildPath"
 
+Repair-ProcessPathEnvironment
 & $MSBuildPath $Solution.FullName /m /p:Configuration=$Configuration /p:Platform=x64 /p:LanguageStandard=stdcpp17
 exit $LASTEXITCODE

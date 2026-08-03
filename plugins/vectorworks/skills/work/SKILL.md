@@ -5,33 +5,88 @@ description: Work with Vectorworks through MCP tools for CAD/BIM tasks. Use when
 
 # Vectorworks Work
 
-Before changing the drawing, confirm the connection:
+## Choose the shortest correct workflow
 
-1. Call `vw_agent_context(profile="production")` when available; otherwise call `vw_preflight_for_cad` or `vw_ping`.
-2. If `vw_ping` is unavailable, use `/vectorworks:ping` or `vectorworksctl ping`.
-3. Confirm the ping/status payload reports `cad_api_safe=true` and `transport_only=false`. Native bridge status is preferred when it is compiled and smoke-tested; the Python dialog listener is an acceptable fallback only when it is CAD-safe.
-4. Prefer the `vw_agent_context` payload for planning because it combines preflight, key capabilities, and compact drawing context in one call.
-5. If `vw_agent_context` is unavailable, call `vw_capabilities`, `vw_tool_safety`, and `vw_drawing_summary`. For large projects, start summaries with `include_examples=false` or a low `example_limit`, then use `vw_lookup_objects` for compact refs/details before falling back to raw `vw_get_objects` or complex `vw_find_objects` criteria.
+The `fast-native` profile is mandatory for normal agent work. It exposes only
+the compact native production surface and keeps Vectorworks non-modal so the
+user can continue working manually between agent operations. If a requested
+operation is not reported by the native bridge, stop and report the unsupported
+capability; do not switch profiles, start a modal listener, decompose the
+request into a different drawing, or route through a legacy handler.
+
+- For a self-contained create request whose target and geometry are fully
+  specified, call `vw_execute_operations` immediately. Do not front-load
+  `vw_agent_context`, `vw_ping`, `vw_capabilities`, `vw_tool_safety`, or a
+  drawing summary merely to create known geometry. The tool performs its own
+  internal CAD preflight and returns `blocked: true` without writing when the
+  bridge is unsafe or the action/variant is unsupported.
+- Use focused context only when the operation depends on existing document
+  state: locating or editing an object, choosing a layer/class, avoiding
+  collisions, deriving geometry, or planning a multi-step change. Start with
+  the smallest useful call (`vw_lookup_objects`, `vw_get_document_info`, or
+  `vw_drawing_summary(include_examples=false)`). Use
+  `vw_agent_context(profile="production")` for genuinely broad planning, not as
+  a mandatory preamble to every write.
+- Use explicit `vw_ping`, `vw_preflight_for_cad`, or `/vectorworks:ping` for
+  diagnosis, reconnects, or when the user asks for a connection check. Confirm
+  `cad_api_safe=true` and `transport_only=false` before resuming after a
+  connectivity or capability failure.
+- Trust a successful, self-verifying tool response. A returned handle/UUID,
+  exact created count, atomic batch result, or verified property readback is
+  sufficient unless the user asks for visual confirmation or the result is
+  ambiguous. Do not automatically add a screenshot, full drawing summary, or
+  redundant object query after every successful write.
+
+The `compat` profile is an administrator-only diagnostic surface. It is not a
+fallback workflow for agent drawing work and must never be selected
+automatically. Starting the separately authorized Python dialog is also an
+administrator diagnostic action and blocks manual Vectorworks UI use. A
+fast-native capability failure remains a failure until the native bridge is
+upgraded or the request changes explicitly.
 
 Use the MCP tools deliberately:
 
-- Create basic geometry with `vw_create_object`.
-- For repeated creation, prefer `vw_batch_create_objects` over many separate MCP calls. Use the default `atomic=true` when the native bridge reports `batch_create_objects`; phase 2 can atomically mix primitives, true walls, text, and linear dimensions. Use `atomic=false` only when deliberately accepting legacy non-atomic composition.
-- For floor plans, use `vw_create_bim_floor_plan` when the target is true wall-based layout work with optional labels/dimensions. Use `vw_plan_schematic_floor_plan` first for dry-run drafting geometry, then `vw_create_schematic_floor_plan` for schematic multi-room layouts. Use `vw_create_schematic_room`, `vw_create_schematic_door`, and `vw_create_schematic_window` for focused 2D drafting edits.
-- Use architectural tools deliberately: `vw_create_wall`, `vw_create_text`, and `vw_create_linear_dimension` are native phase-2 production tools; `vw_insert_door`, `vw_insert_window`, `vw_create_slab`, and `vw_create_roof` remain broader Python/legacy paths unless capabilities say otherwise.
-- Inspect and find existing objects with `vw_drawing_summary`, `vw_lookup_objects`, `vw_get_objects`, `vw_find_objects`, and `vw_inspect_object`. Prefer `vw_drawing_summary(include_examples=false)` for large-project context, then `vw_lookup_objects` for token-efficient refs and exact-name criteria like `((N='Name'))` for deterministic follow-up edits.
-- For property edits, prefer `vw_batch_set_object_properties` when `vw_agent_context` or `vw_capabilities` reports `verified_batch_property_editing=true`. `set_property` is a required native phase-2 production action. Use `uuid:...` refs first, `handle:...` only within the same live session, and `name:...` only when the name is known to be unique.
-- Manage organization with `vw_manage_classes`, layers, names, and properties before bulk edits. `manage_classes` is a required native phase-2 production action for class list/create/delete.
-- Use `vw_run_script` only for trusted local debugging after the environment was explicitly started with `VW_MCP_ENABLE_RUN_SCRIPT=1`; it still requires `confirm="RUN_TRUSTED_CODE"`.
+- Send a complete create-only plan in one `vw_execute_operations` call. Supply
+  a stable caller-generated `idempotency_key` and canonical
+  operations shaped as
+  `{"type":"create","params":{"object_type":"rect",...}}`. Reuse the key only
+  for the identical plan. The host validates the entire plan before writing,
+  requires native phase-4 `apply_operations`, and returns a compact
+  self-verifying result. Missing phase-4 support is a hard upgrade/restart
+  failure; it never routes to a legacy, decomposed, batch, or modal fallback.
+  Do not invent update/delete operation types; the current contract accepts
+  create operations only.
+- Polygon and polyline creation require the native bridge to report those
+  object types (phase 4). If it does not, stop with the capability error. Do not
+  substitute independent lines or retry through compatibility mode.
+- Express a fully specified floor-plan create request as one explicit
+  `vw_execute_operations` plan using supported wall, text, and dimension
+  operation types. Do not call hidden schematic/legacy helpers or derive a
+  substitute representation after a native capability failure.
+- Walls, text, and linear dimensions are supported create-operation types on an
+  appropriate native bridge. Doors/windows, slabs/roofs, worksheets, symbols,
+  import/export, screenshots, inspection, and trusted Python are outside the
+  mandatory fast-native work surface; do not call or automatically enable them.
+- Inspect existing objects with `vw_drawing_summary` and `vw_lookup_objects`.
+  Prefer `vw_drawing_summary(include_examples=false)` for large-project context,
+  then `vw_lookup_objects` for token-efficient refs and exact-name criteria like
+  `((N='Name'))` for deterministic follow-up edits.
+- Manage classes through `vw_manage_classes`; use `vw_selection` only for its
+  native-supported variants. If the required edit is absent from the
+  fast-native surface, report it as unsupported.
 
 Safety habits:
 
 - If a tool returns `blocked: true`, stop and fix the listener/bridge status before retrying CAD work.
 - If ping reports `native_phase: 0`, missing phase-2 actions such as `set_property` or `manage_classes`, or `transport_only: true`, do not call unsupported CAD handlers; run `vectorworksctl native-next --plan-only --json`.
 - Ask before destructive edits such as delete, class-wide changes, overwrites, or exports over existing files.
-- Destructive/code-execution/probing tools require explicit confirmation arguments such as `confirm="DELETE_SELECTED"`, `confirm="DELETE_EXACT_NAME"` for exact-name criteria cleanup, `confirm="DELETE_CLASS"`, `confirm="RUN_TRUSTED_CODE"`, or `confirm="PROBE_PLUGIN"`. `vw_run_script` also requires the `VW_MCP_ENABLE_RUN_SCRIPT=1` environment gate.
+- Destructive fast-native variants require explicit confirmation arguments such
+  as `confirm="DELETE_SELECTED"`, `confirm="DELETE_EXACT_NAME"` for exact-name
+  cleanup, or `confirm="DELETE_CLASS"`.
 - If an operation reports unknown commit state, do not retry non-idempotent or destructive tools. Stabilize the connection, then inspect with read-only tools.
 - State the assumed units when the user gives dimensions. Default to the document/user context; if unknown, use millimeters for architectural dimensions.
-- Verify after changes with object queries, document info, or screenshot/export tools when available.
+- Verify after changes only when the response is not self-verifying, the edit
+  depends on existing state, or the user requests verification. Prefer a
+  focused object query over a screenshot or full-document scan.
 
 For tool details, read `references/tool-map.md` from this plugin.

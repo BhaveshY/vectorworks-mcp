@@ -228,6 +228,11 @@ void TestDispatcherMetadata() {
     Require(ping != nullptr, "ping action spec missing");
     Require(!RequiresCadMainContext("ping"), "ping should not require CAD main context");
     Require(RequiresCadMainContext("get_layers"), "get_layers should require CAD main context");
+    const auto* apply = FindActionSpec("apply_operations");
+    Require(apply != nullptr, "apply_operations action spec missing");
+    Require(RequiresCadMainContext("apply_operations"), "apply_operations should require CAD main context");
+    Require(apply->mayWriteDocument, "apply_operations should be classified as a write");
+    Require(!apply->destructive, "apply_operations should not be classified as destructive");
     Require(FindActionSpec("missing") == nullptr, "missing action should not have a spec");
 }
 
@@ -249,6 +254,7 @@ void TestQueue() {
 
     const auto dequeued = queue.TryDequeueOnVectorworksMainContext();
     Require(dequeued.has_value() && dequeued->id == "r1", "main context dequeue failed");
+    Require(queue.QueueWaitMillisecondsForDiagnostics("r1") >= 0.0, "queue wait timing should be non-negative");
     Require(queue.CompleteFromVectorworksMainContext(ResponseEnvelope{"r1", true, R"({"layers":[]})", ""}), "completion should succeed");
     const auto response = queue.WaitForResponseOnSocketThread("r1", std::chrono::milliseconds(1));
     Require(response.success, "completed queue response should be successful");
@@ -408,11 +414,17 @@ void TestNativeTransportRoundTrip() {
 
 int main() {
     try {
+        std::cout << "native scaffold: protocol" << std::endl;
         TestProtocol();
+        std::cout << "native scaffold: dispatcher metadata" << std::endl;
         TestDispatcherMetadata();
+        std::cout << "native scaffold: queue" << std::endl;
         TestQueue();
+        std::cout << "native scaffold: phase-zero dispatch" << std::endl;
         TestPhaseZeroDispatch();
+        std::cout << "native scaffold: auth" << std::endl;
         TestDispatchAuth();
+        std::cout << "native scaffold: transport round trip" << std::endl;
         TestNativeTransportRoundTrip();
         std::cout << "OK: native bridge scaffold compile smoke passed\n";
         return 0;

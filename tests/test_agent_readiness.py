@@ -127,7 +127,8 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("scripts/run-mcp-server.ps1", "/".join(server["args"]).replace("\\", "/"))
         self.assertEqual(server["env"]["VW_MCP_HOST"], "127.0.0.1")
         self.assertEqual(server["env"]["VW_MCP_PORT"], "9877")
-        self.assertEqual(server["env"]["VW_MCP_PREFLIGHT_CACHE_MS"], "750")
+        self.assertEqual(server["env"]["VW_MCP_PREFLIGHT_CACHE_MS"], "5000")
+        self.assertEqual(server["env"]["VW_MCP_TOOL_PROFILE"], "fast-native")
         self.assertNotIn("CLAUDE_PROJECT_DIR", (ROOT / ".mcp.json").read_text(encoding="utf-8"))
         self.assertNotIn("VW_MCP_AUTH_TOKEN", (ROOT / ".mcp.json").read_text(encoding="utf-8"))
         self.assertNotIn(":-", (ROOT / ".mcp.json").read_text(encoding="utf-8"))
@@ -172,7 +173,9 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("native_summary.acceptance_next_command", agent_install)
         self.assertIn("vectorworks_automation_attempted", agent_install)
         setup_skill = (ROOT / "plugins/vectorworks/skills/setup/SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("automatically opens or restarts Vectorworks", setup_skill)
+        self.assertIn("Native non-modal readiness is required by default", setup_skill)
+        self.assertIn("--allow-python-fallback", setup_skill)
+        self.assertIn("-EnablePythonDialogFallback", setup_skill)
         self.assertIn("native_summary.acceptance_next_command", setup_skill)
         self.assertIn("/plugin marketplace add BhaveshY/vectorworks-mcp", agent_install)
 
@@ -257,6 +260,9 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertIn("native_ready", install)
         self.assertIn("native_summary", install)
         self.assertIn("FullNative", install)
+        self.assertIn("EnablePythonDialogFallback", install)
+        self.assertIn("Invoke-NativeInstallPlan", install)
+        self.assertIn("native_incomplete", install)
         self.assertIn("Invoke-FullNativeInstall", install)
         self.assertIn("AllowInstallSoftware", install)
         self.assertIn("AllowDownloadLargeFiles", install)
@@ -312,7 +318,7 @@ class AgentReadinessTests(unittest.TestCase):
         helper = (ROOT / "plugins" / "vectorworks" / "bin" / "vectorworksctl").read_text(encoding="utf-8")
         self.assertIn('DEFAULT_NATIVE_CONFIGURATION = "Release"', helper)
 
-    def test_root_install_json_from_checkout_creates_persistent_loader(self):
+    def test_root_install_explicit_python_fallback_creates_persistent_loader(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
         if not powershell:
             self.skipTest("PowerShell is required to exercise install.ps1")
@@ -331,6 +337,7 @@ class AgentReadinessTests(unittest.TestCase):
                 "-NoVerify",
                 "-SkipClipboard",
                 "-SkipDependencyInstall",
+                "-EnablePythonDialogFallback",
                 "-Json",
             ],
             cwd=str(ROOT),
@@ -345,16 +352,19 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertTrue(payload["setup_complete"])
         self.assertTrue(payload["install_complete"])
         self.assertTrue(payload["usable_now"])
-        self.assertFalse(payload["requires_action"])
+        self.assertTrue(payload["requires_action"])
         self.assertIn("production_ready", payload)
-        self.assertTrue(payload["production_ready"])
+        self.assertFalse(payload["production_ready"])
+        self.assertEqual(payload["runtime_mode"], "python_dialog_fallback")
         _assert_canonical_install_schema(self, payload)
         self.assertIn("dependency_checks", payload)
         self.assertTrue(any(check["name"] == "Git" and check["ok"] for check in payload["dependency_checks"]))
         self.assertTrue(any(check["name"] == "Python 3.10+" and check["ok"] for check in payload["dependency_checks"]))
         self.assertFalse(payload["native_requested"])
         self.assertFalse(payload["native_ready"])
-        self.assertFalse(payload["native_requires_action"])
+        self.assertTrue(payload["native_requires_action"])
+        self.assertTrue(payload["python_dialog_fallback_requested"])
+        self.assertTrue(payload["python_dialog_fallback_ready"])
         self.assertIsNone(payload["native_summary"])
         _assert_same_path(self, payload["repo_root"], ROOT)
         _assert_same_path(self, payload["mcp_config"], ROOT / ".mcp.json")
@@ -512,6 +522,7 @@ exit 0
                     str(ROOT / "scripts" / "bootstrap-agent.ps1"),
                     "-Client",
                     "HostOnly",
+                    "-EnablePythonDialogFallback",
                     "-SkipClipboard",
                 ],
                 cwd=str(ROOT),
@@ -547,7 +558,6 @@ exit 0
                 "agent-install",
                 "--repo-path",
                 str(ROOT),
-                "--skip-python-fallback",
                 "--json",
             ],
             cwd=str(ROOT),
@@ -629,7 +639,8 @@ exit 0
         self.assertIn('os.environ["VW_MCP_DIALOG_TIMER_MS"] = "50"', register_script)
         self.assertIn("New-VectorworksLoader", register_script)
         self.assertIn("vw_load_listener_2024.py", register_script)
-        self.assertIn('VW_MCP_PREFLIGHT_CACHE_MS = "750"', register_script)
+        self.assertIn('VW_MCP_PREFLIGHT_CACHE_MS = "5000"', register_script)
+        self.assertIn('VW_MCP_TOOL_PROFILE = "fast-native"', register_script)
         self.assertIn("CopyLoaderToClipboard", register_script)
         self.assertIn("copy-vectorworks-loader.ps1", register_script)
         self.assertIn("VW_MCP_LOADER_METADATA", register_script)
@@ -696,16 +707,18 @@ exit 0
             self.assertIn("runpy.run_path", result.stdout)
             _assert_path_in_text(self, launcher_path, loader_path.read_text(encoding="utf-8"))
 
-    def test_no_vectorworks_verifier_generates_fresh_launcher_by_default(self):
+    def test_no_vectorworks_verifier_gates_fresh_launcher_behind_explicit_fallback(self):
         verifier = (ROOT / "scripts/verify-no-vectorworks.ps1").read_text(encoding="utf-8")
 
+        self.assertIn("[switch]$EnablePythonDialogFallback", verifier)
+        self.assertIn("if ($EnablePythonDialogFallback)", verifier)
         self.assertIn("[System.IO.Path]::GetTempPath()", verifier)
         self.assertIn("$FreshLauncher = $true", verifier)
         self.assertIn("$FreshLoader = $true", verifier)
         self.assertIn("$FreshLauncher -or $FreshLoader -or -not (Test-Path $LauncherPath)", verifier)
         self.assertIn("Remove-Item -LiteralPath $LauncherPath", verifier)
         self.assertIn("Remove-Item -LiteralPath $LoaderPath", verifier)
-        self.assertIn("Generated Vectorworks loader", verifier)
+        self.assertIn("Generated Vectorworks Python dialog fallback loader", verifier)
         self.assertIn("test-native-bridge-scaffold.ps1", verifier)
         self.assertIn("native bridge scaffold compile smoke", verifier)
         self.assertIn("doctor-native-bridge.ps1", verifier)
@@ -781,6 +794,7 @@ exit 0
                     str(ROOT / "scripts/register-claude-code.ps1"),
                     "-SkipInstall",
                     "-NoClaudeConfig",
+                    "-EnablePythonDialogFallback",
                     "-LauncherPath",
                     str(launcher_path),
                     "-LoaderPath",
@@ -857,6 +871,7 @@ exit 0
                     "-File",
                     str(ROOT / "scripts/register-claude-code.ps1"),
                     "-SkipInstall",
+                    "-EnablePythonDialogFallback",
                     "-LauncherPath",
                     str(launcher_path),
                     "-LoaderPath",
@@ -881,7 +896,7 @@ exit 0
             self.assertNotIn("VW_MCP_AUTH_TOKEN", server_env)
             self.assertNotIn("client-config-secret-token", claude_text)
 
-    def test_native_bridge_scaffold_is_explicitly_not_default(self):
+    def test_native_bridge_scaffold_is_the_required_default_runtime(self):
         expected_files = (
             "native_bridge/README.md",
             "native_bridge/PROTOCOL.md",
@@ -908,8 +923,9 @@ exit 0
         self.assertIn("marshaled back onto the Vectorworks main/plugin event context", native_readme)
         self.assertIn("Revit-style connector", native_readme)
         root_readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("not compiled or installed by default", root_readme)
-        self.assertIn("phase-2 SDK bridge", root_readme)
+        self.assertIn("required default runtime", root_readme)
+        self.assertIn("install.ps1 -EnablePythonDialogFallback", root_readme)
+        self.assertIn("compiled phase-2 bridge", root_readme)
         self.assertIn("native-sdk-bridge-phase1", root_readme)
         self.assertIn("native-sdk-bridge-phase2", root_readme)
         self.assertIn("main_context_pump_ready=true", root_readme)
@@ -1070,6 +1086,8 @@ exit 0
         self.assertIn("*$VectorworksVersion.sln", build)
         self.assertIn("/p:Platform=x64", build)
         self.assertIn("/p:LanguageStandard=stdcpp17", build)
+        self.assertIn("Repair-ProcessPathEnvironment", build)
+        self.assertIn("[EnvironmentVariableTarget]::Process", build)
         self.assertIn("LanguageStandard", wire)
         self.assertIn("stdcpp17", wire)
         self.assertIn("[string]$SdkDir", build)
@@ -1888,6 +1906,8 @@ if ($Json) {
         self.assertIn("stable loader", doctor)
         self.assertIn("connector contract", doctor)
         self.assertIn("VW_MCP_LOADER_METADATA", doctor)
+        self.assertIn("Get-ProtocolAuthToken", doctor)
+        self.assertIn("auth_token", doctor)
         self.assertIn("Write-RecoverySteps", raw_ping)
         self.assertIn("vw_load_listener_2024.py", raw_ping)
         self.assertIn("foreground/background/win_timer", raw_ping)
@@ -2381,7 +2401,8 @@ if ($Json) {
             self.assertIn("NativeTransport.cpp", report["missingScaffoldFiles"])
             self.assertIn("VectorworksMCPBridge.cpp", report["missingScaffoldFiles"])
             self.assertIn("copy-native-bridge-scaffold.ps1 -VectorworksVersion 2024 -Force", "\n".join(report["nextActions"]))
-            self.assertIn("copy-native-bridge-scaffold.ps1 -VectorworksVersion 2024 -Force", report["nextCommand"])
+            self.assertIn("copy-native-bridge-scaffold.ps1", report["nextCommand"])
+            self.assertIn("-VectorworksVersion 2024 -Force", report["nextCommand"])
             _assert_path_in_text(self, worktree, report["nextCommand"])
             self.assertIn("-WorktreeRoot", report["nextCommand"])
             self.assertIn("partially copied", report["nextCommandReason"])

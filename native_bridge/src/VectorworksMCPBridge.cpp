@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <deque>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -23,6 +24,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #if defined(SDK_VERSION)
@@ -62,6 +64,7 @@ private:
 constexpr wchar_t kMainContextPumpWindowClassName[] = L"VectorworksMCPMainContextPump";
 constexpr UINT_PTR kMainContextPumpTimerId = 1;
 constexpr UINT kMainContextPumpIntervalMs = 50;
+constexpr UINT kMainContextPumpMessage = WM_APP + 0x4d3;
 
 std::atomic_bool gMainContextPumpReady{false};
 HWND gMainContextPumpWindow = nullptr;
@@ -70,7 +73,8 @@ HINSTANCE gMainContextPumpInstance = nullptr;
 int gMainContextPumpModuleAnchor = 0;
 
 LRESULT CALLBACK MainContextPumpWndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
-    if (message == WM_TIMER && wParam == kMainContextPumpTimerId) {
+    if ((message == WM_TIMER && wParam == kMainContextPumpTimerId) ||
+        message == kMainContextPumpMessage) {
         OnVectorworksMainPluginEvent();
         return 0;
     }
@@ -164,6 +168,12 @@ bool MainContextPumpReady() {
     return gMainContextPumpReady.load();
 }
 
+void NotifyMainContextPump() {
+    if (gMainContextPumpWindow && gMainContextPumpReady.load()) {
+        PostMessageW(gMainContextPumpWindow, kMainContextPumpMessage, 0, 0);
+    }
+}
+
 constexpr const char* MainContextPumpName() {
     return "win32_ui_timer";
 }
@@ -177,6 +187,8 @@ void StopMainContextPump() {}
 bool MainContextPumpReady() {
     return false;
 }
+
+void NotifyMainContextPump() {}
 
 constexpr const char* MainContextPumpName() {
     return "unavailable";
@@ -263,6 +275,7 @@ struct ParamValue {
 
     Type type = Type::Other;
     std::string stringValue;
+    std::string rawJson;
     double numberValue = 0.0;
     bool boolValue = false;
 };
@@ -555,7 +568,9 @@ private:
         }
         ParamValue value;
         value.type = ParamValue::Type::Other;
+        const auto start = pos_;
         SkipValue();
+        value.rawJson = std::string(text_.substr(start, pos_ - start));
         return value;
     }
 
@@ -615,6 +630,17 @@ bool GetBoolParam(const Params& params, const std::string& key, bool defaultValu
         throw std::invalid_argument(key + " must be a boolean");
     }
     return found->second.boolValue;
+}
+
+std::string GetRawJsonParam(const Params& params, const std::string& key, std::string defaultValue = "") {
+    const auto found = params.find(key);
+    if (found == params.end() || found->second.type == ParamValue::Type::Null) {
+        return defaultValue;
+    }
+    if (found->second.type != ParamValue::Type::Other || found->second.rawJson.empty()) {
+        throw std::invalid_argument(key + " must be an object or array");
+    }
+    return found->second.rawJson;
 }
 
 std::string TrimCopy(std::string value) {
@@ -749,18 +775,20 @@ bool RequestAuthAccepted(const Protocol::RequestEnvelope& request) {
 Protocol::ResponseEnvelope HandlePingOnTransportThread(const Protocol::RequestEnvelope& request) {
 #if VECTORWORKS_MCP_HAS_SDK
     const bool ready = CadHandlersRuntimeReady();
-    std::string payload = R"({"pong":true,"version":"native-sdk-bridge-phase3","bridge_kind":"native_sdk_bridge_phase3","dispatch_mode":"native_sdk","handlers":15)";
+    std::string payload = R"({"pong":true,"version":"native-sdk-bridge-phase4","bridge_kind":"native_sdk_bridge_phase4","dispatch_mode":"native_sdk","handlers":16)";
     payload += ",\"cad_api_safe\":";
     payload += ready ? "true" : "false";
     payload += ",\"transport_only\":";
     payload += ready ? "false" : "true";
-    payload += R"(,"native_bridge":true,"native_phase":3)";
-    payload += ",\"implemented_actions\":[\"ping\",\"stop\",\"get_document_info\",\"get_layers\",\"get_objects\",\"selection\",\"create_object\",\"batch_create_objects\",\"create_wall\",\"create_text\",\"create_linear_dimension\",\"set_property\",\"manage_classes\",\"find_objects\",\"drawing_summary\"]";
+    payload += R"(,"native_bridge":true,"native_phase":4)";
+    payload += ",\"implemented_actions\":[\"ping\",\"stop\",\"get_document_info\",\"get_layers\",\"get_objects\",\"selection\",\"create_object\",\"batch_create_objects\",\"create_wall\",\"create_text\",\"create_linear_dimension\",\"set_property\",\"manage_classes\",\"find_objects\",\"drawing_summary\",\"apply_operations\"]";
+    payload += ",\"create_object_types\":[\"arc\",\"box\",\"circle\",\"line\",\"oval\",\"polygon\",\"polyline\",\"rect\",\"rectangle\",\"wall\",\"text\",\"dimension\",\"linear_dimension\"]";
     payload += ",\"cad_handlers_implemented\":true";
     payload += ",\"main_context_pump\":";
     payload += JsonString(MainContextPumpName());
     payload += ",\"main_context_pump_ready\":";
     payload += ready ? "true" : "false";
+    payload += R"(,"dispatch_wakeup":"win32_message","pump_watchdog_ms":50,"pump_budget_ms":8)";
     payload += "}";
     return {
         request.id,
@@ -1443,6 +1471,117 @@ std::string HandleSelection(const Params& params) {
     throw std::invalid_argument("unsupported selection action: " + action);
 }
 
+class PointListJsonParser {
+public:
+    PointListJsonParser(std::string_view text, std::string label)
+        : text_(text), label_(std::move(label)) {}
+
+    std::vector<WorldPt> Parse() {
+        std::vector<WorldPt> points;
+        Expect('[', "must be an array");
+        if (ConsumeIf(']')) {
+            Finish();
+            return points;
+        }
+        while (true) {
+            if (points.size() >= kMaxPoints) {
+                throw std::invalid_argument(label_ + " is limited to " + std::to_string(kMaxPoints) + " points");
+            }
+            Expect('[', "point must be a two-number array");
+            const double x = ParseNumber();
+            Expect(',', "point must contain x and y");
+            const double y = ParseNumber();
+            Expect(']', "point must contain exactly two numbers");
+            points.emplace_back(x, y);
+            if (ConsumeIf(']')) {
+                Finish();
+                return points;
+            }
+            Expect(',', "points must be comma-separated");
+        }
+    }
+
+private:
+    static constexpr std::size_t kMaxPoints = 4096u;
+
+    bool AtEnd() const {
+        return pos_ >= text_.size();
+    }
+
+    void SkipWhitespace() {
+        while (!AtEnd() && IsWhitespace(text_[pos_])) {
+            ++pos_;
+        }
+    }
+
+    bool ConsumeIf(char expected) {
+        SkipWhitespace();
+        if (!AtEnd() && text_[pos_] == expected) {
+            ++pos_;
+            return true;
+        }
+        return false;
+    }
+
+    void Expect(char expected, const char* message) {
+        if (!ConsumeIf(expected)) {
+            throw std::invalid_argument(label_ + " " + message);
+        }
+    }
+
+    double ParseNumber() {
+        SkipWhitespace();
+        const auto start = pos_;
+        if (!AtEnd() && (text_[pos_] == '-' || text_[pos_] == '+')) {
+            ++pos_;
+        }
+        bool hasDigits = false;
+        while (!AtEnd() && std::isdigit(static_cast<unsigned char>(text_[pos_]))) {
+            hasDigits = true;
+            ++pos_;
+        }
+        if (!AtEnd() && text_[pos_] == '.') {
+            ++pos_;
+            while (!AtEnd() && std::isdigit(static_cast<unsigned char>(text_[pos_]))) {
+                hasDigits = true;
+                ++pos_;
+            }
+        }
+        if (!hasDigits) {
+            throw std::invalid_argument(label_ + " coordinates must be numbers");
+        }
+        if (!AtEnd() && (text_[pos_] == 'e' || text_[pos_] == 'E')) {
+            ++pos_;
+            if (!AtEnd() && (text_[pos_] == '-' || text_[pos_] == '+')) {
+                ++pos_;
+            }
+            const auto exponentStart = pos_;
+            while (!AtEnd() && std::isdigit(static_cast<unsigned char>(text_[pos_]))) {
+                ++pos_;
+            }
+            if (exponentStart == pos_) {
+                throw std::invalid_argument(label_ + " coordinate exponent is incomplete");
+            }
+        }
+        const double value = std::stod(std::string(text_.substr(start, pos_ - start)));
+        if (!std::isfinite(value)) {
+            throw std::invalid_argument(label_ + " coordinates must be finite");
+        }
+        return value;
+    }
+
+    void Finish() {
+        SkipWhitespace();
+        if (!AtEnd()) {
+            throw std::invalid_argument(label_ + " contained trailing JSON");
+        }
+    }
+
+    std::string_view text_;
+    std::string label_;
+    std::size_t pos_ = 0u;
+};
+
 struct PrimitiveSpec {
     std::string objectType;
     double x1 = 0.0;
@@ -1464,6 +1603,8 @@ struct PrimitiveSpec {
     int dimensionType = 1;
     bool fixedSizeText = false;
     bool wrapText = false;
+    bool closed = true;
+    std::vector<WorldPt> points;
     std::string text;
     std::string styleName;
     std::string name;
@@ -1475,6 +1616,8 @@ struct CreatedPrimitive {
     std::string objectType;
     MCObjectHandle handle = nullptr;
     std::vector<std::string> warnings;
+    std::size_t vertexCount = 0u;
+    bool closed = false;
 };
 
 MCObjectHandle EnsureWritableLayer() {
@@ -1509,7 +1652,12 @@ MCObjectHandle EnsureWritableLayer() {
     if (!layer) {
         throw std::runtime_error("active Vectorworks document has no writable design layer");
     }
-    gSDK->SetCurrentLayer(layer);
+    // Re-selecting the already-active layer for every object can trigger a
+    // costly Vectorworks layer/document refresh. Only switch when recovery
+    // selected a different writable layer.
+    if (gSDK->GetCurrentLayer() != layer) {
+        gSDK->SetCurrentLayer(layer);
+    }
     return layer;
 }
 
@@ -1520,6 +1668,9 @@ std::string CanonicalCreateObjectType(std::string objectType) {
     }
     if (objectType == "dimension" || objectType == "linear_dimension") {
         return "linear_dimension";
+    }
+    if (objectType == "polyline") {
+        return "polygon";
     }
     return objectType;
 }
@@ -1586,6 +1737,21 @@ void ValidatePrimitiveSpec(const PrimitiveSpec& spec, const std::string& label) 
         }
         if (spec.sweepAngle == 0.0) {
             throw std::invalid_argument(label + ".sweep_angle must not be 0");
+        }
+        return;
+    }
+    if (spec.objectType == "polygon") {
+        const std::size_t minimum = spec.closed ? 3u : 2u;
+        if (spec.points.size() < minimum) {
+            throw std::invalid_argument(
+                label + " " + (spec.closed ? "closed polygon" : "open polyline") +
+                " requires at least " + std::to_string(minimum) + " points");
+        }
+        for (std::size_t index = 1; index < spec.points.size(); ++index) {
+            if (spec.points[index - 1].x == spec.points[index].x &&
+                spec.points[index - 1].y == spec.points[index].y) {
+                throw std::invalid_argument(label + ".points contains consecutive duplicate points");
+            }
         }
         return;
     }
@@ -1656,6 +1822,25 @@ PrimitiveSpec ParsePrimitiveSpec(const Params& params, const std::string& label)
     spec.dimensionType = GetBoundedIntParam(params, "dimension_type", 1, 0, 2);
     spec.fixedSizeText = GetBoolParam(params, "fixed_size", false);
     spec.wrapText = GetBoolParam(params, "wrap", false);
+    spec.closed = GetBoolParam(params, "closed", true);
+    if (spec.objectType == "polygon") {
+        std::string pointsJson;
+        const auto points = params.find("points");
+        if (points != params.end() && points->second.type != ParamValue::Type::Null) {
+            pointsJson = GetRawJsonParam(params, "points");
+        } else {
+            pointsJson = GetStringParam(params, "points_json");
+        }
+        if (pointsJson.empty()) {
+            throw std::invalid_argument(label + ".points is required");
+        }
+        spec.points = PointListJsonParser(pointsJson, label + ".points").Parse();
+        if (spec.closed && spec.points.size() > 1u &&
+            spec.points.front().x == spec.points.back().x &&
+            spec.points.front().y == spec.points.back().y) {
+            spec.points.pop_back();
+        }
+    }
     spec.text = GetStringParam(params, "text");
     spec.styleName = GetStringParam(params, "style_name");
     spec.name = GetStringParam(params, "name");
@@ -1719,6 +1904,15 @@ MCObjectHandle CreatePrimitiveFromSpec(const PrimitiveSpec& spec, std::vector<st
         object = gSDK->CreateLine(WorldPt(spec.x1, spec.y1), WorldPt(spec.x2, spec.y2));
     } else if (spec.objectType == "arc") {
         object = gSDK->CreateArcN(WorldRect(WorldPt(spec.x1, spec.y1), spec.radius), spec.startAngle, spec.sweepAngle);
+    } else if (spec.objectType == "polygon") {
+        object = gSDK->CreatePolyshape();
+        if (object) {
+            for (const auto& point : spec.points) {
+                gSDK->AddVertex(object, point, nullptr, vtCorner, 0, false);
+            }
+            gSDK->SetPolyShapeClose(object, spec.closed);
+            gSDK->ResetObject(object);
+        }
     } else if (spec.objectType == "wall") {
         object = gSDK->CreateWall(WorldPt(spec.x1, spec.y1), WorldPt(spec.x2, spec.y2), spec.thickness);
         if (object) {
@@ -1782,6 +1976,14 @@ std::string CreatedPrimitiveJson(const CreatedPrimitive& created) {
         json += ",\"warnings\":";
         json += JsonStringArray(created.warnings);
     }
+    if (created.objectType == "polygon") {
+        json += ",\"vertex_count\":";
+        json += std::to_string(created.vertexCount);
+        json += ",\"closed\":";
+        json += created.closed ? "true" : "false";
+    }
+    json += ",\"object\":";
+    json += ObjectJson(created.handle);
     json += "}";
     return json;
 }
@@ -1793,6 +1995,35 @@ std::string CreatedPrimitiveListJson(const std::vector<CreatedPrimitive>& create
             json += ",";
         }
         json += CreatedPrimitiveJson(created[index]);
+    }
+    json += "]";
+    return json;
+}
+
+std::string CompactCreatedPrimitiveListJson(const std::vector<CreatedPrimitive>& created) {
+    std::string json = "[";
+    for (std::size_t index = 0; index < created.size(); ++index) {
+        if (index != 0u) {
+            json += ",";
+        }
+        const auto& item = created[index];
+        json += "{\"index\":";
+        json += std::to_string(item.index);
+        json += ",\"type\":";
+        json += JsonString(item.objectType);
+        json += ",\"handle\":";
+        json += JsonString(HandleId(item.handle));
+        if (!item.warnings.empty()) {
+            json += ",\"warnings\":";
+            json += JsonStringArray(item.warnings);
+        }
+        if (item.objectType == "polygon") {
+            json += ",\"vertex_count\":";
+            json += std::to_string(item.vertexCount);
+            json += ",\"closed\":";
+            json += item.closed ? "true" : "false";
+        }
+        json += "}";
     }
     json += "]";
     return json;
@@ -1824,6 +2055,14 @@ std::string HandleCreateTypedObject(const Params& params, const std::string& lab
             json += ",\"warnings\":";
             json += JsonStringArray(warnings);
         }
+        if (spec.objectType == "polygon") {
+            json += ",\"vertex_count\":";
+            json += std::to_string(spec.points.size());
+            json += ",\"closed\":";
+            json += spec.closed ? "true" : "false";
+        }
+        json += ",\"object\":";
+        json += ObjectJson(object);
         json += "}";
         return json;
     } catch (...) {
@@ -2086,6 +2325,404 @@ std::string HandleManageClasses(const Params& params) {
     return json;
 }
 
+enum class ApplyOperationKind {
+    Create,
+    SetProperty,
+};
+
+struct ApplyOperation {
+    ApplyOperationKind kind = ApplyOperationKind::Create;
+    PrimitiveSpec primitive;
+    std::string localRef;
+    std::string target;
+    std::string propertyName;
+    std::string propertyValue;
+};
+
+struct ApplyOperationsCacheEntry {
+    std::string idempotencyKey;
+    std::string documentIdentity;
+    std::uint64_t operationsFingerprint = 0u;
+    std::string transactionJson;
+};
+
+constexpr std::size_t kMaxApplyOperations = 250u;
+constexpr std::size_t kMaxApplyOperationsCacheEntries = 128u;
+constexpr std::size_t kMaxApplyReferenceChars = 128u;
+std::deque<ApplyOperationsCacheEntry> gApplyOperationsCache;
+
+bool IsSupportedPropertyName(const std::string& propertyName) {
+    return propertyName == "name" ||
+        propertyName == "class" ||
+        propertyName == "fillColor" ||
+        propertyName == "penColor" ||
+        propertyName == "lineWeight" ||
+        propertyName == "opacity";
+}
+
+std::string ActiveDocumentIdentity() {
+    std::string identity;
+    VectorWorks::Filing::IFileIdentifierPtr activeFile(VectorWorks::Filing::IID_FileIdentifier);
+    bool saved = false;
+    if (activeFile && gSDK->GetActiveDocument(&activeFile, saved)) {
+        TXString path;
+        TXString name;
+        activeFile->GetFileFullPath(path);
+        activeFile->GetFileName(name);
+        identity = TxToUtf8(path);
+        if (identity.empty()) {
+            identity = TxToUtf8(name);
+        }
+    }
+    identity += "|layer:";
+    identity += HandleIdFromRaw(reinterpret_cast<std::uintptr_t>(gSDK->GetActiveLayer()));
+    return identity;
+}
+
+std::uint64_t ApplyOperationsFingerprint(const Params& params) {
+    constexpr std::uint64_t offsetBasis = 14695981039346656037ull;
+    constexpr std::uint64_t prime = 1099511628211ull;
+    std::uint64_t hash = offsetBasis;
+    const int operationCount = GetRequiredBoundedIntParam(
+        params,
+        "operation_count",
+        1,
+        static_cast<int>(kMaxApplyOperations));
+    auto addText = [&](const std::string& text) {
+        for (const unsigned char ch : text) {
+            hash ^= static_cast<std::uint64_t>(ch);
+            hash *= prime;
+        }
+        hash ^= 0xffu;
+        hash *= prime;
+    };
+    addText(std::to_string(operationCount));
+    for (int index = 1; index <= operationCount; ++index) {
+        const std::string key = "operation_" + std::to_string(index) + "_json";
+        const std::string operationJson = GetStringParam(params, key);
+        if (operationJson.empty()) {
+            throw std::invalid_argument(key + " is required");
+        }
+        addText(operationJson);
+    }
+    return hash;
+}
+
+std::optional<std::string> FindCachedApplyOperations(
+    const std::string& idempotencyKey,
+    const std::string& documentIdentity,
+    std::uint64_t operationsFingerprint) {
+    if (idempotencyKey.empty()) {
+        return std::nullopt;
+    }
+    for (const auto& entry : gApplyOperationsCache) {
+        if (entry.idempotencyKey == idempotencyKey) {
+            if (entry.operationsFingerprint != operationsFingerprint) {
+                throw std::invalid_argument(
+                    "idempotency_key was already used with a different operations payload");
+            }
+            if (entry.documentIdentity != documentIdentity) {
+                throw std::invalid_argument(
+                    "idempotency_key was already used in a different active document");
+            }
+            return entry.transactionJson;
+        }
+    }
+    return std::nullopt;
+}
+
+void StoreCachedApplyOperations(
+    const std::string& idempotencyKey,
+    const std::string& documentIdentity,
+    std::uint64_t operationsFingerprint,
+    const std::string& transactionJson) {
+    if (idempotencyKey.empty()) {
+        return;
+    }
+    gApplyOperationsCache.erase(
+        std::remove_if(
+            gApplyOperationsCache.begin(),
+            gApplyOperationsCache.end(),
+            [&](const ApplyOperationsCacheEntry& entry) {
+                return entry.idempotencyKey == idempotencyKey;
+            }),
+        gApplyOperationsCache.end());
+    gApplyOperationsCache.push_back({
+        idempotencyKey,
+        documentIdentity,
+        operationsFingerprint,
+        transactionJson,
+    });
+    while (gApplyOperationsCache.size() > kMaxApplyOperationsCacheEntries) {
+        gApplyOperationsCache.pop_front();
+    }
+}
+
+std::string WrapApplyOperationsResult(
+    const std::string& transactionJson,
+    const std::string& idempotencyKey,
+    bool replayed) {
+    std::string json = "{\"ok\":true,\"atomic\":true,\"verified\":true,\"replayed\":";
+    json += replayed ? "true" : "false";
+    if (!idempotencyKey.empty()) {
+        json += ",\"idempotency_key\":";
+        json += JsonString(idempotencyKey);
+    }
+    json += ",\"transaction\":";
+    json += transactionJson;
+    json += "}";
+    return json;
+}
+
+std::vector<ApplyOperation> ParseApplyOperations(const Params& params) {
+    const int operationCount = GetRequiredBoundedIntParam(
+        params,
+        "operation_count",
+        1,
+        static_cast<int>(kMaxApplyOperations));
+    std::vector<ApplyOperation> operations;
+    operations.reserve(static_cast<std::size_t>(operationCount));
+    std::unordered_set<std::string> declaredLocalRefs;
+
+    for (int index = 1; index <= operationCount; ++index) {
+        const std::string key = "operation_" + std::to_string(index) + "_json";
+        const std::string operationJson = GetStringParam(params, key);
+        if (operationJson.empty()) {
+            throw std::invalid_argument(key + " is required");
+        }
+        const Params operationParams = ParseParams(operationJson);
+        const std::string op = ToLower(GetStringParam(operationParams, "op"));
+        const std::string label = "operation_" + std::to_string(index);
+        if (op == "create") {
+            ApplyOperation operation;
+            operation.kind = ApplyOperationKind::Create;
+            operation.primitive = ParsePrimitiveSpec(operationParams, label);
+            operation.localRef = GetStringParam(operationParams, "local_ref");
+            if (operation.localRef.size() > kMaxApplyReferenceChars) {
+                throw std::invalid_argument(label + ".local_ref is too long");
+            }
+            if (!operation.localRef.empty() && !declaredLocalRefs.insert(operation.localRef).second) {
+                throw std::invalid_argument(label + ".local_ref is duplicated: " + operation.localRef);
+            }
+            operations.push_back(std::move(operation));
+            continue;
+        }
+        if (op == "set_property") {
+            ApplyOperation operation;
+            operation.kind = ApplyOperationKind::SetProperty;
+            operation.target = GetStringParam(operationParams, "target");
+            operation.propertyName = GetStringParam(operationParams, "property_name");
+            operation.propertyValue = GetStringParam(operationParams, "value");
+            if (operation.target.empty()) {
+                throw std::invalid_argument(label + ".target is required");
+            }
+            if (operation.target.size() > kMaxApplyReferenceChars) {
+                throw std::invalid_argument(label + ".target is too long");
+            }
+            if (!IsSupportedPropertyName(operation.propertyName)) {
+                throw std::invalid_argument(label + ".property_name is unsupported: " + operation.propertyName);
+            }
+            if (operation.propertyValue.size() > kMaxPropertyValueChars) {
+                throw std::invalid_argument(label + ".value is too long");
+            }
+            if (operation.target.front() == '$') {
+                const std::string localRef = operation.target.substr(1);
+                if (declaredLocalRefs.find(localRef) == declaredLocalRefs.end()) {
+                    throw std::invalid_argument(label + ".target references an unknown local_ref: " + localRef);
+                }
+            }
+            operations.push_back(std::move(operation));
+            continue;
+        }
+        throw std::invalid_argument(label + ".op must be create or set_property");
+    }
+    return operations;
+}
+
+MCObjectHandle ResolveApplyOperationTarget(
+    const std::string& target,
+    const std::unordered_map<std::string, MCObjectHandle>& localObjects) {
+    if (!target.empty() && target.front() == '$') {
+        const auto found = localObjects.find(target.substr(1));
+        if (found == localObjects.end() || !found->second) {
+            throw std::invalid_argument("local operation target could not be resolved: " + target);
+        }
+        return found->second;
+    }
+    constexpr std::string_view uuidPrefix = "uuid:";
+    if (target.compare(0, uuidPrefix.size(), uuidPrefix) == 0) {
+        const std::string uuid = target.substr(uuidPrefix.size());
+        if (uuid.empty()) {
+            throw std::invalid_argument("uuid operation target is empty");
+        }
+        MCObjectHandle object = gSDK->GetObjectByUuid(TXString(uuid.c_str()));
+        if (!object || !IsUserVisibleObjectType(gSDK->GetObjectTypeN(object))) {
+            throw std::invalid_argument("uuid operation target was not found: " + uuid);
+        }
+        return object;
+    }
+    constexpr std::string_view namePrefix = "name:";
+    if (target.compare(0, namePrefix.size(), namePrefix) == 0) {
+        const std::string name = target.substr(namePrefix.size());
+        if (name.empty()) {
+            throw std::invalid_argument("name operation target is empty");
+        }
+        std::vector<MCObjectHandle> matches;
+        gSDK->ForEachObjectN(
+            allObjects + descendIntoAll + descendIntoViewports + descendIntoAuxLists,
+            [&](MCObjectHandle object) {
+                if (!object || !IsUserVisibleObjectType(gSDK->GetObjectTypeN(object))) {
+                    return;
+                }
+                TXString objectName;
+                gSDK->GetObjectName(object, objectName);
+                if (TxToUtf8(objectName) == name) {
+                    matches.push_back(object);
+                }
+            });
+        if (matches.empty()) {
+            throw std::invalid_argument("name operation target was not found: " + name);
+        }
+        if (matches.size() != 1u) {
+            throw std::invalid_argument("name operation target is ambiguous: " + name);
+        }
+        return matches.front();
+    }
+    constexpr std::string_view handlePrefix = "handle:";
+    const std::string handleId = target.compare(0, handlePrefix.size(), handlePrefix) == 0
+        ? target.substr(handlePrefix.size())
+        : target;
+    return ObjectHandleFromSessionId(handleId);
+}
+
+std::string HandleApplyOperations(const Params& params) {
+    const std::string idempotencyKey = GetStringParam(params, "idempotency_key");
+    if (idempotencyKey.size() > kMaxApplyReferenceChars) {
+        throw std::invalid_argument("idempotency_key is too long");
+    }
+    const auto operations = ParseApplyOperations(params);
+    const std::uint64_t operationsFingerprint = ApplyOperationsFingerprint(params);
+    if (const auto cached = FindCachedApplyOperations(
+            idempotencyKey,
+            ActiveDocumentIdentity(),
+            operationsFingerprint)) {
+        return WrapApplyOperationsResult(*cached, idempotencyKey, true);
+    }
+
+    std::unordered_map<std::string, MCObjectHandle> localObjects;
+    std::unordered_set<MCObjectHandle> createdHandles;
+    std::unordered_set<MCObjectHandle> dirtyHandles;
+    std::unordered_map<MCObjectHandle, std::string> externalBefore;
+    std::vector<CreatedPrimitive> created;
+    std::vector<std::string> operationResults;
+    created.reserve(operations.size());
+    operationResults.reserve(operations.size());
+
+    gSDK->SupportUndoAndRemove();
+    gSDK->SetUndoMethod(kUndoSwapObjects);
+    gSDK->NameUndoEvent(TXString("Vectorworks MCP apply operations"));
+    try {
+        for (std::size_t index = 0; index < operations.size(); ++index) {
+            const auto& operation = operations[index];
+            if (operation.kind == ApplyOperationKind::Create) {
+                std::vector<std::string> warnings;
+                MCObjectHandle object = CreatePrimitiveFromSpec(operation.primitive, &warnings);
+                createdHandles.insert(object);
+                if (!operation.localRef.empty()) {
+                    localObjects.emplace(operation.localRef, object);
+                }
+                created.push_back({
+                    static_cast<int>(index + 1u),
+                    operation.primitive.objectType,
+                    object,
+                    warnings,
+                    operation.primitive.points.size(),
+                    operation.primitive.closed,
+                });
+                std::string result = "{\"index\":" + std::to_string(index + 1u) +
+                    ",\"op\":\"create\",\"handle\":" + JsonString(HandleId(object));
+                if (!operation.localRef.empty()) {
+                    result += ",\"local_ref\":";
+                    result += JsonString(operation.localRef);
+                }
+                result += "}";
+                operationResults.push_back(std::move(result));
+                continue;
+            }
+
+            MCObjectHandle object = ResolveApplyOperationTarget(operation.target, localObjects);
+            if (createdHandles.find(object) == createdHandles.end() &&
+                externalBefore.find(object) == externalBefore.end()) {
+                externalBefore.emplace(object, ObjectJson(object));
+                gSDK->AddBeforeSwapObject(object);
+            }
+            ApplyObjectProperty(object, operation.propertyName, operation.propertyValue);
+            // A plan can apply several properties to the same object. Resetting
+            // after every property makes Vectorworks regenerate that object
+            // repeatedly and dominates otherwise-small transactions. Defer to
+            // one reset per changed object before the undo event is committed.
+            dirtyHandles.insert(object);
+            std::string result = "{\"index\":" + std::to_string(index + 1u) +
+                ",\"op\":\"set_property\",\"target\":" + JsonString(operation.target) +
+                ",\"property_name\":" + JsonString(operation.propertyName) +
+                ",\"value\":" + JsonString(operation.propertyValue) + "}";
+            operationResults.push_back(std::move(result));
+        }
+
+        for (MCObjectHandle object : dirtyHandles) {
+            gSDK->ResetObject(object);
+        }
+        for (MCObjectHandle object : createdHandles) {
+            gSDK->AddAfterSwapObject(object);
+        }
+        for (const auto& entry : externalBefore) {
+            gSDK->AddAfterSwapObject(entry.first);
+        }
+        gSDK->EndUndoEvent();
+    } catch (...) {
+        gSDK->UndoAndRemove();
+        throw;
+    }
+
+    std::string transaction = "{\"committed\":true,\"verified\":true,\"operation_count\":";
+    transaction += std::to_string(operations.size());
+    transaction += ",\"applied_count\":";
+    transaction += std::to_string(operations.size());
+    transaction += ",\"operations\":[";
+    for (std::size_t index = 0; index < operationResults.size(); ++index) {
+        if (index != 0u) {
+            transaction += ",";
+        }
+        transaction += operationResults[index];
+    }
+    transaction += "],\"created\":";
+    // apply_operations already returns one receipt per wire operation. Keep
+    // its created summary handle-based so the fast path does not perform
+    // duplicate UUID, color, class, bounds, and object snapshot queries.
+    transaction += CompactCreatedPrimitiveListJson(created);
+    transaction += ",\"changed\":[";
+    bool firstChanged = true;
+    for (const auto& entry : externalBefore) {
+        if (!firstChanged) {
+            transaction += ",";
+        }
+        firstChanged = false;
+        transaction += "{\"before\":";
+        transaction += entry.second;
+        transaction += ",\"after\":";
+        transaction += ObjectJson(entry.first);
+        transaction += "}";
+    }
+    transaction += "]}";
+
+    StoreCachedApplyOperations(
+        idempotencyKey,
+        ActiveDocumentIdentity(),
+        operationsFingerprint,
+        transaction);
+    return WrapApplyOperationsResult(transaction, idempotencyKey, false);
+}
+
 std::string HandleBatchCreateObjects(const Params& params) {
     const int objectCount = GetRequiredBoundedIntParam(params, "object_count", 1, 250);
     std::vector<PrimitiveSpec> specs;
@@ -2110,7 +2747,14 @@ std::string HandleBatchCreateObjects(const Params& params) {
             std::vector<std::string> warnings;
             MCObjectHandle object = CreatePrimitiveFromSpec(specs[index], &warnings);
             gSDK->AddAfterSwapObject(object);
-            created.push_back({static_cast<int>(index + 1u), specs[index].objectType, object, warnings});
+            created.push_back({
+                static_cast<int>(index + 1u),
+                specs[index].objectType,
+                object,
+                warnings,
+                specs[index].points.size(),
+                specs[index].closed,
+            });
         }
         gSDK->EndUndoEvent();
     } catch (...) {
@@ -2143,6 +2787,9 @@ Protocol::ResponseEnvelope DispatchCadRequestOnVectorworksMainContext(const Prot
         }
         if (request.action == "drawing_summary") {
             return {request.id, true, HandleDrawingSummary(params), ""};
+        }
+        if (request.action == "apply_operations") {
+            return {request.id, true, HandleApplyOperations(params), ""};
         }
         if (request.action == "find_objects") {
             return {request.id, true, HandleFindObjects(params), ""};
@@ -2197,6 +2844,9 @@ Protocol::ResponseEnvelope DispatchFromSocketWorker(const Protocol::RequestEnvel
 void OnPluginLoadStartTransport() {
     gStopRequested.store(false);
     gCadQueue.ResetCancellation();
+#if VECTORWORKS_MCP_HAS_SDK
+    gApplyOperationsCache.clear();
+#endif
     try {
         StartMainContextPump();
         gTransport.Start(GetTransportOptionsFromEnvironment(), DispatchFromSocketWorker);
@@ -2212,6 +2862,9 @@ void OnPluginUnloadStopTransport() {
     StopMainContextPump();
     gCadQueue.CancelAll("native bridge is unloading");
     gTransport.Stop();
+#if VECTORWORKS_MCP_HAS_SDK
+    gApplyOperationsCache.clear();
+#endif
 }
 
 void OnVectorworksMainPluginEvent() {
@@ -2219,8 +2872,39 @@ void OnVectorworksMainPluginEvent() {
         return;
     }
     ScopedAtomicBoolReset resetPumpActive(gCadQueuePumpActive);
-    while (auto request = gCadQueue.TryDequeueOnVectorworksMainContext()) {
-        gCadQueue.CompleteFromVectorworksMainContext(DispatchCadRequestOnVectorworksMainContext(*request));
+    constexpr std::size_t kMaxRequestsPerPump = 8u;
+    constexpr auto kPumpBudget = std::chrono::milliseconds(8);
+    const auto pumpStarted = std::chrono::steady_clock::now();
+    std::size_t processed = 0u;
+    while (processed < kMaxRequestsPerPump &&
+           std::chrono::steady_clock::now() - pumpStarted < kPumpBudget) {
+        auto request = gCadQueue.TryDequeueOnVectorworksMainContext();
+        if (!request) {
+            break;
+        }
+        const double queueWaitMs = gCadQueue.QueueWaitMillisecondsForDiagnostics(request->id);
+        const auto handlerStart = std::chrono::steady_clock::now();
+        auto response = DispatchCadRequestOnVectorworksMainContext(*request);
+        const double handlerMs = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - handlerStart).count();
+        if (response.success &&
+            response.resultJson.size() >= 2u &&
+            response.resultJson.front() == '{' &&
+            response.resultJson.back() == '}') {
+            response.resultJson.pop_back();
+            response.resultJson += ",\"timing\":{\"queue_wait_ms\":";
+            response.resultJson += JsonNumber(queueWaitMs);
+            response.resultJson += ",\"handler_ms\":";
+            response.resultJson += JsonNumber(handlerMs);
+            response.resultJson += ",\"total_native_ms\":";
+            response.resultJson += JsonNumber(queueWaitMs + handlerMs);
+            response.resultJson += "}}";
+        }
+        gCadQueue.CompleteFromVectorworksMainContext(response);
+        ++processed;
+    }
+    if (gCadQueue.PendingCountForDiagnostics() > 0u) {
+        NotifyMainContextPump();
     }
 }
 
@@ -2256,6 +2940,7 @@ Protocol::ResponseEnvelope DispatchFromSocketWorker(const Protocol::RequestEnvel
         if (auto enqueueFailure = gCadQueue.EnqueueFromSocketThread(request)) {
             return *enqueueFailure;
         }
+        NotifyMainContextPump();
         return gCadQueue.WaitForResponseOnSocketThread(
             request.id,
             kCadRequestTimeout,

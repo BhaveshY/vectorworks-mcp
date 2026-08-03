@@ -1,5 +1,28 @@
 # Vectorworks MCP Tool Map
 
+## Workflow Profiles
+
+The normal runtime has one mandatory production profile:
+
+- **Fast native (mandatory):** non-modal, capability-checked native reads and
+  writes. For a fully specified, self-contained write, call the native tool
+  directly; the host performs internal CAD preflight. Use one
+  `vw_execute_operations` call for a complete create-only plan. Successful
+  responses that include handles/UUIDs, exact created counts, atomic status, or
+  verified readback are self-verifying and do not need an automatic screenshot
+  or full drawing scan.
+- **Compat (manual administrator diagnostic only):** broader Python/legacy
+  tools for explicitly authorized troubleshooting. It is not an automatic or
+  alternative drawing workflow. Never switch to it, decompose a request, or
+  launch the modal Python listener after a fast-native capability failure.
+
+Use document context only when the requested result depends on existing state.
+Prefer `vw_lookup_objects`, `vw_get_document_info`, or a focused
+`vw_drawing_summary(include_examples=false)` before the broad
+`vw_agent_context(profile="production")`. Reserve explicit ping/preflight calls
+for diagnosis, recovery, or a requested connection check; document tools already
+preflight internally.
+
 Core health and escape hatch:
 
 - `vw_ping`: confirm the listener and MCP server are connected; check bridge mode and CAD safety before real work.
@@ -23,8 +46,19 @@ Document context:
 
 Create and edit:
 
-- `vw_create_object`: rect, circle, oval, line, arc; polygon is listener-dependent and blocked by the native bridge.
-- `vw_batch_create_objects`: create many native objects in one MCP call. Phase 1 supports primitives; phase 2 also supports walls, text, and linear dimensions. `atomic=true` requires the native `batch_create_objects` bridge action; `atomic=false` uses legacy non-atomic `create_object` composition.
+- `vw_create_object`: compatibility-surface primitive helper. Fast-native work
+  uses `vw_execute_operations`. Polygon/polyline creation requires the bridge
+  to report those phase-4 object types; otherwise stop.
+- `vw_batch_create_objects`: lower-level compatibility-surface batch helper,
+  not a fallback for `vw_execute_operations`. `atomic=false` is a legacy
+  per-object route and is unavailable to mandatory fast-native agent work.
+- `vw_execute_operations`: execute one strictly validated create-only plan using
+  canonical `{"type":"create","params":{...}}` operations and a stable
+  caller-generated `idempotency_key`. It requires native phase-4
+  `apply_operations`; missing support is a hard upgrade/restart failure. There
+  is no legacy, decomposed, batch, or modal fallback. Reuse a key only for the
+  identical plan; update/delete operation types are not part of the current
+  contract.
 - `vw_plan_schematic_floor_plan`: dry-run a multi-room schematic floor plan and return the primitives.
 - `vw_create_schematic_floor_plan`: create a multi-room schematic floor plan from rooms, walls, doors, and windows.
 - `vw_create_bim_floor_plan`: create true wall objects plus optional room text labels and linear dimensions from rooms/walls.
@@ -33,17 +67,16 @@ Create and edit:
 - `vw_create_schematic_window`: schematic double-line window marker from native 2D primitives.
 - `vw_set_object_property`: name, class, color, line weight, opacity.
 - `vw_batch_set_object_properties`: resolve `uuid:...`, `name:...`, or `handle:...` refs, reject ambiguous/stale refs before writing, apply multiple property edits, and optionally verify readback. Requires `set_property`, a native phase-2 production action, in the active bridge.
-- `vw_selection`: get, select, clear, delete, move, or duplicate selected objects; selected-object delete requires `confirm="DELETE_SELECTED"` and exact-name criteria delete requires `confirm="DELETE_EXACT_NAME"`.
+- `vw_selection`: fast-native exposes get, select, clear, and delete; selected-object delete requires `confirm="DELETE_SELECTED"` and exact-name criteria delete requires `confirm="DELETE_EXACT_NAME"`. Legacy move/duplicate are explicit diagnostic `compat` actions only.
 
 Architecture:
 
 - `vw_create_wall`: native true wall objects.
 - `vw_create_text`: native text annotations.
 - `vw_create_linear_dimension`: native linear dimensions.
-- `vw_insert_door`: parametric doors through the legacy/Python path; native wall-hosted insertion is deferred pending plugin inspection.
-- `vw_insert_window`: parametric windows through the legacy/Python path; native wall-hosted insertion is deferred pending plugin inspection.
-- `vw_create_slab`: slab from polygon footprint.
-- `vw_create_roof`: roof from footprint.
+- `vw_insert_door`, `vw_insert_window`, `vw_create_slab`, and
+  `vw_create_roof`: manual compat/admin surface only; unavailable for mandatory
+  fast-native agent work until dedicated native operations are implemented.
 
 Resources and files:
 
@@ -56,12 +89,14 @@ Resources and files:
 
 ## Safety Metadata
 
-Agents should call `vw_tool_safety` as a normal planning step before CAD work,
-especially before mixed, write, destructive, file, or trusted-code tools.
+Agents should consult `vw_tool_safety` when planning mixed, destructive, file,
+or trusted-code operations. It is not a required extra call before a
+self-contained native write because those tools preflight internally.
 
 Rules:
 
-- Call `vw_preflight_for_cad` before tools with `requires_cad_preflight: true`.
+- Tools with `requires_cad_preflight: true` enforce that preflight internally.
+  Call `vw_preflight_for_cad` explicitly for diagnosis or recovery.
 - Prefer `readOnlyHint: true` tools for discovery and verification.
 - Ask for explicit confirmation before `destructiveHint: true` tools or variants.
 - Never automatically retry `idempotentHint: false` operations after timeout,
@@ -88,6 +123,7 @@ Rules:
 | `vw_create_text` | `document-write` | `create_text` | `false` | `false` | `false` | `true` | `true` |
 | `vw_create_wall` | `document-write` | `create_wall` | `false` | `false` | `false` | `true` | `true` |
 | `vw_drawing_summary` | `document-read` | `drawing_summary` | `true` | `false` | `true` | `true` | `true` |
+| `vw_execute_operations` | `document-write` | `apply_operations` | `false` | `false` | `true` | `true` | `true` |
 | `vw_export` | `file-write` | `export` | `false` | `false` | `false` | `true` | `true` |
 | `vw_find_objects` | `document-read` | `find_objects` | `true` | `false` | `true` | `true` | `true` |
 | `vw_get_document_info` | `document-read` | `get_document_info` | `true` | `false` | `true` | `true` | `true` |

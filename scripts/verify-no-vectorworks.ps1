@@ -2,7 +2,8 @@
 param(
     [string]$Name = "vectorworks",
     [string]$LauncherPath = "",
-    [string]$LoaderPath = ""
+    [string]$LoaderPath = "",
+    [switch]$EnablePythonDialogFallback
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,13 +23,19 @@ $FreshLauncher = $false
 $FreshLoader = $false
 $PyCacheRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("vectorworks-mcp-verify-pycache-{0}" -f $PID)
 
-if (-not $LauncherPath) {
-    $LauncherPath = Join-Path ([System.IO.Path]::GetTempPath()) ("vectorworks-mcp-verify-launcher-{0}.py" -f $PID)
-    $FreshLauncher = $true
+if (-not $EnablePythonDialogFallback -and ($LauncherPath -or $LoaderPath)) {
+    throw "Python dialog fallback verification requires -EnablePythonDialogFallback."
 }
-if (-not $LoaderPath) {
-    $LoaderPath = Join-Path ([System.IO.Path]::GetTempPath()) ("vectorworks-mcp-verify-loader-{0}.py" -f $PID)
-    $FreshLoader = $true
+
+if ($EnablePythonDialogFallback) {
+    if (-not $LauncherPath) {
+        $LauncherPath = Join-Path ([System.IO.Path]::GetTempPath()) ("vectorworks-mcp-verify-launcher-{0}.py" -f $PID)
+        $FreshLauncher = $true
+    }
+    if (-not $LoaderPath) {
+        $LoaderPath = Join-Path ([System.IO.Path]::GetTempPath()) ("vectorworks-mcp-verify-loader-{0}.py" -f $PID)
+        $FreshLoader = $true
+    }
 }
 
 function Assert-Path {
@@ -115,29 +122,31 @@ $VenvPython = Resolve-ActiveVenvPython
 New-Item -ItemType Directory -Force -Path $PyCacheRoot *> $null
 $env:PYTHONPYCACHEPREFIX = $PyCacheRoot
 
-if ($FreshLauncher -or $FreshLoader -or -not (Test-Path $LauncherPath) -or -not (Test-Path $LoaderPath)) {
-    Invoke-Checked "generate Vectorworks launcher" {
-        & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $RegisterPath -SkipInstall -NoClaudeConfig -LauncherPath $LauncherPath -LoaderPath $LoaderPath
+if ($EnablePythonDialogFallback) {
+    if ($FreshLauncher -or $FreshLoader -or -not (Test-Path $LauncherPath) -or -not (Test-Path $LoaderPath)) {
+        Invoke-Checked "generate Vectorworks Python dialog fallback launcher" {
+            & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $RegisterPath -SkipInstall -NoClaudeConfig -EnablePythonDialogFallback -LauncherPath $LauncherPath -LoaderPath $LoaderPath
+        }
     }
-}
 
-Assert-Path $LauncherPath "Generated Vectorworks launcher"
-Assert-Path $LoaderPath "Generated Vectorworks loader"
+    Assert-Path $LauncherPath "Generated Vectorworks Python dialog fallback launcher"
+    Assert-Path $LoaderPath "Generated Vectorworks Python dialog fallback loader"
 
-$LauncherText = Get-Content -Raw -Path $LauncherPath
-if ($LauncherText -notmatch 'os\.environ\["VW_MCP_MODE"\]\s*=\s*["'']dialog["'']') {
-    throw "Generated Vectorworks launcher does not set VW_MCP_MODE=dialog; regenerate it with scripts\register-claude-code.ps1."
-}
-if ($LauncherText -notmatch 'os\.environ\["VW_MCP_DIALOG_TIMER_MS"\]\s*=\s*["'']50["'']') {
-    throw "Generated Vectorworks launcher does not set VW_MCP_DIALOG_TIMER_MS=50; regenerate it with scripts\register-claude-code.ps1."
-}
-$LoaderText = Get-Content -Raw -Path $LoaderPath
-if ($LoaderText -notmatch 'runpy\.run_path') {
-    throw "Generated Vectorworks loader does not run the launcher with runpy.run_path; regenerate it with scripts\register-claude-code.ps1."
-}
-$ExpectedLauncherLiteral = $LauncherPath.Replace("\", "\\").Replace('"', '\"')
-if (-not $LoaderText.Contains($ExpectedLauncherLiteral)) {
-    throw "Generated Vectorworks loader does not point at $LauncherPath; regenerate it with scripts\register-claude-code.ps1."
+    $LauncherText = Get-Content -Raw -Path $LauncherPath
+    if ($LauncherText -notmatch 'os\.environ\["VW_MCP_MODE"\]\s*=\s*["'']dialog["'']') {
+        throw "Generated Vectorworks launcher does not set VW_MCP_MODE=dialog; regenerate it with scripts\register-claude-code.ps1 -EnablePythonDialogFallback."
+    }
+    if ($LauncherText -notmatch 'os\.environ\["VW_MCP_DIALOG_TIMER_MS"\]\s*=\s*["'']50["'']') {
+        throw "Generated Vectorworks launcher does not set VW_MCP_DIALOG_TIMER_MS=50; regenerate it with scripts\register-claude-code.ps1 -EnablePythonDialogFallback."
+    }
+    $LoaderText = Get-Content -Raw -Path $LoaderPath
+    if ($LoaderText -notmatch 'runpy\.run_path') {
+        throw "Generated Vectorworks loader does not run the launcher with runpy.run_path; regenerate it with scripts\register-claude-code.ps1 -EnablePythonDialogFallback."
+    }
+    $ExpectedLauncherLiteral = $LauncherPath.Replace("\", "\\").Replace('"', '\"')
+    if (-not $LoaderText.Contains($ExpectedLauncherLiteral)) {
+        throw "Generated Vectorworks loader does not point at $LauncherPath; regenerate it with scripts\register-claude-code.ps1 -EnablePythonDialogFallback."
+    }
 }
 
 Invoke-Checked "fastmcp import" {
@@ -151,7 +160,11 @@ Invoke-Checked "server import" {
 }
 
 Invoke-Checked "Python compilation" {
-    & $VenvPython -m py_compile $ServerPath $ListenerPath $LauncherPath $LoaderPath
+    $CompileTargets = @($ServerPath, $ListenerPath)
+    if ($EnablePythonDialogFallback) {
+        $CompileTargets += @($LauncherPath, $LoaderPath)
+    }
+    & $VenvPython -m py_compile @CompileTargets
 }
 
 Invoke-Checked "unit tests" {

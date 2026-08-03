@@ -187,6 +187,12 @@ the corresponding implemented action. Production phase 2 requires
 `manage_classes` in `implemented_actions`.
 Native phase 3 adds read-only production helpers: `find_objects` for criteria
 search and `drawing_summary` for compact counts/bounds/examples in large files.
+Native phase 4 is the required fast-write runtime. It adds true open/closed
+polygon creation and `apply_operations`, which validates and commits creates
+plus property edits in one native undo transaction. Requests use
+document/payload-scoped idempotency keys, return compact verified object
+snapshots and timing, and never fall back automatically to the modal Python
+listener or a decomposed legacy write path.
 The SDK scaffold queue applies bounded backpressure and rejects duplicate
 request ids before work is handed to the Vectorworks main/plugin event context.
 While the copied scaffold is still phase 0, CAD actions fail immediately with

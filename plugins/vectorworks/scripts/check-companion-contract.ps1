@@ -437,7 +437,7 @@ $ConnectorMcp = Get-Content -Raw -LiteralPath $ConnectorMcpPath | ConvertFrom-Js
 $PluginMcp = Get-Content -Raw -LiteralPath $PluginMcpPath | ConvertFrom-Json
 $ConnectorEnv = $ConnectorMcp.mcpServers.vectorworks.env
 $PluginEnv = $PluginMcp.mcpServers.vectorworks.env
-foreach ($Key in @("VW_MCP_HOST", "VW_MCP_PORT", "VW_MCP_TIMEOUT", "VW_MCP_PREFLIGHT_CACHE_MS")) {
+foreach ($Key in @("VW_MCP_HOST", "VW_MCP_PORT", "VW_MCP_TIMEOUT", "VW_MCP_PREFLIGHT_CACHE_MS", "VW_MCP_TOOL_PROFILE")) {
     if ($ConnectorEnv.$Key -ne $PluginEnv.$Key) {
         throw "MCP env default drift for $Key. Connector=$($ConnectorEnv.$Key), plugin=$($PluginEnv.$Key)"
     }

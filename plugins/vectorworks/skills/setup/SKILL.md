@@ -23,16 +23,16 @@ py -3 "${CLAUDE_PLUGIN_ROOT}\bin\vectorworksctl" agent-install --json
 ```
 
 This command resolves or installs the companion `vectorworks-mcp` checkout,
-checks the current contract, installs the usable Python dialog fallback by
-default, and asks the native bridge doctor for a structured next step. If the
-JSON reports `setup_complete: true` with `native_requires_action: true`, do not
-call it an install failure; native bridge setup is only an optional non-modal
-upgrade. `command_ok` only means the helper produced diagnostics; `ok`,
-`setup_complete`, and `usable_now` mean the install can actually be used. Use
+checks the current contract, and asks the native bridge doctor for a structured
+next step. Native non-modal readiness is required by default. If JSON reports
+`native_requires_action: true`, setup is incomplete unless the user explicitly
+selected the modal Python fallback. `command_ok` only means the helper produced
+diagnostics; `ok`, `setup_complete`, and `usable_now` mean the requested runtime
+can actually be used. Use
 top-level `mcp_config_path`, `loader_path`, `runner_path`, and `next_user_step`
-for the user handoff. Follow `native_plan.nextCommandSpec` only when native
-setup is requested; do not improvise SDK, Visual Studio, or Vectorworks plug-in
-install commands.
+for the user handoff. Follow `native_plan.nextCommandSpec` for required native
+setup; do not improvise SDK, Visual Studio, or Vectorworks plug-in install
+commands.
 
 For Codex or non-Claude host-only setup, use the companion repo command:
 
@@ -46,11 +46,18 @@ For a non-technical PC full install attempt including native bridge setup:
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -FullNative -Json
 ```
 
-If the result has `setup_complete: true` but `native_summary.next_stage:
-smoke-phase-0`, the MCP is usable and the installer already automatically opens or restarts Vectorworks and attempts native smoke. If Vectorworks blocks
-automation with license, recovery, startup, or plug-in approval prompts, report
+`-FullNative` is explicit consent for side effects: network access, Visual
+Studio installation, large downloads, Vectorworks user Plug-ins writes,
+launch/restart automation, and disposable-document smoke fixtures. Never append
+it automatically or infer consent from a generic setup request.
+
+If `native_summary.next_stage` is `smoke-phase-0`, native setup is not yet
+accepted. A `-FullNative` run may already have attempted to open or restart
+Vectorworks and run smoke. If Vectorworks blocks automation with license,
+recovery, startup, or plug-in approval prompts, report
 `native_summary.next_command` or `native_summary.acceptance_next_command` as
-the exact resume command after the prompt is cleared.
+the exact resume command after the prompt is cleared; do not claim completion
+until native smoke passes.
 
 Then use the repo `.mcp.json`, or configure the same `powershell.exe -File
 scripts\run-mcp-server.ps1` stdio server with an absolute path if the client
@@ -58,15 +65,24 @@ does not launch from the repo root.
 
 ## Temporary Python Fallback
 
-Use the Python dialog listener only when the user explicitly needs today's
+Use the Python dialog listener only when the user explicitly accepts a modal
 compatibility path before the native SDK bridge is built/installed:
 
 ```powershell
-vectorworksctl setup-runtime --include-python-fallback --json
+vectorworksctl agent-install --allow-python-fallback --json
+```
+
+For the companion root installer, use:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -EnablePythonDialogFallback -Json
 ```
 
 That fallback regenerates the stable loader (`vw_load_listener_2024.py`) and
-does not make the Python listener the long-term default.
+opens the `VW MCP Listener` dialog. The dialog blocks manual Vectorworks UI use;
+the user cannot work in Vectorworks in parallel with Codex until it is stopped.
+State this before enabling the fallback and label the result degraded/modal,
+not native production readiness.
 
 ## Rules
 
@@ -78,5 +94,5 @@ does not make the Python listener the long-term default.
   and `transport_only: false`.
 - The production non-modal path is the compiled Vectorworks SDK bridge. Phase 2
   supports native walls, text, linear dimensions, verified property edits,
-  class management, and mixed atomic batches. Python loader repair is fallback
-  only.
+  class management, and mixed atomic batches. Python loader repair is explicit
+  fallback only and never satisfies the default native completion criterion.

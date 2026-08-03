@@ -47,7 +47,8 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("scripts/run-vectorworks-mcp.ps1", "/".join(server["args"]).replace("\\", "/"))
         self.assertEqual(server["env"]["VW_MCP_HOST"], "127.0.0.1")
         self.assertEqual(server["env"]["VW_MCP_PORT"], "9877")
-        self.assertEqual(server["env"]["VW_MCP_PREFLIGHT_CACHE_MS"], "750")
+        self.assertEqual(server["env"]["VW_MCP_PREFLIGHT_CACHE_MS"], "5000")
+        self.assertEqual(server["env"]["VW_MCP_TOOL_PROFILE"], "fast-native")
 
     def test_plugin_skills_exist(self):
         for name in ("setup", "ping", "diagnose", "work"):
@@ -101,7 +102,10 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("requires_action", helper)
         self.assertIn("native_setup_complete", helper)
         self.assertIn("native_requires_action", helper)
-        self.assertIn("native_optional_upgrade", helper)
+        self.assertIn("allow_python_fallback", helper)
+        self.assertIn("phase_zero_only", helper)
+        self.assertIn("live_native_ready", helper)
+        self.assertIn("NATIVE_PHASE_TWO_REQUIRED_ACTIONS", helper)
         self.assertIn("mcp_config_path", helper)
         self.assertIn("runner_path", helper)
         self.assertIn("launcher_path", helper)
@@ -222,13 +226,22 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("unknown commit state", diagnose)
         self.assertIn("nextCommandSpec", diagnose)
         self.assertIn("vectorworksctl agent-install --json", setup)
-        self.assertIn("include-python-fallback", setup)
+        self.assertIn("--allow-python-fallback", setup)
         self.assertIn("nextCommandSpec", setup)
         self.assertIn("vectorworksctl ping", ping)
         self.assertIn("cad_api_safe", ping)
         self.assertIn("transport_only", ping)
         self.assertIn("transport_only=false", work)
         self.assertIn("native-next", work)
+        self.assertIn("fast-native` profile is mandatory", work)
+        self.assertIn("internal CAD preflight", work)
+        self.assertIn("self-verifying tool response", work)
+        self.assertIn("substitute independent lines", work)
+        self.assertIn("administrator-only diagnostic surface", work)
+        self.assertIn("never routes to a legacy, decomposed, batch, or modal fallback", work)
+        self.assertIn("vw_execute_operations", work)
+        self.assertIn("idempotency_key", work)
+        self.assertIn("create operations only", work)
 
     def test_plugin_tool_map_documents_safety_metadata_and_mixed_actions(self):
         tool_map = (PLUGIN / "references" / "tool-map.md").read_text(encoding="utf-8")
@@ -241,6 +254,15 @@ class ClaudePluginTests(unittest.TestCase):
             "idempotentHint",
             "openWorldHint",
             "## Mixed Tool Actions",
+            "## Workflow Profiles",
+            "Fast native (mandatory)",
+            "preflight internally",
+            "self-verifying",
+            "manual administrator diagnostic only",
+            "no legacy, decomposed, batch, or modal fallback",
+            "`vw_execute_operations`",
+            "`apply_operations`",
+            "create-only",
             "`vw_selection.get`",
             "`vw_selection.delete`",
             "`vw_manage_classes.list`",

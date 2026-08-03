@@ -412,7 +412,7 @@ if ($Json) {
         Write-Host "OK: native bridge prerequisites appear ready."
     } else {
         Write-Host ""
-        Write-Warning "Native bridge prerequisites are not complete. The pure-Python dialog listener remains the safe fallback agent-session mode."
+        Write-Warning "Native non-modal runtime prerequisites are not complete. The Python dialog listener is available only as an explicit modal fallback and blocks parallel manual Vectorworks use."
     }
 }
 

@@ -9,37 +9,85 @@ Windows PC.
 Codex / Claude Code / MCP client <--stdio--> scripts/run-mcp-server.ps1
                          |
                          v
-                      server.py <--TCP/JSON--> vw_listener.py (modal agent session inside Vectorworks)
-                                             127.0.0.1:9877
+                      server.py <--TCP/JSON--> Native Vectorworks SDK plug-in
+                                             (non-modal, 127.0.0.1:9877)
+
+Explicit fallback only:
+                      server.py <--TCP/JSON--> vw_listener.py
+                                             (modal agent session; manual UI blocked)
 ```
 
 `scripts/run-mcp-server.ps1` is the self-bootstrapping entrypoint. It creates a
-repo-local `.venv`, installs bounded host dependencies from `requirements.txt`, then starts `server.py`. The
-generated Vectorworks launcher sets `VW_MCP_MODE=dialog`, the only pure-Python
-mode currently safe for real `vs.*` API calls. It opens a modal agent-control
-dialog; close or stop it when you want to use Vectorworks manually.
+repo-local `.venv`, installs bounded host dependencies from `requirements.txt`,
+then starts `server.py`. A compiled, installed, and smoke-tested native SDK
+bridge is the required default runtime because it keeps Vectorworks non-modal
+and manually usable between agent operations. Setup is not complete merely
+because the host MCP process starts.
+
+The generated Python launcher is a manual administrator diagnostic, not an
+agent-work fallback. It can be enabled with
+`install.ps1 -EnablePythonDialogFallback` or
+`vectorworksctl agent-install --allow-python-fallback`. It sets
+`VW_MCP_MODE=dialog`, the only pure-Python mode safe for real `vs.*` calls, and
+opens a modal agent-control dialog. While that dialog is open, manual
+Vectorworks UI use is blocked; stop or close it before working manually.
 
 The host MCP server also enforces CAD safety metadata. Tools that touch the
 document automatically require a fresh or very recent safe bridge status and
 return a structured `blocked: true` response instead of forwarding CAD work to
 transport-only or legacy listeners.
 
+### Fast agent workflow
+
+For a fully specified, self-contained operation, the fastest safe path is one
+native MCP write call. Do not require a separate ping, capabilities call, agent
+context, drawing summary, or screenshot before creating known geometry: the
+write tool performs internal CAD preflight and blocks before writing if the
+bridge or requested variant is unsafe. Trust self-verifying success responses
+that return handles/UUIDs, exact created counts, atomic status, or verified
+readback.
+
+Fetch context only when the requested edit depends on the current document.
+Prefer a focused `vw_lookup_objects`, `vw_get_document_info`, or
+`vw_drawing_summary(include_examples=false)` call; use
+`vw_agent_context(profile="production")` for broad multi-step planning.
+
+`vw_execute_operations` is the mandatory fast-native one-call path for a
+complete, create-only plan. Send canonical
+`{"type":"create","params":{"object_type":...}}` operations with a stable
+caller-generated `idempotency_key`, and reuse that key only for the identical
+plan. The host validates the plan before writing and requires native phase-4
+`apply_operations`. Missing support is a hard upgrade/restart failure; it never
+routes through a legacy, decomposed, batch, or modal fallback. The current
+contract does not accept guessed update/delete operation types.
+
+`fast-native` is mandatory for normal agent work and is also the default when
+`VW_MCP_TOOL_PROFILE` is absent. It exposes only the compact native production
+surface. `compat` is a manual administrator-only diagnostic profile, not an
+alternative drawing workflow. It must never be selected automatically after a
+blocked request. The modal Python listener likewise requires separate
+administrative authorization and is not a fallback for Codex work. Polygon and
+polyline creation require a bridge that reports the phase-4 object types; if
+missing, stop with the capability error rather than drawing independent lines.
+
 ## Bridge Status
 
 | Bridge path | Status | Real CAD/API handlers | Manual Vectorworks UI |
 |-------------|--------|-----------------------|------------------------|
-| Python `dialog` listener | supported fallback | yes | modal agent session |
+| Python `dialog` listener | manual administrator diagnostic only | yes | modal agent session; manual UI blocked |
 | Python `foreground` listener | legacy diagnostic only | no, guarded | blocks UI |
 | Python `background` listener | diagnostic only | no, guarded | no reliable scheduling |
 | Python `win_timer` listener | diagnostic only | no, guarded | transport ping only |
-| Native SDK bridge | phase-2 SDK bridge when built/installed | yes, guarded to implemented actions | non-modal native plug-in |
+| Native SDK bridge | required production runtime when built/installed/smoke-tested | yes, guarded to implemented actions | non-modal native plug-in |
 
-The proper long-term fix for non-modal, always-on control is a native
+The required production path for non-modal, always-on control is a native
 Vectorworks SDK plug-in bridge. The SDK bridge in `native_bridge/` can be copied
 into an SDK examples worktree, wired into the module lifecycle, built,
-installed, and smoke-tested. It is not compiled or installed by default by the
-host MCP setup, because fresh machines still need the official Vectorworks SDK
-and Visual Studio C++ build tools. When the compiled phase-2 bridge is loaded it
+installed, and smoke-tested. The default setup diagnoses and plans this path but
+does not silently install Visual Studio, download a large SDK, modify the
+Vectorworks user Plug-ins folder, restart Vectorworks, or run write fixtures.
+Use `-FullNative` only as explicit consent for those side effects. When the
+compiled phase-2 bridge is loaded it
 reports `native-sdk-bridge-phase2`, `cad_api_safe=true`, `transport_only=false`,
 and `main_context_pump_ready=true`; older phase-1 builds report
 `native-sdk-bridge-phase1`.
@@ -62,9 +110,10 @@ Vectorworks document; the Home/no-document screen can answer read health checks
 but is not a valid drawing target. In an active document with no current
 writable design layer, native creation attempts to create/select a default
 `Vectorworks MCP Layer` before drawing. Host preflight blocks broader MCP tools
-or unsupported variants before dispatching them to the native bridge. Use the
-generated Python dialog launcher when you need broader legacy tool coverage that
-has not been ported to native yet.
+or unsupported variants before dispatching them to the native bridge. Broader
+legacy coverage remains a separately authorized administrator diagnostic only,
+not a production fallback; manual Vectorworks control is unavailable while its
+modal dialog is open.
 
 Why this is not as simple as a Revit-style setup yet:
 
@@ -73,9 +122,9 @@ Why this is not as simple as a Revit-style setup yet:
 - Vectorworks 2024 can run Python scripts, but a long-lived Python socket loop
   either blocks the UI or loses the safe document/API context after the script
   returns.
-- The safe pure-Python fallback is therefore a modal dialog agent session. It is
-  stable for CAD operations, but you close it when you want manual Vectorworks
-  control back.
+- The safe pure-Python diagnostic is a modal dialog agent session. It is never
+  selected implicitly or used for normal agent work; enabling it accepts that
+  manual Vectorworks control is blocked until the dialog is closed.
 - A Revit-like always-on Vectorworks experience needs the native SDK plug-in
   bridge: worker-thread networking plus strict marshaling back to the
   Vectorworks main/plugin event context.
@@ -211,11 +260,12 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "irm https://
 
 The installer clones or updates `BhaveshY/vectorworks-mcp` under
 `$env:USERPROFILE\repos\vectorworks-mcp`, installs Python dependencies,
-generates the durable `vw_start_listener_2024.py` launcher and
-`vw_load_listener_2024.py` Vectorworks loader, runs host verification, and
-leaves the repo `.mcp.json` ready for Codex, Claude Code project MCP, or any
-stdio MCP client. The default is `-Client HostOnly`, so it does not modify
-Claude Code user config.
+checks host readiness, and leaves the repo `.mcp.json` ready for Codex, Claude
+Code project MCP, or any stdio MCP client. It diagnoses the native SDK bridge
+and reports the exact guarded next step. Native non-modal readiness is the
+default completion criterion; a host-only MCP process or generated Python
+launcher is not production readiness. The default is `-Client HostOnly`, so it
+does not modify Claude Code user config.
 
 From an existing checkout:
 
@@ -242,6 +292,28 @@ startup prompt, JSON reports
 `native_summary.vectorworks_automation_attempted`, `native_summary.next_command`,
 and `native_summary.acceptance_next_command` so the agent can resume exactly.
 Native production readiness is not claimed until both smoke stages pass.
+`-FullNative` is explicit, side-effecting consent. Do not add it automatically
+or infer consent from a request to connect, diagnose, or plan the MCP setup. It
+is mutually exclusive with `-EnablePythonDialogFallback`.
+
+For manual administrator diagnostics only, a separately authorized modal
+session can be enabled. It prevents parallel manual Vectorworks use and must
+not be used as an automatic or normal agent-work fallback:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -EnablePythonDialogFallback -Json
+```
+
+The equivalent bundled-helper opt-in is:
+
+```powershell
+py -3 .\plugins\vectorworks\bin\vectorworksctl agent-install --repo-path $PWD --allow-python-fallback --json
+```
+
+This diagnostic mode is degraded/modal readiness, not native production
+readiness or a valid substitute for mandatory fast-native work.
+Leave the `VW MCP Listener` dialog open only while the agent controls
+Vectorworks, then stop it before resuming manual work.
 
 If you specifically want Claude Code user registration from the checkout:
 
@@ -270,7 +342,8 @@ the same server manually:
         "VW_MCP_HOST": "127.0.0.1",
         "VW_MCP_PORT": "9877",
         "VW_MCP_TIMEOUT": "60",
-        "VW_MCP_PREFLIGHT_CACHE_MS": "750"
+        "VW_MCP_PREFLIGHT_CACHE_MS": "5000",
+        "VW_MCP_TOOL_PROFILE": "fast-native"
       },
       "timeout": 120000
     }
@@ -303,10 +376,12 @@ py -3 .\plugins\vectorworks\bin\vectorworksctl agent-install --repo-path $PWD --
 py -3 .\plugins\vectorworks\bin\vectorworksctl doctor --repo-path $PWD --json
 ```
 
-`agent-install` prepares the Python dialog fallback and returns the guarded
-native SDK bridge plan in one JSON payload. `setup_complete: true` means the
-MCP install is usable now; `native_requires_action: true` means only the
-optional non-modal native bridge still has follow-up work. JSON also includes
+`agent-install` returns the guarded native SDK bridge plan in one JSON payload.
+By default, `setup_complete: true` requires the non-modal native bridge to be
+built, installed, and accepted. `native_requires_action: true` is required
+follow-up, not an optional upgrade. The `--allow-python-fallback` switch is
+reserved for separately authorized administrator diagnostics, not normal agent
+work; its modal session blocks manual Vectorworks use. JSON also includes
 top-level `repo_root`, `mcp_config_path`, `runner_path`, `launcher_path`,
 `loader_path`, and `next_user_step` so agents do not need to scrape PowerShell
 output. See
@@ -318,16 +393,19 @@ Claude Code-specific setup:
 powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-claude-code.ps1 -Verify
 ```
 
-The setup is idempotent and safe to rerun. It:
+The client/bootstrap helper is idempotent and safe to rerun. By default it:
 
 - creates or refreshes `.venv`
 - installs bounded host dependencies into the repo-local virtual environment
-- generates `vw_start_listener_2024.py` with machine-specific absolute paths and `VW_MCP_MODE=dialog`
-- generates `vw_load_listener_2024.py`, a tiny stable Vectorworks script/menu loader that runs the current launcher file
-- best-effort copies the exact loader script text to your clipboard
 - registers the `vectorworks` MCP server with Claude Code
 - falls back to updating `C:\Users\<you>\.claude.json` if `claude` is not on PATH
 - runs no-Vectorworks host verification when `-Verify` is passed
+
+Only when `-EnablePythonDialogFallback` is passed, it also generates
+`vw_start_listener_2024.py` with `VW_MCP_MODE=dialog`, generates the stable
+`vw_load_listener_2024.py` script/menu loader, and best-effort copies that
+loader to the clipboard. Those files are for the explicit modal fallback and
+do not satisfy native readiness.
 
 This repo also includes a project `.mcp.json` that points compatible MCP clients
 at the self-bootstrapping runner. Claude Code and Codex may ask you to trust
@@ -378,7 +456,9 @@ claude --plugin-dir $env:USERPROFILE\repos\vectorworks-mcp\plugins\vectorworks
 
 The plugin adds namespaced skills:
 
-- `/vectorworks:setup` bootstraps dependencies and regenerates the Vectorworks launcher plus stable loader.
+- `/vectorworks:setup` bootstraps dependencies and plans required native
+  readiness; it generates the Python launcher/loader only after explicit
+  fallback consent.
 - `/vectorworks:ping` checks the raw listener and then `vw_ping` when MCP tools are loaded.
 - `/vectorworks:diagnose` checks repo resolution, launcher agent-session mode, Claude availability, and listener reachability.
 - `/vectorworks:work` guides CAD/BIM operations with the `vw_*` MCP tools.
@@ -386,15 +466,18 @@ The plugin adds namespaced skills:
 The plugin also declares the `vectorworks` MCP server, so `vw_ping` and the
 other `vw_*` tools become available when the plugin is enabled.
 
-## Start Vectorworks Listener
+## Manual Administrator Python Dialog Diagnostics
 
-After setup, open the generated loader file:
+Do not run the generated loader during normal native operation or after a
+fast-native capability failure. For separately authorized administrator
+diagnostics, explicitly enable `-EnablePythonDialogFallback` or
+`--allow-python-fallback`, open the generated loader file:
 
 ```text
 vw_load_listener_2024.py
 ```
 
-Setup tries to copy this loader script to your clipboard automatically. If you
+Fallback setup may copy this loader script to your clipboard. If you
 need to copy it again, run:
 
 ```powershell
@@ -410,10 +493,13 @@ this loader once.
 
 Do not paste `vw_listener.py`, `vw_start_listener_2024.py`, or any old
 foreground/background/timer launcher into Vectorworks. Paste only the generated
-`vw_load_listener_2024.py` stable loader. For CAD-safe work, a healthy Python
+`vw_load_listener_2024.py` stable loader after explicit fallback consent. For
+CAD-safe fallback work, a healthy Python
 listener reports `dispatch_mode=dialog`,
 `bridge_kind=python_dialog_agent_session`, `cad_api_safe=true`, and
-`transport_only=false`. Raw socket reachability is not enough: a listener that
+`transport_only=false`. This is a modal agent session: leave the dialog open
+while Codex controls Vectorworks, and close it before using Vectorworks
+manually. Raw socket reachability is not enough: a listener that
 can answer `ping` but reports `transport_only=true` is not safe for CAD
 handlers.
 
@@ -470,11 +556,18 @@ The same no-Vectorworks verification runs in GitHub Actions on Windows.
 Manual equivalent:
 
 ```powershell
-.\.venv\Scripts\python.exe -m py_compile server.py vw_listener.py vw_start_listener_2024.py vw_load_listener_2024.py
+.\.venv\Scripts\python.exe -m py_compile server.py vw_listener.py
 .\.venv\Scripts\python.exe -m unittest discover -v
 ```
 
 ## Available Tools
+
+The mandatory `fast-native` profile exposes only its compact production subset:
+health/context tools, `vw_execute_operations`, focused native reads,
+`vw_manage_classes`, and native selection/control. The broader rows below
+document the manual `compat` administrator surface for contract completeness;
+their presence in this reference is not permission to enable, call, or fall
+back to them during normal agent work.
 
 Core:
 
@@ -487,8 +580,9 @@ Core:
 | `vw_capabilities` | Current bridge capabilities, native phase-1/phase-2 support, and tool surface |
 | `vw_tool_safety` | Structured safety metadata for all tools |
 | `vw_run_script` | Disabled by default; execute trusted Python inside Vectorworks only after `VW_MCP_ENABLE_RUN_SCRIPT=1` and `confirm="RUN_TRUSTED_CODE"` |
-| `vw_create_object` | Create rect/rectangle/box, circle, oval, line, arc; phase-2 batches also support wall, text, and linear_dimension |
-| `vw_batch_create_objects` | Create many native objects; `atomic=true` uses native all-or-none batch creation, `atomic=false` uses legacy non-atomic composition |
+| `vw_create_object` | Compat/admin primitive helper; hidden from mandatory fast-native work |
+| `vw_batch_create_objects` | Compat/admin batch helper; `atomic=false` is legacy and never a fast-native fallback |
+| `vw_execute_operations` | Mandatory fast-native create-only operation plan with a stable idempotency key; requires native phase-4 `apply_operations` and hard-fails when unavailable |
 | `vw_plan_schematic_floor_plan` | Dry-run a multi-room schematic floor plan and return the native primitives |
 | `vw_create_schematic_floor_plan` | Create a multi-room schematic floor plan from rooms, wall segments, doors, and windows |
 | `vw_create_bim_floor_plan` | Create a native wall-based floor plan with optional room labels and linear dimensions |
@@ -510,7 +604,7 @@ Core:
 | `vw_get_document_info` | Document metadata |
 | `vw_screenshot` | Open the Vectorworks Export Image File dialog with the requested path |
 | `vw_stop_listener` | Ask the listener to stop gracefully |
-| `vw_selection` | Get, select, clear, delete, move, or duplicate selected objects; selected-object delete requires `confirm="DELETE_SELECTED"`; exact-name criteria delete requires `confirm="DELETE_EXACT_NAME"` |
+| `vw_selection` | Fast-native: get, select, clear, or delete; selected-object delete requires `confirm="DELETE_SELECTED"` and exact-name criteria delete requires `confirm="DELETE_EXACT_NAME"`. Legacy move/duplicate are exposed only in explicit diagnostic `compat` mode. |
 
 Architectural:
 
@@ -519,11 +613,11 @@ Architectural:
 | `vw_create_wall` | Create native true wall objects |
 | `vw_create_text` | Create native text annotations |
 | `vw_create_linear_dimension` | Create native linear dimensions |
-| `vw_insert_door` | Insert a parametric door through the Python/legacy path; native wall-hosted insertion is deferred pending plugin inspection |
-| `vw_insert_window` | Insert a parametric window through the Python/legacy path; native wall-hosted insertion is deferred pending plugin inspection |
-| `vw_create_slab` | Create an extruded floor-like solid from a polygon footprint, not a BIM slab object |
-| `vw_create_roof` | Try to create a roof custom object from a footprint, with flat extrusion fallback |
-| `vw_inspect_object` | Discover object/plugin parameters; plugin probing requires `confirm="PROBE_PLUGIN"` |
+| `vw_insert_door` | Manual compat/admin diagnostic only; unavailable in fast-native |
+| `vw_insert_window` | Manual compat/admin diagnostic only; unavailable in fast-native |
+| `vw_create_slab` | Manual compat/admin diagnostic only; unavailable in fast-native |
+| `vw_create_roof` | Manual compat/admin diagnostic only; unavailable in fast-native |
+| `vw_inspect_object` | Manual compat/admin diagnostic only; plugin probing requires `confirm="PROBE_PLUGIN"` |
 
 ## Agent Handoff
 
@@ -540,10 +634,16 @@ powershell -ExecutionPolicy Bypass -File .\scripts\bootstrap-agent.ps1 -Verify
 End-to-end requires:
 
 - Vectorworks 2024/2025 open
-- listener started through the generated `vw_load_listener_2024.py`; leave the `VW MCP Listener` dialog open while the agent works
+- compiled native SDK bridge installed and loaded
 - MCP client restarted after registration
 - `vectorworks` trusted/loaded in the MCP client; Claude Code users can confirm this with `/mcp`
-- first tool call: `vw_ping`
+- first tool call `vw_ping` proving `dispatch_mode=native_sdk`,
+  `cad_api_safe=true`, `transport_only=false`, and
+  `main_context_pump_ready=true`
+
+The modal Python diagnostic never replaces native end-to-end acceptance. If an
+administrator runs it separately, record that manual Vectorworks use is blocked
+until its dialog closes.
 
 ## Troubleshooting
 
@@ -555,13 +655,16 @@ End-to-end requires:
 `vw_ping` reports a connection error:
 
 - Start Vectorworks.
-- Run the generated `vw_load_listener_2024.py` inside Vectorworks.
-- Confirm the `VW MCP Listener` dialog is open on `127.0.0.1:9877`, then verify with `vw_ping`.
+- Run the native doctor/plan and confirm the compiled SDK plug-in is installed
+  and enabled.
+- If the user explicitly enabled the Python fallback, run the generated
+  `vw_load_listener_2024.py`, keep the `VW MCP Listener` dialog open, and remind
+  them that manual UI use is blocked during that session.
 - Check that no previous listener is already using port `9877`.
 
-Vectorworks hangs after running the listener script:
+Vectorworks hangs after explicitly starting the Python fallback:
 
-- Regenerate `vw_start_listener_2024.py` with `.\scripts\bootstrap-agent.ps1 -Verify` or, for host-only clients, `.\scripts\bootstrap-agent.ps1 -Client HostOnly -Verify`.
+- Regenerate the explicitly enabled fallback launcher with `.\scripts\bootstrap-agent.ps1 -EnablePythonDialogFallback -Verify` or, for host-only clients, `.\scripts\bootstrap-agent.ps1 -Client HostOnly -EnablePythonDialogFallback -Verify`.
 - Run `.\scripts\copy-vectorworks-loader.ps1`, then replace any old pasted Vectorworks script with the clipboard contents from `vw_load_listener_2024.py`; it loads the current launcher from disk and prevents stale pasted listener code from lingering in a menu command.
 - Confirm the generated launcher contains `os.environ["VW_MCP_MODE"] = "dialog"`.
 - Confirm `vw_ping` reports `dispatch_mode=dialog`,

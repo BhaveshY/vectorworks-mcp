@@ -16,7 +16,8 @@
         "VW_MCP_HOST": "127.0.0.1",
         "VW_MCP_PORT": "9877",
         "VW_MCP_TIMEOUT": "60",
-        "VW_MCP_PREFLIGHT_CACHE_MS": "750"
+        "VW_MCP_PREFLIGHT_CACHE_MS": "5000",
+        "VW_MCP_TOOL_PROFILE": "fast-native"
       },
       "timeout": 120000
     }

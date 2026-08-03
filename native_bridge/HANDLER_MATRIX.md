@@ -20,8 +20,8 @@ Legend:
 | `get_layers` | `handle_get_layers` | read | main/plugin event context | 1 | Lists layers repeatedly without freezing Vectorworks |
 | `get_objects` | `handle_get_objects` | read | main/plugin event context | 1 | Lists objects with layer/type filters |
 | `selection` | `handle_selection` | mixed/destructive | main/plugin event context | 1 | `get` and `clear` work; `delete` requires explicit destructive test |
-| `create_object` | `handle_create_object` | write | main/plugin event context | 1 | Creates and then deletes a test rectangle in an active disposable document; attempts to create/select `Vectorworks MCP Layer` when the active document has no writable design layer |
-| `batch_create_objects` | `handle_batch_create_objects` | write | main/plugin event context | 1 | Atomically creates multiple phase-1 primitives in one undo event; uses the same active-document layer bootstrap as `create_object` |
+| `create_object` | `handle_create_object` | write | main/plugin event context | 1/4 | Creates phase-1 primitives plus phase-4 open/closed polygons; returns UUID, bounds, and polygon vertex/closure metadata |
+| `batch_create_objects` | `handle_batch_create_objects` | write | main/plugin event context | 1/4 | Atomically creates mixed supported objects, including phase-4 polygons, in one undo event |
 | `create_wall` | `handle_create_wall` | write | main/plugin event context | 2 | Creates and deletes a temporary true wall object; can set width and fixed corner height |
 | `create_text` | `handle_create_text` | write | main/plugin event context | 2 | Creates and deletes a temporary text label |
 | `create_linear_dimension` | `handle_create_linear_dimension` | write | main/plugin event context | 2 | Creates and deletes a temporary linear dimension |
@@ -29,6 +29,7 @@ Legend:
 | `manage_classes` | `handle_manage_classes` | mixed/destructive | main/plugin event context | 2 | Lists, creates, and deletes a temporary class; delete has separate destructive confirmation |
 | `find_objects` | `handle_find_objects` | read | main/plugin event context | 3 | Criteria search returns known test object |
 | `drawing_summary` | `handle_drawing_summary` | read | main/plugin event context | 3 | Returns compact counts by type/layer/class plus bounded examples without dumping every object |
+| `apply_operations` | no Python fallback | idempotent write | main/plugin event context | 4 | Atomically creates objects and applies property edits with local/handle/UUID/exact-name refs; returns verified receipts and rejects idempotency-key reuse across payloads/documents |
 | `worksheet` | `handle_worksheet` | mixed/write | main/plugin event context | 3 | Lists worksheets and reads/writes a temporary cell |
 | `symbol` | `handle_symbol` | mixed/write | main/plugin event context | 3 | Lists symbols and inserts a known symbol in a test document |
 | `export` | `handle_export` | write | main/plugin event context | 3 | Exports test document to a temporary file or opens expected export dialog |

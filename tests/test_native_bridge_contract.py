@@ -646,19 +646,48 @@ class NativeBridgeContractTests(unittest.TestCase):
         self.assertIn('confirm") != "DELETE_CLASS"', manage_block)
         self.assertIn("refusing to delete the None class", manage_block)
 
-    def test_native_phase_three_read_handlers_are_advertised_and_allowlisted(self):
+    def test_native_phase_four_fast_path_and_read_handlers_are_advertised_and_allowlisted(self):
         bridge_source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
         dispatcher_source = (ROOT / "native_bridge" / "src" / "BridgeDispatcher.hpp").read_text(encoding="utf-8")
 
-        self.assertIn('"native_phase":3', bridge_source)
+        self.assertIn('"native_phase":4', bridge_source)
         self.assertIn('"find_objects"', bridge_source)
         self.assertIn('"drawing_summary"', bridge_source)
+        self.assertIn('"apply_operations"', bridge_source)
         self.assertIn("HandleFindObjects", bridge_source)
         self.assertIn("HandleDrawingSummary", bridge_source)
+        self.assertIn("HandleApplyOperations", bridge_source)
         self.assertIn('request.action == "find_objects"', bridge_source)
         self.assertIn('request.action == "drawing_summary"', bridge_source)
+        self.assertIn('request.action == "apply_operations"', bridge_source)
         self.assertIn('{"find_objects", ExecutionContext::VectorworksMainPluginContext, false, false}', dispatcher_source)
         self.assertIn('{"drawing_summary", ExecutionContext::VectorworksMainPluginContext, false, false}', dispatcher_source)
+        self.assertIn('{"apply_operations", ExecutionContext::VectorworksMainPluginContext, true, false}', dispatcher_source)
+
+    def test_native_fast_path_supports_polygons_replay_guards_and_timing(self):
+        bridge_source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
+        queue_source = (ROOT / "native_bridge" / "src" / "CadRequestQueue.hpp").read_text(encoding="utf-8")
+
+        self.assertIn('spec.objectType == "polygon"', bridge_source)
+        self.assertIn("CreatePolyshape", bridge_source)
+        self.assertIn("SetPolyShapeClose", bridge_source)
+        self.assertIn("vertex_count", bridge_source)
+        self.assertIn("operationsFingerprint", bridge_source)
+        self.assertIn("different operations payload", bridge_source)
+        self.assertIn("different active document", bridge_source)
+        self.assertIn("kMaxApplyOperationsCacheEntries", bridge_source)
+        self.assertIn('constexpr std::string_view uuidPrefix = "uuid:"', bridge_source)
+        self.assertIn('constexpr std::string_view namePrefix = "name:"', bridge_source)
+        self.assertIn("name operation target is ambiguous", bridge_source)
+        self.assertIn("QueueWaitMillisecondsForDiagnostics", queue_source)
+        self.assertIn("queue_wait_ms", bridge_source)
+        self.assertIn("handler_ms", bridge_source)
+        self.assertIn("kMainContextPumpMessage", bridge_source)
+        self.assertIn("PostMessageW", bridge_source)
+        self.assertIn("kPumpBudget", bridge_source)
+        self.assertIn("kMaxRequestsPerPump", bridge_source)
+        self.assertIn("dirtyHandles.insert(object)", bridge_source)
+        self.assertIn("CompactCreatedPrimitiveListJson(created)", bridge_source)
 
     def test_native_writable_layer_fallback_creates_design_layer(self):
         source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
@@ -667,6 +696,7 @@ class NativeBridgeContractTests(unittest.TestCase):
         self.assertIn('CreateLayer(TXString("Vectorworks MCP Layer"), 1)', layer_block)
         self.assertIn("CreateLayerN", layer_block)
         self.assertLess(layer_block.index("CreateLayer(TXString"), layer_block.index("CreateLayerN"))
+        self.assertIn("if (gSDK->GetCurrentLayer() != layer)", layer_block)
 
     def test_native_smoke_write_fixture_aborts_cleanup_when_create_fails(self):
         calls = []
@@ -952,9 +982,11 @@ class NativeBridgeContractTests(unittest.TestCase):
         listener_handlers = _listener_handlers()
         server_actions = _server_actions()
         matrix_rows = _matrix_rows()
+        native_only_actions = {"apply_operations"}
 
-        self.assertEqual(server_actions, set(listener_handlers))
-        self.assertEqual(set(matrix_rows), set(listener_handlers))
+        self.assertEqual(server_actions - native_only_actions, set(listener_handlers))
+        self.assertTrue(native_only_actions <= server_actions)
+        self.assertEqual(set(matrix_rows), set(listener_handlers) | native_only_actions)
         for action, handler in listener_handlers.items():
             if action == "ping":
                 continue

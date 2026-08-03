@@ -7,6 +7,7 @@ param(
     [switch]$SkipClipboard,
     [switch]$SkipDependencyInstall,
     [switch]$FullNative,
+    [switch]$EnablePythonDialogFallback,
     [string]$VectorworksVersion = "2024",
     [ValidateSet("Debug", "Release")]
     [string]$NativeConfiguration = "Release",
@@ -31,6 +32,7 @@ $DefaultInstallDir = Join-Path $env:USERPROFILE "repos\vectorworks-mcp"
 $DependencyChecks = [System.Collections.Generic.List[object]]::new()
 $RepoRoot = ""
 $GitExe = ""
+$NativeRequested = -not [bool]$EnablePythonDialogFallback
 
 function Add-PathIfPresent {
     param([string]$Directory)
@@ -415,6 +417,63 @@ function Get-NativeDoctorJson {
     return $Output | ConvertFrom-Json
 }
 
+function Get-LiveNativeBridgeStatus {
+    param([string]$RepoRoot)
+    $DoctorPath = Join-Path $RepoRoot "scripts\doctor-vectorworks-mcp.ps1"
+    if (-not (Test-Path -LiteralPath $DoctorPath -PathType Leaf)) {
+        return [pscustomobject]@{ ready = $false; status = $null; error = "Runtime doctor not found." }
+    }
+    $Result = Invoke-ProcessCapture -FilePath "powershell.exe" -ArgumentList @(
+        "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", $DoctorPath,
+        "-Json"
+    )
+    $Output = if ($Result.stdout.Trim()) { $Result.stdout } else { $Result.output }
+    try {
+        $Report = $Output | ConvertFrom-Json
+        $Status = $Report.ping.result
+        $RequiredActions = @(
+            "get_document_info",
+            "get_layers",
+            "get_objects",
+            "selection",
+            "create_object",
+            "batch_create_objects",
+            "create_wall",
+            "create_text",
+            "create_linear_dimension",
+            "set_property",
+            "manage_classes"
+        )
+        $Implemented = @($Status.implemented_actions | ForEach-Object { [string]$_ })
+        $Missing = @($RequiredActions | Where-Object { $_ -notin $Implemented })
+        $Ready = [bool](
+            $Result.exitCode -eq 0 -and
+            $Status -and
+            $Status.native_bridge -eq $true -and
+            [string]$Status.dispatch_mode -eq "native_sdk" -and
+            [int]$Status.native_phase -ge 2 -and
+            $Status.cad_api_safe -eq $true -and
+            $Status.transport_only -eq $false -and
+            $Status.main_context_pump_ready -eq $true -and
+            $Missing.Count -eq 0
+        )
+        return [pscustomobject]@{
+            ready = $Ready
+            status = $Status
+            missing_actions = @($Missing)
+            error = ""
+        }
+    } catch {
+        return [pscustomobject]@{
+            ready = $false
+            status = $null
+            missing_actions = @()
+            error = $_.Exception.Message
+        }
+    }
+}
+
 function Get-LastNativeStep {
     param([object]$NativeRunnerResult)
     if ($NativeRunnerResult -and $NativeRunnerResult.steps) {
@@ -478,7 +537,7 @@ function New-NativeSummary {
     $Built = [bool]($Doctor.builtArtifact -or $Doctor.builtArtifactCandidate)
     $MissingAllowFlags = @($NativeRunnerResult.missingAllowFlags | ForEach-Object { [string]$_ })
     return [ordered]@{
-        requested = [bool]$FullNative
+        requested = $NativeRequested
         ok = -not $NativeFatal
         fatal = $NativeFatal
         status = [string]$NativeRunnerResult.status
@@ -632,6 +691,43 @@ function Invoke-FullNativeInstall {
     }
 }
 
+function Invoke-NativeInstallPlan {
+    param([string]$RepoRoot)
+    $PlanArgs = @(
+        "-VectorworksVersion", $VectorworksVersion,
+        "-Configuration", $NativeConfiguration,
+        "-MaxSteps", "1",
+        "-PlanOnly",
+        "-Json"
+    )
+    if ($SdkDir) { $PlanArgs += @("-SdkDir", $SdkDir) }
+    if ($SdkArchivePath) { $PlanArgs += @("-SdkArchivePath", $SdkArchivePath) }
+    if ($SdkExamplesDir) { $PlanArgs += @("-SdkExamplesDir", $SdkExamplesDir) }
+    if ($WorktreeRoot) { $PlanArgs += @("-WorktreeRoot", $WorktreeRoot) }
+    if ($NativeInstallDir) { $PlanArgs += @("-InstallDir", $NativeInstallDir) }
+
+    $Plan = Invoke-NativeRunnerJson -RepoRoot $RepoRoot -Arguments $PlanArgs
+    $Doctor = Get-NativeDoctorJson -RepoRoot $RepoRoot
+    $Summary = New-NativeSummary `
+        -NativeRunnerResult $Plan.payload `
+        -NativeExitCode $Plan.exitCode `
+        -Doctor $Doctor `
+        -Runs @($Plan.payload)
+    $LiveBridge = Get-LiveNativeBridgeStatus -RepoRoot $RepoRoot
+    $Summary["live_bridge_ready"] = [bool]$LiveBridge.ready
+    $Summary["live_bridge_status"] = $LiveBridge.status
+    $Summary["live_bridge_error"] = [string]$LiveBridge.error
+    if ($LiveBridge.ready -and [string]$NativeConfiguration -eq "Release") {
+        $Summary["status"] = "live_native_ready"
+        $Summary["current_stage"] = "ready"
+        $Summary["production_ready"] = $true
+        $Summary["native_production_ready"] = $true
+        $Summary["requires_action"] = $false
+        $Summary["exact_remaining_action"] = "Native bridge is live and production-capable. Trust or reload the MCP client, then call vw_ping."
+    }
+    return $Summary
+}
+
 function New-InstallPayload {
     param(
         [bool]$Ok,
@@ -645,8 +741,8 @@ function New-InstallPayload {
     $McpConfigPath = if ($RepoRoot) { Join-Path $RepoRoot ".mcp.json" } else { "" }
     $RunnerPath = if ($RepoRoot) { Join-Path $RepoRoot "scripts\run-mcp-server.ps1" } else { "" }
     $ContractInfo = Get-ContractInfo -RepoRoot $RepoRoot
-    $NativeRequiresAction = if ($Native) { [bool]$Native.requires_action } else { $false }
     $NativeReady = if ($Native) { [bool]$Native.native_production_ready } else { $false }
+    $NativeRequiresAction = -not $NativeReady
     $NativeSummary = if ($Native) {
         [ordered]@{
             ready = [bool]$Native.native_production_ready
@@ -667,6 +763,8 @@ function New-InstallPayload {
             phase2_smoke_tested = [bool]$Native.phase2_smoke_tested
             native_smoke_ready = [bool]$Native.native_smoke_ready
             vectorworks_interaction_required = [bool]$Native.vectorworks_interaction_required
+            live_bridge_ready = [bool]$Native.live_bridge_ready
+            live_bridge_status = $Native.live_bridge_status
         }
     } else {
         $null
@@ -676,8 +774,15 @@ function New-InstallPayload {
         setup_complete = $Ok
         install_complete = $Ok
         usable_now = $Ok
-        requires_action = -not $Ok
-        production_ready = [bool]($Ok -and (-not $FullNative -or $NativeReady))
+        requires_action = [bool]((-not $Ok) -or ($EnablePythonDialogFallback -and -not $NativeReady))
+        production_ready = $NativeReady
+        runtime_mode = if ($NativeReady) {
+            "native"
+        } elseif ($EnablePythonDialogFallback -and $Ok) {
+            "python_dialog_fallback"
+        } else {
+            "native_incomplete"
+        }
         client = $Client
         repo_root = $RepoRoot
         mcp_config_path = $McpConfigPath
@@ -690,25 +795,29 @@ function New-InstallPayload {
         vectorworks_loader = $LoaderPath
         vectorworks_launcher = $LauncherPath
         dependency_checks = @($DependencyChecks)
-        native_requested = [bool]$FullNative
+        native_requested = $NativeRequested
         native_ready = $NativeReady
         native_requires_action = $NativeRequiresAction
+        python_dialog_fallback_requested = [bool]$EnablePythonDialogFallback
+        python_dialog_fallback_ready = [bool]($EnablePythonDialogFallback -and $Ok)
         native_summary = $NativeSummary
         native = $Native
         user_message = $Message
         next_action = if ($Native -and $Native.native_production_ready) {
             "Native bridge acceptance smoke passed. Trust or reload the MCP client, then use vw_ping and production CAD tools."
+        } elseif ($EnablePythonDialogFallback -and $Ok) {
+            "Trust or add the repo .mcp.json, run vw_load_listener_2024.py in Vectorworks, and keep its modal dialog open only while Codex controls the document."
         } elseif ($Native -and $Native.requires_action) {
             $Native.exact_remaining_action
-        } elseif ($Ok) {
-            "Trust or add the repo .mcp.json in your MCP client, run vw_load_listener_2024.py in Vectorworks, then call vw_ping."
         } else {
             "Fix the reported installer error, then rerun install.ps1."
         }
         native_note = if ($FullNative) {
             "Full native setup attempts to open/restart Vectorworks and run native smoke automatically. The installer does not claim native production readiness until phase-0 and phase-2 smoke pass."
+        } elseif ($EnablePythonDialogFallback) {
+            "The explicitly requested Python dialog fallback is modal and blocks manual Vectorworks use while its listener dialog is open."
         } else {
-            "The native SDK bridge is an optional non-modal upgrade. Run install.ps1 -FullNative to build/install it on this PC."
+            "Native non-modal readiness is required by default. Review the reported native plan, then rerun with -FullNative only after approving its software, download, plug-in-write, restart, and smoke-test side effects."
         }
         raw_install_url = $RawInstallUrl
         error = $ErrorMessage
@@ -726,7 +835,9 @@ function Write-InstallPayload {
         Write-Host $Payload.user_message
         Write-Host "Repo: $($Payload.repo_root)"
         Write-Host "MCP config: $($Payload.mcp_config)"
-        Write-Host "Vectorworks loader: $($Payload.vectorworks_loader)"
+        if ($Payload.python_dialog_fallback_requested) {
+            Write-Host "Vectorworks modal fallback loader: $($Payload.vectorworks_loader)"
+        }
         if ($Payload.native_requested) {
             Write-Host "Native prereqs ready: $($Payload.native.prereqs_ready)"
             Write-Host "Native bridge built: $($Payload.native.bridge_built)"
@@ -735,20 +846,32 @@ function Write-InstallPayload {
         }
         Write-Host "Next: $($Payload.next_action)"
     } else {
-        Write-Error $Payload.user_message
+        Write-Warning $Payload.user_message
         if ($Payload.error) {
-            Write-Error $Payload.error
+            Write-Warning $Payload.error
         }
+        if ($Payload.native_summary) {
+            Write-Host "Native next stage: $($Payload.native_summary.next_stage)"
+            Write-Host "Native next command: $($Payload.native_summary.next_command)"
+            if ($Payload.native_summary.missing_allow_flags.Count -gt 0) {
+                Write-Host "Required approvals: $($Payload.native_summary.missing_allow_flags -join ', ')"
+            }
+        }
+        Write-Host "Next: $($Payload.next_action)"
     }
 }
 
 try {
+    if ($FullNative -and $EnablePythonDialogFallback) {
+        throw "-FullNative and -EnablePythonDialogFallback select conflicting runtime modes."
+    }
     Ensure-BaseDependencies
     $RepoRoot = Resolve-ConnectorRepoRoot
     $BootstrapPath = Join-Path $RepoRoot "scripts\bootstrap-agent.ps1"
     $BootstrapArgs = @("-Client", $Client)
     if (-not $NoVerify) { $BootstrapArgs += "-Verify" }
     if ($SkipClipboard) { $BootstrapArgs += "-SkipClipboard" }
+    if ($EnablePythonDialogFallback) { $BootstrapArgs += "-EnablePythonDialogFallback" }
 
     if ($Json) {
         $BootstrapResult = Invoke-ProcessCapture -FilePath "powershell.exe" -ArgumentList (@("-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $BootstrapPath) + @($BootstrapArgs)) -WorkingDirectory $RepoRoot
@@ -773,17 +896,27 @@ try {
         if ($NativeSummary.fatal) {
             throw "Full native setup failed before reaching the Vectorworks interaction boundary."
         }
+    } elseif ($NativeRequested) {
+        $NativeSummary = Invoke-NativeInstallPlan -RepoRoot $RepoRoot
+        if ($NativeSummary.fatal) {
+            throw "Native setup planning failed before producing a safe next step."
+        }
     }
 
-    $InstallOk = [bool](-not $FullNative -or $NativeSummary.native_production_ready)
+    $InstallOk = [bool](
+        ($NativeSummary -and $NativeSummary.native_production_ready) -or
+        $EnablePythonDialogFallback
+    )
     $Message = if ($FullNative -and $NativeSummary.native_production_ready) {
         "Vectorworks MCP installed. Native bridge is built, installed, and smoke-tested."
     } elseif ($FullNative -and $NativeSummary.vectorworks_interaction_required) {
         "Vectorworks MCP base install completed, but native bridge production readiness still requires action."
     } elseif ($FullNative) {
         "Vectorworks MCP base install completed, but native bridge production readiness is not complete."
+    } elseif ($EnablePythonDialogFallback) {
+        "Vectorworks MCP installed with the explicitly requested modal Python dialog fallback."
     } else {
-        "Vectorworks MCP installed and usable now with the Python dialog fallback."
+        "Vectorworks MCP host setup completed, but the required non-modal native bridge is not production-ready yet."
     }
     $Payload = New-InstallPayload -Ok $InstallOk -RepoRoot $RepoRoot -Message $Message -Native $NativeSummary
     Write-InstallPayload $Payload

@@ -56,6 +56,26 @@ function Read-Exact {
     return $Buffer
 }
 
+function Get-ProtocolAuthToken {
+    if ($env:VW_MCP_INSECURE_NO_AUTH) {
+        return ""
+    }
+    if ($env:VW_MCP_AUTH_TOKEN) {
+        return ([string]$env:VW_MCP_AUTH_TOKEN).Trim()
+    }
+    $TokenPath = if ($env:VW_MCP_AUTH_TOKEN_FILE) {
+        [System.IO.Path]::GetFullPath([string]$env:VW_MCP_AUTH_TOKEN_FILE)
+    } elseif ($env:USERPROFILE) {
+        Join-Path $env:USERPROFILE ".vectorworks-mcp\auth-token"
+    } else {
+        ""
+    }
+    if ($TokenPath -and (Test-Path -LiteralPath $TokenPath -PathType Leaf)) {
+        return (Get-Content -Raw -LiteralPath $TokenPath).Trim()
+    }
+    return ""
+}
+
 function Invoke-RawListenerPing {
     param(
         [string]$Address,
@@ -72,7 +92,12 @@ function Invoke-RawListenerPing {
         $Client.ReceiveTimeout = $TimeoutMs
         $Client.SendTimeout = $TimeoutMs
 
-        $Request = @{ id = "doctor-ping"; action = "ping"; params = @{} } | ConvertTo-Json -Compress
+        $RequestData = @{ id = "doctor-ping"; action = "ping"; params = @{} }
+        $AuthToken = Get-ProtocolAuthToken
+        if ($AuthToken) {
+            $RequestData.auth_token = $AuthToken
+        }
+        $Request = $RequestData | ConvertTo-Json -Compress
         $Payload = [System.Text.Encoding]::UTF8.GetBytes($Request)
         $Header = [System.BitConverter]::GetBytes([uint32]$Payload.Length)
         if ([System.BitConverter]::IsLittleEndian) {

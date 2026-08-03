@@ -44,6 +44,10 @@ constexpr std::array<ActionSpec, 2> kPhaseThreeActions = {{
     {"drawing_summary", ExecutionContext::VectorworksMainPluginContext, false, false},
 }};
 
+constexpr std::array<ActionSpec, 1> kPhaseFourActions = {{
+    {"apply_operations", ExecutionContext::VectorworksMainPluginContext, true, false},
+}};
+
 inline bool RequiresCadMainContext(std::string_view action) {
     for (const auto& spec : kPhaseOneActions) {
         if (spec.action == action) {
@@ -56,6 +60,11 @@ inline bool RequiresCadMainContext(std::string_view action) {
         }
     }
     for (const auto& spec : kPhaseThreeActions) {
+        if (spec.action == action) {
+            return true;
+        }
+    }
+    for (const auto& spec : kPhaseFourActions) {
         if (spec.action == action) {
             return true;
         }
@@ -80,6 +89,11 @@ inline const ActionSpec* FindActionSpec(std::string_view action) {
         }
     }
     for (const auto& spec : kPhaseThreeActions) {
+        if (spec.action == action) {
+            return &spec;
+        }
+    }
+    for (const auto& spec : kPhaseFourActions) {
         if (spec.action == action) {
             return &spec;
         }

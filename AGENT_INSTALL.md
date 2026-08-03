@@ -35,8 +35,11 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "irm https://
 
 The one-click installer clones or updates the repo at
 `$env:USERPROFILE\repos\vectorworks-mcp`, installs the repo-local Python
-runtime, generates durable Vectorworks handoff files, runs host verification,
-and leaves `.mcp.json` ready for the MCP client to trust. It defaults to
+runtime, runs host verification, leaves `.mcp.json` ready for the MCP client to
+trust, and returns a guarded native bridge plan. Native non-modal readiness is
+the default required outcome. The command does not silently install Visual
+Studio, download a large SDK, modify the Vectorworks user Plug-ins folder,
+restart Vectorworks, or select the modal Python fallback. It defaults to
 `-Client HostOnly`, so it does not write Claude Code user config.
 
 From an existing checkout:
@@ -70,6 +73,29 @@ with license, recovery, plug-in approval, or startup prompts, JSON reports
 `native_summary.vectorworks_automation_attempted: true` plus the exact
 `native_summary.next_command` or `native_summary.acceptance_next_command` to
 resume after the prompt is cleared.
+
+`-FullNative` is explicit consent for side effects. Never add it automatically
+because a user asked to connect, inspect, diagnose, or plan setup. It cannot be
+combined with `-EnablePythonDialogFallback`.
+
+If native setup must be deferred and the user explicitly accepts a modal agent
+session that prevents parallel manual Vectorworks use, enable the compatibility
+fallback:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -EnablePythonDialogFallback -Json
+```
+
+For the bundled helper, the equivalent opt-in is:
+
+```powershell
+py -3 .\plugins\vectorworks\bin\vectorworksctl agent-install --repo-path $PWD --allow-python-fallback --json
+```
+
+Keep the `VW MCP Listener` dialog open while the agent works. Its modality
+blocks manual Vectorworks UI use; close or stop it before the user resumes
+manual work. Treat this as degraded fallback readiness, not native production
+readiness.
 
 ## Preferred Claude Code Plugin Path
 
@@ -116,7 +142,9 @@ For Codex/non-Claude installs where you do not want to touch Claude Code config:
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-agent.ps1 -Client HostOnly -Verify
 ```
 
-Then add or trust the repo `.mcp.json`. It is client-neutral and uses the
+This prepares host/client files only; it does not satisfy native runtime
+readiness or authorize the Python dialog fallback. Then add or trust the repo
+`.mcp.json`. It is client-neutral and uses the
 repo-relative `scripts/run-mcp-server.ps1` path. If the client launches MCP
 servers from outside the repo root, configure the same stdio server with an
 absolute `-File C:\path\to\vectorworks-mcp\scripts\run-mcp-server.ps1`.
@@ -128,15 +156,15 @@ py -3 .\plugins\vectorworks\bin\vectorworksctl agent-install --repo-path $PWD --
 py -3 .\plugins\vectorworks\bin\vectorworksctl doctor --repo-path $PWD --json
 ```
 
-`agent-install` prepares the MCP server and generated Vectorworks loader through
-the Python dialog fallback while also returning the guarded native bridge plan.
-If the JSON says `setup_complete: true` and `native_requires_action: true`, the
-install is usable now; the native SDK bridge is only an optional non-modal
-upgrade path.
+`agent-install` prepares the MCP host and returns the guarded native bridge
+plan. It does not select the Python dialog listener unless
+`--allow-python-fallback` is present. Without that explicit escape hatch,
+`native_requires_action: true` means setup remains incomplete and the reported
+native step is required.
 
-## Native Long-Term Setup
+## Required Native Setup
 
-The long-term non-modal target is a compiled Vectorworks SDK bridge. It needs
+The production non-modal runtime is a compiled Vectorworks SDK bridge. It needs
 the official Vectorworks SDK and Visual Studio C++ build tools.
 
 First inspect the plan:
@@ -173,22 +201,27 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-
 
 Agents should parse:
 
-- `ok`: the install is usable now. For `agent-install --json`, this matches
-  `setup_complete` and exits nonzero when the MCP install is not usable.
+- `ok`: the requested runtime is usable now. For `agent-install --json`, this
+  matches `setup_complete` and exits nonzero when the requested runtime is not
+  usable.
 - `command_ok`: the helper command ran far enough to return diagnostics or a
   native setup plan. This can be true while `setup_complete` is false.
-- `setup_complete` / `install_complete` / `usable_now`: the MCP install is
-  usable now. This can be true with the Python dialog fallback even when native
-  SDK setup is still pending.
+- `setup_complete` / `install_complete` / `usable_now`: native production
+  readiness is complete by default. These fields may describe degraded modal
+  readiness only when `-EnablePythonDialogFallback` or
+  `--allow-python-fallback` was explicitly supplied; the handoff must say that
+  manual Vectorworks UI use is blocked.
 - `user_message`: short install status string safe to show to users.
-- `requires_action`: the usable MCP install still needs more action.
+- `requires_action`: setup still needs the reported action.
 - `repo_root`: resolved companion checkout.
 - `mcp_config_path`: MCP client config file to trust or add.
 - `runner_path`: stdio runner path inside the companion checkout.
 - `launcher_path`: generated machine-specific Vectorworks launcher.
 - `loader_path`: stable Vectorworks script/menu loader to run in Vectorworks.
 - `next_user_step`: concise next human-facing install step.
-- `cad_ready`: Python fallback listener is running and safe for CAD handlers.
+- `cad_ready`: the requested runtime is safe for CAD handlers. When this is
+  true only because the explicit Python fallback is active, it does not imply
+  manual UI availability.
 - `native_ready`: native bridge setup is complete according to the runner.
 - `native_summary`: root installer/native status summary. For `install.ps1
   -FullNative -Json`, parse `native_summary.next_stage`,
@@ -201,7 +234,8 @@ Agents should parse:
   `native_summary.vectorworks_interaction_required`. If phase 0 passes but
   phase 2 needs a retry, use `native_summary.acceptance_next_command`.
 - `native_setup_complete`: native bridge setup is complete according to the runner.
-- `native_requires_action`: native bridge setup still has optional follow-up work.
+- `native_requires_action`: native bridge setup still has required follow-up
+  work unless the user explicitly accepted degraded modal fallback readiness.
 - `native_summary.next_stage`: the next native setup stage.
 - `native_summary.acceptance_next_command`: the command to resume final native
   production smoke after Vectorworks prompts are cleared.
@@ -210,12 +244,14 @@ Agents should parse:
 - `python_fallback_setup`: fallback launcher/loader setup result.
 - `listener_doctor.overall`: current Python fallback session state.
 
-Treat `ok: true` as "the control command ran and returned a plan", not as full
-CAD readiness. Do not report `native_requires_action: true` as an install
-failure when `setup_complete` is true. Do not call CAD tools unless `cad_ready`
-is true or a
-smoke-tested native bridge reports `cad_api_safe: true`, `transport_only:
-false`, `main_context_pump_ready: true`, and supports the requested
-`implemented_actions` entry. Current phase-2 production work requires
+Treat `command_ok: true` as "the control command ran and returned a plan", not
+as full CAD readiness. By default, do not report setup complete while
+`native_requires_action: true`. The only exception is an explicitly requested
+Python fallback, which must be labelled modal and incompatible with simultaneous
+manual Vectorworks use. Do not call CAD tools unless a smoke-tested native
+bridge reports `cad_api_safe: true`, `transport_only: false`,
+`main_context_pump_ready: true`, and supports the requested
+`implemented_actions` entry, or the user explicitly selected a CAD-safe modal
+fallback. Current phase-2 production work requires
 `create_wall`, `create_text`, `create_linear_dimension`, `set_property`, and
 `manage_classes` when those tool families are requested.

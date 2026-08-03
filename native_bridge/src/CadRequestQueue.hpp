@@ -20,6 +20,8 @@ struct QueuedCadRequest {
     Protocol::RequestEnvelope request;
     bool completed = false;
     Protocol::ResponseEnvelope response;
+    std::chrono::steady_clock::time_point enqueuedAt = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point dequeuedAt{};
 };
 
 class CadRequestQueue {
@@ -62,6 +64,7 @@ public:
             pending_.pop_front();
             const auto found = requests_.find(id);
             if (found != requests_.end()) {
+                found->second.dequeuedAt = std::chrono::steady_clock::now();
                 return found->second.request;
             }
         }
@@ -152,6 +155,18 @@ public:
     std::size_t InFlightCountForDiagnostics() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return requests_.size();
+    }
+
+    double QueueWaitMillisecondsForDiagnostics(const std::string& id) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto found = requests_.find(id);
+        if (found == requests_.end()) {
+            return 0.0;
+        }
+        const auto end = found->second.dequeuedAt == std::chrono::steady_clock::time_point{}
+            ? std::chrono::steady_clock::now()
+            : found->second.dequeuedAt;
+        return std::chrono::duration<double, std::milli>(end - found->second.enqueuedAt).count();
     }
 
 private:

@@ -12,7 +12,8 @@ param(
     [switch]$NoClaudeConfig,
     [switch]$CopyLoaderToClipboard,
     [switch]$BestEffortClipboard,
-    [switch]$Verify
+    [switch]$Verify,
+    [switch]$EnablePythonDialogFallback
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,6 +29,13 @@ $AuthTokenPath = if ($env:VW_MCP_AUTH_TOKEN_FILE) {
     [System.IO.Path]::GetFullPath($env:VW_MCP_AUTH_TOKEN_FILE)
 } else {
     Join-Path $DefaultStateDir "auth-token"
+}
+$LauncherPathWasExplicit = $PSBoundParameters.ContainsKey("LauncherPath")
+$LoaderPathWasExplicit = $PSBoundParameters.ContainsKey("LoaderPath")
+
+if (-not $EnablePythonDialogFallback -and
+    ($CopyLoaderToClipboard -or $LauncherPathWasExplicit -or $LoaderPathWasExplicit)) {
+    throw "Python dialog fallback artifacts require -EnablePythonDialogFallback."
 }
 
 if (-not $LauncherPath) {
@@ -201,7 +209,8 @@ function New-ClaudeServerConfig {
         VW_MCP_HOST = $HostName
         VW_MCP_PORT = "$ListenPort"
         VW_MCP_TIMEOUT = "$ToolTimeoutSeconds"
-        VW_MCP_PREFLIGHT_CACHE_MS = "750"
+        VW_MCP_PREFLIGHT_CACHE_MS = "5000"
+        VW_MCP_TOOL_PROFILE = "fast-native"
         VW_MCP_STOP_DIR = $DefaultStateDir
     }
     if ($AuthEnabled) {
@@ -273,8 +282,12 @@ if (-not $SkipInstall) {
 
 $AuthToken = Ensure-AuthToken
 $AuthEnabled = [bool]$AuthToken
-$GeneratedLauncherPath = New-VectorworksLauncher -Path $LauncherPath -HostName $ListenHost -ListenPort $Port -AuthEnabled $AuthEnabled
-$GeneratedLoaderPath = New-VectorworksLoader -Path $LoaderPath -TargetLauncherPath $GeneratedLauncherPath
+$GeneratedLauncherPath = ""
+$GeneratedLoaderPath = ""
+if ($EnablePythonDialogFallback) {
+    $GeneratedLauncherPath = New-VectorworksLauncher -Path $LauncherPath -HostName $ListenHost -ListenPort $Port -AuthEnabled $AuthEnabled
+    $GeneratedLoaderPath = New-VectorworksLoader -Path $LoaderPath -TargetLauncherPath $GeneratedLauncherPath
+}
 $Config = New-ClaudeServerConfig -HostName $ListenHost -ListenPort $Port -ToolTimeoutSeconds $TimeoutSeconds -AuthEnabled $AuthEnabled
 $Json = $Config | ConvertTo-Json -Depth 10 -Compress
 
@@ -303,9 +316,13 @@ if (-not $NoClaudeConfig) {
 Write-Host "Vectorworks MCP setup complete."
 Write-Host "Repo: $RepoRoot"
 Write-Host "Listener address: $ListenHost`:$Port"
-Write-Host "Vectorworks launcher: $GeneratedLauncherPath"
-Write-Host "Vectorworks loader to paste/install: $GeneratedLoaderPath"
 Write-Host "MCP runner: $RunnerPath"
+if ($EnablePythonDialogFallback) {
+    Write-Host "Python dialog fallback launcher: $GeneratedLauncherPath"
+    Write-Host "Python dialog fallback loader to paste/install: $GeneratedLoaderPath"
+} else {
+    Write-Host "Python dialog fallback: disabled (use -EnablePythonDialogFallback to generate the modal loader)."
+}
 
 if ($CopyLoaderToClipboard) {
     $CopyArgs = @("-LauncherPath", $GeneratedLauncherPath, "-LoaderPath", $GeneratedLoaderPath)
@@ -317,6 +334,14 @@ if ($CopyLoaderToClipboard) {
 }
 
 if ($Verify) {
-    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $VerifierPath -Name $Name -LauncherPath $GeneratedLauncherPath -LoaderPath $GeneratedLoaderPath
+    $VerifyArgs = @("-Name", $Name)
+    if ($EnablePythonDialogFallback) {
+        $VerifyArgs += @(
+            "-EnablePythonDialogFallback",
+            "-LauncherPath", $GeneratedLauncherPath,
+            "-LoaderPath", $GeneratedLoaderPath
+        )
+    }
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $VerifierPath @VerifyArgs
     exit $LASTEXITCODE
 }

@@ -30,7 +30,7 @@ if ($ShouldRegenerate) {
     if (-not (Test-Path -LiteralPath $RegisterScript)) {
         throw "register-claude-code.ps1 was not found at $RegisterScript"
     }
-    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $RegisterScript -SkipInstall -NoClaudeConfig -LauncherPath $LauncherPath -LoaderPath $LoaderPath
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $RegisterScript -SkipInstall -NoClaudeConfig -EnablePythonDialogFallback -LauncherPath $LauncherPath -LoaderPath $LoaderPath
     if ($LASTEXITCODE -ne 0) {
         throw "Could not regenerate Vectorworks loader. register-claude-code.ps1 exited with code $LASTEXITCODE."
     }

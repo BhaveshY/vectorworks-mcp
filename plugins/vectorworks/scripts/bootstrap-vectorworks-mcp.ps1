@@ -42,7 +42,7 @@ if (-not $SkipContract) {
 & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $Runner -SetupOnly
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-$RegisterArgs = @("-SkipInstall", "-NoClaudeConfig", "-LauncherPath", $Launcher, "-LoaderPath", $Loader)
+$RegisterArgs = @("-SkipInstall", "-NoClaudeConfig", "-EnablePythonDialogFallback", "-LauncherPath", $Launcher, "-LoaderPath", $Loader)
 if ($ListenHost) {
     $RegisterArgs += @("-ListenHost", $ListenHost)
 } elseif ($env:VW_MCP_HOST) {
@@ -63,7 +63,7 @@ if ($TimeoutSeconds -gt 0) {
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 if (-not $SkipVerify) {
-    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $Verify -LauncherPath $Launcher -LoaderPath $Loader
+    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $Verify -EnablePythonDialogFallback -LauncherPath $Launcher -LoaderPath $Loader
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 

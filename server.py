@@ -19,10 +19,13 @@ Environment variables, all optional:
   VW_MCP_ENABLE_RUN_SCRIPT
                           set to 1 to expose trusted Python execution
   VW_MCP_PREFLIGHT_CACHE_MS
-                          safe-CAD preflight success cache in ms, default 750
+                          safe-CAD preflight success cache in ms, default 5000
+  VW_MCP_TOOL_PROFILE     fast-native (default) or explicit diagnostic compat
+  VW_MCP_TRACE            set to 1 for token-safe request timing JSON on stderr
 """
 
 import atexit
+import hashlib
 import ipaddress
 import json
 import math
@@ -59,7 +62,7 @@ DEFAULT_PORT = 9877
 DEFAULT_TIMEOUT = 60.0
 DEFAULT_HEALTH_TIMEOUT = 2.0
 DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024
-DEFAULT_PREFLIGHT_CACHE_MS = 750
+DEFAULT_PREFLIGHT_CACHE_MS = 5_000
 MAX_PREFLIGHT_CACHE_MS = 5_000
 DEFAULT_AUTH_TOKEN_FILENAME = "auth-token"
 NATIVE_PHASE_ONE_REQUIRED_ACTIONS = {
@@ -93,6 +96,10 @@ NATIVE_PHASE_TWO_CREATE_OBJECT_TYPES = NATIVE_PHASE_ONE_CREATE_OBJECT_TYPES | {
     "linear_dimension",
     "text",
     "wall",
+}
+NATIVE_PHASE_FOUR_CREATE_OBJECT_TYPES = NATIVE_PHASE_TWO_CREATE_OBJECT_TYPES | {
+    "polygon",
+    "polyline",
 }
 NATIVE_PHASE_ONE_SELECTION_ACTIONS = {
     "clear",
@@ -277,6 +284,7 @@ PREFLIGHT_CACHE_SECONDS = PREFLIGHT_CACHE_MS / 1000.0
 AUTH_TOKEN = _load_auth_token()
 ALLOW_INSECURE_NO_AUTH = _truthy_env("VW_MCP_INSECURE_NO_AUTH")
 ENABLE_RUN_SCRIPT = _truthy_env("VW_MCP_ENABLE_RUN_SCRIPT")
+TRACE_ENABLED = _truthy_env("VW_MCP_TRACE")
 _EXACT_NAME_CRITERIA_RE = re.compile(r"^\(\(N='([^']{1,255})'\)\)$")
 _SIMPLE_FIND_CRITERIA_RE = re.compile(
     r"^(?P<key>[NTC])\s*=\s*(?:'(?P<quoted>[^']{1,255})'|(?P<bare>[A-Za-z0-9_. -]{1,255}))$",
@@ -337,9 +345,22 @@ _sock: Optional[socket.socket] = None
 _lock = threading.Lock()
 _cad_safe_cache_lock = threading.Lock()
 _cad_safe_cache: Optional[tuple[float, dict[str, Any]]] = None
+_operation_idempotency_lock = threading.Lock()
+_operation_idempotency_cache: dict[str, str] = {}
+_MAX_OPERATION_IDEMPOTENCY_ENTRIES = 256
+_IDEMPOTENCY_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_NATIVE_TIMING_KEYS = {
+    "queue_wait_ms",
+    "handler_ms",
+    "native_total_ms",
+    "total_native_ms",
+    "transport_ms",
+    "serialize_ms",
+    "pump_interval_ms",
+}
 
 
-ObjectType = Literal["rect", "rectangle", "box", "circle", "oval", "line", "arc", "polygon"]
+ObjectType = Literal["rect", "rectangle", "box", "circle", "oval", "line", "arc", "polygon", "polyline"]
 BatchObjectType = Literal[
     "rect",
     "rectangle",
@@ -348,6 +369,8 @@ BatchObjectType = Literal[
     "oval",
     "line",
     "arc",
+    "polygon",
+    "polyline",
     "wall",
     "text",
     "dimension",
@@ -362,7 +385,13 @@ WorksheetAction = Literal["list", "read", "write", "read_range"]
 SymbolAction = Literal["list", "insert"]
 ExportFormat = Literal["pdf", "dxf", "dwg", "image"]
 ImportFormat = Literal["auto", "dxf", "dwg", "png", "jpg", "jpeg", "tif", "tiff", "bmp"]
-SelectionAction = Literal["get", "select", "clear", "delete", "move", "duplicate"]
+FastNativeSelectionAction = Literal["get", "select", "clear", "delete"]
+CompatSelectionAction = Literal["get", "select", "clear", "delete", "move", "duplicate"]
+SelectionAction = (
+    CompatSelectionAction
+    if os.environ.get("VW_MCP_TOOL_PROFILE", "fast-native").strip().lower() == "compat"
+    else FastNativeSelectionAction
+)
 AgentContextProfile = Literal["brief", "production", "full"]
 LookupDetail = Literal["brief", "normal", "full"]
 MAX_OBJECT_QUERY_LIMIT = 1000
@@ -421,6 +450,42 @@ Point2D = Annotated[list[float], Field(min_length=2, max_length=2)]
 PointList = Annotated[list[Point2D], Field(max_length=1000)]
 PolygonPointList = Annotated[list[Point2D], Field(min_length=3, max_length=1000)]
 PrimitiveObjectList = Annotated[list[dict[str, Any]], Field(min_length=1, max_length=250)]
+ExecuteOperationList = Annotated[
+    list[dict[str, Any]],
+    Field(
+        min_length=1,
+        max_length=250,
+        description=(
+            "Typed operations. Supported forms are "
+            '{"type":"create","params":{"object_type":"rect",...}} and '
+            '{"type":"set_properties","params":{"edits":[...]}}.'
+        ),
+        json_schema_extra={
+            "items": {
+                "type": "object",
+                "required": ["type", "params"],
+                "additionalProperties": False,
+                "properties": {
+                    "type": {"type": "string", "enum": ["create", "set_properties"]},
+                    "operation_id": {"type": "string", "minLength": 1, "maxLength": 128},
+                    "params": {
+                        "type": "object",
+                        "description": "Parameters accepted by the corresponding typed operation.",
+                    },
+                },
+            }
+        },
+    ),
+]
+IdempotencyKey = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+        description="Stable caller-generated key reused only for the identical operation plan.",
+    ),
+]
 FloorPlanRoomList = Annotated[list[dict[str, Any]], Field(min_length=1, max_length=100)]
 OptionalFloorPlanRoomList = Annotated[list[dict[str, Any]], Field(max_length=100)]
 FloorPlanItemList = Annotated[list[dict[str, Any]], Field(max_length=250)]
@@ -577,6 +642,17 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
         "idempotentHint": False,
         "openWorldHint": True,
         "requires_cad_preflight": True,
+    },
+    "vw_execute_operations": {
+        "category": "document-write",
+        "wire_action": "apply_operations",
+        "composes_actions": ["apply_operations"],
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+        "writesDocument": True,
     },
     "vw_plan_schematic_floor_plan": {
         "category": "schematic-floor-plan",
@@ -935,6 +1011,49 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
     },
 }
 
+FAST_NATIVE_TOOL_NAMES = frozenset(
+    {
+        "vw_agent_context",
+        "vw_bridge_status",
+        "vw_capabilities",
+        "vw_drawing_summary",
+        "vw_execute_operations",
+        "vw_get_document_info",
+        "vw_get_layers",
+        "vw_lookup_objects",
+        "vw_manage_classes",
+        "vw_ping",
+        "vw_preflight_for_cad",
+        "vw_selection",
+        "vw_stop_listener",
+        "vw_tool_safety",
+    }
+)
+_SUPPORTED_TOOL_PROFILES = frozenset({"compat", "fast-native"})
+_tool_profile_applied = False
+
+
+def _configured_tool_profile() -> str:
+    return (os.environ.get("VW_MCP_TOOL_PROFILE", "fast-native").strip().lower() or "fast-native")
+
+
+def _visible_tool_names() -> set[str]:
+    return set(TOOL_SAFETY if _configured_tool_profile() == "compat" else FAST_NATIVE_TOOL_NAMES)
+
+
+def _visible_tool_safety_entry(tool_name: str) -> dict[str, Any]:
+    metadata = TOOL_SAFETY[tool_name]
+    if _configured_tool_profile() != "compat" and tool_name == "vw_selection":
+        visible = dict(metadata)
+        actions = metadata.get("actions", {})
+        visible["actions"] = {
+            action: actions[action]
+            for action in ("get", "select", "clear", "delete")
+            if action in actions
+        }
+        return visible
+    return metadata
+
 
 _ACTION_SAFETY: dict[str, dict[str, Any]] = {}
 for _tool_name, _safety in TOOL_SAFETY.items():
@@ -969,6 +1088,85 @@ def _annotations_for(tool_name: str) -> dict[str, bool]:
 
 def _tool(tool_name: str):
     return mcp.tool(annotations=_annotations_for(tool_name))
+
+
+def _new_request_trace(tool: str, action: str) -> dict[str, Any]:
+    return {
+        "trace_id": uuid.uuid4().hex[:16],
+        "tool": tool,
+        "action": action,
+        "started": time.perf_counter(),
+        "preflight_ms": 0.0,
+        "wire_ms": 0.0,
+        "health_wire_ms": 0.0,
+        "request_ids": [],
+        "attempts": 0,
+        "preflight_cache_hit": False,
+    }
+
+
+def _safe_native_timing_meta(value: Any) -> dict[str, float]:
+    if not isinstance(value, dict):
+        return {}
+    timings = value.get("timings", value)
+    if not isinstance(timings, dict):
+        return {}
+    safe: dict[str, float] = {}
+    for key in _NATIVE_TIMING_KEYS:
+        raw = timings.get(key)
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(float(raw)):
+            safe[key] = round(float(raw), 3)
+    return safe
+
+
+def _finish_request_trace(trace: dict[str, Any], outcome: str) -> dict[str, Any]:
+    total_ms = max(0.0, (time.perf_counter() - float(trace.get("started", time.perf_counter()))) * 1000.0)
+    request_ids = trace.get("request_ids")
+    payload: dict[str, Any] = {
+        "trace_id": str(trace.get("trace_id", "")),
+        "request_id": request_ids[-1] if isinstance(request_ids, list) and request_ids else "",
+        "total_ms": round(total_ms, 3),
+        "preflight_ms": round(float(trace.get("preflight_ms", 0.0)), 3),
+        "wire_ms": round(float(trace.get("wire_ms", 0.0)), 3),
+        "health_wire_ms": round(float(trace.get("health_wire_ms", 0.0)), 3),
+        "attempts": int(trace.get("attempts", 0)),
+        "preflight_cache_hit": bool(trace.get("preflight_cache_hit", False)),
+        "outcome": outcome,
+    }
+    native = _safe_native_timing_meta(trace.get("native"))
+    if native:
+        payload["native"] = native
+    return payload
+
+
+def _emit_request_trace(trace: dict[str, Any], timing: dict[str, Any]) -> None:
+    if not TRACE_ENABLED:
+        return
+    event = {
+        "schema_version": 1,
+        "event": "vectorworks_mcp_request",
+        "ts_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "trace_id": timing.get("trace_id"),
+        "request_id": timing.get("request_id"),
+        "component": "mcp_host",
+        "tool": trace.get("tool"),
+        "action": trace.get("action"),
+        "outcome": timing.get("outcome"),
+        "total_ms": timing.get("total_ms"),
+        "preflight_ms": timing.get("preflight_ms"),
+        "wire_ms": timing.get("wire_ms"),
+        "health_wire_ms": timing.get("health_wire_ms"),
+        "attempts": timing.get("attempts"),
+        "preflight_cache_hit": timing.get("preflight_cache_hit"),
+    }
+    if "native" in timing:
+        event["native"] = timing["native"]
+    print(json.dumps(event, ensure_ascii=True, separators=(",", ":"), sort_keys=True), file=sys.stderr, flush=True)
+
+
+def _clear_operation_idempotency_cache() -> None:
+    with _operation_idempotency_lock:
+        _operation_idempotency_cache.clear()
 
 
 def _clear_cad_safe_cache():
@@ -1200,6 +1398,11 @@ def _native_phase(status: dict[str, Any]) -> int:
 
 
 def _native_create_object_types(status: dict[str, Any]) -> set[str]:
+    advertised = status.get("create_object_types")
+    if isinstance(advertised, list) and all(isinstance(value, str) for value in advertised):
+        return {value.strip().lower() for value in advertised if value.strip()}
+    if _native_phase(status) >= 4:
+        return set(NATIVE_PHASE_FOUR_CREATE_OBJECT_TYPES)
     if _native_phase(status) >= 2:
         return set(NATIVE_PHASE_TWO_CREATE_OBJECT_TYPES)
     return set(NATIVE_PHASE_ONE_CREATE_OBJECT_TYPES)
@@ -1305,7 +1508,11 @@ def _evaluate_cad_preflight_status(
                 "main_context_pump_ready": status.get("main_context_pump_ready"),
                 "implemented_actions": status.get("implemented_actions"),
                 "reason": "native_bridge_action_not_implemented",
-                "next_action": "Do not dispatch this CAD action to the native bridge. Use an implemented action, switch to the Python dialog listener for broader legacy coverage, or implement the native handler first.",
+                "next_action": (
+                    "Do not dispatch this CAD action or switch runtimes. "
+                    "Upgrade/restart the phase-4 native bridge and retry only after "
+                    "the required action appears in implemented_actions."
+                ),
                 "native_readiness_errors": native_action_errors,
                 "raw_status": status,
             },
@@ -1376,34 +1583,55 @@ def _cached_cad_safe_status() -> Optional[dict[str, Any]]:
     return None
 
 
-def _cad_preflight_block(action: str, params: Optional[dict[str, Any]] = None) -> Optional[str]:
-    cached_status = _cached_cad_safe_status()
-    if cached_status is not None:
-        payload = _evaluate_cad_preflight_status(cached_status, blocked_action=action, blocked_params=params)
-        if payload["ok"]:
+def _cad_preflight_block(
+    action: str,
+    params: Optional[dict[str, Any]] = None,
+    trace: Optional[dict[str, Any]] = None,
+) -> Optional[str]:
+    started = time.perf_counter()
+    try:
+        cached_status = _cached_cad_safe_status()
+        if cached_status is not None:
+            if trace is not None:
+                trace["preflight_cache_hit"] = True
+            payload = _evaluate_cad_preflight_status(cached_status, blocked_action=action, blocked_params=params)
+            if payload["ok"]:
+                return None
+            return json.dumps(payload, indent=2, sort_keys=True)
+
+        response = _request_once_health("ping", None, trace)
+        if response.get("success") is not True:
+            payload = _cad_preflight_ping_error_payload(response, blocked_action=action)
+            return json.dumps(payload, indent=2, sort_keys=True)
+
+        status = response.get("result")
+        payload = _evaluate_cad_preflight_status(status, blocked_action=action, blocked_params=params)
+        if payload["ok"] and isinstance(status, dict):
+            _remember_cad_safe_status(status)
             return None
         return json.dumps(payload, indent=2, sort_keys=True)
-
-    response = _request_once_health("ping", None)
-    if response.get("success") is not True:
-        payload = _cad_preflight_ping_error_payload(response, blocked_action=action)
-        return json.dumps(payload, indent=2, sort_keys=True)
-
-    status = response.get("result")
-    payload = _evaluate_cad_preflight_status(status, blocked_action=action, blocked_params=params)
-    if payload["ok"] and isinstance(status, dict):
-        _remember_cad_safe_status(status)
-        return None
-    return json.dumps(payload, indent=2, sort_keys=True)
+    finally:
+        if trace is not None:
+            trace["preflight_ms"] = (
+                float(trace.get("preflight_ms", 0.0)) + (time.perf_counter() - started) * 1000.0
+            )
 
 
-def _request_once(action: str, params: Optional[dict[str, Any]]) -> dict[str, Any]:
-    _connect()
+def _request_once(
+    action: str,
+    params: Optional[dict[str, Any]],
+    trace: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
     request_id = uuid.uuid4().hex[:8]
+    if trace is not None:
+        trace.setdefault("request_ids", []).append(request_id)
+        trace["attempts"] = int(trace.get("attempts", 0)) + 1
     request = {"id": request_id, "action": action, "params": params or {}}
     if AUTH_TOKEN:
         request["auth_token"] = AUTH_TOKEN
+    wire_started = time.perf_counter()
     try:
+        _connect()
         payload = _json_bytes(request)
         _send_frame(payload)
     except ProtocolError as exc:
@@ -1415,12 +1643,23 @@ def _request_once(action: str, params: Optional[dict[str, Any]]) -> dict[str, An
         response = _decode_response(_recv_frame())
     except (ConnectionError, TimeoutError, socket.timeout, OSError) as exc:
         raise RequestTransportError(action, "response", exc) from exc
+    finally:
+        if trace is not None:
+            trace["wire_ms"] = float(trace.get("wire_ms", 0.0)) + (time.perf_counter() - wire_started) * 1000.0
     _validate_response_envelope(response, request_id, action)
+    if trace is not None and isinstance(response.get("meta"), dict):
+        trace["native"] = response["meta"]
     return response
 
 
-def _request_once_health(action: str, params: Optional[dict[str, Any]]) -> dict[str, Any]:
+def _request_once_health(
+    action: str,
+    params: Optional[dict[str, Any]],
+    trace: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
     request_id = uuid.uuid4().hex[:8]
+    if trace is not None:
+        trace.setdefault("request_ids", []).append(request_id)
     request = {"id": request_id, "action": action, "params": params or {}}
     if AUTH_TOKEN:
         request["auth_token"] = AUTH_TOKEN
@@ -1429,6 +1668,7 @@ def _request_once_health(action: str, params: Optional[dict[str, Any]]) -> dict[
     except ProtocolError as exc:
         raise RequestNotSentError(action, exc) from exc
 
+    wire_started = time.perf_counter()
     try:
         with socket.create_connection((HOST, PORT), timeout=HEALTH_TIMEOUT) as sock:
             sock.settimeout(HEALTH_TIMEOUT)
@@ -1440,18 +1680,27 @@ def _request_once_health(action: str, params: Optional[dict[str, Any]]) -> dict[
             response = _decode_response(_recv_frame_from(sock))
     except (ConnectionError, TimeoutError, socket.timeout, OSError) as exc:
         raise RequestTransportError(action, "health", exc) from exc
+    finally:
+        if trace is not None:
+            trace["health_wire_ms"] = (
+                float(trace.get("health_wire_ms", 0.0)) + (time.perf_counter() - wire_started) * 1000.0
+            )
     _validate_response_envelope(response, request_id, action)
     return response
 
 
-def _send_health(action: str = "ping", params: Optional[dict[str, Any]] = None) -> str:
+def _send_health(
+    action: str = "ping",
+    params: Optional[dict[str, Any]] = None,
+    trace: Optional[dict[str, Any]] = None,
+) -> str:
     if _CONFIG_ERROR:
         return f"Configuration error: {_CONFIG_ERROR}"
     auth_error = _auth_configuration_error()
     if auth_error:
         return f"Configuration error: {auth_error}"
     try:
-        response = _request_once_health(action, params)
+        response = _request_once_health(action, params, trace)
         if response.get("success") is True:
             return _format_result(response.get("result", "OK"))
         return f"VW Error ({action}): {response.get('error', 'Unknown listener error')}"
@@ -1468,7 +1717,12 @@ def _send_health(action: str = "ping", params: Optional[dict[str, Any]] = None) 
         return f"Unexpected error while talking to Vectorworks: {exc}"
 
 
-def _send(action: str, params: Optional[dict[str, Any]] = None, require_cad_safe: bool = False) -> str:
+def _send(
+    action: str,
+    params: Optional[dict[str, Any]] = None,
+    require_cad_safe: bool = False,
+    trace: Optional[dict[str, Any]] = None,
+) -> str:
     if _CONFIG_ERROR:
         return f"Configuration error: {_CONFIG_ERROR}"
     auth_error = _auth_configuration_error()
@@ -1480,13 +1734,13 @@ def _send(action: str, params: Optional[dict[str, Any]] = None, require_cad_safe
             try:
                 if require_cad_safe:
                     try:
-                        blocked = _cad_preflight_block(action, params)
+                        blocked = _cad_preflight_block(action, params, trace)
                     except ProtocolError as exc:
                         _close()
                         return f"Protocol error: {exc}. Restart the Vectorworks listener if this persists."
                     if blocked:
                         return blocked
-                response = _request_once(action, params)
+                response = _request_once(action, params, trace)
                 if response.get("success") is True:
                     return _format_result(response.get("result", "OK"))
                 listener_error = str(response.get("error", "Unknown listener error"))
@@ -1524,18 +1778,42 @@ def _send(action: str, params: Optional[dict[str, Any]] = None, require_cad_safe
     return "Unexpected error while talking to Vectorworks: request loop exited"
 
 
-def _send_tool(tool_name: str, params: Optional[dict[str, Any]] = None) -> str:
+def _send_tool(
+    tool_name: str,
+    params: Optional[dict[str, Any]] = None,
+    trace: Optional[dict[str, Any]] = None,
+) -> str:
     safety = TOOL_SAFETY[tool_name]
     action = safety.get("wire_action")
     if not isinstance(action, str) or not action:
         return f"Configuration error: {tool_name} does not declare a wire_action"
-    return _send(action, params, require_cad_safe=bool(safety["requires_cad_preflight"]))
+    owns_trace = trace is None
+    request_trace = trace or _new_request_trace(tool_name, action)
+    result = _send(
+        action,
+        params,
+        require_cad_safe=bool(safety["requires_cad_preflight"]),
+        trace=request_trace,
+    )
+    if owns_trace:
+        decoded = _decode_tool_result(result)
+        if isinstance(decoded, dict) and isinstance(decoded.get("timing"), dict):
+            request_trace["native"] = decoded["timing"]
+        outcome = "error" if _tool_result_failed(result, decoded) else "ok"
+        timing = _finish_request_trace(request_trace, outcome)
+        _emit_request_trace(request_trace, timing)
+    return result
 
 
 @_tool("vw_tool_safety")
 def vw_tool_safety() -> str:
-    """Return structured safety metadata for every Vectorworks MCP tool."""
-    return json.dumps(TOOL_SAFETY, indent=2, sort_keys=True)
+    """Return structured safety metadata for tools visible in the active profile."""
+    visible_tools = _visible_tool_names()
+    return json.dumps(
+        {name: _visible_tool_safety_entry(name) for name in sorted(visible_tools)},
+        indent=2,
+        sort_keys=True,
+    )
 
 
 @_tool("vw_capabilities")
@@ -1566,43 +1844,63 @@ def vw_capabilities(include_tools: bool = True) -> str:
         and _native_phase(decoded_status) >= 2
         and NATIVE_PHASE_TWO_REQUIRED_ACTIONS <= implemented_actions
     )
+    tool_profile = _configured_tool_profile()
+    fast_native_ready = (
+        native_ready
+        and _native_phase(decoded_status) >= 4
+        and "apply_operations" in implemented_actions
+    )
+    host_capabilities: dict[str, Any] = {
+        "tool_profile": tool_profile,
+        "fast_native_required": tool_profile == "fast-native",
+        "execute_operations_fast_path": fast_native_ready,
+        "native_apply_operations": fast_native_ready,
+        "drawing_summary": native_ready and "drawing_summary" in implemented_actions,
+        "compact_object_lookup": native_ready,
+        "native_class_management": class_management_available,
+    }
+    if tool_profile == "compat":
+        host_capabilities.update(
+            {
+                "batch_primitive_creation": True,
+                "atomic_batch_primitive_creation": native_ready and "batch_create_objects" in implemented_actions,
+                "atomic_mixed_production_batch_creation": phase_two_ready,
+                "schematic_floor_plan_planning": True,
+                "schematic_floor_plan_creation": True,
+                "native_wall_creation": phase_two_ready,
+                "native_text_creation": phase_two_ready,
+                "native_linear_dimension_creation": phase_two_ready,
+                "verified_batch_property_editing": property_editing_available,
+                "true_bim_objects": phase_two_ready,
+            }
+        )
     payload: dict[str, Any] = {
-        "ok": status_ok,
+        "ok": status_ok and (tool_profile != "fast-native" or fast_native_ready),
         "tool": "vw_capabilities",
+        "profile_ready": tool_profile != "fast-native" or fast_native_ready,
         "bridge_status": decoded_status,
         "native_phase_one_required_actions": sorted(NATIVE_PHASE_ONE_REQUIRED_ACTIONS),
         "native_phase_two_required_actions": sorted(NATIVE_PHASE_TWO_REQUIRED_ACTIONS),
         "native_phase_one_create_object_types": sorted(NATIVE_PHASE_ONE_CREATE_OBJECT_TYPES),
         "native_phase_two_create_object_types": sorted(NATIVE_PHASE_TWO_CREATE_OBJECT_TYPES),
+        "native_phase_four_create_object_types": sorted(NATIVE_PHASE_FOUR_CREATE_OBJECT_TYPES),
+        "native_create_object_types": sorted(
+            _native_create_object_types(decoded_status) if isinstance(decoded_status, dict) else set()
+        ),
         "native_phase_one_selection_actions": sorted(NATIVE_PHASE_ONE_SELECTION_ACTIONS),
-        "host_capabilities": {
-            "batch_primitive_creation": True,
-            "atomic_batch_primitive_creation": (
-                native_ready
-                and "batch_create_objects" in implemented_actions
-            ),
-            "atomic_mixed_production_batch_creation": phase_two_ready,
-            "schematic_floor_plan_planning": True,
-            "schematic_floor_plan_creation": True,
-            "native_wall_creation": phase_two_ready,
-            "native_text_creation": phase_two_ready,
-            "native_linear_dimension_creation": phase_two_ready,
-            "drawing_summary": True,
-            "compact_object_lookup": True,
-            "verified_batch_property_editing": property_editing_available,
-            "native_class_management": class_management_available,
-            "true_bim_objects": phase_two_ready,
-        },
+        "host_capabilities": host_capabilities,
         "notes": [
-            "Native phase 1 supports 2D primitives, reads, and bounded selection operations.",
-            "Native phase 2 adds true wall objects, text annotations, linear dimensions, class management, verified property edits, and mixed atomic batches when the upgraded bridge is installed.",
-            "Schematic floor-plan tools create drafting geometry, not BIM wall/door/window objects.",
-            "Door/window/space automation stays behind plugin inspection because Vectorworks plugin parameters and wall-hosting behavior are version-sensitive.",
+            "Normal agent work requires the fast-native profile and phase-4 apply_operations.",
+            "Missing phase-4 support is a hard upgrade/restart failure; no legacy or modal fallback is selected.",
         ],
     }
     if include_tools:
-        payload["tools"] = sorted(TOOL_SAFETY)
-        payload["tool_safety"] = TOOL_SAFETY
+        visible_tools = _visible_tool_names()
+        payload["tools"] = sorted(visible_tools)
+        payload["tool_safety"] = {
+            name: _visible_tool_safety_entry(name)
+            for name in sorted(visible_tools)
+        }
     return json.dumps(payload, indent=2, sort_keys=True)
 
 
@@ -1645,6 +1943,39 @@ def vw_agent_context(
         and _native_phase(decoded_status) >= 2
         and NATIVE_PHASE_TWO_REQUIRED_ACTIONS <= implemented_actions
     )
+    tool_profile = _configured_tool_profile()
+    fast_native_ready = (
+        native_ready
+        and isinstance(decoded_status, dict)
+        and _native_phase(decoded_status) >= 4
+        and "apply_operations" in implemented_actions
+    )
+    context_capabilities: dict[str, Any] = {
+        "tool_profile": tool_profile,
+        "fast_native_required": tool_profile == "fast-native",
+        "compact_context": True,
+        "drawing_summary": native_ready and "drawing_summary" in implemented_actions,
+        "drawing_scan_performed": False,
+        "execute_operations_fast_path": fast_native_ready,
+        "native_apply_operations": fast_native_ready,
+        "exact_name_lookup": True,
+        "compact_object_lookup": native_ready,
+        "native_class_management": class_management_available,
+    }
+    if tool_profile == "compat":
+        context_capabilities.update(
+            {
+                "verified_batch_property_editing": property_editing_available,
+                "batch_primitive_creation": True,
+                "atomic_batch_primitive_creation": native_ready and "batch_create_objects" in implemented_actions,
+                "atomic_mixed_production_batch_creation": phase_two_ready,
+                "native_wall_creation": phase_two_ready,
+                "native_text_creation": phase_two_ready,
+                "native_linear_dimension_creation": phase_two_ready,
+                "true_bim_wall_layouts": phase_two_ready,
+                "native_doors_windows_spaces": False,
+            }
+        )
     bridge: dict[str, Any] = {
         "ok": status_ok,
         "cad_api_safe": preflight.get("cad_api_safe"),
@@ -1660,7 +1991,7 @@ def vw_agent_context(
     }
 
     summary: Any = None
-    if preflight.get("ok"):
+    if preflight.get("ok") and profile != "brief":
         if isinstance(decoded_status, dict):
             _remember_cad_safe_status(decoded_status)
         summary = _decode_tool_result(
@@ -1670,40 +2001,33 @@ def vw_agent_context(
                 example_limit=example_limit,
             )
         )
+    context_capabilities["drawing_scan_performed"] = summary is not None
 
     payload: dict[str, Any] = {
-        "ok": status_ok and bool(preflight.get("ok")),
+        "ok": (
+            status_ok
+            and bool(preflight.get("ok"))
+            and (tool_profile != "fast-native" or fast_native_ready)
+        ),
         "tool": "vw_agent_context",
         "profile": profile,
+        "profile_ready": tool_profile != "fast-native" or fast_native_ready,
         "bridge": bridge,
         "preflight": preflight,
-        "host_capabilities": {
-            "compact_context": True,
-            "drawing_summary": bool(preflight.get("ok")),
-            "exact_name_lookup": True,
-            "compact_object_lookup": True,
-            "verified_batch_property_editing": property_editing_available,
-            "native_class_management": class_management_available,
-            "batch_primitive_creation": True,
-            "atomic_batch_primitive_creation": native_ready and "batch_create_objects" in implemented_actions,
-            "atomic_mixed_production_batch_creation": phase_two_ready,
-            "native_wall_creation": phase_two_ready,
-            "native_text_creation": phase_two_ready,
-            "native_linear_dimension_creation": phase_two_ready,
-            "true_bim_wall_layouts": phase_two_ready,
-            "native_doors_windows_spaces": False,
-        },
+        "host_capabilities": context_capabilities,
         "drawing_summary": summary,
         "recommended_workflow": [
-            "Use this compact context before planning large edits.",
-            "Use vw_lookup_objects for compact object refs, then vw_batch_set_object_properties for verified ref-based edits when available.",
-            "Use vw_find_objects only for complex Vectorworks criteria.",
-            "Use vw_batch_create_objects for repeated creation; avoid retrying writes after unknown commit state.",
-            "Ask for focused object detail only after counts/classes/layers identify the target area.",
+            "Use vw_lookup_objects only when the requested edit depends on existing drawing state.",
+            "Use vw_execute_operations with a stable idempotency key for every bounded write.",
+            "If phase-4 apply_operations is missing, stop and upgrade/restart the native bridge; do not switch runtimes or decompose the write.",
         ],
     }
     if profile == "full":
-        payload["tool_safety"] = TOOL_SAFETY
+        visible_tools = _visible_tool_names()
+        payload["tool_safety"] = {
+            name: _visible_tool_safety_entry(name)
+            for name in sorted(visible_tools)
+        }
         payload["bridge_status"] = decoded_status
     elif profile == "brief":
         payload.pop("recommended_workflow", None)
@@ -1839,6 +2163,8 @@ _PRIMITIVE_ALLOWED_KEYS = {
     "radius",
     "start_angle",
     "sweep_angle",
+    "points",
+    "closed",
     "height",
     "thickness",
     "style_name",
@@ -2220,14 +2546,17 @@ def _normalise_create_primitive(
         raise ValueError(f"{label} has unsupported key(s): {', '.join(unknown)}")
 
     object_type = str(raw.get("object_type", raw.get("type", "")) or "").strip().lower()
+    requested_object_type = object_type
     if object_type == "rectangle" or object_type == "box":
         object_type = "rect"
+    if object_type == "polyline":
+        object_type = "polygon"
     if object_type == "dimension":
         object_type = "linear_dimension"
-    if object_type == "polygon":
-        raise ValueError(f"{label}.object_type polygon is not supported by the native bridge")
-    if object_type not in NATIVE_PHASE_TWO_CREATE_OBJECT_TYPES:
-        raise ValueError(f"{label}.object_type must be one of: {', '.join(sorted(NATIVE_PHASE_TWO_CREATE_OBJECT_TYPES))}")
+    if object_type not in NATIVE_PHASE_FOUR_CREATE_OBJECT_TYPES:
+        raise ValueError(
+            f"{label}.object_type must be one of: {', '.join(sorted(NATIVE_PHASE_FOUR_CREATE_OBJECT_TYPES))}"
+        )
 
     params: dict[str, Any] = {"object_type": object_type}
     if object_type in {"rect", "oval", "line"}:
@@ -2245,6 +2574,28 @@ def _normalise_create_primitive(
         params["radius"] = _coerce_positive_number(raw, "radius", label=label)
         params["start_angle"] = _coerce_number(raw, "start_angle", default=0, label=label)
         params["sweep_angle"] = _coerce_number(raw, "sweep_angle", default=90, label=label)
+    elif object_type == "polygon":
+        raw_points = raw.get("points")
+        if not isinstance(raw_points, list) or len(raw_points) > 1000:
+            raise ValueError(f"{label}.points must be a list containing at most 1000 [x, y] points")
+        closed = _coerce_bool(raw, "closed", requested_object_type != "polyline", label=label)
+        minimum = 3 if closed else 2
+        if len(raw_points) < minimum:
+            raise ValueError(f"{label}.points requires at least {minimum} points")
+        points: list[list[float]] = []
+        for point_index, point in enumerate(raw_points):
+            if not isinstance(point, (list, tuple)) or len(point) != 2:
+                raise ValueError(f"{label}.points[{point_index}] must be [x, y]")
+            try:
+                x_value = float(point[0])
+                y_value = float(point[1])
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{label}.points[{point_index}] must contain finite numbers") from exc
+            if not math.isfinite(x_value) or not math.isfinite(y_value):
+                raise ValueError(f"{label}.points[{point_index}] must contain finite numbers")
+            points.append([x_value, y_value])
+        params["points"] = points
+        params["closed"] = closed
     elif object_type == "wall":
         params["start_x"] = _coerce_number_any(raw, ("start_x", "x1"), required=True, label=label)
         params["start_y"] = _coerce_number_any(raw, ("start_y", "y1"), required=True, label=label)
@@ -3165,6 +3516,405 @@ def _build_bim_floor_plan_objects(
     return objects, warnings, counts
 
 
+def _normalise_operation_property_edits(value: Any, *, label: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value or len(value) > 100:
+        raise ValueError(f"{label} must be a list containing 1 to 100 edits")
+    normalised: list[dict[str, Any]] = []
+    for index, edit in enumerate(value, start=1):
+        edit_label = f"{label}[{index}]"
+        if not isinstance(edit, dict):
+            raise ValueError(f"{edit_label} must be an object")
+        unknown = sorted(set(edit) - {"ref", "expected_type", "expected_layer", "expected_name", "properties"})
+        if unknown:
+            raise ValueError(f"{edit_label} has unsupported key(s): {', '.join(unknown)}")
+        ref = str(edit.get("ref", "") or "").strip()
+        if not ref or not ref.startswith(("uuid:", "name:", "handle:", "$")):
+            raise ValueError(f"{edit_label}.ref must start with uuid:, name:, handle:, or $ for a prior operation_id")
+        properties = edit.get("properties")
+        if not isinstance(properties, dict) or not properties or len(properties) > 20:
+            raise ValueError(f"{edit_label}.properties must contain 1 to 20 supported properties")
+        normalised_properties: dict[str, str] = {}
+        for property_name, value in properties.items():
+            property_name = str(property_name)
+            if property_name not in PROPERTY_NAME_VALUES:
+                raise ValueError(
+                    f"{edit_label}.properties.{property_name} is unsupported; "
+                    f"use one of: {', '.join(sorted(PROPERTY_NAME_VALUES))}"
+                )
+            normalised_value, value_error = _normalize_property_value(property_name, value)
+            if value_error is not None:
+                raise ValueError(f"{edit_label}.properties.{property_name}: {value_error}")
+            normalised_properties[property_name] = str(normalised_value)
+        item: dict[str, Any] = {"ref": ref, "properties": normalised_properties}
+        for guard in ("expected_type", "expected_layer", "expected_name"):
+            guard_value = str(edit.get(guard, "") or "")
+            if guard_value:
+                item[guard] = guard_value
+        normalised.append(item)
+    return normalised
+
+
+def _normalise_execute_operations(operations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalised: list[dict[str, Any]] = []
+    for index, operation in enumerate(operations, start=1):
+        label = f"operations[{index}]"
+        if not isinstance(operation, dict):
+            raise ValueError(f"{label} must be an object")
+        unknown = sorted(set(operation) - {"type", "operation_id", "params"})
+        if unknown:
+            raise ValueError(f"{label} has unsupported key(s): {', '.join(unknown)}")
+        operation_type = str(operation.get("type", "") or "").strip().lower()
+        if operation_type not in {"create", "set_properties"}:
+            raise ValueError(f"{label}.type must be create or set_properties")
+        params = operation.get("params")
+        if not isinstance(params, dict):
+            raise ValueError(f"{label}.params must be an object")
+        operation_id = str(operation.get("operation_id", "") or "").strip()
+        if operation_id and (len(operation_id) > 128 or not _IDEMPOTENCY_KEY_RE.fullmatch(operation_id)):
+            raise ValueError(
+                f"{label}.operation_id must match {_IDEMPOTENCY_KEY_RE.pattern} and be at most 128 characters"
+            )
+
+        if operation_type == "create":
+            canonical_params = _normalise_create_primitive(params, label=f"{label}.params")
+        else:
+            unknown_params = sorted(set(params) - {"edits"})
+            if unknown_params:
+                raise ValueError(f"{label}.params has unsupported key(s): {', '.join(unknown_params)}")
+            canonical_params = {
+                "edits": _normalise_operation_property_edits(params.get("edits"), label=f"{label}.params.edits")
+            }
+
+        item: dict[str, Any] = {"type": operation_type, "params": canonical_params}
+        if operation_id:
+            item["operation_id"] = operation_id
+        normalised.append(item)
+    return normalised
+
+
+def _operation_plan_hash(operations: list[dict[str, Any]]) -> str:
+    encoded = json.dumps(
+        operations,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _operation_idempotency_lookup(
+    idempotency_key: str,
+    plan_hash: str,
+) -> str:
+    with _operation_idempotency_lock:
+        cached_hash = _operation_idempotency_cache.get(idempotency_key)
+        if cached_hash is None:
+            return "miss"
+        if cached_hash != plan_hash:
+            return "conflict"
+        return "same"
+
+
+def _remember_operation_result(
+    idempotency_key: str,
+    plan_hash: str,
+) -> None:
+    with _operation_idempotency_lock:
+        _operation_idempotency_cache[idempotency_key] = plan_hash
+        while len(_operation_idempotency_cache) > _MAX_OPERATION_IDEMPOTENCY_ENTRIES:
+            oldest = next(iter(_operation_idempotency_cache))
+            del _operation_idempotency_cache[oldest]
+
+
+def _fast_execution_bridge_status(trace: dict[str, Any]) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    cached = _cached_cad_safe_status()
+    if cached is not None:
+        trace["preflight_cache_hit"] = True
+        return cached, None
+    started = time.perf_counter()
+    try:
+        response = _request_once_health("ping", None, trace)
+    except Exception as exc:
+        return None, str(exc)
+    finally:
+        trace["preflight_ms"] = float(trace.get("preflight_ms", 0.0)) + (time.perf_counter() - started) * 1000.0
+    if response.get("success") is not True or not isinstance(response.get("result"), dict):
+        return None, str(response.get("error", "bridge status was not an object"))
+    status = response["result"]
+    evaluated = _evaluate_cad_preflight_status(status)
+    if not evaluated.get("ok"):
+        return status, str(evaluated.get("reason", "bridge is not CAD-safe"))
+    _remember_cad_safe_status(status)
+    return status, None
+
+
+def _compact_operation_receipts(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    receipts: list[dict[str, Any]] = []
+    for index, entry in enumerate(value, start=1):
+        if not isinstance(entry, dict):
+            continue
+        receipt: dict[str, Any] = {"index": entry.get("index", index)}
+        for key in (
+            "type",
+            "op",
+            "operation_id",
+            "local_ref",
+            "ref",
+            "target",
+            "target_ref",
+            "uuid",
+            "handle",
+            "verified",
+        ):
+            field = entry.get(key)
+            if isinstance(field, (str, bool)) and field != "":
+                receipt[key] = field
+        receipts.append(receipt)
+    return receipts
+
+
+def _execute_operations_response(
+    core: dict[str, Any],
+    trace: dict[str, Any],
+    outcome: str,
+) -> str:
+    timing = _finish_request_trace(trace, outcome)
+    payload = dict(core)
+    payload["timing"] = timing
+    _emit_request_trace(trace, timing)
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+@_tool("vw_execute_operations")
+def vw_execute_operations(
+    operations: ExecuteOperationList,
+    idempotency_key: IdempotencyKey,
+) -> str:
+    """Preferred native write path with internal preflight and compact receipts.
+
+    Requires the phase-4 native apply_operations action. Create and
+    set_properties operations are forwarded together without legacy or modal
+    fallback. Reuse idempotency_key only for the identical plan.
+    """
+    trace = _new_request_trace("vw_execute_operations", "execute_operations")
+    try:
+        if not isinstance(idempotency_key, str) or not _IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key):
+            raise ValueError(
+                f"idempotency_key must match {_IDEMPOTENCY_KEY_RE.pattern} and be at most 128 characters"
+            )
+        normalised = _normalise_execute_operations(operations)
+    except ValueError as exc:
+        return _execute_operations_response(
+            {
+                "ok": False,
+                "tool": "vw_execute_operations",
+                "error": str(exc),
+                "idempotency_key": idempotency_key,
+            },
+            trace,
+            "validation_error",
+        )
+
+    plan_hash = _operation_plan_hash(normalised)
+    cache_state = _operation_idempotency_lookup(idempotency_key, plan_hash)
+    if cache_state == "conflict":
+        return _execute_operations_response(
+            {
+                "ok": False,
+                "tool": "vw_execute_operations",
+                "error": "idempotency_key was already used for a different operation plan",
+                "idempotency_key": idempotency_key,
+                "plan_hash": plan_hash,
+            },
+            trace,
+            "idempotency_conflict",
+        )
+    status, status_error = _fast_execution_bridge_status(trace)
+    if status_error or not isinstance(status, dict):
+        return _execute_operations_response(
+            {
+                "ok": False,
+                "tool": "vw_execute_operations",
+                "error": f"CAD preflight failed: {status_error or 'bridge status unavailable'}",
+                "idempotency_key": idempotency_key,
+                "plan_hash": plan_hash,
+            },
+            trace,
+            "preflight_error",
+        )
+
+    implemented_actions = set(status.get("implemented_actions") or [])
+    primitives = [dict(operation["params"]) for operation in normalised if operation["type"] == "create"]
+    requested_types = {str(primitive.get("object_type", "")) for primitive in primitives}
+    unsupported_types = sorted(requested_types - _native_create_object_types(status))
+    if unsupported_types:
+        return _execute_operations_response(
+            {
+                "ok": False,
+                "tool": "vw_execute_operations",
+                "error": "operation plan includes create types not implemented by this native bridge",
+                "unsupported_object_types": unsupported_types,
+                "idempotency_key": idempotency_key,
+                "plan_hash": plan_hash,
+            },
+            trace,
+            "unsupported",
+        )
+    if status.get("native_bridge") is not True:
+        return _execute_operations_response(
+            {
+                "ok": False,
+                "tool": "vw_execute_operations",
+                "error": "vw_execute_operations requires the native SDK bridge",
+                "idempotency_key": idempotency_key,
+                "plan_hash": plan_hash,
+            },
+            trace,
+            "unsupported",
+        )
+
+    if "apply_operations" in implemented_actions:
+        execution_path = "apply_operations"
+        trace["action"] = execution_path
+        wire_operations: list[dict[str, Any]] = []
+        for operation in normalised:
+            if operation["type"] == "create":
+                wire_item = {"op": "create", **dict(operation["params"])}
+                wire_item.pop("role", None)
+                operation_id = str(operation.get("operation_id", "") or "")
+                if operation_id:
+                    wire_item["local_ref"] = operation_id
+                wire_operations.append(wire_item)
+                continue
+
+            for edit in operation["params"]["edits"]:
+                target = str(edit["ref"])
+                if any(edit.get(guard) for guard in ("expected_type", "expected_layer", "expected_name")):
+                    return _execute_operations_response(
+                        {
+                            "ok": False,
+                            "tool": "vw_execute_operations",
+                            "error": (
+                                "expected_type/expected_layer/expected_name guards require the verified property-edit "
+                                "workflow; focused native apply_operations does not scan targets"
+                            ),
+                            "idempotency_key": idempotency_key,
+                            "plan_hash": plan_hash,
+                        },
+                        trace,
+                        "validation_error",
+                    )
+                for property_name, value in edit["properties"].items():
+                    wire_operations.append(
+                        {
+                            "op": "set_property",
+                            "target": target,
+                            "property_name": property_name,
+                            "value": value,
+                        }
+                    )
+        wire_params = {"operation_count": len(wire_operations), "idempotency_key": idempotency_key}
+        for index, wire_operation in enumerate(wire_operations, start=1):
+            wire_params[f"operation_{index}_json"] = json.dumps(
+                wire_operation,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        raw = _send("apply_operations", wire_params, require_cad_safe=True, trace=trace)
+    else:
+        return _execute_operations_response(
+            {
+                "ok": False,
+                "tool": "vw_execute_operations",
+                "error": (
+                    "native bridge does not advertise required phase-4 action: apply_operations; "
+                    "upgrade/restart the native bridge instead of using a compatibility fallback"
+                ),
+                "idempotency_key": idempotency_key,
+                "plan_hash": plan_hash,
+            },
+            trace,
+            "unsupported",
+        )
+
+    decoded = _decode_tool_result(raw)
+    if _tool_result_failed(raw, decoded) or not isinstance(decoded, dict):
+        error = decoded.get("error") if isinstance(decoded, dict) else str(decoded)
+        return _execute_operations_response(
+            {
+                "ok": False,
+                "tool": "vw_execute_operations",
+                "error": str(error or "native operation request failed"),
+                "execution_path": execution_path,
+                "idempotency_key": idempotency_key,
+                "plan_hash": plan_hash,
+            },
+            trace,
+            "error",
+        )
+
+    if isinstance(decoded.get("timing"), dict):
+        trace["native"] = decoded["timing"]
+    transaction = decoded.get("transaction") if isinstance(decoded.get("transaction"), dict) else decoded
+    receipt_source = transaction.get("operations")
+    if not isinstance(receipt_source, list):
+        receipt_source = transaction.get("results")
+    if not isinstance(receipt_source, list):
+        receipt_source = transaction.get("created")
+    receipts = _compact_operation_receipts(receipt_source)
+    native_wire_count = transaction.get(
+        "operation_count",
+        transaction.get("applied_count", transaction.get("created_count", len(receipts))),
+    )
+    if not isinstance(native_wire_count, int) or isinstance(native_wire_count, bool):
+        native_wire_count = len(receipts)
+    expected_wire_count = len(wire_operations)
+    committed = transaction.get("committed") is True
+    self_verified = (
+        committed
+        and native_wire_count == expected_wire_count
+        and len(receipts) == expected_wire_count
+        and all(
+            receipt.get("verified") is True
+            or receipt.get("uuid")
+            or receipt.get("handle")
+            or receipt.get("target")
+            or receipt.get("target_ref")
+            for receipt in receipts
+        )
+    )
+    if decoded.get("verified") is True and native_wire_count == expected_wire_count:
+        self_verified = True
+
+    core = {
+        "ok": committed and native_wire_count == expected_wire_count,
+        "tool": "vw_execute_operations",
+        "execution_path": execution_path,
+        "atomic": True,
+        "operation_count": len(normalised),
+        "wire_operation_count": expected_wire_count,
+        "applied_count": len(normalised) if committed and native_wire_count == expected_wire_count else 0,
+        "applied_wire_count": native_wire_count,
+        "idempotency_key": idempotency_key,
+        "idempotency_replay": bool(decoded.get("replayed", False)),
+        "idempotency_scope": "native_active_document",
+        "plan_hash": plan_hash,
+        "verification": {
+            "ok": self_verified,
+            "method": "native_atomic_receipt",
+            "receipt_count": len(receipts),
+            "receipts": receipts,
+            "drawing_scan_performed": False,
+        },
+    }
+    if core["ok"]:
+        _remember_operation_result(idempotency_key, plan_hash)
+    return _execute_operations_response(core, trace, "ok" if core["ok"] else "error")
+
+
 @_tool("vw_batch_create_objects")
 def vw_batch_create_objects(
     objects: PrimitiveObjectList,
@@ -3174,7 +3924,8 @@ def vw_batch_create_objects(
     atomic: bool = True,
 ) -> str:
     """Create many native objects in one MCP call.
-    Supported object_type values are rect/rectangle/box, circle, oval, line, arc, wall, text, and linear_dimension.
+    Supported object_type values are rect/rectangle/box, circle, oval, line, arc,
+    polygon/polyline, wall, text, and linear_dimension when advertised by the bridge.
     By default this uses the native atomic batch action so either all objects are created or none are."""
     try:
         primitives = [
@@ -4366,14 +5117,39 @@ def vw_inspect_object(handle: str = "", plugin_name: str = "", confirm: str = ""
     return _send_tool("vw_inspect_object", {"handle": handle, "plugin_name": plugin_name, "confirm": confirm})
 
 
+def _apply_tool_profile() -> str:
+    """Apply the startup-only MCP tool profile and return its canonical name."""
+    global _tool_profile_applied
+    profile = _configured_tool_profile()
+    if profile not in _SUPPORTED_TOOL_PROFILES:
+        raise ConfigError(
+            "VW_MCP_TOOL_PROFILE must be one of: {0}".format(
+                ", ".join(sorted(_SUPPORTED_TOOL_PROFILES))
+            )
+        )
+    if _tool_profile_applied:
+        return profile
+    if profile == "fast-native":
+        unknown = sorted(FAST_NATIVE_TOOL_NAMES - set(TOOL_SAFETY))
+        if unknown:
+            raise ConfigError(
+                "fast-native profile references unknown tools: {0}".format(", ".join(unknown))
+            )
+        for tool_name in sorted(set(TOOL_SAFETY) - FAST_NATIVE_TOOL_NAMES):
+            mcp.remove_tool(tool_name)
+    _tool_profile_applied = True
+    return profile
+
+
 def main() -> int:
     if _CONFIG_ERROR:
         print(f"Vectorworks MCP configuration error: {_CONFIG_ERROR}", file=sys.stderr)
         return 2
     try:
+        _apply_tool_profile()
         mcp.run(transport="stdio", show_banner=False)
         return 0
-    except RuntimeError as exc:
+    except (ConfigError, RuntimeError) as exc:
         print(f"Vectorworks MCP startup error: {exc}", file=sys.stderr)
         return 1
     finally:

@@ -21,6 +21,40 @@ def _all_broken_resource_errors(exc: BaseException) -> bool:
 
 
 class McpStdioContractTests(unittest.TestCase):
+    def test_fast_native_profile_exposes_only_curated_native_tools(self):
+        async def run_contract():
+            env = os.environ.copy()
+            env.update(
+                {
+                    "VW_MCP_HOST": "127.0.0.1",
+                    "VW_MCP_PORT": "1",
+                    "VW_MCP_TIMEOUT": "0.5",
+                    "VW_MCP_HEALTH_TIMEOUT": "0.2",
+                    "VW_MCP_INSECURE_NO_AUTH": "1",
+                    "VW_MCP_TOOL_PROFILE": "fast-native",
+                }
+            )
+            params = StdioServerParameters(
+                command=sys.executable,
+                args=["server.py"],
+                cwd=ROOT,
+                env=env,
+            )
+            with open(os.devnull, "w", encoding="utf-8") as errlog:
+                async with stdio_client(params, errlog=errlog) as (read, write):
+                    async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=5)) as session:
+                        await session.initialize()
+                        tools = await session.list_tools()
+                        names = {tool.name for tool in tools.tools}
+                        by_name = {tool.name: tool for tool in tools.tools}
+                        self.assertEqual(names, set(__import__("server").FAST_NATIVE_TOOL_NAMES))
+                        self.assertIn("vw_execute_operations", names)
+                        self.assertNotIn("vw_run_script", names)
+                        self.assertNotIn("vw_create_object", names)
+                        self.assertNotIn("vw_insert_door", names)
+                        selection_actions = by_name["vw_selection"].inputSchema["properties"]["action"]["enum"]
+                        self.assertEqual(selection_actions, ["get", "select", "clear", "delete"])
+
     def test_server_starts_over_stdio_and_exposes_expected_contract(self):
         contract_checked = False
 
@@ -34,6 +68,7 @@ class McpStdioContractTests(unittest.TestCase):
                     "VW_MCP_TIMEOUT": "0.5",
                     "VW_MCP_HEALTH_TIMEOUT": "0.2",
                     "VW_MCP_INSECURE_NO_AUTH": "1",
+                    "VW_MCP_TOOL_PROFILE": "compat",
                 }
             )
             params = StdioServerParameters(
@@ -53,11 +88,20 @@ class McpStdioContractTests(unittest.TestCase):
                             tools = await session.list_tools()
                             by_name = {tool.name: tool for tool in tools.tools}
                             self.assertGreaterEqual(len(by_name), 25)
+                            self.assertIn(
+                                "move",
+                                by_name["vw_selection"].inputSchema["properties"]["action"]["enum"],
+                            )
+                            self.assertIn(
+                                "duplicate",
+                                by_name["vw_selection"].inputSchema["properties"]["action"]["enum"],
+                            )
                             for name in (
                                 "vw_ping",
                                 "vw_preflight_for_cad",
                                 "vw_create_object",
                                 "vw_batch_create_objects",
+                                "vw_execute_operations",
                                 "vw_plan_schematic_floor_plan",
                                 "vw_create_schematic_floor_plan",
                                 "vw_create_bim_floor_plan",
@@ -115,6 +159,18 @@ class McpStdioContractTests(unittest.TestCase):
                             self.assertEqual(batch_objects_schema["minItems"], 1)
                             self.assertEqual(batch_objects_schema["maxItems"], 250)
                             self.assertIn("atomic", by_name["vw_batch_create_objects"].inputSchema["properties"])
+
+                            execute_schema = by_name["vw_execute_operations"].inputSchema
+                            self.assertEqual(execute_schema["properties"]["operations"]["minItems"], 1)
+                            self.assertEqual(execute_schema["properties"]["operations"]["maxItems"], 250)
+                            self.assertIn("create", execute_schema["properties"]["operations"]["items"]["properties"]["type"]["enum"])
+                            self.assertIn(
+                                "set_properties",
+                                execute_schema["properties"]["operations"]["items"]["properties"]["type"]["enum"],
+                            )
+                            self.assertIn("idempotency_key", execute_schema["required"])
+                            self.assertEqual(execute_schema["properties"]["idempotency_key"]["maxLength"], 128)
+                            self.assertIn("pattern", execute_schema["properties"]["idempotency_key"])
 
                             create_object_type = by_name["vw_create_object"].inputSchema["properties"]["object_type"]
                             self.assertIn("rectangle", create_object_type["enum"])
