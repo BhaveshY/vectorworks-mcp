@@ -1908,9 +1908,15 @@ if ($Json) {
         self.assertIn("VW_MCP_LOADER_METADATA", doctor)
         self.assertIn("Get-ProtocolAuthToken", doctor)
         self.assertIn("auth_token", doctor)
+        self.assertIn("[switch]$EnablePythonDialogFallback", doctor)
+        self.assertIn('mode = if ($EnablePythonDialogFallback) { "explicit-python-dialog-fallback" } else { "fast-native" }', doctor)
+        self.assertIn("Test-NativePhase4Ready", doctor)
         self.assertIn("Write-RecoverySteps", raw_ping)
+        self.assertIn("VW_MCP_AUTH_TOKEN_FILE", raw_ping)
+        self.assertIn('request["auth_token"] = token', raw_ping)
         self.assertIn("vw_load_listener_2024.py", raw_ping)
-        self.assertIn("foreground/background/win_timer", raw_ping)
+        self.assertIn("Fast-native mode does not use vw_listener.py or vw_load_listener_2024.py", raw_ping)
+        self.assertIn("blocks parallel manual Vectorworks use", raw_ping)
 
     def test_native_smoke_script_is_documented(self):
         smoke_script = (ROOT / "scripts/smoke-native-bridge.ps1").read_text(encoding="utf-8")

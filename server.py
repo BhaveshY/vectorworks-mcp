@@ -1294,14 +1294,47 @@ def _format_result(value: Any) -> str:
 
 
 def _connection_help(error: BaseException) -> str:
+    if _configured_tool_profile() != "compat":
+        return (
+            f"Connection error: {error}. Could not reach the Vectorworks native SDK bridge on {HOST}:{PORT}. "
+            "The fast-native profile does not use vw_listener.py or vw_load_listener_2024.py. "
+            "Close any VW MCP Listener Python dialog, then run "
+            "py -3 .\\plugins\\vectorworks\\bin\\vectorworksctl doctor --repo-path . --json "
+            "from the connector checkout. Ensure the compiled native plug-in is installed and loaded, "
+            "restart Vectorworks if required, and require dispatch_mode=native_sdk, native_phase>=4, "
+            "cad_api_safe=true, transport_only=false, and main_context_pump_ready=true before CAD work. "
+            "If a stale listener still owns the port, create "
+            "C:\\Users\\<you>\\.vectorworks-mcp\\STOP and restart Vectorworks."
+        )
     return (
         f"Connection error: {error}. Could not reach the Vectorworks MCP listener on {HOST}:{PORT}. "
-        "Start Vectorworks, run the generated vw_load_listener_2024.py from Resource Manager "
-        "or the installed VW MCP Listener menu command, and verify VW_MCP_HOST/VW_MCP_PORT "
-        "match on both sides. If the port is open but requests time out, run "
+        "This compatibility path is available only after explicit Python dialog fallback opt-in and "
+        "blocks parallel manual Vectorworks use. Start Vectorworks, run the generated "
+        "vw_load_listener_2024.py from Resource Manager or the installed VW MCP Listener menu command, "
+        "and verify VW_MCP_HOST/VW_MCP_PORT match on both sides. If the port is open but requests time out, run "
         "scripts\\test-vectorworks-listener.ps1 or scripts\\doctor-vectorworks-mcp.ps1, create "
         "C:\\Users\\<you>\\.vectorworks-mcp\\STOP, and restart Vectorworks if the stale listener "
         "does not recover."
+    )
+
+
+def _listener_failure_message(action: str, listener_error: str) -> str:
+    message = f"VW Error ({action}): {listener_error}"
+    if "vw_mcp_auth_token is required" not in listener_error.lower():
+        return message
+    if _configured_tool_profile() != "compat":
+        return (
+            message
+            + " The process on the MCP port started without the shared authentication configuration. "
+            "Do not disable authentication or run vw_listener.py/vw_load_listener_2024.py. Close any "
+            "Python listener dialog, rerun install.ps1 to repair the token file and client registration, "
+            "restart Vectorworks, then require a phase-4 native result from vectorworksctl doctor."
+        )
+    return (
+        message
+        + " The explicitly enabled modal fallback was started without its generated token-file environment. "
+        "Regenerate vw_load_listener_2024.py with -EnablePythonDialogFallback and run only that loader; "
+        "the fallback dialog blocks parallel manual Vectorworks use."
     )
 
 
@@ -1390,6 +1423,21 @@ def _native_readiness_errors(status: dict[str, Any]) -> list[str]:
     return errors
 
 
+def _fast_native_readiness_errors(status: dict[str, Any]) -> list[str]:
+    errors = _native_readiness_errors(status)
+    if status.get("native_bridge") is not True:
+        errors.append("native_bridge is not true")
+    if str(status.get("dispatch_mode", "") or "").lower() != "native_sdk":
+        errors.append("dispatch_mode is not native_sdk")
+    native_phase = status.get("native_phase")
+    if not isinstance(native_phase, int) or isinstance(native_phase, bool) or native_phase < 4:
+        errors.append("native_phase is not >= 4")
+    implemented_actions = status.get("implemented_actions")
+    if not isinstance(implemented_actions, list) or "apply_operations" not in implemented_actions:
+        errors.append("implemented_actions missing phase-4 action: apply_operations")
+    return list(dict.fromkeys(errors))
+
+
 def _native_phase(status: dict[str, Any]) -> int:
     native_phase = status.get("native_phase")
     if isinstance(native_phase, int) and not isinstance(native_phase, bool):
@@ -1455,6 +1503,17 @@ def _evaluate_cad_preflight_status(
     dispatch_mode = str(status.get("dispatch_mode", "") or "").lower()
     bridge_kind = str(status.get("bridge_kind", "") or "").lower()
     if dispatch_mode == "foreground" or bridge_kind == "python_foreground_diagnostic":
+        if _configured_tool_profile() == "compat":
+            next_action = (
+                "Do not call CAD handlers. After explicit Python dialog fallback opt-in, regenerate and run "
+                "vw_load_listener_2024.py. This modal fallback blocks parallel manual Vectorworks use."
+            )
+        else:
+            next_action = (
+                "Do not call CAD handlers. The fast-native profile rejects this legacy Python listener. "
+                "Close its dialog, run vectorworksctl doctor, and load a compiled phase-4 native SDK bridge. "
+                "Do not run vw_listener.py or vw_load_listener_2024.py."
+            )
         return _with_block_context(
             {
                 "ok": False,
@@ -1464,13 +1523,14 @@ def _evaluate_cad_preflight_status(
                 "transport_only": bool(status.get("transport_only")),
                 "native_bridge": bool(status.get("native_bridge")),
                 "reason": "foreground_diagnostic_bridge",
-                "next_action": "Do not call CAD handlers. Replace the old foreground script with vw_load_listener_2024.py or use a compiled native SDK bridge.",
+                "next_action": next_action,
                 "raw_status": status,
             },
             blocked_action,
         )
 
-    native_errors = _native_readiness_errors(status)
+    fast_native = _configured_tool_profile() != "compat"
+    native_errors = _fast_native_readiness_errors(status) if fast_native else _native_readiness_errors(status)
     if native_errors:
         return _with_block_context(
             {
@@ -1479,13 +1539,18 @@ def _evaluate_cad_preflight_status(
                 "bridge_kind": status.get("bridge_kind", "unknown"),
                 "dispatch_mode": status.get("dispatch_mode", "unknown"),
                 "transport_only": bool(status.get("transport_only")),
-                "native_bridge": True,
+                "native_bridge": bool(status.get("native_bridge")),
                 "handlers": status.get("handlers"),
                 "version": status.get("version"),
                 "main_context_pump": status.get("main_context_pump"),
                 "main_context_pump_ready": status.get("main_context_pump_ready"),
-                "reason": "native_bridge_not_phase1_ready",
-                "next_action": "Do not call CAD handlers. Run scripts\\smoke-native-bridge.ps1 -Json and fix native bridge capabilities.",
+                "reason": "fast_native_bridge_not_ready" if fast_native else "native_bridge_not_phase1_ready",
+                "next_action": (
+                    "Do not call CAD handlers or switch runtimes. Run vectorworksctl doctor and upgrade/restart "
+                    "the compiled phase-4 native SDK bridge; do not run vw_listener.py or vw_load_listener_2024.py."
+                    if fast_native
+                    else "Do not call CAD handlers. Run scripts\\smoke-native-bridge.ps1 -Json and fix native bridge capabilities."
+                ),
                 "native_readiness_errors": native_errors,
                 "raw_status": status,
             },
@@ -1703,7 +1768,7 @@ def _send_health(
         response = _request_once_health(action, params, trace)
         if response.get("success") is True:
             return _format_result(response.get("result", "OK"))
-        return f"VW Error ({action}): {response.get('error', 'Unknown listener error')}"
+        return _listener_failure_message(action, str(response.get("error", "Unknown listener error")))
     except RequestNotSentError as exc:
         return _request_not_sent_help(action, exc)
     except ProtocolError as exc:
@@ -1746,7 +1811,7 @@ def _send(
                 listener_error = str(response.get("error", "Unknown listener error"))
                 if "unknown_commit_state" in listener_error.lower():
                     return _unknown_commit_state_help(action, RuntimeError(listener_error))
-                return f"VW Error ({action}): {listener_error}"
+                return _listener_failure_message(action, listener_error)
             except RequestNotSentError as exc:
                 _close()
                 return _request_not_sent_help(action, exc)

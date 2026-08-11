@@ -6,6 +6,7 @@ param(
     [int]$Port = 0,
     [ValidateRange(100, 30000)]
     [int]$TimeoutMilliseconds = 1200,
+    [switch]$EnablePythonDialogFallback,
     [switch]$Json
 )
 
@@ -119,6 +120,7 @@ $Args = @()
 if ($HostName) { $Args += @("-HostName", $HostName) }
 if ($Port -ne 0) { $Args += @("-Port", $Port) }
 $Args += @("-TimeoutMilliseconds", $TimeoutMilliseconds)
+if ($EnablePythonDialogFallback) { $Args += "-EnablePythonDialogFallback" }
 if ($Json) { $Args += "-Json" }
 
 & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $Doctor @Args

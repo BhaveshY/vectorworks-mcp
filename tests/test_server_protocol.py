@@ -230,8 +230,15 @@ def _python_dialog_status():
 
 
 class ServerProtocolTests(unittest.TestCase):
+    def setUp(self):
+        # Most protocol tests exercise the complete compatibility surface. Tests
+        # for the production default opt into fast-native explicitly.
+        self._profile_env = patch.dict(os.environ, {"VW_MCP_TOOL_PROFILE": "compat"})
+        self._profile_env.start()
+
     def tearDown(self):
         server._close()
+        self._profile_env.stop()
 
     def test_main_forces_stdio_transport(self):
         class FakeMCP:
@@ -371,13 +378,63 @@ class ServerProtocolTests(unittest.TestCase):
         sock.close()
 
         _configure_server(port)
-        result = server._send("ping")
+        with patch.dict(os.environ, {"VW_MCP_TOOL_PROFILE": "fast-native"}):
+            result = server._send("ping")
 
         self.assertTrue(result.startswith("Connection error:"))
         self.assertIn(f"127.0.0.1:{port}", result)
-        self.assertIn("run the generated vw_load_listener_2024.py", result)
-        self.assertIn("scripts\\test-vectorworks-listener.ps1", result)
+        self.assertIn("native SDK bridge", result)
+        self.assertIn("vectorworksctl doctor", result)
+        self.assertIn("does not use vw_listener.py or vw_load_listener_2024.py", result)
         self.assertIn("C:\\Users\\<you>\\.vectorworks-mcp\\STOP", result)
+
+    def test_send_reports_modal_loader_help_only_for_compat_profile(self):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()
+
+        _configure_server(port)
+        with patch.dict(os.environ, {"VW_MCP_TOOL_PROFILE": "compat"}):
+            result = server._send("ping")
+
+        self.assertIn("explicit Python dialog fallback opt-in", result)
+        self.assertIn("vw_load_listener_2024.py", result)
+        self.assertIn("blocks parallel manual Vectorworks use", result)
+
+    def test_auth_configuration_failure_is_native_first_in_fast_profile(self):
+        def handler(request):
+            return {
+                "id": request["id"],
+                "success": False,
+                "error": "VW_MCP_AUTH_TOKEN is required for the local Vectorworks MCP protocol",
+            }
+
+        with FakeListener(handler) as listener:
+            _configure_server(listener.port)
+            with patch.dict(os.environ, {"VW_MCP_TOOL_PROFILE": "fast-native"}):
+                result = server._send_health("ping")
+
+        self.assertIn("started without the shared authentication configuration", result)
+        self.assertIn("Do not disable authentication or run vw_listener.py/vw_load_listener_2024.py", result)
+        self.assertIn("phase-4 native result", result)
+
+    def test_auth_configuration_failure_routes_to_loader_only_in_compat_profile(self):
+        def handler(request):
+            return {
+                "id": request["id"],
+                "success": False,
+                "error": "VW_MCP_AUTH_TOKEN is required for the local Vectorworks MCP protocol",
+            }
+
+        with FakeListener(handler) as listener:
+            _configure_server(listener.port)
+            with patch.dict(os.environ, {"VW_MCP_TOOL_PROFILE": "compat"}):
+                result = server._send_health("ping")
+
+        self.assertIn("explicitly enabled modal fallback", result)
+        self.assertIn("Regenerate vw_load_listener_2024.py", result)
+        self.assertIn("blocks parallel manual Vectorworks use", result)
 
     def test_bridge_status_tool_uses_ping_action(self):
         calls = []
@@ -644,7 +701,8 @@ class ServerProtocolTests(unittest.TestCase):
 
         with FakeListener(handler, max_requests=1) as listener:
             _configure_server(listener.port)
-            result = json.loads(server.vw_capabilities(include_tools=False))
+            with patch.dict(os.environ, {"VW_MCP_TOOL_PROFILE": "fast-native"}):
+                result = json.loads(server.vw_capabilities(include_tools=False))
 
         self.assertFalse(result["ok"])
         self.assertFalse(result["profile_ready"])
@@ -663,13 +721,14 @@ class ServerProtocolTests(unittest.TestCase):
 
         with FakeListener(handler, max_requests=1) as listener:
             _configure_server(listener.port)
-            result = json.loads(server.vw_capabilities(include_tools=False))
+            with patch.dict(os.environ, {"VW_MCP_TOOL_PROFILE": "fast-native"}):
+                result = json.loads(server.vw_capabilities(include_tools=False))
 
         self.assertFalse(result["ok"])
         self.assertFalse(result["profile_ready"])
         self.assertIn("wall", result["native_phase_two_create_object_types"])
         self.assertFalse(result["host_capabilities"]["execute_operations_fast_path"])
-        self.assertTrue(result["host_capabilities"]["native_class_management"])
+        self.assertFalse(result["host_capabilities"]["native_class_management"])
         self.assertNotIn("true_bim_objects", result["host_capabilities"])
 
     def test_capabilities_do_not_advertise_native_writes_when_bridge_is_not_cad_safe(self):
@@ -685,7 +744,8 @@ class ServerProtocolTests(unittest.TestCase):
 
         with FakeListener(handler, max_requests=1) as listener:
             _configure_server(listener.port)
-            result = json.loads(server.vw_capabilities(include_tools=False))
+            with patch.dict(os.environ, {"VW_MCP_TOOL_PROFILE": "fast-native"}):
+                result = json.loads(server.vw_capabilities(include_tools=False))
 
         self.assertFalse(result["ok"])
         self.assertFalse(result["host_capabilities"]["execute_operations_fast_path"])
@@ -695,39 +755,34 @@ class ServerProtocolTests(unittest.TestCase):
     def test_agent_context_returns_compact_preflight_capabilities_and_summary(self):
         def handler(request):
             if request["action"] == "ping":
-                return {"id": request["id"], "success": True, "result": _native_phase_two_status()}
-            if request["action"] == "get_document_info":
+                return {"id": request["id"], "success": True, "result": _native_phase_four_status()}
+            if request["action"] == "drawing_summary":
                 return {
                     "id": request["id"],
                     "success": True,
-                    "result": {"filename": "Demo.vwx", "layers": ["Layer 1"], "layer_count": 1, "total_objects": 2},
-                }
-            if request["action"] == "get_layers":
-                return {"id": request["id"], "success": True, "result": [{"name": "Layer 1", "visible": True}]}
-            if request["action"] == "get_objects":
-                return {
-                    "id": request["id"],
-                    "success": True,
-                    "result": [
-                        {"handle": "h1", "type": "wall", "name": "Wall", "layer": "Layer 1"},
-                        {"handle": "h2", "type": "text", "name": "Label", "layer": "Layer 1"},
-                    ],
+                    "result": {
+                        "ok": True,
+                        "tool": "vw_drawing_summary",
+                        "native_summary": True,
+                        "objects_scanned": 2,
+                        "counts_by_type": {"text": 1, "wall": 1},
+                    },
                 }
             self.fail(f"Unexpected action: {request['action']}")
 
-        with FakeListener(handler, max_requests=4) as listener:
+        with FakeListener(handler, max_requests=2) as listener:
             _configure_server(listener.port)
             result = json.loads(server.vw_agent_context())
 
-        self.assertFalse(result["ok"])
-        self.assertFalse(result["profile_ready"])
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["profile_ready"])
         self.assertEqual(result["profile"], "production")
         self.assertTrue(result["preflight"]["ok"])
-        self.assertFalse(result["host_capabilities"]["execute_operations_fast_path"])
+        self.assertTrue(result["host_capabilities"]["execute_operations_fast_path"])
         self.assertTrue(result["host_capabilities"]["native_class_management"])
         self.assertEqual(result["drawing_summary"]["counts_by_type"], {"text": 1, "wall": 1})
         self.assertNotIn("examples", result["drawing_summary"])
-        self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_document_info", "get_layers", "get_objects"])
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "drawing_summary"])
 
     def test_agent_context_does_not_read_drawing_when_preflight_blocks(self):
         unsafe_status = _native_phase_two_status()
@@ -2290,7 +2345,8 @@ class ServerProtocolTests(unittest.TestCase):
                 self.assertEqual(set(annotations), set(server._ANNOTATION_KEYS))
 
     def test_tool_safety_tool_returns_structured_metadata(self):
-        safety = json.loads(server.vw_tool_safety())
+        with patch.dict(os.environ, {"VW_MCP_TOOL_PROFILE": "fast-native"}):
+            safety = json.loads(server.vw_tool_safety())
 
         self.assertEqual(set(safety), set(server.FAST_NATIVE_TOOL_NAMES))
         self.assertNotIn("vw_run_script", safety)
@@ -2362,7 +2418,8 @@ class ServerProtocolTests(unittest.TestCase):
                     "version": "test",
                 }
             )
-            result = server.vw_preflight_for_cad()
+            with patch.dict(os.environ, {"VW_MCP_TOOL_PROFILE": "compat"}):
+                result = server.vw_preflight_for_cad()
         finally:
             server._send_health = original_send
 
@@ -2372,6 +2429,33 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertEqual(preflight["bridge_kind"], "python_dialog_agent_session")
         self.assertEqual(preflight["reason"], "cad_api_safe")
         self.assertIn("vw_get_document_info", preflight["next_action"])
+
+    def test_fast_native_preflight_rejects_cad_safe_python_dialog(self):
+        original_send = server._send_health
+        try:
+            server._send_health = lambda action, params=None: json.dumps(
+                {
+                    "pong": True,
+                    "cad_api_safe": True,
+                    "transport_only": False,
+                    "native_bridge": False,
+                    "bridge_kind": "python_dialog_agent_session",
+                    "dispatch_mode": "dialog",
+                    "handlers": 23,
+                    "version": "test",
+                }
+            )
+            with patch.dict(os.environ, {"VW_MCP_TOOL_PROFILE": "fast-native"}):
+                result = server.vw_preflight_for_cad()
+        finally:
+            server._send_health = original_send
+
+        preflight = json.loads(result)
+        self.assertFalse(preflight["ok"])
+        self.assertEqual(preflight["reason"], "fast_native_bridge_not_ready")
+        self.assertIn("native_bridge is not true", preflight["native_readiness_errors"])
+        self.assertIn("native_phase is not >= 4", preflight["native_readiness_errors"])
+        self.assertIn("do not run vw_listener.py or vw_load_listener_2024.py", preflight["next_action"])
 
     def test_cad_preflight_blocks_transport_only_bridge(self):
         original_send = server._send_health
@@ -2385,7 +2469,8 @@ class ServerProtocolTests(unittest.TestCase):
                     "dispatch_mode": "win_timer",
                 }
             )
-            result = server.vw_preflight_for_cad()
+            with patch.dict(os.environ, {"VW_MCP_TOOL_PROFILE": "fast-native"}):
+                result = server.vw_preflight_for_cad()
         finally:
             server._send_health = original_send
 
@@ -2393,7 +2478,8 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertFalse(preflight["ok"])
         self.assertFalse(preflight["cad_api_safe"])
         self.assertTrue(preflight["transport_only"])
-        self.assertEqual(preflight["reason"], "transport_only_bridge")
+        self.assertEqual(preflight["reason"], "fast_native_bridge_not_ready")
+        self.assertIn("native_bridge is not true", preflight["native_readiness_errors"])
 
     def test_cad_preflight_blocks_native_bridge_missing_capabilities(self):
         original_send = server._send_health
@@ -2412,7 +2498,8 @@ class ServerProtocolTests(unittest.TestCase):
                     "version": "native-scaffold-phase0",
                 }
             )
-            result = server.vw_preflight_for_cad()
+            with patch.dict(os.environ, {"VW_MCP_TOOL_PROFILE": "fast-native"}):
+                result = server.vw_preflight_for_cad()
         finally:
             server._send_health = original_send
 
@@ -2420,7 +2507,7 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertFalse(preflight["ok"])
         self.assertFalse(preflight["cad_api_safe"])
         self.assertTrue(preflight["native_bridge"])
-        self.assertEqual(preflight["reason"], "native_bridge_not_phase1_ready")
+        self.assertEqual(preflight["reason"], "fast_native_bridge_not_ready")
         self.assertIn("native_phase is not >= 1", preflight["native_readiness_errors"])
         self.assertIn("implemented_actions missing", "\n".join(preflight["native_readiness_errors"]))
 
@@ -2443,7 +2530,8 @@ class ServerProtocolTests(unittest.TestCase):
                     "main_context_pump_ready": False,
                 }
             )
-            result = server.vw_preflight_for_cad()
+            with patch.dict(os.environ, {"VW_MCP_TOOL_PROFILE": "fast-native"}):
+                result = server.vw_preflight_for_cad()
         finally:
             server._send_health = original_send
 
@@ -2451,7 +2539,7 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertFalse(preflight["ok"])
         self.assertFalse(preflight["cad_api_safe"])
         self.assertTrue(preflight["native_bridge"])
-        self.assertEqual(preflight["reason"], "native_bridge_not_phase1_ready")
+        self.assertEqual(preflight["reason"], "fast_native_bridge_not_ready")
         self.assertEqual(preflight["main_context_pump"], "win32_ui_timer")
         self.assertFalse(preflight["main_context_pump_ready"])
         self.assertIn("main_context_pump_ready is not true", preflight["native_readiness_errors"])
@@ -2468,7 +2556,8 @@ class ServerProtocolTests(unittest.TestCase):
                     "dispatch_mode": "foreground",
                 }
             )
-            result = server.vw_preflight_for_cad()
+            with patch.dict(os.environ, {"VW_MCP_TOOL_PROFILE": "fast-native"}):
+                result = server.vw_preflight_for_cad()
         finally:
             server._send_health = original_send
 
@@ -2476,7 +2565,31 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertFalse(preflight["ok"])
         self.assertFalse(preflight["cad_api_safe"])
         self.assertEqual(preflight["reason"], "foreground_diagnostic_bridge")
+        self.assertIn("fast-native profile rejects", preflight["next_action"])
+        self.assertIn("Do not run vw_listener.py or vw_load_listener_2024.py", preflight["next_action"])
+
+    def test_compat_preflight_routes_legacy_foreground_to_explicit_modal_fallback(self):
+        original_send = server._send_health
+        try:
+            server._send_health = lambda action, params=None: json.dumps(
+                {
+                    "pong": True,
+                    "cad_api_safe": True,
+                    "transport_only": False,
+                    "bridge_kind": "python_foreground_diagnostic",
+                    "dispatch_mode": "foreground",
+                }
+            )
+            with patch.dict(os.environ, {"VW_MCP_TOOL_PROFILE": "compat"}):
+                result = server.vw_preflight_for_cad()
+        finally:
+            server._send_health = original_send
+
+        preflight = json.loads(result)
+        self.assertFalse(preflight["ok"])
+        self.assertIn("explicit Python dialog fallback opt-in", preflight["next_action"])
         self.assertIn("vw_load_listener_2024.py", preflight["next_action"])
+        self.assertIn("blocks parallel manual Vectorworks use", preflight["next_action"])
 
     def test_cad_preflight_blocks_legacy_status_without_safety_field(self):
         original_send = server._send_health

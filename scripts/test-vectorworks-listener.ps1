@@ -4,7 +4,8 @@ param(
     [ValidateRange(1, 65535)]
     [int]$Port = 0,
     [ValidateRange(1, 120)]
-    [int]$TimeoutSeconds = 5
+    [int]$TimeoutSeconds = 5,
+    [switch]$EnablePythonDialogFallback
 )
 
 $ErrorActionPreference = "Stop"
@@ -51,8 +52,13 @@ function Write-RecoverySteps {
     Write-Host "Recovery:"
     Write-Host "1. If Vectorworks is hung or $Address`:$PortNumber is open but ping timed out, create $env:USERPROFILE\.vectorworks-mcp\STOP and wait a few seconds."
     Write-Host "2. If it stays stuck, save work if possible and restart Vectorworks."
-    Write-Host "3. Regenerate/copy the stable loader with scripts\copy-vectorworks-loader.ps1, then paste/run only vw_load_listener_2024.py inside Vectorworks."
-    Write-Host "4. Do not switch foreground/background/win_timer launchers on for CAD work; only dialog mode or a smoke-tested native SDK bridge is CAD-safe."
+    if ($EnablePythonDialogFallback) {
+        Write-Host "3. Regenerate/copy the stable loader with scripts\copy-vectorworks-loader.ps1, then paste/run only vw_load_listener_2024.py inside Vectorworks."
+        Write-Host "4. This explicitly enabled dialog fallback is modal and blocks parallel manual Vectorworks use."
+    } else {
+        Write-Host "3. Run py -3 .\plugins\vectorworks\bin\vectorworksctl doctor --repo-path . --json and complete the guarded native next action."
+        Write-Host "4. Fast-native mode does not use vw_listener.py or vw_load_listener_2024.py. Close any Python listener dialog and require a phase-4 native SDK bridge."
+    }
 }
 
 if (Test-Path $VenvPython) {
@@ -70,6 +76,8 @@ if (Test-Path $VenvPython) {
 
 $Code = @'
 import json
+import os
+from pathlib import Path
 import socket
 import struct
 import sys
@@ -78,6 +86,20 @@ host = sys.argv[1]
 port = int(sys.argv[2])
 timeout = float(sys.argv[3])
 request = {"id": "manual-ping", "action": "ping", "params": {}}
+token = os.environ.get("VW_MCP_AUTH_TOKEN", "").strip()
+if not token:
+    token_file = os.environ.get("VW_MCP_AUTH_TOKEN_FILE", "").strip()
+    if not token_file:
+        user_profile = os.environ.get("USERPROFILE", "").strip()
+        if user_profile:
+            token_file = str(Path(user_profile) / ".vectorworks-mcp" / "auth-token")
+    if token_file:
+        try:
+            token = Path(token_file).read_text(encoding="utf-8").strip()
+        except OSError:
+            token = ""
+if token:
+    request["auth_token"] = token
 payload = json.dumps(request).encode("utf-8")
 
 def read_exact(sock, size):

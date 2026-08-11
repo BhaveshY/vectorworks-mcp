@@ -19,7 +19,7 @@ from typing import Any
 
 
 DEFAULT_NATIVE_CONFIGURATION = "Release"
-NATIVE_PHASE_TWO_REQUIRED_ACTIONS = {
+NATIVE_PRODUCTION_REQUIRED_ACTIONS = {
     "ping",
     "stop",
     "get_document_info",
@@ -33,6 +33,7 @@ NATIVE_PHASE_TWO_REQUIRED_ACTIONS = {
     "create_linear_dimension",
     "set_property",
     "manage_classes",
+    "apply_operations",
 }
 
 
@@ -174,7 +175,10 @@ def native_summary(native_plan: Any) -> dict[str, Any]:
 
 
 def listener_cad_ready(listener_doctor: Any) -> bool:
-    return isinstance(listener_doctor, dict) and listener_doctor.get("overall") == "cad-ready"
+    return isinstance(listener_doctor, dict) and listener_doctor.get("overall") in {
+        "native-phase4-ready",
+        "modal-fallback-ready",
+    }
 
 
 def live_native_ready(listener_doctor: Any) -> bool:
@@ -194,11 +198,11 @@ def live_native_ready(listener_doctor: Any) -> bool:
         and status.get("dispatch_mode") == "native_sdk"
         and isinstance(status.get("native_phase"), int)
         and not isinstance(status.get("native_phase"), bool)
-        and status["native_phase"] >= 2
+        and status["native_phase"] >= 4
         and status.get("cad_api_safe") is True
         and status.get("transport_only") is False
         and status.get("main_context_pump_ready") is True
-        and NATIVE_PHASE_TWO_REQUIRED_ACTIONS <= set(str(action) for action in implemented_actions)
+        and NATIVE_PRODUCTION_REQUIRED_ACTIONS <= set(str(action) for action in implemented_actions)
     )
 
 
@@ -269,6 +273,8 @@ def companion_contract(repo_root: str) -> dict[str, Any]:
 def cmd_doctor(args: argparse.Namespace) -> int:
     ps_args = ["-TimeoutMilliseconds", str(args.timeout_ms)]
     ps_args = add_repo_path(ps_args, args.repo_path)
+    if args.allow_python_fallback:
+        ps_args.append("-EnablePythonDialogFallback")
     if args.json:
         ps_args.append("-Json")
 
@@ -323,6 +329,8 @@ def cmd_ping(args: argparse.Namespace) -> int:
         ps_args.extend(["-Port", str(args.port)])
     if args.timeout_seconds:
         ps_args.extend(["-TimeoutSeconds", str(args.timeout_seconds)])
+    if args.allow_python_fallback:
+        ps_args.append("-EnablePythonDialogFallback")
     result = run_script("test-vectorworks-listener.ps1", ps_args)
     return result.returncode
 
@@ -390,6 +398,8 @@ def cmd_setup_runtime(args: argparse.Namespace) -> int:
         native_error = str(exc)
 
     listener_args = add_repo_path(["-TimeoutMilliseconds", "1200", "-Json"], args.repo_path)
+    if args.include_python_fallback:
+        listener_args.append("-EnablePythonDialogFallback")
     listener_result = run_script("doctor-vectorworks-mcp.ps1", listener_args, capture=True)
     listener_doctor: Any = None
     listener_error = ""
@@ -518,9 +528,9 @@ def cmd_setup_runtime(args: argparse.Namespace) -> int:
     if listener_error:
         print(f"live native check: failed - {listener_error}")
     elif live_native_ready(listener_doctor):
-        print("live native check: phase-2 SDK bridge ready")
+        print("live native check: phase-4 SDK bridge ready")
     else:
-        print("live native check: phase-2 SDK bridge not ready")
+        print("live native check: phase-4 SDK bridge not ready")
     if fallback_result is not None:
         print(f"python fallback setup: exit {fallback_result.returncode}")
     print("Normal daily use should not run setup-runtime; use doctor only for troubleshooting.")
@@ -573,6 +583,11 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.add_argument("--install-dir", default="")
     doctor.add_argument("--max-steps", type=int, default=1)
     doctor.add_argument("--json", action="store_true")
+    doctor.add_argument(
+        "--allow-python-fallback",
+        action="store_true",
+        help="include diagnostics for the explicitly enabled modal Python fallback",
+    )
     doctor.set_defaults(func=cmd_doctor)
 
     setup = sub.add_parser("setup-runtime")
@@ -601,6 +616,11 @@ def build_parser() -> argparse.ArgumentParser:
     ping.add_argument("--host", default="")
     ping.add_argument("--port", type=int, default=0)
     ping.add_argument("--timeout-seconds", type=int, default=0)
+    ping.add_argument(
+        "--allow-python-fallback",
+        action="store_true",
+        help="show recovery for the explicitly enabled modal Python fallback",
+    )
     ping.set_defaults(func=cmd_ping)
 
     return parser

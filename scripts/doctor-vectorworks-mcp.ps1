@@ -5,6 +5,7 @@ param(
     [int]$Port = 0,
     [ValidateRange(100, 30000)]
     [int]$TimeoutMilliseconds = 1200,
+    [switch]$EnablePythonDialogFallback,
     [switch]$Json
 )
 
@@ -54,6 +55,31 @@ function Read-Exact {
         $Offset += $Read
     }
     return $Buffer
+}
+
+function Test-NativePhase4Ready {
+    param($Result)
+    if (-not $Result) { return $false }
+    $Implemented = @($Result.implemented_actions | ForEach-Object { [string]$_ })
+    return [bool](
+        [string]$Result.dispatch_mode -eq "native_sdk" -and
+        [bool]$Result.native_bridge -and
+        [int]$Result.native_phase -ge 4 -and
+        $Result.cad_api_safe -eq $true -and
+        $Result.transport_only -ne $true -and
+        $Result.main_context_pump_ready -eq $true -and
+        "apply_operations" -in $Implemented
+    )
+}
+
+function Test-ExplicitPythonDialogReady {
+    param($Result)
+    if (-not $EnablePythonDialogFallback -or -not $Result) { return $false }
+    return [bool](
+        [string]$Result.dispatch_mode -eq "dialog" -and
+        $Result.cad_api_safe -eq $true -and
+        $Result.transport_only -ne $true
+    )
 }
 
 function Get-ProtocolAuthToken {
@@ -184,7 +210,10 @@ if ($MissingFiles.Count -eq 0) {
 
 $LauncherStatus = "missing"
 $LauncherDetail = $LauncherPath
-if (Test-Path -LiteralPath $LauncherPath) {
+if (-not $EnablePythonDialogFallback) {
+    $LauncherStatus = "not-enabled"
+    $LauncherDetail = "Python dialog fallback is disabled; launcher is not part of native readiness"
+} elseif (Test-Path -LiteralPath $LauncherPath) {
     $LauncherText = Get-Content -Raw -LiteralPath $LauncherPath
     if ($LauncherText -match 'os\.environ\["VW_MCP_MODE"\]\s*=\s*["'']dialog["'']' -and
         $LauncherText -match 'os\.environ\["VW_MCP_DIALOG_TIMER_MS"\]\s*=\s*["'']50["'']') {
@@ -202,7 +231,10 @@ $Findings += New-Finding -Name "launcher" -Status $LauncherStatus -Detail $Launc
 
 $LoaderStatus = "missing"
 $LoaderDetail = $LoaderPath
-if (Test-Path -LiteralPath $LoaderPath) {
+if (-not $EnablePythonDialogFallback) {
+    $LoaderStatus = "not-enabled"
+    $LoaderDetail = "Python dialog fallback is disabled; loader is not part of native readiness"
+} elseif (Test-Path -LiteralPath $LoaderPath) {
     $LoaderText = Get-Content -Raw -LiteralPath $LoaderPath
     $ExpectedLauncherLiteral = ConvertTo-PythonRawStringLiteralText $LauncherPath
     $ExpectedRepoLiteral = ConvertTo-PythonRawStringLiteralText $RepoRoot
@@ -239,14 +271,24 @@ try {
     if ($Ping.success) {
         $Result = $Ping.result
         $Findings += New-Finding -Name "listener ping" -Status "ok" -Detail ("bridge={0}; mode={1}; cad_api_safe={2}; transport_only={3}" -f $Result.bridge_kind, $Result.dispatch_mode, $Result.cad_api_safe, $Result.transport_only)
-        if ($Result.transport_only -or $Result.cad_api_safe -eq $false) {
-            $NextActions.Add("Do not call CAD handlers. Regenerate/copy/run the stable loader, or build the native SDK bridge.")
+        if (Test-NativePhase4Ready -Result $Result) {
+            $NextActions.Add("Native phase-4 bridge is ready. Use vw_preflight_for_cad before CAD work.")
+        } elseif (Test-ExplicitPythonDialogReady -Result $Result) {
+            $NextActions.Add("Explicit modal Python fallback is CAD-safe, but its dialog blocks parallel manual Vectorworks use.")
+        } elseif (-not $EnablePythonDialogFallback -and ([string]$Result.dispatch_mode -ne "native_sdk" -or -not [bool]$Result.native_bridge)) {
+            $NextActions.Add("Do not call CAD handlers. Stop the legacy Python listener, restart Vectorworks, and load the compiled phase-4 native SDK bridge. Do not run vw_listener.py or vw_load_listener_2024.py.")
+        } elseif ($Result.transport_only -or $Result.cad_api_safe -eq $false) {
+            $NextActions.Add("Do not call CAD handlers. Run scripts\doctor-native-bridge.ps1 -Json and complete its guarded native next action.")
         } else {
-            $NextActions.Add("Listener is CAD-safe. Use vw_get_document_info next before CAD work.")
+            $NextActions.Add("Bridge is not phase-4 native ready. Run scripts\doctor-native-bridge.ps1 -Json and complete its guarded next action.")
         }
     } else {
         $Findings += New-Finding -Name "listener ping" -Status "error" -Detail $Ping.error
-        $NextActions.Add("Listener answered with an error; rerun the stable loader or inspect Vectorworks alerts.")
+        if ($EnablePythonDialogFallback) {
+            $NextActions.Add("Explicit fallback listener answered with an error; regenerate its loader so the token-file environment is refreshed, then inspect Vectorworks alerts.")
+        } else {
+            $NextActions.Add("The process on the MCP port is not a usable native bridge. Stop any Python listener, restart Vectorworks, and ensure the compiled phase-4 native plug-in is loaded.")
+        }
     }
 } catch {
     $PingError = $_.Exception.Message
@@ -257,7 +299,11 @@ $PortOwners = @(Get-PortOwners -PortNumber $Port)
 if ($PortOwners.Count -eq 0) {
     $Findings += New-Finding -Name "port owner" -Status "none" -Detail "nothing owns $HostName`:$Port"
     if (-not $Ping) {
-        $NextActions.Add("Open Vectorworks 2024 and run the generated loader.")
+        if ($EnablePythonDialogFallback) {
+            $NextActions.Add("Open Vectorworks and run the generated loader. Its dialog is modal and blocks manual Vectorworks use.")
+        } else {
+            $NextActions.Add("Open or restart Vectorworks and ensure the compiled phase-4 native SDK bridge plug-in is installed, enabled, and loaded.")
+        }
     }
 } else {
     $OwnerSummary = ($PortOwners | ForEach-Object { "{0}({1}) responding={2}" -f $_.processName, $_.id, $_.responding }) -join "; "
@@ -265,7 +311,11 @@ if ($PortOwners.Count -eq 0) {
     if (-not $Ping) {
         $UnresponsiveVectorworks = @($PortOwners | Where-Object { $_.processName -like "Vectorworks*" -and $_.responding -eq $false })
         if ($UnresponsiveVectorworks.Count -gt 0) {
-            $NextActions.Add("Vectorworks owns the port but is not responding. Save if possible, then restart Vectorworks before running the stable loader.")
+            if ($EnablePythonDialogFallback) {
+                $NextActions.Add("Vectorworks owns the port but is not responding. Save if possible, restart Vectorworks, then rerun the explicitly enabled modal loader.")
+            } else {
+                $NextActions.Add("Vectorworks owns the port but is not responding. Save if possible, restart Vectorworks, and verify the compiled native plug-in loads.")
+            }
         } else {
             $NextActions.Add("Port $Port is owned but ping failed. Create ~/.vectorworks-mcp/STOP; if it stays stuck, restart Vectorworks.")
         }
@@ -287,12 +337,14 @@ if (Test-Path -LiteralPath $NativeCheckerPath) {
 }
 
 if ($NextActions.Count -eq 0) {
-    $NextActions.Add("Run scripts\bootstrap-claude-code.ps1 -Verify, then run this doctor again.")
+    $NextActions.Add("Run scripts\doctor-native-bridge.ps1 -Json and complete its guarded native next action.")
 }
 
 $Overall = "needs-attention"
-if ($Ping -and $Ping.success -and $Ping.result.cad_api_safe -eq $true -and $LauncherStatus -eq "ok" -and $LoaderStatus -eq "ok") {
-    $Overall = "cad-ready"
+if ($Ping -and $Ping.success -and (Test-NativePhase4Ready -Result $Ping.result)) {
+    $Overall = "native-phase4-ready"
+} elseif ($Ping -and $Ping.success -and (Test-ExplicitPythonDialogReady -Result $Ping.result) -and $LauncherStatus -eq "ok" -and $LoaderStatus -eq "ok") {
+    $Overall = "modal-fallback-ready"
 } elseif ($Ping -and $Ping.success -and ($Ping.result.transport_only -or $Ping.result.cad_api_safe -eq $false)) {
     $Overall = "transport-only"
 } elseif (-not $Ping -and $PortOwners.Count -gt 0) {
@@ -303,6 +355,8 @@ if ($Ping -and $Ping.success -and $Ping.result.cad_api_safe -eq $true -and $Laun
 
 $Report = [pscustomobject]@{
     overall = $Overall
+    mode = if ($EnablePythonDialogFallback) { "explicit-python-dialog-fallback" } else { "fast-native" }
+    pythonDialogFallbackEnabled = [bool]$EnablePythonDialogFallback
     host = $HostName
     port = $Port
     findings = $Findings

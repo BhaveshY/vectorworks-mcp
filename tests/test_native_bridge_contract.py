@@ -1,9 +1,11 @@
 import ast
 import json
+import os
 from pathlib import Path
 import socket
 import time
 import unittest
+from unittest.mock import patch
 
 import server
 from native_bridge import smoke as smoke_module
@@ -83,8 +85,15 @@ def _wait_for_port_released(port, timeout=2.0):
 
 
 class NativeBridgeContractTests(unittest.TestCase):
+    def setUp(self):
+        # The mock intentionally implements only the historical phase-one
+        # contract. Production fast-native tests use the phase-four harness.
+        self._profile_env = patch.dict(os.environ, {"VW_MCP_TOOL_PROFILE": "compat"})
+        self._profile_env.start()
+
     def tearDown(self):
         server._close()
+        self._profile_env.stop()
 
     def test_mock_native_bridge_supports_structured_preflight_and_cad_read(self):
         with MockNativeBridge() as bridge:

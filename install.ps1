@@ -443,7 +443,8 @@ function Get-LiveNativeBridgeStatus {
             "create_text",
             "create_linear_dimension",
             "set_property",
-            "manage_classes"
+            "manage_classes",
+            "apply_operations"
         )
         $Implemented = @($Status.implemented_actions | ForEach-Object { [string]$_ })
         $Missing = @($RequiredActions | Where-Object { $_ -notin $Implemented })
@@ -452,7 +453,7 @@ function Get-LiveNativeBridgeStatus {
             $Status -and
             $Status.native_bridge -eq $true -and
             [string]$Status.dispatch_mode -eq "native_sdk" -and
-            [int]$Status.native_phase -ge 2 -and
+            [int]$Status.native_phase -ge 4 -and
             $Status.cad_api_safe -eq $true -and
             $Status.transport_only -eq $false -and
             $Status.main_context_pump_ready -eq $true -and

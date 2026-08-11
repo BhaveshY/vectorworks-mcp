@@ -5,7 +5,8 @@ param(
     [ValidateRange(1, 65535)]
     [int]$Port = 0,
     [ValidateRange(1, 120)]
-    [int]$TimeoutSeconds = 5
+    [int]$TimeoutSeconds = 5,
+    [switch]$EnablePythonDialogFallback
 )
 
 $ErrorActionPreference = "Stop"
@@ -23,6 +24,7 @@ $Args = @()
 if ($HostName) { $Args += @("-HostName", $HostName) }
 if ($Port -ne 0) { $Args += @("-Port", $Port) }
 $Args += @("-TimeoutSeconds", $TimeoutSeconds)
+if ($EnablePythonDialogFallback) { $Args += "-EnablePythonDialogFallback" }
 
 & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $Tester @Args
 exit $LASTEXITCODE
