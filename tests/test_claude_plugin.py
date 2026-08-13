@@ -23,32 +23,69 @@ def _tool_map_names():
 
 
 class ClaudePluginTests(unittest.TestCase):
-    def test_plugin_manifest_declares_mcp_config(self):
-        manifest = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    def test_codex_repo_marketplace_targets_bundled_plugin(self):
+        marketplace_path = ROOT / ".agents" / "plugins" / "marketplace.json"
+        marketplace = json.loads(marketplace_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(marketplace["name"], "vectorworks-mcp")
+        self.assertEqual(marketplace["interface"], {"displayName": "Vectorworks MCP"})
+        self.assertEqual(len(marketplace["plugins"]), 1)
+        entry = marketplace["plugins"][0]
+        self.assertEqual(entry["name"], "vectorworks")
+        self.assertEqual(entry["source"], {"source": "local", "path": "./plugins/vectorworks"})
+        self.assertEqual(
+            entry["policy"],
+            {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},
+        )
+        self.assertEqual(entry["category"], "Productivity")
+        self.assertEqual((ROOT / entry["source"]["path"]).resolve(), PLUGIN.resolve())
+
+    def test_client_manifests_declare_separate_mcp_configs(self):
+        claude_manifest = json.loads((PLUGIN / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        codex_manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
         marketplace = json.loads((PLUGIN / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
         root_marketplace = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
 
-        self.assertEqual(manifest["name"], "vectorworks")
-        self.assertEqual(manifest["version"], "0.4.0")
-        self.assertEqual(manifest["mcpServers"], "./.mcp.json")
-        self.assertIn("vectorworks_repo", manifest["userConfig"])
+        self.assertEqual(claude_manifest["name"], "vectorworks")
+        self.assertEqual(claude_manifest["version"], "0.5.0")
+        self.assertEqual(claude_manifest["mcpServers"], "./.claude-plugin/mcp.json")
+        self.assertIn("vectorworks_repo", claude_manifest["userConfig"])
+        self.assertEqual(codex_manifest["name"], "vectorworks")
+        self.assertEqual(codex_manifest["version"], "0.5.0")
+        self.assertEqual(codex_manifest["skills"], "./skills/")
+        self.assertEqual(codex_manifest["mcpServers"], "./.mcp.json")
+        self.assertEqual(codex_manifest["interface"]["displayName"], "Vectorworks MCP")
+        self.assertEqual(codex_manifest["interface"]["category"], "Productivity")
+        self.assertEqual(codex_manifest["interface"]["capabilities"], ["Interactive", "Write"])
+        self.assertLessEqual(len(codex_manifest["interface"]["defaultPrompt"]), 3)
         self.assertEqual(marketplace["name"], "vectorworks-claude-plugin")
         self.assertEqual(marketplace["plugins"][0]["name"], "vectorworks")
         self.assertEqual(root_marketplace["name"], "vectorworks-mcp")
         self.assertEqual(root_marketplace["plugins"][0]["name"], "vectorworks")
         self.assertEqual(root_marketplace["plugins"][0]["source"], "./plugins/vectorworks")
 
-    def test_plugin_mcp_config_uses_wrapper(self):
-        config = json.loads((PLUGIN / ".mcp.json").read_text(encoding="utf-8"))
-        server = config["mcpServers"]["vectorworks"]
+    def test_client_mcp_configs_use_native_only_wrappers(self):
+        codex_config = json.loads((PLUGIN / ".mcp.json").read_text(encoding="utf-8"))
+        claude_config = json.loads((PLUGIN / ".claude-plugin" / "mcp.json").read_text(encoding="utf-8"))
+        codex_server = codex_config["mcpServers"]["vectorworks"]
+        claude_server = claude_config["mcpServers"]["vectorworks"]
 
-        self.assertEqual(server["type"], "stdio")
-        self.assertEqual(server["command"], "powershell.exe")
-        self.assertIn("scripts/run-vectorworks-mcp.ps1", "/".join(server["args"]).replace("\\", "/"))
-        self.assertEqual(server["env"]["VW_MCP_HOST"], "127.0.0.1")
-        self.assertEqual(server["env"]["VW_MCP_PORT"], "9877")
-        self.assertEqual(server["env"]["VW_MCP_PREFLIGHT_CACHE_MS"], "5000")
-        self.assertEqual(server["env"]["VW_MCP_TOOL_PROFILE"], "fast-native")
+        for server in (codex_server, claude_server):
+            self.assertEqual(server["type"], "stdio")
+            self.assertEqual(server["command"], "powershell.exe")
+            self.assertIn("scripts/run-vectorworks-mcp.ps1", "/".join(server["args"]).replace("\\", "/"))
+            self.assertEqual(server["env"]["VW_MCP_HOST"], "127.0.0.1")
+            self.assertEqual(server["env"]["VW_MCP_PORT"], "9877")
+            self.assertEqual(server["env"]["VW_MCP_PREFLIGHT_CACHE_MS"], "5000")
+            self.assertEqual(server["env"]["VW_MCP_TOOL_PROFILE"], "fast-native")
+            serialized = json.dumps(server)
+            self.assertNotIn("EnablePythonDialogFallback", serialized)
+            self.assertNotIn("allow-python-fallback", serialized)
+
+        self.assertIn("${PLUGIN_ROOT}/scripts/run-vectorworks-mcp.ps1", codex_server["args"])
+        self.assertNotIn("VW_MCP_REPO", codex_server["env"])
+        self.assertIn("${CLAUDE_PLUGIN_ROOT}/scripts/run-vectorworks-mcp.ps1", claude_server["args"])
+        self.assertEqual(claude_server["env"]["VW_MCP_REPO"], "${user_config.vectorworks_repo}")
 
     def test_plugin_skills_exist(self):
         for name in ("setup", "ping", "diagnose", "work"):
@@ -242,7 +279,8 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("never routes to a legacy, decomposed, batch, or modal fallback", work)
         self.assertIn("vw_execute_operations", work)
         self.assertIn("idempotency_key", work)
-        self.assertIn("create operations only", work)
+        self.assertIn("create-and-property-edit plan", work)
+        self.assertIn("`create` and `set_properties`", work)
 
     def test_plugin_tool_map_documents_safety_metadata_and_mixed_actions(self):
         tool_map = (PLUGIN / "references" / "tool-map.md").read_text(encoding="utf-8")
@@ -263,7 +301,8 @@ class ClaudePluginTests(unittest.TestCase):
             "no legacy, decomposed, batch, or modal fallback",
             "`vw_execute_operations`",
             "`apply_operations`",
-            "create-only",
+            "create-and-property-edit plan",
+            '"type":"set_properties"',
             "`vw_selection.get`",
             "`vw_selection.delete`",
             "`vw_manage_classes.list`",
@@ -309,9 +348,17 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("-LoaderPath", bootstrap)
         self.assertIn("copy-vectorworks-loader.ps1", bootstrap)
         self.assertIn("SkipClipboard", bootstrap)
-        self.assertIn("[int]$MinimumContractVersion = 15", resolver)
+        self.assertIn("[int]$MinimumContractVersion", resolver)
+        self.assertIn("$MinimumContractVersion = 16", resolver)
         self.assertIn("requiredFeatures", resolver)
-        self.assertIn("contractVersion >= 15", contract)
+        for feature in (
+            "native-phase4-apply-operations",
+            "fast-native-tool-profile",
+            "structured-mcp-results",
+            "codex-plugin-package",
+        ):
+            self.assertIn(feature, resolver)
+        self.assertIn("contractVersion >= 16", contract)
         self.assertIn("native-bridge-scaffold-copy", contract)
         self.assertIn("native-doctor-next-command", contract)
         self.assertIn("native-doctor-command-spec", contract)

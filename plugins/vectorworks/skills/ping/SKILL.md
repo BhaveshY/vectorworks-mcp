@@ -22,15 +22,18 @@ Interpretation:
   is stale; create `~\.vectorworks-mcp\STOP`, wait, and restart Vectorworks if
   needed.
 - Raw ping passes but MCP `vw_ping` is unavailable: the MCP client has not
-  loaded the `vectorworks` server. In Claude Code, reload plugins. In Codex or
-  another direct client, trust/add the repo `.mcp.json`.
+  loaded the `vectorworks` server. In Claude Code, reload plugins. In Codex,
+  confirm that the bundled plugin package is installed and loaded. For a
+  direct checkout or another direct client, trust/add the repo `.mcp.json`.
 - Ping/preflight reports `cad_api_safe: true` and `transport_only: false`:
   proceed with CAD actions.
 - Ping reports `native_bridge: true`, `native_phase: 0`, or
   `transport_only: true`: transport is alive, but CAD handlers are not ready.
   Do not call CAD tools.
-- For native phase-2 production work, also confirm the ping/capabilities payload
-  includes `create_wall`, `create_text`, `create_linear_dimension`,
-  `set_property`, `manage_classes`, and `batch_create_objects`.
+- For normal production work, also confirm `native_phase >= 4`, the
+  `fast-native` tool profile, and an implemented `apply_operations` action.
+  Focused phase-2 handler families remain usable when advertised; these include
+  `create_wall`, `create_text`, `create_linear_dimension`, `set_property`,
+  `manage_classes`, and `batch_create_objects`.
 
 Use `vw_ping` with an underscore. `/mcp vw-ping` is not the right call pattern.

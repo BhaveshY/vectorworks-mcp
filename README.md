@@ -53,13 +53,15 @@ Prefer a focused `vw_lookup_objects`, `vw_get_document_info`, or
 `vw_agent_context(profile="production")` for broad multi-step planning.
 
 `vw_execute_operations` is the mandatory fast-native one-call path for a
-complete, create-only plan. Send canonical
-`{"type":"create","params":{"object_type":...}}` operations with a stable
-caller-generated `idempotency_key`, and reuse that key only for the identical
-plan. The host validates the plan before writing and requires native phase-4
-`apply_operations`. Missing support is a hard upgrade/restart failure; it never
-routes through a legacy, decomposed, batch, or modal fallback. The current
-contract does not accept guessed update/delete operation types.
+complete create-and-property-edit plan. Send canonical `create` and
+`set_properties` operations with a stable caller-generated `idempotency_key`,
+and reuse that key only for the identical plan. A property edit can target an
+existing `uuid:...`, `name:...`, or `handle:...` ref, or `$<operation_id>` for
+an object created earlier in the same transaction. The host validates the plan
+before writing and requires native phase-4 `apply_operations`. Missing support
+is a hard upgrade/restart failure; it never routes through a legacy,
+decomposed, batch, or modal fallback. Delete and other guessed operation types
+are not accepted.
 
 `fast-native` is mandatory for normal agent work and is also the default when
 `VW_MCP_TOOL_PROFILE` is absent. It exposes only the compact native production
@@ -86,11 +88,13 @@ into an SDK examples worktree, wired into the module lifecycle, built,
 installed, and smoke-tested. The default setup diagnoses and plans this path but
 does not silently install Visual Studio, download a large SDK, modify the
 Vectorworks user Plug-ins folder, restart Vectorworks, or run write fixtures.
-Use `-FullNative` only as explicit consent for those side effects. When the
-compiled phase-2 bridge is loaded it
-reports `native-sdk-bridge-phase2`, `cad_api_safe=true`, `transport_only=false`,
-and `main_context_pump_ready=true`; older phase-1 builds report
-`native-sdk-bridge-phase1`.
+Use `-FullNative` only as explicit consent for those side effects. Normal
+production readiness requires a phase-4 bridge that reports
+`native_phase >= 4`, `cad_api_safe=true`, `transport_only=false`,
+`main_context_pump_ready=true`, the `fast-native` profile, and an implemented
+`apply_operations` action. Older phase-1 and phase-2 builds report
+`native-sdk-bridge-phase1` and `native-sdk-bridge-phase2`, respectively, but do
+not satisfy the current production gate.
 
 Native phase 1 implements `get_document_info`, `get_layers`,
 `get_objects`, `selection` (`get`, `clear`, `select`, `delete`), and
@@ -105,7 +109,8 @@ management. This includes
 readback-verified edits, and `vw_manage_classes` for native class
 list/create/delete workflows. Native phase 3 adds compact drawing summaries and
 criteria search so agents can inspect large drawings without fetching thousands
-of full object records. Write tools require an active
+of full object records. Native phase 4 adds true polygon/polyline creation and
+idempotent atomic `apply_operations` transactions. Write tools require an active
 Vectorworks document; the Home/no-document screen can answer read health checks
 but is not a valid drawing target. In an active document with no current
 writable design layer, native creation attempts to create/select a default
@@ -260,8 +265,10 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "irm https://
 
 The installer clones or updates `BhaveshY/vectorworks-mcp` under
 `$env:USERPROFILE\repos\vectorworks-mcp`, installs Python dependencies,
-checks host readiness, and leaves the repo `.mcp.json` ready for Codex, Claude
-Code project MCP, or any stdio MCP client. It diagnoses the native SDK bridge
+checks host readiness, and leaves the repo `.mcp.json` ready as a
+direct-checkout fallback for Codex, Claude Code project MCP, or any stdio MCP
+client. Packaged Codex installs discover the MCP server and skills through the
+bundled plugin package. It diagnoses the native SDK bridge
 and reports the exact guarded next step. Native non-modal readiness is the
 default completion criterion; a host-only MCP process or generated Python
 launcher is not production readiness. The default is `-Client HostOnly`, so it
@@ -285,13 +292,14 @@ winget is available, then runs the guarded native bridge loop with the required
 network/software/download/plugin-write allow flags. After the native artifact is
 installed, the installer automatically opens or restarts Vectorworks, waits for
 the native plug-in socket, runs phase-0 transport smoke, and then attempts the
-phase-2 production smoke. If Vectorworks opens on the Home/no-document screen,
+phase-2 write-fixture smoke. If Vectorworks opens on the Home/no-document screen,
 the native bridge opens a default blank document before write fixtures. If
 Vectorworks blocks automation with a license, recovery, plug-in approval, or
 startup prompt, JSON reports
 `native_summary.vectorworks_automation_attempted`, `native_summary.next_command`,
 and `native_summary.acceptance_next_command` so the agent can resume exactly.
-Native production readiness is not claimed until both smoke stages pass.
+After both smoke stages pass, the live bridge must also satisfy the phase-4
+`apply_operations` production gate before setup is complete.
 `-FullNative` is explicit, side-effecting consent. Do not add it automatically
 or infer consent from a request to connect, diagnose, or plan the MCP setup. It
 is mutually exclusive with `-EnablePythonDialogFallback`.
@@ -321,8 +329,9 @@ If you specifically want Claude Code user registration from the checkout:
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Client ClaudeCode
 ```
 
-Then point the client at the project `.mcp.json` from this repo, or configure
-the same server manually:
+Packaged Codex installs use the bundled plugin package. For a direct checkout,
+point the client at the project `.mcp.json` from this repo, or configure the
+same server manually:
 
 ```json
 {
@@ -408,8 +417,18 @@ loader to the clipboard. Those files are for the explicit modal fallback and
 do not satisfy native readiness.
 
 This repo also includes a project `.mcp.json` that points compatible MCP clients
-at the self-bootstrapping runner. Claude Code and Codex may ask you to trust
-project MCP servers the first time they see that file.
+at the self-bootstrapping runner. It is the direct-checkout fallback when the
+bundled Codex plugin package is not installed. Claude Code and Codex may ask you
+to trust project MCP servers the first time they see that file.
+
+## Codex Plugin
+
+Install the packaged connector directly from this repository's `main` branch:
+
+```powershell
+codex plugin marketplace add BhaveshY/vectorworks-mcp --ref main
+codex plugin add vectorworks@vectorworks-mcp
+```
 
 ## Claude Code Plugin
 
@@ -577,12 +596,12 @@ Core:
 | `vw_bridge_status` | Same status payload as `vw_ping`, named for agent preflight checks |
 | `vw_preflight_for_cad` | Structured JSON go/no-go check before real CAD/API handlers |
 | `vw_agent_context` | One-call compact Codex planning snapshot with preflight, key capabilities, and token-efficient drawing summary |
-| `vw_capabilities` | Current bridge capabilities, native phase-1/phase-2 support, and tool surface |
+| `vw_capabilities` | Current bridge capabilities, native phase-1 through phase-4 support, and tool surface |
 | `vw_tool_safety` | Structured safety metadata for all tools |
 | `vw_run_script` | Disabled by default; execute trusted Python inside Vectorworks only after `VW_MCP_ENABLE_RUN_SCRIPT=1` and `confirm="RUN_TRUSTED_CODE"` |
 | `vw_create_object` | Compat/admin primitive helper; hidden from mandatory fast-native work |
 | `vw_batch_create_objects` | Compat/admin batch helper; `atomic=false` is legacy and never a fast-native fallback |
-| `vw_execute_operations` | Mandatory fast-native create-only operation plan with a stable idempotency key; requires native phase-4 `apply_operations` and hard-fails when unavailable |
+| `vw_execute_operations` | Mandatory fast-native create-and-property-edit plan with a stable idempotency key; accepts `create` and `set_properties`, requires native phase-4 `apply_operations`, and hard-fails when unavailable |
 | `vw_plan_schematic_floor_plan` | Dry-run a multi-room schematic floor plan and return the native primitives |
 | `vw_create_schematic_floor_plan` | Create a multi-room schematic floor plan from rooms, wall segments, doors, and windows |
 | `vw_create_bim_floor_plan` | Create a native wall-based floor plan with optional room labels and linear dimensions |

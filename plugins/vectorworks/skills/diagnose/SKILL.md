@@ -34,9 +34,11 @@ Follow `nextCommandSpec` and safety fields. `missingAllowFlags`,
 - `native_plan` or `native-next` reports a bootstrap/build/install stage:
   report that required native bridge setup is not complete yet and follow only
   the structured next command. Do not silently switch to Python.
-- Native production readiness means `native_phase >= 2`, `cad_api_safe: true`,
-  `transport_only: false`, `main_context_pump_ready: true`, and implemented
-  actions for the requested wall/text/dimension/property/class/batch work.
+- Native production readiness means `native_phase >= 4`, `cad_api_safe: true`,
+  `transport_only: false`, `main_context_pump_ready: true`, the `fast-native`
+  tool profile, and an implemented `apply_operations` action. Also confirm the
+  specific actions needed for any focused wall, text, dimension, property,
+  class, or batch work.
 - `sdkArchiveCandidates` exists: reuse the downloaded SDK ZIP with
   `--sdk-archive-path` / `-SdkArchivePath`; do not download another copy.
 - `vw_ping` or raw ping reports `cad_api_safe: false` or
@@ -48,7 +50,9 @@ Follow `nextCommandSpec` and safety fields. `missingAllowFlags`,
   while its dialog is open.
 - MCP tools absent but raw listener works: the MCP client has not loaded the
   `vectorworks` server. In Claude Code, reload plugins or start Claude Code
-  with this plugin. In Codex/direct clients, trust or add the repo `.mcp.json`.
+  with this plugin. In Codex, confirm that the bundled plugin package is
+  installed and loaded. For a direct checkout, trust or add the repo
+  `.mcp.json`.
 - Tool result contains `blocked: true`: stop and follow the reported reason
   before attempting CAD work.
 - Tool result reports `unknown commit state`: do not retry non-idempotent or destructive tools. Use

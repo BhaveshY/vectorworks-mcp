@@ -133,6 +133,53 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertNotIn("VW_MCP_AUTH_TOKEN", (ROOT / ".mcp.json").read_text(encoding="utf-8"))
         self.assertNotIn(":-", (ROOT / ".mcp.json").read_text(encoding="utf-8"))
 
+    def test_release_metadata_pins_tested_mcp_stack(self):
+        requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
+        expected_dependencies = [
+            "fastmcp==3.4.7",
+            "mcp==1.29.0",
+            "pydantic==2.13.4",
+        ]
+        self.assertEqual(requirements, expected_dependencies)
+
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn('version = "0.5.0"', pyproject)
+        for dependency in expected_dependencies:
+            self.assertIn(f'"{dependency}"', pyproject)
+
+    def test_bundled_skills_require_phase4_transaction_runtime(self):
+        for relative_path in (
+            "plugins/vectorworks/skills/diagnose/SKILL.md",
+            "plugins/vectorworks/skills/ping/SKILL.md",
+            "plugins/vectorworks/skills/setup/SKILL.md",
+            "plugins/vectorworks/skills/work/SKILL.md",
+        ):
+            content = (ROOT / relative_path).read_text(encoding="utf-8")
+            normalized = content.replace("phase-4", "phase 4").lower()
+            self.assertTrue(
+                "phase 4" in normalized or "native_phase >= 4" in normalized,
+                relative_path,
+            )
+            self.assertIn("apply_operations", content, relative_path)
+
+        work_skill = (ROOT / "plugins/vectorworks/skills/work/SKILL.md").read_text(encoding="utf-8")
+        tool_map = (ROOT / "plugins/vectorworks/references/tool-map.md").read_text(encoding="utf-8")
+        for content in (work_skill, tool_map):
+            self.assertIn("set_properties", content)
+            self.assertNotIn("create-only", content)
+
+        companion_check = (
+            ROOT / "plugins/vectorworks/scripts/check-companion-contract.ps1"
+        ).read_text(encoding="utf-8")
+        self.assertIn("contractVersion >= 16", companion_check)
+        for feature in (
+            "native-phase4-apply-operations",
+            "fast-native-tool-profile",
+            "structured-mcp-results",
+            "codex-plugin-package",
+        ):
+            self.assertIn(feature, companion_check)
+
     def test_agent_instruction_files_exist(self):
         self.assertTrue((ROOT / "AGENTS.md").exists())
         self.assertTrue((ROOT / "CLAUDE.md").exists())
@@ -183,7 +230,7 @@ class AgentReadinessTests(unittest.TestCase):
         marker = json.loads((ROOT / ".vectorworks-mcp-contract.json").read_text(encoding="utf-8"))
 
         self.assertEqual(marker["name"], "vectorworks-mcp")
-        self.assertGreaterEqual(marker["contractVersion"], 15)
+        self.assertEqual(marker["contractVersion"], 16)
         for feature in (
             "stable-loader",
             "loader-clipboard-copy",
@@ -201,6 +248,10 @@ class AgentReadinessTests(unittest.TestCase):
             "native-phase2-cad-handlers",
             "native-phase2-set-property",
             "native-phase2-manage-classes",
+            "native-phase4-apply-operations",
+            "fast-native-tool-profile",
+            "structured-mcp-results",
+            "codex-plugin-package",
             "local-auth-token-required",
             "client-neutral-project-mcp",
         ):
@@ -826,7 +877,7 @@ exit 0
             self.assertIn("runpy.run_path", loader_text)
             _assert_path_in_text(self, launcher_path, loader_text)
             self.assertIn("VW_MCP_LOADER_METADATA", loader_text)
-            self.assertIn('"contractVersion": 15', loader_text)
+            self.assertIn('"contractVersion": 16', loader_text)
             self.assertIn('"native-bridge-scaffold-copy"', loader_text)
             self.assertIn('"native-doctor-next-command"', loader_text)
             self.assertIn('"native-doctor-command-spec"', loader_text)
@@ -840,6 +891,10 @@ exit 0
             self.assertIn('"native-phase2-cad-handlers"', loader_text)
             self.assertIn('"native-phase2-set-property"', loader_text)
             self.assertIn('"native-phase2-manage-classes"', loader_text)
+            self.assertIn('"native-phase4-apply-operations"', loader_text)
+            self.assertIn('"fast-native-tool-profile"', loader_text)
+            self.assertIn('"structured-mcp-results"', loader_text)
+            self.assertIn('"codex-plugin-package"', loader_text)
             self.assertIn('"local-auth-token-required"', loader_text)
             self.assertIn('"client-neutral-project-mcp"', loader_text)
 
@@ -925,9 +980,11 @@ exit 0
         root_readme = (ROOT / "README.md").read_text(encoding="utf-8")
         self.assertIn("required default runtime", root_readme)
         self.assertIn("install.ps1 -EnablePythonDialogFallback", root_readme)
-        self.assertIn("compiled phase-2 bridge", root_readme)
+        self.assertIn("production readiness requires a phase-4 bridge", root_readme)
         self.assertIn("native-sdk-bridge-phase1", root_readme)
         self.assertIn("native-sdk-bridge-phase2", root_readme)
+        self.assertIn("Native phase 4 adds true polygon/polyline creation", root_readme)
+        self.assertIn("idempotent atomic `apply_operations` transactions", root_readme)
         self.assertIn("main_context_pump_ready=true", root_readme)
         self.assertIn("production class", root_readme)
         self.assertIn("Host preflight blocks broader MCP tools", root_readme)

@@ -59,7 +59,8 @@ recovery, startup, or plug-in approval prompts, report
 the exact resume command after the prompt is cleared; do not claim completion
 until native smoke passes.
 
-Then use the repo `.mcp.json`, or configure the same `powershell.exe -File
+In Codex, use the bundled plugin package when it is installed. For a direct
+checkout, use the repo `.mcp.json`, or configure the same `powershell.exe -File
 scripts\run-mcp-server.ps1` stdio server with an absolute path if the client
 does not launch from the repo root.
 
@@ -92,7 +93,10 @@ not native production readiness.
   Cursor, or non-interactive shells.
 - Raw socket reachability is not enough. CAD work requires `cad_api_safe: true`
   and `transport_only: false`.
-- The production non-modal path is the compiled Vectorworks SDK bridge. Phase 2
-  supports native walls, text, linear dimensions, verified property edits,
-  class management, and mixed atomic batches. Python loader repair is explicit
-  fallback only and never satisfies the default native completion criterion.
+- The production non-modal path is the compiled Vectorworks SDK bridge. Normal
+  readiness requires native phase 4, the `fast-native` tool profile, and an
+  implemented `apply_operations` action. Phase 2 introduced native walls,
+  text, linear dimensions, verified property edits, class management, and
+  mixed atomic batches; those handlers do not by themselves satisfy the
+  current production gate. Python loader repair is explicit fallback only and
+  never satisfies the default native completion criterion.

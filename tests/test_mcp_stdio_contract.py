@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import unittest
@@ -43,7 +44,11 @@ class McpStdioContractTests(unittest.TestCase):
             with open(os.devnull, "w", encoding="utf-8") as errlog:
                 async with stdio_client(params, errlog=errlog) as (read, write):
                     async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=5)) as session:
-                        await session.initialize()
+                        initialized = await session.initialize()
+                        self.assertEqual(initialized.serverInfo.version, "0.5.0")
+                        self.assertIn("fast-native phase-4", initialized.instructions[:512])
+                        self.assertIn("one atomic vw_execute_operations", initialized.instructions[:512])
+                        self.assertIn("Never use the modal Python listener", initialized.instructions[:512])
                         tools = await session.list_tools()
                         names = {tool.name for tool in tools.tools}
                         by_name = {tool.name: tool for tool in tools.tools}
@@ -54,6 +59,23 @@ class McpStdioContractTests(unittest.TestCase):
                         self.assertNotIn("vw_insert_door", names)
                         selection_actions = by_name["vw_selection"].inputSchema["properties"]["action"]["enum"]
                         self.assertEqual(selection_actions, ["get", "select", "clear", "delete"])
+                        for tool in tools.tools:
+                            self.assertEqual(tool.outputSchema, {"type": "object", "additionalProperties": True})
+
+                        safety_result = await session.call_tool("vw_tool_safety")
+                        self.assertFalse(safety_result.isError)
+                        self.assertEqual(
+                            safety_result.structuredContent,
+                            json.loads(safety_result.content[0].text),
+                        )
+
+                        failure_result = await session.call_tool(
+                            "vw_manage_classes",
+                            {"action": "delete", "class_name": "Test Class"},
+                        )
+                        self.assertTrue(failure_result.isError)
+                        self.assertFalse(failure_result.structuredContent["ok"])
+                        self.assertTrue(failure_result.structuredContent["confirmation_required"])
 
     def test_server_starts_over_stdio_and_exposes_expected_contract(self):
         contract_checked = False
@@ -84,6 +106,8 @@ class McpStdioContractTests(unittest.TestCase):
                         async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=5)) as session:
                             initialized = await session.initialize()
                             self.assertEqual(initialized.serverInfo.name, "Vectorworks 2024/2025")
+                            self.assertEqual(initialized.serverInfo.version, "0.5.0")
+                            self.assertIn("fast-native phase-4", initialized.instructions[:512])
 
                             tools = await session.list_tools()
                             by_name = {tool.name: tool for tool in tools.tools}
@@ -194,10 +218,11 @@ class McpStdioContractTests(unittest.TestCase):
 
                             contract_checked = True
                             ping = await session.call_tool("vw_ping", {})
-                            self.assertFalse(ping.isError)
+                            self.assertTrue(ping.isError)
                             ping_text = ping.content[0].text
                             self.assertIn("Connection error:", ping_text)
                             self.assertIn("127.0.0.1:1", ping_text)
+                            self.assertEqual(ping.structuredContent, {"result": ping_text})
                 except BaseExceptionGroup as exc:
                     if not _all_broken_resource_errors(exc):
                         raise

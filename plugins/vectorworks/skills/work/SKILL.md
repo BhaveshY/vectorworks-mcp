@@ -46,16 +46,20 @@ upgraded or the request changes explicitly.
 
 Use the MCP tools deliberately:
 
-- Send a complete create-only plan in one `vw_execute_operations` call. Supply
+- Send a complete create-and-property-edit plan in one
+  `vw_execute_operations` call. Supply
   a stable caller-generated `idempotency_key` and canonical
-  operations shaped as
-  `{"type":"create","params":{"object_type":"rect",...}}`. Reuse the key only
-  for the identical plan. The host validates the entire plan before writing,
-  requires native phase-4 `apply_operations`, and returns a compact
+  operations shaped as `{"type":"create","operation_id":"room","params":
+  {"object_type":"rect",...}}` or `{"type":"set_properties","params":
+  {"edits":[{"ref":"$room","properties":{"name":"Room 101"}}]}}`. Existing
+  targets can use `uuid:...`, `name:...`, or `handle:...` refs; `$<operation_id>`
+  targets an object created earlier in the same transaction. Reuse the key
+  only for the identical plan. The host validates the entire plan before
+  writing, requires native phase-4 `apply_operations`, and returns a compact
   self-verifying result. Missing phase-4 support is a hard upgrade/restart
   failure; it never routes to a legacy, decomposed, batch, or modal fallback.
-  Do not invent update/delete operation types; the current contract accepts
-  create operations only.
+  The contract accepts `create` and `set_properties`; do not invent delete or
+  other operation types.
 - Polygon and polyline creation require the native bridge to report those
   object types (phase 4). If it does not, stop with the capability error. Do not
   substitute independent lines or retry through compatibility mode.
@@ -78,7 +82,10 @@ Use the MCP tools deliberately:
 Safety habits:
 
 - If a tool returns `blocked: true`, stop and fix the listener/bridge status before retrying CAD work.
-- If ping reports `native_phase: 0`, missing phase-2 actions such as `set_property` or `manage_classes`, or `transport_only: true`, do not call unsupported CAD handlers; run `vectorworksctl native-next --plan-only --json`.
+- If ping reports `native_phase < 4`, missing `apply_operations`, missing
+  focused actions such as `set_property` or `manage_classes`, or
+  `transport_only: true`, do not call unsupported CAD handlers; run
+  `vectorworksctl native-next --plan-only --json`.
 - Ask before destructive edits such as delete, class-wide changes, overwrites, or exports over existing files.
 - Destructive fast-native variants require explicit confirmation arguments such
   as `confirm="DELETE_SELECTED"`, `confirm="DELETE_EXACT_NAME"` for exact-name

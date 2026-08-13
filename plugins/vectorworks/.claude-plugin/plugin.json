@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "vectorworks",
   "displayName": "Vectorworks MCP",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Claude Code plugin for connecting to Vectorworks 2024/2025 through the production Vectorworks MCP connector. Bundles setup, diagnosis, listener ping, CAD workflow skills, native bridge planning, and an MCP server definition.",
   "repository": "https://github.com/BhaveshY/vectorworks-claude-plugin",
   "author": {
@@ -15,7 +15,7 @@
     "bim",
     "windows"
   ],
-  "mcpServers": "./.mcp.json",
+  "mcpServers": "./.claude-plugin/mcp.json",
   "userConfig": {
     "vectorworks_repo": {
       "type": "directory",

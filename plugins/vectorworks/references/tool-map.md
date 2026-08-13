@@ -7,8 +7,8 @@ The normal runtime has one mandatory production profile:
 - **Fast native (mandatory):** non-modal, capability-checked native reads and
   writes. For a fully specified, self-contained write, call the native tool
   directly; the host performs internal CAD preflight. Use one
-  `vw_execute_operations` call for a complete create-only plan. Successful
-  responses that include handles/UUIDs, exact created counts, atomic status, or
+  `vw_execute_operations` call for a complete create-and-property-edit plan.
+  Successful responses that include handles/UUIDs, exact created counts, atomic status, or
   verified readback are self-verifying and do not need an automatic screenshot
   or full drawing scan.
 - **Compat (manual administrator diagnostic only):** broader Python/legacy
@@ -52,12 +52,15 @@ Create and edit:
 - `vw_batch_create_objects`: lower-level compatibility-surface batch helper,
   not a fallback for `vw_execute_operations`. `atomic=false` is a legacy
   per-object route and is unavailable to mandatory fast-native agent work.
-- `vw_execute_operations`: execute one strictly validated create-only plan using
-  canonical `{"type":"create","params":{...}}` operations and a stable
-  caller-generated `idempotency_key`. It requires native phase-4
+- `vw_execute_operations`: execute one strictly validated plan using canonical
+  `{"type":"create","operation_id":"item","params":{...}}` and
+  `{"type":"set_properties","params":{"edits":[...]}}` operations with a
+  stable caller-generated `idempotency_key`. Property edits may target existing
+  `uuid:...`, `name:...`, or `handle:...` refs, or `$<operation_id>` for an
+  object created earlier in the same transaction. It requires native phase-4
   `apply_operations`; missing support is a hard upgrade/restart failure. There
   is no legacy, decomposed, batch, or modal fallback. Reuse a key only for the
-  identical plan; update/delete operation types are not part of the current
+  identical plan; delete and other operation types are not part of the current
   contract.
 - `vw_plan_schematic_floor_plan`: dry-run a multi-room schematic floor plan and return the primitives.
 - `vw_create_schematic_floor_plan`: create a multi-room schematic floor plan from rooms, walls, doors, and windows.
@@ -66,7 +69,7 @@ Create and edit:
 - `vw_create_schematic_door`: schematic door leaf and swing arc from native 2D primitives.
 - `vw_create_schematic_window`: schematic double-line window marker from native 2D primitives.
 - `vw_set_object_property`: name, class, color, line weight, opacity.
-- `vw_batch_set_object_properties`: resolve `uuid:...`, `name:...`, or `handle:...` refs, reject ambiguous/stale refs before writing, apply multiple property edits, and optionally verify readback. Requires `set_property`, a native phase-2 production action, in the active bridge.
+- `vw_batch_set_object_properties`: resolve `uuid:...`, `name:...`, or `handle:...` refs, reject ambiguous/stale refs before writing, apply multiple property edits, and optionally verify readback. Requires the native phase-2 `set_property` action in the active bridge.
 - `vw_selection`: fast-native exposes get, select, clear, and delete; selected-object delete requires `confirm="DELETE_SELECTED"` and exact-name criteria delete requires `confirm="DELETE_EXACT_NAME"`. Legacy move/duplicate are explicit diagnostic `compat` actions only.
 
 Architecture:
@@ -80,7 +83,7 @@ Architecture:
 
 Resources and files:
 
-- `vw_manage_classes`: native phase-2 production class management; list/create/delete classes; delete requires `confirm="DELETE_CLASS"`.
+- `vw_manage_classes`: native phase-2 class management; list/create/delete classes; delete requires `confirm="DELETE_CLASS"`.
 - `vw_worksheet`: read/write worksheet cells and ranges.
 - `vw_symbol`: list and insert symbols.
 - `vw_export`: export PDF, DXF, DWG, or image where supported.

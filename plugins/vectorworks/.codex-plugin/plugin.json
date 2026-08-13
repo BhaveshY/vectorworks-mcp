@@ -1,0 +1,38 @@
+{
+  "name": "vectorworks",
+  "version": "0.5.0",
+  "description": "Control Vectorworks 2024/2025 through the production fast-native MCP connector.",
+  "author": {
+    "name": "Bhavesh",
+    "url": "https://github.com/BhaveshY"
+  },
+  "homepage": "https://github.com/BhaveshY/vectorworks-mcp",
+  "repository": "https://github.com/BhaveshY/vectorworks-mcp",
+  "keywords": [
+    "vectorworks",
+    "mcp",
+    "cad",
+    "bim",
+    "windows"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Vectorworks MCP",
+    "shortDescription": "Fast native CAD control for Vectorworks",
+    "longDescription": "Inspect and edit Vectorworks drawings through a guarded phase-4 native SDK bridge while keeping the Vectorworks interface available for manual work.",
+    "developerName": "Bhavesh",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/BhaveshY/vectorworks-mcp",
+    "defaultPrompt": [
+      "Check the Vectorworks connection and summarize the active drawing.",
+      "Create this architecture diagram in the active Vectorworks document.",
+      "Inspect these Vectorworks objects and apply the requested edits."
+    ],
+    "brandColor": "#D71920"
+  }
+}

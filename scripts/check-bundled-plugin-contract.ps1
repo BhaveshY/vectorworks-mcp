@@ -9,7 +9,9 @@ $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $BundledPlugin = Join-Path $RepoRoot "plugins\vectorworks"
 $ServerPath = Join-Path $RepoRoot "server.py"
 $BundledMcpPath = Join-Path $BundledPlugin ".mcp.json"
+$BundledClaudeMcpPath = Join-Path $BundledPlugin ".claude-plugin\mcp.json"
 $RepoMcpPath = Join-Path $RepoRoot ".mcp.json"
+$RepoMarketplacePath = Join-Path $RepoRoot ".agents\plugins\marketplace.json"
 
 function Assert-File {
     param([string]$RelativePath)
@@ -49,6 +51,8 @@ function Get-FirstPythonCommand {
 
 $RequiredFiles = @(
     ".mcp.json",
+    ".codex-plugin\plugin.json",
+    ".claude-plugin\mcp.json",
     ".claude-plugin\plugin.json",
     ".claude-plugin\marketplace.json",
     "references\tool-map.md",
@@ -81,6 +85,9 @@ $RequiredFiles = @(
 foreach ($RelativePath in $RequiredFiles) {
     Assert-File $RelativePath
 }
+if (-not (Test-Path -LiteralPath $RepoMarketplacePath -PathType Leaf)) {
+    throw "Repository Codex marketplace is missing: $RepoMarketplacePath"
+}
 
 $BundledCompanionContract = Join-Path $BundledPlugin "scripts\check-companion-contract.ps1"
 & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $BundledCompanionContract -RepoPath $RepoRoot
@@ -88,28 +95,80 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-$Manifest = Get-Content -Raw -LiteralPath (Join-Path $BundledPlugin ".claude-plugin\plugin.json") | ConvertFrom-Json
-if ($Manifest.name -ne "vectorworks" -or $Manifest.mcpServers -ne "./.mcp.json") {
-    throw "Bundled plugin manifest is not a valid Vectorworks plugin manifest."
+$CodexManifest = Get-Content -Raw -LiteralPath (Join-Path $BundledPlugin ".codex-plugin\plugin.json") | ConvertFrom-Json
+if ($CodexManifest.name -ne "vectorworks" -or
+    $CodexManifest.version -ne "0.5.0" -or
+    $CodexManifest.skills -ne "./skills/" -or
+    $CodexManifest.mcpServers -ne "./.mcp.json" -or
+    $CodexManifest.interface.displayName -ne "Vectorworks MCP") {
+    throw "Bundled Codex plugin manifest is not a valid Vectorworks plugin manifest."
+}
+$ClaudeManifest = Get-Content -Raw -LiteralPath (Join-Path $BundledPlugin ".claude-plugin\plugin.json") | ConvertFrom-Json
+if ($ClaudeManifest.name -ne "vectorworks" -or
+    $ClaudeManifest.version -ne "0.5.0" -or
+    $ClaudeManifest.mcpServers -ne "./.claude-plugin/mcp.json") {
+    throw "Bundled Claude Code plugin manifest is not a valid Vectorworks plugin manifest."
 }
 $Marketplace = Get-Content -Raw -LiteralPath (Join-Path $BundledPlugin ".claude-plugin\marketplace.json") | ConvertFrom-Json
 if ($Marketplace.name -ne "vectorworks-claude-plugin" -or $Marketplace.plugins[0].name -ne "vectorworks") {
     throw "Bundled plugin marketplace manifest is invalid."
 }
+$RepoMarketplace = Get-Content -Raw -LiteralPath $RepoMarketplacePath | ConvertFrom-Json
+$RepoMarketplaceEntry = @($RepoMarketplace.plugins)[0]
+if ($RepoMarketplace.name -ne "vectorworks-mcp" -or
+    $RepoMarketplace.interface.displayName -ne "Vectorworks MCP" -or
+    @($RepoMarketplace.plugins).Count -ne 1 -or
+    $RepoMarketplaceEntry.name -ne "vectorworks" -or
+    $RepoMarketplaceEntry.source.source -ne "local" -or
+    $RepoMarketplaceEntry.source.path -ne "./plugins/vectorworks" -or
+    $RepoMarketplaceEntry.policy.installation -ne "AVAILABLE" -or
+    $RepoMarketplaceEntry.policy.authentication -ne "ON_INSTALL" -or
+    $RepoMarketplaceEntry.category -ne "Productivity") {
+    throw "Repository Codex marketplace manifest is invalid."
+}
+$RepoMarketplaceTarget = [System.IO.Path]::GetFullPath(
+    (Join-Path $RepoRoot ([string]$RepoMarketplaceEntry.source.path).TrimStart(".", "/", "\"))
+)
+if ($RepoMarketplaceTarget -ne [System.IO.Path]::GetFullPath($BundledPlugin)) {
+    throw "Repository Codex marketplace source does not resolve to the bundled Vectorworks plugin."
+}
 
 $RepoMcp = Get-Content -Raw -LiteralPath $RepoMcpPath | ConvertFrom-Json
 $BundledMcp = Get-Content -Raw -LiteralPath $BundledMcpPath | ConvertFrom-Json
+$BundledClaudeMcp = Get-Content -Raw -LiteralPath $BundledClaudeMcpPath | ConvertFrom-Json
 $RepoEnv = $RepoMcp.mcpServers.vectorworks.env
 $BundledEnv = $BundledMcp.mcpServers.vectorworks.env
+$BundledClaudeEnv = $BundledClaudeMcp.mcpServers.vectorworks.env
 foreach ($Key in @("VW_MCP_HOST", "VW_MCP_PORT", "VW_MCP_TIMEOUT", "VW_MCP_PREFLIGHT_CACHE_MS", "VW_MCP_TOOL_PROFILE")) {
     if ($RepoEnv.$Key -ne $BundledEnv.$Key) {
-        throw "Bundled plugin MCP env default drift for $Key. Repo=$($RepoEnv.$Key), bundled=$($BundledEnv.$Key)"
+        throw "Bundled Codex MCP env default drift for $Key. Repo=$($RepoEnv.$Key), bundled=$($BundledEnv.$Key)"
     }
+    if ($RepoEnv.$Key -ne $BundledClaudeEnv.$Key) {
+        throw "Bundled Claude MCP env default drift for $Key. Repo=$($RepoEnv.$Key), bundled=$($BundledClaudeEnv.$Key)"
+    }
+}
+$CodexMcpText = Get-Content -Raw -LiteralPath $BundledMcpPath
+$ClaudeMcpText = Get-Content -Raw -LiteralPath $BundledClaudeMcpPath
+if ($CodexMcpText -notmatch '\$\{PLUGIN_ROOT\}/scripts/run-vectorworks-mcp\.ps1' -or
+    $CodexMcpText -match 'CLAUDE_PLUGIN_ROOT|user_config|EnablePythonDialogFallback|allow-python-fallback') {
+    throw "Bundled Codex MCP config must use PLUGIN_ROOT and must not enable the modal Python fallback."
+}
+if ($ClaudeMcpText -notmatch '\$\{CLAUDE_PLUGIN_ROOT\}/scripts/run-vectorworks-mcp\.ps1' -or
+    $ClaudeMcpText -match 'EnablePythonDialogFallback|allow-python-fallback') {
+    throw "Bundled Claude MCP config must use CLAUDE_PLUGIN_ROOT and must not enable the modal Python fallback."
 }
 
 $Resolver = Get-Content -Raw -LiteralPath (Join-Path $BundledPlugin "scripts\resolve-vectorworks-mcp-repo.ps1")
 if ($Resolver -notmatch "InstallIfMissing" -or $Resolver -notmatch "RequireContract" -or $Resolver -notmatch "\.vectorworks-mcp-contract\.json") {
     throw "Bundled resolver must support auto-clone and current connector contract validation."
+}
+if ($Resolver -notmatch 'MinimumContractVersion\s*=\s*16') {
+    throw "Bundled resolver must reject connector contracts older than version 16."
+}
+foreach ($Feature in @("native-phase4-apply-operations", "fast-native-tool-profile", "structured-mcp-results", "codex-plugin-package")) {
+    if ($Resolver -notmatch [regex]::Escape($Feature)) {
+        throw "Bundled resolver must require connector feature '$Feature'."
+    }
 }
 
 $Claude = Get-Command claude -ErrorAction SilentlyContinue
@@ -183,6 +242,8 @@ if ($StandalonePluginPath) {
     $StandaloneRoot = (Resolve-Path -LiteralPath $StandalonePluginPath).Path
     $CanonicalPaths = @(
         ".mcp.json",
+        ".codex-plugin\plugin.json",
+        ".claude-plugin\mcp.json",
         ".claude-plugin\plugin.json",
         ".claude-plugin\marketplace.json",
         "references\tool-map.md",

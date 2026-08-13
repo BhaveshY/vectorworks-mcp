@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vectorworks-mcp"
-version = "0.4.0"
+version = "0.5.0"
 description = "Agent-ready MCP server and native/Python Vectorworks bridge for Vectorworks 2024/2025."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "fastmcp>=3.3.1,<4",
-  "pydantic>=2,<3",
+  "fastmcp==3.4.7",
+  "mcp==1.29.0",
+  "pydantic==2.13.4",
 ]
 
 [project.scripts]

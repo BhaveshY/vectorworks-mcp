@@ -25,6 +25,7 @@ Environment variables, all optional:
 """
 
 import atexit
+import functools
 import hashlib
 import ipaddress
 import json
@@ -48,10 +49,12 @@ except Exception:
 
 try:
     from fastmcp import FastMCP
+    from fastmcp.tools import ToolResult
 except ModuleNotFoundError as exc:
     if exc.name != "fastmcp":
         raise
     FastMCP = None
+    ToolResult = None
     _FASTMCP_IMPORT_ERROR: Optional[BaseException] = exc
 else:
     _FASTMCP_IMPORT_ERROR = None
@@ -65,6 +68,19 @@ DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024
 DEFAULT_PREFLIGHT_CACHE_MS = 5_000
 MAX_PREFLIGHT_CACHE_MS = 5_000
 DEFAULT_AUTH_TOKEN_FILENAME = "auth-token"
+CONNECTOR_VERSION = "0.5.0"
+MCP_SERVER_INSTRUCTIONS = (
+    "Use the fast-native phase-4 bridge only. Start with vw_agent_context and call "
+    "vw_preflight_for_cad before CAD writes. For non-trivial edits, send one atomic "
+    "vw_execute_operations call with a unique idempotency key; do not decompose work into "
+    "per-object MCP calls. Never use the modal Python listener or any Python fallback. If "
+    "phase 4 or apply_operations is unavailable, stop and repair the native bridge rather "
+    "than falling back."
+)
+MCP_TOOL_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": True,
+}
 NATIVE_PHASE_ONE_REQUIRED_ACTIONS = {
     "ping",
     "stop",
@@ -137,7 +153,7 @@ class RequestTransportError(ConnectionError):
 
 
 class _MissingFastMCP:
-    def __init__(self, name: str):
+    def __init__(self, name: str, **_kwargs: Any):
         self.name = name
 
     def tool(self, func=None, *args, **kwargs):
@@ -337,7 +353,19 @@ def _parse_simple_find_criteria(criteria: str) -> Optional[tuple[str, str]]:
     return None
 
 
-mcp = FastMCP("Vectorworks 2024/2025") if FastMCP is not None else _MissingFastMCP("Vectorworks 2024/2025")
+mcp = (
+    FastMCP(
+        "Vectorworks 2024/2025",
+        instructions=MCP_SERVER_INSTRUCTIONS,
+        version=CONNECTOR_VERSION,
+    )
+    if FastMCP is not None
+    else _MissingFastMCP(
+        "Vectorworks 2024/2025",
+        instructions=MCP_SERVER_INSTRUCTIONS,
+        version=CONNECTOR_VERSION,
+    )
+)
 
 # Persistent connection, guarded by a lock so concurrent MCP tool calls do not
 # interleave frames on the same socket.
@@ -1087,7 +1115,28 @@ def _annotations_for(tool_name: str) -> dict[str, bool]:
 
 
 def _tool(tool_name: str):
-    return mcp.tool(annotations=_annotations_for(tool_name))
+    def register(func):
+        @functools.wraps(func)
+        def mcp_adapter(*args, **kwargs):
+            raw = func(*args, **kwargs)
+            decoded = _decode_tool_result(raw)
+            structured = decoded if isinstance(decoded, dict) else {"result": decoded}
+            if ToolResult is None:
+                return raw
+            return ToolResult(
+                content=raw,
+                structured_content=structured,
+                is_error=_tool_result_failed(raw, decoded),
+            )
+
+        mcp.tool(
+            name=tool_name,
+            output_schema=MCP_TOOL_OUTPUT_SCHEMA,
+            annotations=_annotations_for(tool_name),
+        )(mcp_adapter)
+        return func
+
+    return register
 
 
 def _new_request_trace(tool: str, action: str) -> dict[str, Any]:
@@ -5201,7 +5250,7 @@ def _apply_tool_profile() -> str:
                 "fast-native profile references unknown tools: {0}".format(", ".join(unknown))
             )
         for tool_name in sorted(set(TOOL_SAFETY) - FAST_NATIVE_TOOL_NAMES):
-            mcp.remove_tool(tool_name)
+            mcp.local_provider.remove_tool(tool_name)
     _tool_profile_applied = True
     return profile
 

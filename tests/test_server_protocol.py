@@ -1,3 +1,4 @@
+import asyncio
 import io
 import json
 import inspect
@@ -2403,6 +2404,46 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertEqual(set(annotations), set(server._ANNOTATION_KEYS))
         self.assertTrue(annotations["readOnlyHint"])
         self.assertFalse(annotations["destructiveHint"])
+
+    def test_mcp_tool_adapter_preserves_text_and_adds_structured_content(self):
+        direct = server.vw_tool_safety()
+        result = asyncio.run(server.mcp.call_tool("vw_tool_safety", {}))
+        tool = asyncio.run(server.mcp.get_tool("vw_tool_safety"))
+
+        self.assertIsInstance(direct, str)
+        self.assertEqual(result.content[0].text, direct)
+        self.assertEqual(result.structured_content, json.loads(direct))
+        self.assertFalse(result.is_error)
+        self.assertEqual(tool.output_schema, server.MCP_TOOL_OUTPUT_SCHEMA)
+
+    def test_mcp_tool_adapter_marks_structured_tool_failures(self):
+        direct = server.vw_manage_classes("delete", "Test Class")
+        result = asyncio.run(
+            server.mcp.call_tool(
+                "vw_manage_classes",
+                {"action": "delete", "class_name": "Test Class"},
+            )
+        )
+
+        self.assertIsInstance(direct, str)
+        self.assertEqual(result.content[0].text, direct)
+        self.assertEqual(result.structured_content, json.loads(direct))
+        self.assertTrue(result.structured_content["confirmation_required"])
+        self.assertTrue(result.is_error)
+
+    def test_mcp_server_identity_and_instructions_describe_fast_native_contract(self):
+        low_level = server.mcp._mcp_server
+        instructions = low_level.instructions
+
+        self.assertEqual(low_level.name, "Vectorworks 2024/2025")
+        self.assertEqual(low_level.version, server.CONNECTOR_VERSION)
+        self.assertIn("fast-native phase-4", instructions[:512])
+        self.assertIn("vw_agent_context", instructions[:512])
+        self.assertIn("vw_preflight_for_cad", instructions[:512])
+        self.assertIn("one atomic vw_execute_operations", instructions[:512])
+        self.assertIn("idempotency key", instructions[:512])
+        self.assertIn("do not decompose", instructions[:512])
+        self.assertIn("Never use the modal Python listener", instructions[:512])
 
     def test_cad_preflight_allows_cad_safe_bridge(self):
         original_send = server._send_health

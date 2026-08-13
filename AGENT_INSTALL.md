@@ -35,9 +35,11 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -Command "irm https://
 
 The one-click installer clones or updates the repo at
 `$env:USERPROFILE\repos\vectorworks-mcp`, installs the repo-local Python
-runtime, runs host verification, leaves `.mcp.json` ready for the MCP client to
-trust, and returns a guarded native bridge plan. Native non-modal readiness is
-the default required outcome. The command does not silently install Visual
+runtime, runs host verification, leaves `.mcp.json` ready as a direct-checkout
+fallback, and returns a guarded native bridge plan. Packaged Codex installs
+discover the MCP server and skills through the bundled plugin package. Native
+non-modal readiness is the default required outcome. The command does not
+silently install Visual
 Studio, download a large SDK, modify the Vectorworks user Plug-ins folder,
 restart Vectorworks, or select the modal Python fallback. It defaults to
 `-Client HostOnly`, so it does not write Claude Code user config.
@@ -66,7 +68,7 @@ Git and Python first, then drives the guarded native runner with opt-ins for
 network access, Visual Studio Build Tools install, large SDK downloads, native
 plug-in folder writes, and reboot risk. After the bridge is installed, it
 automatically opens or restarts Vectorworks, waits for the native bridge socket,
-runs phase-0 transport smoke, and attempts phase-2 production smoke. If
+runs phase-0 transport smoke, and attempts the phase-2 write-fixture smoke. If
 Vectorworks is on the Home/no-document screen, the native bridge opens a
 default blank document before write fixtures. If Vectorworks blocks automation
 with license, recovery, plug-in approval, or startup prompts, JSON reports
@@ -143,7 +145,8 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootst
 ```
 
 This prepares host/client files only; it does not satisfy native runtime
-readiness or authorize the Python dialog fallback. Then add or trust the repo
+readiness or authorize the Python dialog fallback. Packaged Codex installs use
+the bundled plugin package. For a direct checkout, add or trust the repo
 `.mcp.json`. It is client-neutral and uses the
 repo-relative `scripts/run-mcp-server.ps1` path. If the client launches MCP
 servers from outside the repo root, configure the same stdio server with an
@@ -188,14 +191,17 @@ py -3 .\plugins\vectorworks\bin\vectorworksctl native-next --repo-path $PWD --js
 
 After a native artifact is built, install only through the guarded doctor/native
 runner, then use the launch/smoke helper to restart/open Vectorworks and run
-phase-0 stop/port-release smoke. Phase 2 should run in a disposable document
-before claiming native production readiness; the phase-2 gate includes native
-walls, text, dimensions, verified property edits, class management, and mixed
-atomic batches:
+phase-0 stop/port-release smoke. Run the phase-2 write fixtures in a disposable
+document; they exercise native walls, text, dimensions, verified property
+edits, class management, and mixed atomic batches:
 
 ```powershell
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-vectorworks-native-smoke.ps1 -VectorworksVersion 2024 -RestartIfRunning -RunPhase2 -AllowWriteFixture -Json
 ```
+
+Passing those fixtures is necessary but not the final production gate. The
+live bridge must also report `native_phase >= 4`, the `fast-native` tool
+profile, and an implemented `apply_operations` action.
 
 ## Result Fields
 
@@ -249,9 +255,10 @@ as full CAD readiness. By default, do not report setup complete while
 `native_requires_action: true`. The only exception is an explicitly requested
 Python fallback, which must be labelled modal and incompatible with simultaneous
 manual Vectorworks use. Do not call CAD tools unless a smoke-tested native
-bridge reports `cad_api_safe: true`, `transport_only: false`,
-`main_context_pump_ready: true`, and supports the requested
+bridge reports `native_phase >= 4`, `cad_api_safe: true`,
+`transport_only: false`, `main_context_pump_ready: true`, the `fast-native`
+profile, an implemented `apply_operations` action, and supports the requested
 `implemented_actions` entry, or the user explicitly selected a CAD-safe modal
-fallback. Current phase-2 production work requires
+fallback. Focused phase-2 handler families require
 `create_wall`, `create_text`, `create_linear_dimension`, `set_property`, and
 `manage_classes` when those tool families are requested.
