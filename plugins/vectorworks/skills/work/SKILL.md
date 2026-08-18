@@ -1,99 +1,100 @@
 ---
 name: work
-description: Work with Vectorworks through MCP tools for CAD/BIM tasks. Use when the user asks an MCP agent to draw, model, inspect, edit, export, import, screenshot, create walls/doors/windows/slabs/roofs, manage classes/layers, or automate Vectorworks 2024/2025.
+description: Work with Vectorworks through the compact fast-native MCP tools for CAD and BIM tasks in Vectorworks 2024/2025.
 ---
 
 # Vectorworks Work
 
+## Use the grouped native surface
+
+Normal work requires the non-modal native SDK bridge. The bridge must report
+`native_phase >= 4`, `capability_revision >= 4`, a non-empty
+`capability_fingerprint`, `cad_api_safe=true`, `transport_only=false`, and a
+ready main-context pump. Treat a missing or stale manifest as an upgrade or
+restart error. Never infer support from the native phase.
+
+The fast-native profile exposes only these tools:
+
+- `vw_status` for health and compact document context.
+- `vw_read` for document, layer, summary, object query, and selection reads.
+- `vw_catalog` for capabilities, classes, symbols, parametric schemas,
+  worksheets, and resources.
+- `vw_apply` for one atomic mutation plan.
+- `vw_execute_operations` as the same atomic engine under its established
+  name. It is not a fallback path.
+- `vw_io` for advertised native import, export, and capture actions.
+- `vw_view` for advertised native get, set, and capture actions.
+- `vw_document` for advertised native info, save, export, open, and new actions.
+- `vw_tool_safety` for exact grouped action safety and retry metadata.
+
+Do not switch to compatibility tools, a Python listener, mouse automation,
+schematic geometry, per-object decomposition, or another native action after a
+capability failure.
+
 ## Choose the shortest correct workflow
 
-The `fast-native` profile is mandatory for normal agent work. It exposes only
-the compact native production surface and keeps Vectorworks non-modal so the
-user can continue working manually between agent operations. If a requested
-operation is not reported by the native bridge, stop and report the unsupported
-capability; do not switch profiles, start a modal listener, decompose the
-request into a different drawing, or route through a legacy handler.
+For a fully specified create or edit, call `vw_apply` immediately with one
+complete plan and a unique `idempotency_key`. The write core performs its own
+native preflight. Use `vw_status(action="context")` first when the operation
+depends on the active document or when the manifest identity is not known.
 
-- For a self-contained create request whose target and geometry are fully
-  specified, call `vw_execute_operations` immediately. Do not front-load
-  `vw_agent_context`, `vw_ping`, `vw_capabilities`, `vw_tool_safety`, or a
-  drawing summary merely to create known geometry. The tool performs its own
-  internal CAD preflight and returns `blocked: true` without writing when the
-  bridge is unsafe or the action/variant is unsupported.
-- Use focused context only when the operation depends on existing document
-  state: locating or editing an object, choosing a layer/class, avoiding
-  collisions, deriving geometry, or planning a multi-step change. Start with
-  the smallest useful call (`vw_lookup_objects`, `vw_get_document_info`, or
-  `vw_drawing_summary(include_examples=false)`). Use
-  `vw_agent_context(profile="production")` for genuinely broad planning, not as
-  a mandatory preamble to every write.
-- Use explicit `vw_ping`, `vw_preflight_for_cad`, or `/vectorworks:ping` for
-  diagnosis, reconnects, or when the user asks for a connection check. Confirm
-  `cad_api_safe=true` and `transport_only=false` before resuming after a
-  connectivity or capability failure.
-- Trust a successful, self-verifying tool response. A returned handle/UUID,
-  exact created count, atomic batch result, or verified property readback is
-  sufficient unless the user asks for visual confirmation or the result is
-  ambiguous. Do not automatically add a screenshot, full drawing summary, or
-  redundant object query after every successful write.
+Use `vw_read` when the plan depends on existing state. Supply `layer` and
+`object_type` with `action="query"` when either filter matters. Request only the
+fields needed for the next decision.
 
-The `compat` profile is an administrator-only diagnostic surface. It is not a
-fallback workflow for agent drawing work and must never be selected
-automatically. Starting the separately authorized Python dialog is also an
-administrator diagnostic action and blocks manual Vectorworks UI use. A
-fast-native capability failure remains a failure until the native bridge is
-upgraded or the request changes explicitly.
+Use `vw_catalog(action="capabilities")` to inspect the exact native manifest.
+Use `vw_catalog(action="parametric_schemas", query="<universal plugin name>")`
+before creating or updating a generic parametric object. Use universal
+parameter IDs and the returned descriptor fingerprint. Never guess fields from
+localized labels.
 
-Use the MCP tools deliberately:
+Trust a successful semantic receipt. Verify with one focused `vw_read` only
+when the receipt is incomplete, the edit depends on existing state, or the user
+asks for verification. Do not add a screenshot or full-document scan after
+every write.
 
-- Send a complete create-and-property-edit plan in one
-  `vw_execute_operations` call. Supply
-  a stable caller-generated `idempotency_key` and canonical
-  operations shaped as `{"type":"create","operation_id":"room","params":
-  {"object_type":"rect",...}}` or `{"type":"set_properties","params":
-  {"edits":[{"ref":"$room","properties":{"name":"Room 101"}}]}}`. Existing
-  targets can use `uuid:...`, `name:...`, or `handle:...` refs; `$<operation_id>`
-  targets an object created earlier in the same transaction. Reuse the key
-  only for the identical plan. The host validates the entire plan before
-  writing, requires native phase-4 `apply_operations`, and returns a compact
-  self-verifying result. Missing phase-4 support is a hard upgrade/restart
-  failure; it never routes to a legacy, decomposed, batch, or modal fallback.
-  The contract accepts `create` and `set_properties`; do not invent delete or
-  other operation types.
-- Polygon and polyline creation require the native bridge to report those
-  object types (phase 4). If it does not, stop with the capability error. Do not
-  substitute independent lines or retry through compatibility mode.
-- Express a fully specified floor-plan create request as one explicit
-  `vw_execute_operations` plan using supported wall, text, and dimension
-  operation types. Do not call hidden schematic/legacy helpers or derive a
-  substitute representation after a native capability failure.
-- Walls, text, and linear dimensions are supported create-operation types on an
-  appropriate native bridge. Doors/windows, slabs/roofs, worksheets, symbols,
-  import/export, screenshots, inspection, and trusted Python are outside the
-  mandatory fast-native work surface; do not call or automatically enable them.
-- Inspect existing objects with `vw_drawing_summary` and `vw_lookup_objects`.
-  Prefer `vw_drawing_summary(include_examples=false)` for large-project context,
-  then `vw_lookup_objects` for token-efficient refs and exact-name criteria like
-  `((N='Name'))` for deterministic follow-up edits.
-- Manage classes through `vw_manage_classes`; use `vw_selection` only for its
-  native-supported variants. If the required edit is absent from the
-  fast-native surface, report it as unsupported.
+## Build atomic BIM plans
 
-Safety habits:
+Each operation has `type`, optional `operation_id`, and `params`. Creates use
+the exact `object_type` advertised by the manifest. Later operations can refer
+to an earlier result as `$<operation_id>`. Existing objects require an explicit
+`uuid:`, `name:`, or `handle:` reference.
 
-- If a tool returns `blocked: true`, stop and fix the listener/bridge status before retrying CAD work.
-- If ping reports `native_phase < 4`, missing `apply_operations`, missing
-  focused actions such as `set_property` or `manage_classes`, or
-  `transport_only: true`, do not call unsupported CAD handlers; run
-  `vectorworksctl native-next --plan-only --json`.
-- Ask before destructive edits such as delete, class-wide changes, overwrites, or exports over existing files.
-- Destructive fast-native variants require explicit confirmation arguments such
-  as `confirm="DELETE_SELECTED"`, `confirm="DELETE_EXACT_NAME"` for exact-name
-  cleanup, or `confirm="DELETE_CLASS"`.
-- If an operation reports unknown commit state, do not retry non-idempotent or destructive tools. Stabilize the connection, then inspect with read-only tools.
-- State the assumed units when the user gives dimensions. Default to the document/user context; if unknown, use millimeters for architectural dimensions.
-- Verify after changes only when the response is not self-verifying, the edit
-  depends on existing state, or the user requests verification. Prefer a
-  focused object query over a screenshot or full-document scan.
+Supported operation types are `create`, `set_properties`, `transform`,
+`duplicate`, and `delete`.
 
-For tool details, read `references/tool-map.md` from this plugin.
+Use true native object types only. A Space request includes a closed boundary,
+height, name, and room ID. Slab and roof requests include their real footprint
+and semantic parameters. Dedicated `door` and `window` creates require the
+exact universal `plugin_name` (`Door` or `Window`), the live
+`descriptor_fingerprint`, an exact raw `wall_uuid`, explicit insertion `x`/`y`,
+width, and height. A window also requires `sill_height`. Both types
+force verified wall hosting and can include the same typed universal parameter
+list as a generic parametric create, except parameters that duplicate the
+dedicated width/height or window elevation fields. If the bridge does not advertise the
+needed type or action, stop. Do not substitute rectangles, extrusions, symbols,
+or unhosted plug-in objects.
+
+Reuse an `idempotency_key` only for the identical atomic plan. `vw_apply` and
+`vw_execute_operations` share one implementation and one native
+`apply_operations` transaction. Neither tool decomposes the plan.
+
+## Handle files and document lifecycle safely
+
+`vw_io` and `vw_document` do not offer idempotency keys. Their state-changing
+actions are not safe to retry after send. Check `vw_tool_safety` for the exact
+action before import, export, capture, save, open, or new-document work.
+
+If a grouped result reports `error.code="unknown_commit_state"`,
+`commit_state="unknown"`, or `retry_policy="never_after_send"`, do not repeat
+the action. Reconnect, inspect the active document and the target file with
+read-only calls, then decide what remains. A request with
+`error.code="request_not_sent"` did not cross the transport boundary and is
+safe to retry.
+
+Ask before destructive document changes, file replacement, or a document
+switch that can discard unsaved work. State the assumed units for dimensional
+work.
+
+For exact action and parameter mappings, read `references/tool-map.md` from
+this plugin.

@@ -158,6 +158,7 @@ def _native_phase_one_status():
         "native_bridge": True,
         "native_phase": 1,
         "implemented_actions": sorted(server.NATIVE_PHASE_ONE_REQUIRED_ACTIONS),
+        "create_object_types": sorted(server.NATIVE_PHASE_ONE_CREATE_OBJECT_TYPES),
         "bridge_kind": "native_sdk_bridge_phase1",
         "dispatch_mode": "native_sdk",
         "handlers": 8,
@@ -175,6 +176,7 @@ def _native_phase_two_status():
         "native_bridge": True,
         "native_phase": 2,
         "implemented_actions": sorted(server.NATIVE_PHASE_TWO_REQUIRED_ACTIONS),
+        "create_object_types": sorted(server.NATIVE_PHASE_TWO_CREATE_OBJECT_TYPES),
         "bridge_kind": "native_sdk_bridge_phase2",
         "dispatch_mode": "native_sdk",
         "handlers": 13,
@@ -211,8 +213,12 @@ def _native_phase_four_status():
     status["native_phase"] = 4
     status["version"] = "native-sdk-bridge-phase4"
     status["bridge_kind"] = "native_sdk_bridge_phase4"
-    status["implemented_actions"] = sorted(set(status["implemented_actions"]) | {"apply_operations"})
+    status["implemented_actions"] = sorted(
+        set(status["implemented_actions"]) | {"apply_operations", "capabilities"}
+    )
     status["create_object_types"] = sorted(server.NATIVE_PHASE_FOUR_CREATE_OBJECT_TYPES)
+    status["capability_revision"] = server.MIN_FAST_NATIVE_CAPABILITY_REVISION
+    status["capability_fingerprint"] = "sha256:test-native-capability-manifest"
     status["handlers"] = 16
     return status
 
@@ -2328,12 +2334,18 @@ class ServerProtocolTests(unittest.TestCase):
                     for variant_name, variant in safety["actions"].items():
                         self.assertIsInstance(variant_name, str)
                         self.assertTrue({"readOnlyHint", "destructiveHint", "idempotentHint"}.issubset(variant))
-                        operation = server._operation_safety(safety["wire_action"], {"action": variant_name})
-                        self.assertIsNotNone(operation)
-                        self.assertTrue(set(server._ANNOTATION_KEYS).issubset(operation))
+                        if safety["wire_action"]:
+                            operation = server._operation_safety(
+                                safety["wire_action"], {"action": variant_name}
+                            )
+                            self.assertIsNotNone(operation)
+                            self.assertTrue(set(server._ANNOTATION_KEYS).issubset(operation))
                         self.assertIn("writesDocument", variant)
                         self.assertIn("writesFiles", variant)
                         self.assertIn("confirmationRequired", variant)
+                        if tool_name in server.FAST_NATIVE_TOOL_NAMES:
+                            self.assertIn("retryPolicy", variant)
+                            self.assertIn("unknownCommitState", variant)
                         if variant["readOnlyHint"]:
                             self.assertFalse(variant["destructiveHint"])
                         if variant["destructiveHint"]:
@@ -2351,19 +2363,19 @@ class ServerProtocolTests(unittest.TestCase):
 
         self.assertEqual(set(safety), set(server.FAST_NATIVE_TOOL_NAMES))
         self.assertNotIn("vw_run_script", safety)
-        self.assertIn("vw_agent_context", safety)
-        self.assertIn("vw_capabilities", safety)
+        self.assertIn("vw_status", safety)
+        self.assertIn("vw_read", safety)
+        self.assertIn("vw_catalog", safety)
+        self.assertIn("vw_apply", safety)
+        self.assertIn("vw_io", safety)
+        self.assertIn("vw_view", safety)
+        self.assertIn("vw_document", safety)
         self.assertIn("vw_execute_operations", safety)
-        self.assertIn("vw_drawing_summary", safety)
-        self.assertIn("vw_lookup_objects", safety)
-        self.assertTrue(safety["vw_ping"]["readOnlyHint"])
-        self.assertTrue(safety["vw_agent_context"]["readOnlyHint"])
-        self.assertEqual(safety["vw_agent_context"]["composes_actions"], ["ping", "get_document_info", "get_layers", "get_objects"])
-        self.assertTrue(safety["vw_capabilities"]["readOnlyHint"])
-        self.assertFalse(safety["vw_preflight_for_cad"]["requires_cad_preflight"])
-        self.assertTrue(safety["vw_get_layers"]["requires_cad_preflight"])
-        self.assertEqual(safety["vw_drawing_summary"]["wire_action"], "drawing_summary")
-        self.assertEqual(safety["vw_drawing_summary"]["composes_actions"], ["drawing_summary", "get_document_info", "get_layers", "get_objects"])
+        self.assertTrue(safety["vw_status"]["readOnlyHint"])
+        self.assertTrue(safety["vw_read"]["readOnlyHint"])
+        self.assertTrue(safety["vw_catalog"]["readOnlyHint"])
+        self.assertTrue(safety["vw_apply"]["idempotentHint"])
+        self.assertTrue(safety["vw_io"]["requires_cad_preflight"])
 
         with patch.dict(os.environ, {"VW_MCP_TOOL_PROFILE": "compat"}):
             compat_safety = json.loads(server.vw_tool_safety())
@@ -2379,16 +2391,8 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertEqual(compat_safety["vw_create_schematic_floor_plan"]["composes_actions"], ["create_object"])
         self.assertEqual(compat_safety["vw_find_objects"]["wire_action"], "find_objects")
         self.assertEqual(compat_safety["vw_find_objects"]["composes_actions"], ["get_objects"])
-        self.assertIsNone(safety["vw_lookup_objects"]["wire_action"])
-        self.assertEqual(safety["vw_lookup_objects"]["composes_actions"], ["get_objects"])
-        self.assertTrue(safety["vw_selection"]["actions"]["get"]["readOnlyHint"])
-        self.assertTrue(safety["vw_selection"]["actions"]["delete"]["destructiveHint"])
-        self.assertTrue(safety["vw_selection"]["actions"]["delete"]["confirmationRequired"])
-        self.assertNotIn("move", safety["vw_selection"]["actions"])
-        self.assertNotIn("duplicate", safety["vw_selection"]["actions"])
         self.assertIn("move", compat_safety["vw_selection"]["actions"])
         self.assertIn("duplicate", compat_safety["vw_selection"]["actions"])
-        self.assertTrue(safety["vw_manage_classes"]["actions"]["delete"]["destructiveHint"])
         self.assertIsNone(compat_safety["vw_batch_set_object_properties"]["wire_action"])
         self.assertEqual(compat_safety["vw_batch_set_object_properties"]["composes_actions"], ["get_objects", "set_property"])
         self.assertTrue(compat_safety["vw_worksheet"]["actions"]["read_range"]["readOnlyHint"])
@@ -2438,12 +2442,12 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertEqual(low_level.name, "Vectorworks 2024/2025")
         self.assertEqual(low_level.version, server.CONNECTOR_VERSION)
         self.assertIn("fast-native phase-4", instructions[:512])
-        self.assertIn("vw_agent_context", instructions[:512])
-        self.assertIn("vw_preflight_for_cad", instructions[:512])
-        self.assertIn("one atomic vw_execute_operations", instructions[:512])
+        self.assertIn("vw_status", instructions[:512])
+        self.assertIn("vw_read/vw_catalog", instructions[:512])
+        self.assertIn("one atomic vw_apply or vw_execute_operations", instructions[:512])
         self.assertIn("idempotency key", instructions[:512])
-        self.assertIn("do not decompose", instructions[:512])
-        self.assertIn("Never use the modal Python listener", instructions[:512])
+        self.assertIn("never decompose", instructions[:512])
+        self.assertIn("Never use modal Python", instructions[:512])
 
     def test_cad_preflight_allows_cad_safe_bridge(self):
         original_send = server._send_health
@@ -2497,6 +2501,28 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertIn("native_bridge is not true", preflight["native_readiness_errors"])
         self.assertIn("native_phase is not >= 4", preflight["native_readiness_errors"])
         self.assertIn("do not run vw_listener.py or vw_load_listener_2024.py", preflight["next_action"])
+
+    def test_fast_native_preflight_requires_revision_four_manifest_identity(self):
+        stale = _native_phase_four_status()
+        stale["capability_revision"] = server.MIN_FAST_NATIVE_CAPABILITY_REVISION - 1
+        missing_fingerprint = _native_phase_four_status()
+        missing_fingerprint.pop("capability_fingerprint")
+
+        for status, expected_error in (
+            (
+                stale,
+                f"capability_revision is not >= {server.MIN_FAST_NATIVE_CAPABILITY_REVISION}",
+            ),
+            (missing_fingerprint, "capability_fingerprint is missing"),
+        ):
+            with self.subTest(expected_error=expected_error):
+                with patch.object(server, "_send_health", return_value=json.dumps(status)):
+                    with patch.dict(os.environ, {"VW_MCP_TOOL_PROFILE": "fast-native"}):
+                        preflight = json.loads(server.vw_preflight_for_cad())
+
+                self.assertFalse(preflight["ok"])
+                self.assertEqual(preflight["reason"], "fast_native_bridge_not_ready")
+                self.assertIn(expected_error, preflight["native_readiness_errors"])
 
     def test_cad_preflight_blocks_transport_only_bridge(self):
         original_send = server._send_health

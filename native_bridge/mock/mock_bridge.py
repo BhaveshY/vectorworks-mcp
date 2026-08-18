@@ -199,6 +199,10 @@ class MockNativeBridge:
             "native_bridge": True,
             "native_phase": 2,
             "implemented_actions": sorted(IMPLEMENTED_ACTIONS),
+            "create_object_types": [
+                "arc", "box", "circle", "dimension", "line", "linear_dimension",
+                "oval", "polygon", "polyline", "rect", "rectangle", "text", "wall",
+            ],
             "main_context_pump": "win32_ui_timer",
             "main_context_pump_ready": True,
         }

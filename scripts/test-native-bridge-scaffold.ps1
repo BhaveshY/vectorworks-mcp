@@ -11,12 +11,18 @@ $NativeTests = Join-Path $RepoRoot "native_bridge\tests"
 $Harness = Join-Path $NativeTests "native_scaffold_smoke.cpp"
 $ProtocolSource = Join-Path $NativeSrc "BridgeProtocol.cpp"
 $TransportSource = Join-Path $NativeSrc "NativeTransport.cpp"
+$CapabilitySource = Join-Path $NativeSrc "CapabilityRegistry.cpp"
 $BridgeSource = Join-Path $NativeSrc "VectorworksMCPBridge.cpp"
 $RequiredPaths = @(
     (Join-Path $NativeSrc "BridgeProtocol.hpp"),
     $ProtocolSource,
     (Join-Path $NativeSrc "NativeTransport.hpp"),
     $TransportSource,
+    (Join-Path $NativeSrc "NativeDomain.hpp"),
+    (Join-Path $NativeSrc "CapabilityRegistry.hpp"),
+    $CapabilitySource,
+    (Join-Path $NativeSrc "NativeTransaction.hpp"),
+    (Join-Path $NativeSrc "NativeTransaction.cpp"),
     (Join-Path $NativeSrc "BridgeDispatcher.hpp"),
     (Join-Path $NativeSrc "CadRequestQueue.hpp"),
     $BridgeSource,
@@ -57,13 +63,13 @@ New-Item -ItemType Directory -Force -Path $ObjDir | Out-Null
 try {
     if ($Compiler.Name -ieq "cl.exe") {
         $FoArg = "/Fo{0}{1}" -f $ObjDir, [System.IO.Path]::DirectorySeparatorChar
-        & $Compiler.Source /nologo /std:c++17 /EHsc "/I$NativeSrc" $FoArg "/Fe:$ExePath" $Harness $ProtocolSource $TransportSource $BridgeSource Ws2_32.lib
+        & $Compiler.Source /nologo /std:c++17 /EHsc "/I$NativeSrc" $FoArg "/Fe:$ExePath" $Harness $ProtocolSource $TransportSource $CapabilitySource $BridgeSource Ws2_32.lib
     } else {
         $LinkArgs = @()
         if ([System.Environment]::OSVersion.Platform -eq [System.PlatformID]::Win32NT) {
             $LinkArgs += "-lws2_32"
         }
-        & $Compiler.Source -std=c++17 -I $NativeSrc $Harness $ProtocolSource $TransportSource $BridgeSource -o $ExePath @LinkArgs
+        & $Compiler.Source -std=c++17 -I $NativeSrc $Harness $ProtocolSource $TransportSource $CapabilitySource $BridgeSource -o $ExePath @LinkArgs
     }
     if ($LASTEXITCODE -ne 0) {
         throw "Native bridge scaffold compile failed with exit code $LASTEXITCODE"

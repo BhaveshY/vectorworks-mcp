@@ -217,7 +217,19 @@ foreach ($RelativePath in @(
 
 $ServerText = Get-Content -Raw -LiteralPath $ServerPath
 $ToolMapText = Get-Content -Raw -LiteralPath (Join-Path $BundledPlugin "references\tool-map.md")
-$ServerTools = @([regex]::Matches($ServerText, 'def (vw_[A-Za-z0-9_]+)\(') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+$FastNativeMatch = [regex]::Match(
+    $ServerText,
+    'FAST_NATIVE_TOOL_NAMES\s*=\s*frozenset\(\s*\{(?<body>.*?)\}\s*\)',
+    [System.Text.RegularExpressions.RegexOptions]::Singleline
+)
+if (-not $FastNativeMatch.Success) {
+    throw "Server is missing the FAST_NATIVE_TOOL_NAMES production manifest."
+}
+$ServerTools = @(
+    [regex]::Matches($FastNativeMatch.Groups['body'].Value, '["''](?<name>vw_[A-Za-z0-9_]+)["'']') |
+        ForEach-Object { $_.Groups['name'].Value } |
+        Sort-Object -Unique
+)
 $DocumentedTools = @([regex]::Matches($ToolMapText, '`(vw_[A-Za-z0-9_]+)`') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
 if (@($ServerTools | Where-Object { $_ -notin $DocumentedTools }).Count -gt 0 -or
     @($DocumentedTools | Where-Object { $_ -notin $ServerTools }).Count -gt 0) {
@@ -233,9 +245,8 @@ if ($LASTEXITCODE -ne 0) {
 }
 $ToolSafety = $ToolSafetyJson | ConvertFrom-Json
 $SafetyTools = @($ToolSafety.PSObject.Properties.Name | Sort-Object -Unique)
-if (@($SafetyTools | Where-Object { $_ -notin $DocumentedTools }).Count -gt 0 -or
-    @($DocumentedTools | Where-Object { $_ -notin $SafetyTools }).Count -gt 0) {
-    throw "Bundled plugin tool map must match server TOOL_SAFETY exactly."
+if (@($ServerTools | Where-Object { $_ -notin $SafetyTools }).Count -gt 0) {
+    throw "Bundled production tools must all have server TOOL_SAFETY entries."
 }
 
 if ($StandalonePluginPath) {

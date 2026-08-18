@@ -23,10 +23,29 @@ if (-not $SourceDir) {
 $CompileFiles = @(
     "BridgeProtocol.cpp",
     "NativeTransport.cpp",
+    "CapabilityRegistry.cpp",
+    "ParametricObjectAdapter.cpp",
+    "NativeObjectFactory.cpp",
+    "NativeTransaction.cpp",
+    "BimObjectHandlers.cpp",
+    "SpaceObjectHandlers.cpp",
+    "NativeIOHandlers.cpp",
+    "ResourceWorksheetHandlers.cpp",
+    "ViewDocumentHandlers.cpp",
     "VectorworksMCPBridge.cpp"
 )
 $HeaderFiles = @(
     "BridgeProtocol.hpp",
+    "NativeDomain.hpp",
+    "CapabilityRegistry.hpp",
+    "ParametricObjectAdapter.hpp",
+    "NativeObjectFactory.hpp",
+    "NativeTransaction.hpp",
+    "BimObjectHandlers.hpp",
+    "SpaceObjectHandlers.hpp",
+    "NativeIOHandlers.hpp",
+    "ResourceWorksheetHandlers.hpp",
+    "ViewDocumentHandlers.hpp",
     "BridgeDispatcher.hpp",
     "CadRequestQueue.hpp",
     "NativeTransport.hpp"

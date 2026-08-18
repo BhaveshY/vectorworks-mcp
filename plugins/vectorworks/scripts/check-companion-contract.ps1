@@ -91,7 +91,22 @@ $PluginMcpPath = Join-Path $PluginRoot ".mcp.json"
 $ServerText = Get-Content -Raw -LiteralPath $ServerPath
 $ToolMapText = Get-Content -Raw -LiteralPath $ToolMapPath
 
-$ServerTools = @([regex]::Matches($ServerText, 'def (vw_[A-Za-z0-9_]+)\(') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+$FastNativeMatch = [regex]::Match(
+    $ServerText,
+    'FAST_NATIVE_TOOL_NAMES\s*=\s*frozenset\(\s*\{(?<body>.*?)\}\s*\)',
+    [System.Text.RegularExpressions.RegexOptions]::Singleline
+)
+if (-not $FastNativeMatch.Success) {
+    throw "Companion server is missing the FAST_NATIVE_TOOL_NAMES production manifest."
+}
+$ServerTools = @(
+    [regex]::Matches($FastNativeMatch.Groups['body'].Value, '["''](?<name>vw_[A-Za-z0-9_]+)["'']') |
+        ForEach-Object { $_.Groups['name'].Value } |
+        Sort-Object -Unique
+)
+if ($ServerTools.Count -eq 0) {
+    throw "Companion server FAST_NATIVE_TOOL_NAMES production manifest is empty."
+}
 $DocumentedTools = @([regex]::Matches($ToolMapText, '`(vw_[A-Za-z0-9_]+)`') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
 $MissingDocs = @($ServerTools | Where-Object { $_ -notin $DocumentedTools })
 $StaleDocs = @($DocumentedTools | Where-Object { $_ -notin $ServerTools })
@@ -292,11 +307,12 @@ if ($LASTEXITCODE -ne 0) {
     throw "Could not import companion server TOOL_SAFETY."
 }
 $ToolSafety = $ToolSafetyJson | ConvertFrom-Json
-$SafetyTools = @($ToolSafety.PSObject.Properties.Name | Sort-Object -Unique)
-if (@($SafetyTools | Where-Object { $_ -notin $DocumentedTools }).Count -gt 0 -or
-    @($DocumentedTools | Where-Object { $_ -notin $SafetyTools }).Count -gt 0) {
-    throw "Tool safety drift. Tool map must match server TOOL_SAFETY exactly."
+$AllSafetyTools = @($ToolSafety.PSObject.Properties.Name | Sort-Object -Unique)
+$MissingProductionSafety = @($ServerTools | Where-Object { $_ -notin $AllSafetyTools })
+if ($MissingProductionSafety.Count -gt 0) {
+    throw "Production tool safety drift. Missing TOOL_SAFETY entries: $($MissingProductionSafety -join ', ')"
 }
+$SafetyTools = @($ServerTools)
 
 $RequiredSafetyKeys = @("category", "wire_action", "readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint", "requires_cad_preflight")
 $RequiredVariantKeys = @("readOnlyHint", "destructiveHint", "idempotentHint", "writesDocument", "writesFiles", "confirmationRequired")
@@ -312,7 +328,14 @@ $AllowedCategories = @(
     "listener-control",
     "mixed-document-write",
     "mixed-destructive",
-    "trusted-code"
+    "trusted-code",
+    "grouped-atomic-write",
+    "grouped-catalog",
+    "grouped-native-document",
+    "grouped-native-io",
+    "grouped-native-view",
+    "grouped-read",
+    "grouped-status"
 )
 foreach ($ToolName in $SafetyTools) {
     $Safety = $ToolSafety.$ToolName
@@ -392,41 +415,9 @@ foreach ($ToolName in $SafetyTools) {
     }
 }
 
-$VariantDocRows = @{}
-$VariantPattern = '^\|\s*`(vw_[^`.]+\.[^`]+)`\s*\|\s*`(true|false)`\s*\|\s*`(true|false)`\s*\|\s*`(true|false)`\s*\|\s*`(true|false)`\s*\|\s*`(true|false)`\s*\|\s*`(true|false)`\s*\|\s*`(true|false)`\s*\|'
-foreach ($Line in ($ToolMapText -split "`r?`n")) {
-    $Match = [regex]::Match($Line, $VariantPattern)
-    if ($Match.Success) {
-        $VariantDocRows[$Match.Groups[1].Value] = [pscustomobject]@{
-            readOnlyHint = [bool]::Parse($Match.Groups[2].Value)
-            destructiveHint = [bool]::Parse($Match.Groups[3].Value)
-            idempotentHint = [bool]::Parse($Match.Groups[4].Value)
-            writesDocument = [bool]::Parse($Match.Groups[5].Value)
-            writesSelection = [bool]::Parse($Match.Groups[6].Value)
-            writesFiles = [bool]::Parse($Match.Groups[7].Value)
-            confirmationRequired = [bool]::Parse($Match.Groups[8].Value)
-        }
-    }
-}
-foreach ($ToolName in $SafetyTools) {
-    $Safety = $ToolSafety.$ToolName
-    if ($Safety.PSObject.Properties.Name -notcontains "actions") { continue }
-    foreach ($ActionProperty in $Safety.actions.PSObject.Properties) {
-        $DocKey = "$ToolName.$($ActionProperty.Name)"
-        if (-not $VariantDocRows.ContainsKey($DocKey)) {
-            throw "Tool map mixed-action safety table missing $DocKey"
-        }
-        $Variant = $ActionProperty.Value
-        $Doc = $VariantDocRows[$DocKey]
-        foreach ($Key in @("readOnlyHint", "destructiveHint", "idempotentHint", "writesDocument", "writesFiles", "confirmationRequired")) {
-            if ($Doc.$Key -ne $Variant.$Key) {
-                throw "Tool map mixed-action table drift for $DocKey.$Key. Doc=$($Doc.$Key), server=$($Variant.$Key)"
-            }
-        }
-        $WritesSelection = if ($Variant.PSObject.Properties.Name -contains "writesSelection") { [bool]$Variant.writesSelection } else { $false }
-        if ($Doc.writesSelection -ne $WritesSelection) {
-            throw "Tool map mixed-action table drift for $DocKey.writesSelection. Doc=$($Doc.writesSelection), server=$WritesSelection"
-        }
+foreach ($RequiredSafetyTerm in @("retryPolicy", "unknownCommitState", "never_after_send", "vw_tool_safety")) {
+    if ($ToolMapText -notmatch [regex]::Escape($RequiredSafetyTerm)) {
+        throw "Tool map is missing grouped safety guidance: $RequiredSafetyTerm"
     }
 }
 

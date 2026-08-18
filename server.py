@@ -69,13 +69,15 @@ DEFAULT_PREFLIGHT_CACHE_MS = 5_000
 MAX_PREFLIGHT_CACHE_MS = 5_000
 DEFAULT_AUTH_TOKEN_FILENAME = "auth-token"
 CONNECTOR_VERSION = "0.5.0"
+MIN_FAST_NATIVE_CAPABILITY_REVISION = 4
 MCP_SERVER_INSTRUCTIONS = (
-    "Use the fast-native phase-4 bridge only. Start with vw_agent_context and call "
-    "vw_preflight_for_cad before CAD writes. For non-trivial edits, send one atomic "
-    "vw_execute_operations call with a unique idempotency key; do not decompose work into "
-    "per-object MCP calls. Never use the modal Python listener or any Python fallback. If "
-    "phase 4 or apply_operations is unavailable, stop and repair the native bridge rather "
-    "than falling back."
+    "Use the fast-native phase-4 bridge with capability revision 4 or newer. "
+    "Start with vw_status(action='context') and require a capability fingerprint. "
+    "Read through vw_read/vw_catalog and send one atomic vw_apply or "
+    "vw_execute_operations call with a unique idempotency key for edits; never decompose "
+    "work into per-object MCP calls. Use vw_io, vw_view, and vw_document only when their "
+    "native action is advertised. Never use modal Python, menus, schematic helpers, or any "
+    "fallback. If a capability is unavailable, stop and upgrade/restart the native bridge."
 )
 MCP_TOOL_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -114,8 +116,15 @@ NATIVE_PHASE_TWO_CREATE_OBJECT_TYPES = NATIVE_PHASE_ONE_CREATE_OBJECT_TYPES | {
     "wall",
 }
 NATIVE_PHASE_FOUR_CREATE_OBJECT_TYPES = NATIVE_PHASE_TWO_CREATE_OBJECT_TYPES | {
+    "door",
     "polygon",
     "polyline",
+    "parametric",
+    "roof",
+    "slab",
+    "space",
+    "symbol",
+    "window",
 }
 NATIVE_PHASE_ONE_SELECTION_ACTIONS = {
     "clear",
@@ -403,6 +412,11 @@ BatchObjectType = Literal[
     "text",
     "dimension",
     "linear_dimension",
+    "slab",
+    "roof",
+    "space",
+    "door",
+    "window",
 ]
 DoorSwing = Literal["left", "right"]
 PropertyName = Literal["name", "class", "fillColor", "penColor", "lineWeight", "opacity"]
@@ -421,9 +435,25 @@ SelectionAction = (
     else FastNativeSelectionAction
 )
 AgentContextProfile = Literal["brief", "production", "full"]
+GroupedStatusAction = Literal["health", "context"]
+GroupedReadAction = Literal["document", "layers", "summary", "query", "selection"]
+GroupedCatalogAction = Literal[
+    "capabilities",
+    "classes",
+    "symbols",
+    "parametric_schemas",
+    "worksheets",
+    "resources",
+]
+GroupedIOAction = Literal["import", "export", "capture"]
+GroupedIOFormat = Literal["auto", "dwg", "pdf", "image", "png", "jpg", "jpeg", "tif", "tiff", "vwx"]
+GroupedViewAction = Literal["get", "set", "capture"]
+GroupedDocumentAction = Literal["info", "save", "export", "open", "new"]
 LookupDetail = Literal["brief", "normal", "full"]
 MAX_OBJECT_QUERY_LIMIT = 1000
 ObjectQueryLimit = Annotated[int, Field(ge=1, le=MAX_OBJECT_QUERY_LIMIT)]
+GroupedPageLimit = Annotated[int, Field(ge=1, le=200)]
+GroupedCursor = Annotated[str, Field(max_length=10, pattern=r"^(?:0|[1-9][0-9]{0,9})?$")]
 SummaryExampleLimit = Annotated[int, Field(ge=0, le=100)]
 SummaryScanLimit = Annotated[int, Field(ge=1, le=100_000)]
 ObjectFieldList = Annotated[list[str], Field(max_length=20)]
@@ -484,9 +514,8 @@ ExecuteOperationList = Annotated[
         min_length=1,
         max_length=250,
         description=(
-            "Typed operations. Supported forms are "
-            '{"type":"create","params":{"object_type":"rect",...}} and '
-            '{"type":"set_properties","params":{"edits":[...]}}.'
+            "One atomic plan: create, set_properties, transform, duplicate, or delete. "
+            "Targets are explicit uuid:/name:/handle: refs or $operation_id refs."
         ),
         json_schema_extra={
             "items": {
@@ -494,7 +523,10 @@ ExecuteOperationList = Annotated[
                 "required": ["type", "params"],
                 "additionalProperties": False,
                 "properties": {
-                    "type": {"type": "string", "enum": ["create", "set_properties"]},
+                    "type": {
+                        "type": "string",
+                        "enum": ["create", "set_properties", "transform", "duplicate", "delete"],
+                    },
                     "operation_id": {"type": "string", "minLength": 1, "maxLength": 128},
                     "params": {
                         "type": "object",
@@ -676,7 +708,7 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
         "wire_action": "apply_operations",
         "composes_actions": ["apply_operations"],
         "readOnlyHint": False,
-        "destructiveHint": False,
+        "destructiveHint": True,
         "idempotentHint": True,
         "openWorldHint": True,
         "requires_cad_preflight": True,
@@ -1037,24 +1069,262 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
         "openWorldHint": True,
         "requires_cad_preflight": True,
     },
+    "vw_status": {
+        "category": "grouped-status",
+        "wire_action": None,
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_read": {
+        "category": "grouped-read",
+        "wire_action": None,
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_catalog": {
+        "category": "grouped-catalog",
+        "wire_action": None,
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_apply": {
+        "category": "grouped-atomic-write",
+        "wire_action": None,
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": True,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+        "writesDocument": True,
+        "retryPolicy": "same_idempotency_key",
+        "unknownCommitState": "query_or_inspect_before_retry",
+    },
+    "vw_io": {
+        "category": "grouped-native-io",
+        "wire_action": None,
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_view": {
+        "category": "grouped-native-view",
+        "wire_action": None,
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
+    "vw_document": {
+        "category": "grouped-native-document",
+        "wire_action": None,
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": True,
+        "requires_cad_preflight": True,
+    },
 }
+
+_GROUPED_VARIANT_SAFETY: dict[str, dict[str, dict[str, Any]]] = {
+    "vw_status": {
+        action: {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "writesDocument": False,
+            "writesFiles": False,
+            "confirmationRequired": False,
+            "retryPolicy": "safe",
+            "unknownCommitState": "not_applicable",
+        }
+        for action in ("health", "context")
+    },
+    "vw_read": {
+        action: {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "writesDocument": False,
+            "writesFiles": False,
+            "confirmationRequired": False,
+            "retryPolicy": "safe",
+            "unknownCommitState": "not_applicable",
+        }
+        for action in ("document", "layers", "summary", "query", "selection")
+    },
+    "vw_catalog": {
+        action: {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "writesDocument": False,
+            "writesFiles": False,
+            "confirmationRequired": False,
+            "retryPolicy": "safe",
+            "unknownCommitState": "not_applicable",
+        }
+        for action in (
+            "capabilities",
+            "classes",
+            "symbols",
+            "parametric_schemas",
+            "worksheets",
+            "resources",
+        )
+    },
+    "vw_io": {
+        "import": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "writesDocument": True,
+            "writesFiles": False,
+            "confirmationRequired": False,
+            "retryPolicy": "never_after_send",
+            "unknownCommitState": "possible",
+        },
+        "export": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "writesDocument": False,
+            "writesFiles": True,
+            "confirmationRequired": False,
+            "retryPolicy": "never_after_send",
+            "unknownCommitState": "possible",
+        },
+        "capture": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "writesDocument": False,
+            "writesFiles": True,
+            "confirmationRequired": False,
+            "retryPolicy": "never_after_send",
+            "unknownCommitState": "possible",
+        },
+    },
+    "vw_view": {
+        "get": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "writesDocument": False,
+            "writesFiles": False,
+            "confirmationRequired": False,
+            "retryPolicy": "safe",
+            "unknownCommitState": "not_applicable",
+        },
+        "set": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "writesDocument": False,
+            "writesFiles": False,
+            "writesViewState": True,
+            "confirmationRequired": False,
+            "retryPolicy": "never_after_send",
+            "unknownCommitState": "possible",
+        },
+        "capture": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "writesDocument": False,
+            "writesFiles": True,
+            "confirmationRequired": False,
+            "retryPolicy": "never_after_send",
+            "unknownCommitState": "possible",
+        },
+    },
+    "vw_document": {
+        "info": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "writesDocument": False,
+            "writesFiles": False,
+            "confirmationRequired": False,
+            "retryPolicy": "safe",
+            "unknownCommitState": "not_applicable",
+        },
+        "save": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "writesDocument": False,
+            "writesFiles": True,
+            "confirmationRequired": False,
+            "retryPolicy": "never_after_send",
+            "unknownCommitState": "possible",
+        },
+        "export": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "writesDocument": False,
+            "writesFiles": True,
+            "confirmationRequired": False,
+            "retryPolicy": "never_after_send",
+            "unknownCommitState": "possible",
+        },
+        "open": {
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": False,
+            "writesDocument": True,
+            "writesFiles": False,
+            "confirmationRequired": True,
+            "retryPolicy": "never_after_send",
+            "unknownCommitState": "possible",
+        },
+        "new": {
+            "readOnlyHint": False,
+            "destructiveHint": True,
+            "idempotentHint": False,
+            "writesDocument": True,
+            "writesFiles": False,
+            "confirmationRequired": True,
+            "retryPolicy": "never_after_send",
+            "unknownCommitState": "possible",
+        },
+    },
+}
+
+for _grouped_tool_name, _grouped_actions in _GROUPED_VARIANT_SAFETY.items():
+    TOOL_SAFETY[_grouped_tool_name]["action_param"] = "action"
+    TOOL_SAFETY[_grouped_tool_name]["actions"] = _grouped_actions
+
+TOOL_SAFETY["vw_execute_operations"].update(
+    {
+        "retryPolicy": "same_idempotency_key",
+        "unknownCommitState": "query_or_inspect_before_retry",
+    }
+)
 
 FAST_NATIVE_TOOL_NAMES = frozenset(
     {
-        "vw_agent_context",
-        "vw_bridge_status",
-        "vw_capabilities",
-        "vw_drawing_summary",
+        "vw_apply",
+        "vw_catalog",
+        "vw_document",
         "vw_execute_operations",
-        "vw_get_document_info",
-        "vw_get_layers",
-        "vw_lookup_objects",
-        "vw_manage_classes",
-        "vw_ping",
-        "vw_preflight_for_cad",
-        "vw_selection",
-        "vw_stop_listener",
+        "vw_io",
+        "vw_read",
+        "vw_status",
         "vw_tool_safety",
+        "vw_view",
     }
 )
 _SUPPORTED_TOOL_PROFILES = frozenset({"compat", "fast-native"})
@@ -1481,6 +1751,18 @@ def _fast_native_readiness_errors(status: dict[str, Any]) -> list[str]:
     native_phase = status.get("native_phase")
     if not isinstance(native_phase, int) or isinstance(native_phase, bool) or native_phase < 4:
         errors.append("native_phase is not >= 4")
+    capability_revision = status.get("capability_revision")
+    if (
+        not isinstance(capability_revision, int)
+        or isinstance(capability_revision, bool)
+        or capability_revision < MIN_FAST_NATIVE_CAPABILITY_REVISION
+    ):
+        errors.append(
+            "capability_revision is not >= {0}".format(MIN_FAST_NATIVE_CAPABILITY_REVISION)
+        )
+    capability_fingerprint = status.get("capability_fingerprint")
+    if not isinstance(capability_fingerprint, str) or not capability_fingerprint.strip():
+        errors.append("capability_fingerprint is missing")
     implemented_actions = status.get("implemented_actions")
     if not isinstance(implemented_actions, list) or "apply_operations" not in implemented_actions:
         errors.append("implemented_actions missing phase-4 action: apply_operations")
@@ -1498,11 +1780,7 @@ def _native_create_object_types(status: dict[str, Any]) -> set[str]:
     advertised = status.get("create_object_types")
     if isinstance(advertised, list) and all(isinstance(value, str) for value in advertised):
         return {value.strip().lower() for value in advertised if value.strip()}
-    if _native_phase(status) >= 4:
-        return set(NATIVE_PHASE_FOUR_CREATE_OBJECT_TYPES)
-    if _native_phase(status) >= 2:
-        return set(NATIVE_PHASE_TWO_CREATE_OBJECT_TYPES)
-    return set(NATIVE_PHASE_ONE_CREATE_OBJECT_TYPES)
+    return set()
 
 
 def _native_action_readiness_errors(
@@ -2280,8 +2558,32 @@ _PRIMITIVE_ALLOWED_KEYS = {
     "points",
     "closed",
     "height",
+    "sill_height",
     "thickness",
+    "elevation",
+    "bearing_height",
+    "bearing_inset",
+    "vertical_miter",
+    "miter_type",
+    "generate_gable_walls",
+    "slope",
+    "overhang",
     "style_name",
+    "plugin_name",
+    "definition_name",
+    "descriptor_fingerprint",
+    "wall_uuid",
+    "require_wall_host",
+    "parameters",
+    "elevation",
+    "bearing_height",
+    "slope",
+    "overhang",
+    "bearing_inset",
+    "vertical_miter",
+    "miter_type",
+    "generate_gable_walls",
+    "room_id",
     "text",
     "width",
     "rotation",
@@ -2296,6 +2598,7 @@ _PRIMITIVE_ALLOWED_KEYS = {
     "direction_y",
     "dimension_type",
     "name",
+    "room_id",
     "class_name",
 }
 
@@ -2688,11 +2991,13 @@ def _normalise_create_primitive(
         params["radius"] = _coerce_positive_number(raw, "radius", label=label)
         params["start_angle"] = _coerce_number(raw, "start_angle", default=0, label=label)
         params["sweep_angle"] = _coerce_number(raw, "sweep_angle", default=90, label=label)
-    elif object_type == "polygon":
+    elif object_type in {"polygon", "slab", "roof", "space"}:
         raw_points = raw.get("points")
         if not isinstance(raw_points, list) or len(raw_points) > 1000:
             raise ValueError(f"{label}.points must be a list containing at most 1000 [x, y] points")
         closed = _coerce_bool(raw, "closed", requested_object_type != "polyline", label=label)
+        if object_type != "polygon" and not closed:
+            raise ValueError(f"{label}.{object_type} requires a closed point boundary")
         minimum = 3 if closed else 2
         if len(raw_points) < minimum:
             raise ValueError(f"{label}.points requires at least {minimum} points")
@@ -2710,6 +3015,57 @@ def _normalise_create_primitive(
             points.append([x_value, y_value])
         params["points"] = points
         params["closed"] = closed
+        if object_type == "slab":
+            params["thickness"] = _coerce_positive_number(raw, "thickness", default=200, label=label)
+            params["elevation"] = _coerce_number(raw, "elevation", default=0, label=label)
+            style_name = _optional_text(raw, "style_name", "")
+            if style_name:
+                params["style_name"] = style_name
+        elif object_type == "roof":
+            params["thickness"] = _coerce_positive_number(raw, "thickness", default=200, label=label)
+            params["slope"] = _coerce_positive_number(raw, "slope", default=30, label=label)
+            if params["slope"] > 89:
+                raise ValueError(f"{label}.slope must be <= 89")
+            params["overhang"] = _coerce_number(raw, "overhang", default=500, min_value=0, label=label)
+            params["elevation"] = _coerce_number_any(
+                raw,
+                ("elevation", "bearing_height"),
+                default=0,
+                label=label,
+            )
+            params["bearing_inset"] = _coerce_number(
+                raw,
+                "bearing_inset",
+                default=0,
+                min_value=0,
+                label=label,
+            )
+            params["vertical_miter"] = _coerce_number(
+                raw,
+                "vertical_miter",
+                default=0,
+                min_value=0,
+                label=label,
+            )
+            params["miter_type"] = _coerce_int(
+                raw,
+                "miter_type",
+                default=1,
+                min_value=1,
+                max_value=4,
+                label=label,
+            )
+            params["generate_gable_walls"] = _coerce_bool(
+                raw,
+                "generate_gable_walls",
+                False,
+                label=label,
+            )
+        elif object_type == "space":
+            params["height"] = _coerce_positive_number(raw, "height", default=3000, label=label)
+            room_id = _optional_text(raw, "room_id", "")
+            if room_id:
+                params["room_id"] = room_id
     elif object_type == "wall":
         params["start_x"] = _coerce_number_any(raw, ("start_x", "x1"), required=True, label=label)
         params["start_y"] = _coerce_number_any(raw, ("start_y", "y1"), required=True, label=label)
@@ -2722,6 +3078,135 @@ def _normalise_create_primitive(
         style_name = _optional_text(raw, "style_name", "")
         if style_name:
             params["style_name"] = style_name
+    elif object_type in {"parametric", "door", "window"}:
+        raw_plugin_name = raw.get("plugin_name")
+        raw_descriptor_fingerprint = raw.get("descriptor_fingerprint")
+        if not isinstance(raw_plugin_name, str):
+            raise ValueError(f"{label}.plugin_name must be a non-empty string")
+        if not isinstance(raw_descriptor_fingerprint, str):
+            raise ValueError(f"{label}.descriptor_fingerprint must be a non-empty string")
+        plugin_name = raw_plugin_name.strip()
+        descriptor_fingerprint = raw_descriptor_fingerprint.strip()
+        if not plugin_name:
+            raise ValueError(f"{label}.plugin_name is required; discover it with vw_catalog parametric_schemas")
+        if not descriptor_fingerprint:
+            raise ValueError(f"{label}.descriptor_fingerprint is required from live schema discovery")
+        if object_type in {"door", "window"}:
+            expected_plugin_name = object_type.title()
+            if plugin_name != expected_plugin_name:
+                raise ValueError(
+                    f"{label}.plugin_name must be exactly {expected_plugin_name!r} for {object_type}"
+                )
+        params["plugin_name"] = plugin_name
+        params["descriptor_fingerprint"] = descriptor_fingerprint
+        params["x1"] = _coerce_number_any(
+            raw,
+            ("x", "x1"),
+            required=object_type in {"door", "window"},
+            default=0,
+            label=label,
+        )
+        params["y1"] = _coerce_number_any(
+            raw,
+            ("y", "y1"),
+            required=object_type in {"door", "window"},
+            default=0,
+            label=label,
+        )
+        params["rotation"] = _coerce_number(raw, "rotation", default=0, label=label)
+        if object_type in {"door", "window"} and "require_wall_host" in raw:
+            if not _coerce_bool(raw, "require_wall_host", True, label=label):
+                raise ValueError(f"{label}.require_wall_host cannot be false for {object_type}")
+        require_wall_host = (
+            True
+            if object_type in {"door", "window"}
+            else _coerce_bool(raw, "require_wall_host", False, label=label)
+        )
+        raw_wall_uuid = raw.get("wall_uuid", "")
+        if raw_wall_uuid is not None and not isinstance(raw_wall_uuid, str):
+            raise ValueError(f"{label}.wall_uuid must be a non-empty string")
+        wall_uuid = str(raw_wall_uuid or "").strip()
+        if require_wall_host and not wall_uuid:
+            raise ValueError(f"{label}.wall_uuid is required for hosted {object_type} placement")
+        params["require_wall_host"] = require_wall_host
+        if wall_uuid:
+            params["wall_uuid"] = wall_uuid
+        if object_type in {"door", "window"}:
+            params["width"] = _coerce_positive_number(
+                raw,
+                "width",
+                label=label,
+            )
+            params["height"] = _coerce_positive_number(
+                raw,
+                "height",
+                label=label,
+            )
+            if object_type == "window":
+                params["sill_height"] = _coerce_number(
+                    raw,
+                    "sill_height",
+                    required=True,
+                    min_value=0,
+                    label=label,
+                )
+            elif "sill_height" in raw:
+                raise ValueError(f"{label}.sill_height is supported only for window")
+        raw_parameters = raw.get("parameters", [])
+        if not isinstance(raw_parameters, list) or len(raw_parameters) > 256:
+            raise ValueError(f"{label}.parameters must be a list with at most 256 entries")
+        params["parameter_count"] = len(raw_parameters)
+        seen_parameters: set[str] = set()
+        for parameter_index, parameter in enumerate(raw_parameters, start=1):
+            parameter_label = f"{label}.parameters[{parameter_index}]"
+            if not isinstance(parameter, dict):
+                raise ValueError(f"{parameter_label} must be an object")
+            unknown_parameter_keys = sorted(set(parameter) - {"id", "type", "value"})
+            if unknown_parameter_keys:
+                raise ValueError(f"{parameter_label} has unsupported key(s): {', '.join(unknown_parameter_keys)}")
+            parameter_id = _optional_text(parameter, "id", "").strip()
+            parameter_type = _optional_text(parameter, "type", "").strip().lower()
+            if not parameter_id or parameter_id in seen_parameters:
+                raise ValueError(f"{parameter_label}.id must be a unique universal parameter name")
+            semantic_parameter_id = re.sub(r"[^a-z0-9]", "", parameter_id.lower())
+            dedicated_semantics = {"width", "height"}
+            if object_type == "window":
+                dedicated_semantics.update({"elevation", "sillheight"})
+            if object_type in {"door", "window"} and semantic_parameter_id in dedicated_semantics:
+                raise ValueError(
+                    f"{parameter_label}.id duplicates the dedicated {object_type} field {parameter_id!r}"
+                )
+            if parameter_type not in {"integer", "boolean", "real", "string"}:
+                raise ValueError(f"{parameter_label}.type must be integer, boolean, real, or string")
+            value = parameter.get("value")
+            prefix = f"parameter_{parameter_index}_"
+            params[prefix + "name"] = parameter_id
+            params[prefix + "type"] = parameter_type
+            if parameter_type == "integer":
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise ValueError(f"{parameter_label}.value must be an integer")
+                params[prefix + "integer"] = value
+            elif parameter_type == "boolean":
+                if not isinstance(value, bool):
+                    raise ValueError(f"{parameter_label}.value must be a boolean")
+                params[prefix + "boolean"] = value
+            elif parameter_type == "real":
+                if not _is_real_number(value):
+                    raise ValueError(f"{parameter_label}.value must be a finite number")
+                params[prefix + "real"] = float(value)
+            else:
+                if not isinstance(value, str):
+                    raise ValueError(f"{parameter_label}.value must be a string")
+                params[prefix + "string"] = value
+            seen_parameters.add(parameter_id)
+    elif object_type == "symbol":
+        definition_name = _optional_text(raw, "definition_name", "").strip()
+        if not definition_name:
+            raise ValueError(f"{label}.definition_name is required; discover it with vw_catalog(action='symbols')")
+        params["definition_name"] = definition_name
+        params["x1"] = _coerce_number_any(raw, ("x", "x1"), default=0, label=label)
+        params["y1"] = _coerce_number_any(raw, ("y", "y1"), default=0, label=label)
+        params["rotation"] = _coerce_number(raw, "rotation", default=0, label=label)
     elif object_type == "text":
         text = _optional_text(raw, "text", "")
         if not text:
@@ -3668,6 +4153,17 @@ def _normalise_operation_property_edits(value: Any, *, label: str) -> list[dict[
     return normalised
 
 
+def _normalise_atomic_target(value: Any, *, label: str) -> str:
+    target = str(value or "").strip()
+    if not target.startswith(("uuid:", "name:", "handle:", "$")):
+        raise ValueError(f"{label} must start with uuid:, name:, handle:, or $ for a prior operation_id")
+    if target == "$" or target.endswith(":"):
+        raise ValueError(f"{label} has an empty reference value")
+    if len(target) > 512:
+        raise ValueError(f"{label} is limited to 512 characters")
+    return target
+
+
 def _normalise_execute_operations(operations: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalised: list[dict[str, Any]] = []
     for index, operation in enumerate(operations, start=1):
@@ -3678,8 +4174,10 @@ def _normalise_execute_operations(operations: list[dict[str, Any]]) -> list[dict
         if unknown:
             raise ValueError(f"{label} has unsupported key(s): {', '.join(unknown)}")
         operation_type = str(operation.get("type", "") or "").strip().lower()
-        if operation_type not in {"create", "set_properties"}:
-            raise ValueError(f"{label}.type must be create or set_properties")
+        if operation_type not in {"create", "set_properties", "transform", "duplicate", "delete"}:
+            raise ValueError(
+                f"{label}.type must be create, set_properties, transform, duplicate, or delete"
+            )
         params = operation.get("params")
         if not isinstance(params, dict):
             raise ValueError(f"{label}.params must be an object")
@@ -3689,15 +4187,81 @@ def _normalise_execute_operations(operations: list[dict[str, Any]]) -> list[dict
                 f"{label}.operation_id must match {_IDEMPOTENCY_KEY_RE.pattern} and be at most 128 characters"
             )
 
+        if operation_id and operation_type not in {"create", "duplicate"}:
+            raise ValueError(f"{label}.operation_id is supported only for create and duplicate")
+
         if operation_type == "create":
             canonical_params = _normalise_create_primitive(params, label=f"{label}.params")
-        else:
+        elif operation_type == "set_properties":
             unknown_params = sorted(set(params) - {"edits"})
             if unknown_params:
                 raise ValueError(f"{label}.params has unsupported key(s): {', '.join(unknown_params)}")
             canonical_params = {
                 "edits": _normalise_operation_property_edits(params.get("edits"), label=f"{label}.params.edits")
             }
+        elif operation_type == "transform":
+            unknown_params = sorted(
+                set(params) - {
+                    "target", "ref", "dx", "dy", "rotation_deg",
+                    "scale_x", "scale_y", "pivot_x", "pivot_y",
+                }
+            )
+            if unknown_params:
+                raise ValueError(f"{label}.params has unsupported key(s): {', '.join(unknown_params)}")
+            target = _normalise_atomic_target(
+                params.get("target", params.get("ref")),
+                label=f"{label}.params.target",
+            )
+            dx = _coerce_number(params, "dx", default=0, label=f"{label}.params")
+            dy = _coerce_number(params, "dy", default=0, label=f"{label}.params")
+            rotation_deg = _coerce_number(params, "rotation_deg", default=0, label=f"{label}.params")
+            scale_x = _coerce_positive_number(params, "scale_x", default=1, label=f"{label}.params")
+            scale_y = _coerce_positive_number(params, "scale_y", default=1, label=f"{label}.params")
+            has_pivot_x = "pivot_x" in params
+            has_pivot_y = "pivot_y" in params
+            if has_pivot_x != has_pivot_y:
+                raise ValueError(f"{label}.params.pivot_x and pivot_y must be provided together")
+            if dx == 0 and dy == 0 and rotation_deg == 0 and scale_x == 1 and scale_y == 1:
+                raise ValueError(f"{label}.params transform must change translation, rotation, or scale")
+            canonical_params = {
+                "target": target,
+                "dx": dx,
+                "dy": dy,
+                "rotation_deg": rotation_deg,
+                "scale_x": scale_x,
+                "scale_y": scale_y,
+            }
+            if has_pivot_x:
+                canonical_params["pivot_x"] = _coerce_number(
+                    params, "pivot_x", required=True, label=f"{label}.params"
+                )
+                canonical_params["pivot_y"] = _coerce_number(
+                    params, "pivot_y", required=True, label=f"{label}.params"
+                )
+        elif operation_type == "duplicate":
+            unknown_params = sorted(set(params) - {"target", "ref", "dx", "dy"})
+            if unknown_params:
+                raise ValueError(f"{label}.params has unsupported key(s): {', '.join(unknown_params)}")
+            canonical_params = {
+                "target": _normalise_atomic_target(
+                    params.get("target", params.get("ref")),
+                    label=f"{label}.params.target",
+                ),
+                "dx": _coerce_number(params, "dx", default=0, label=f"{label}.params"),
+                "dy": _coerce_number(params, "dy", default=0, label=f"{label}.params"),
+            }
+        else:
+            unknown_params = sorted(set(params) - {"target", "ref"})
+            if unknown_params:
+                raise ValueError(f"{label}.params has unsupported key(s): {', '.join(unknown_params)}")
+            canonical_params = {
+                "target": _normalise_atomic_target(
+                    params.get("target", params.get("ref")),
+                    label=f"{label}.params.target",
+                )
+            }
+            if canonical_params["target"].startswith("$"):
+                raise ValueError(f"{label}.params.target delete requires an external uuid:, name:, or handle: ref")
 
         item: dict[str, Any] = {"type": operation_type, "params": canonical_params}
         if operation_id:
@@ -3740,10 +4304,23 @@ def _remember_operation_result(
             del _operation_idempotency_cache[oldest]
 
 
+def _fast_native_status_error(status: dict[str, Any]) -> Optional[str]:
+    errors = _fast_native_readiness_errors(status)
+    if not errors:
+        return None
+    return (
+        "required phase-4 capability manifest is not ready ({0}); upgrade/restart the native bridge "
+        "instead of using a compatibility fallback"
+    ).format("; ".join(errors))
+
+
 def _fast_execution_bridge_status(trace: dict[str, Any]) -> tuple[Optional[dict[str, Any]], Optional[str]]:
     cached = _cached_cad_safe_status()
     if cached is not None:
         trace["preflight_cache_hit"] = True
+        fast_error = _fast_native_status_error(cached)
+        if fast_error:
+            return cached, fast_error
         return cached, None
     started = time.perf_counter()
     try:
@@ -3758,6 +4335,9 @@ def _fast_execution_bridge_status(trace: dict[str, Any]) -> tuple[Optional[dict[
     evaluated = _evaluate_cad_preflight_status(status)
     if not evaluated.get("ok"):
         return status, str(evaluated.get("reason", "bridge is not CAD-safe"))
+    fast_error = _fast_native_status_error(status)
+    if fast_error:
+        return status, fast_error
     _remember_cad_safe_status(status)
     return status, None
 
@@ -3808,9 +4388,9 @@ def vw_execute_operations(
 ) -> str:
     """Preferred native write path with internal preflight and compact receipts.
 
-    Requires the phase-4 native apply_operations action. Create and
-    set_properties operations are forwarded together without legacy or modal
-    fallback. Reuse idempotency_key only for the identical plan.
+    Requires native apply_operations. Create, set-properties, transform,
+    duplicate, and delete operations are forwarded together without fallback.
+    Reuse idempotency_key only for the identical plan.
     """
     trace = _new_request_trace("vw_execute_operations", "execute_operations")
     try:
@@ -3894,11 +4474,46 @@ def vw_execute_operations(
         trace["action"] = execution_path
         wire_operations: list[dict[str, Any]] = []
         for operation in normalised:
-            if operation["type"] == "create":
+            operation_type = operation["type"]
+            if operation_type == "create":
                 wire_item = {"op": "create", **dict(operation["params"])}
                 wire_item.pop("role", None)
                 operation_id = str(operation.get("operation_id", "") or "")
                 if operation_id:
+                    wire_item["local_ref"] = operation_id
+                wire_operations.append(wire_item)
+                continue
+
+            if operation_type in {"transform", "duplicate", "delete"}:
+                canonical = dict(operation["params"])
+                if operation_type == "transform":
+                    wire_item = {
+                        "op": "object.transform",
+                        "target": canonical["target"],
+                        "delta_x": canonical["dx"],
+                        "delta_y": canonical["dy"],
+                        "rotation_degrees": canonical["rotation_deg"],
+                        "scale_x": canonical["scale_x"],
+                        "scale_y": canonical["scale_y"],
+                    }
+                    if "pivot_x" in canonical:
+                        wire_item["pivot_x"] = canonical["pivot_x"]
+                        wire_item["pivot_y"] = canonical["pivot_y"]
+                elif operation_type == "duplicate":
+                    wire_item = {
+                        "op": "object.duplicate",
+                        "target": canonical["target"],
+                        "delta_x": canonical["dx"],
+                        "delta_y": canonical["dy"],
+                    }
+                else:
+                    wire_item = {
+                        "op": "object.delete",
+                        "target": canonical["target"],
+                        "confirm": "DELETE_OBJECT",
+                    }
+                operation_id = str(operation.get("operation_id", "") or "")
+                if operation_type == "duplicate" and operation_id:
                     wire_item["local_ref"] = operation_id
                 wire_operations.append(wire_item)
                 continue
@@ -5172,7 +5787,7 @@ def vw_create_linear_dimension(
 
 @_tool("vw_insert_door")
 def vw_insert_door(x: float, y: float, width: PositiveLength = 900, height: PositiveLength = 2100, rotation: float = 0) -> str:
-    """Insert parametric door. Place on or near a wall for auto-insertion."""
+    """Disabled compatibility entry; use vw_apply with a native hosted Door and exact wall UUID."""
     return _send_tool("vw_insert_door", {"x": x, "y": y, "width": width, "height": height, "rotation": rotation})
 
 
@@ -5185,7 +5800,7 @@ def vw_insert_window(
     sill_height: float = 900,
     rotation: float = 0,
 ) -> str:
-    """Insert parametric window. sill_height is floor to window bottom in mm."""
+    """Disabled compatibility entry; use vw_apply with a native hosted Window and exact wall UUID."""
     return _send_tool(
         "vw_insert_window",
         {"x": x, "y": y, "width": width, "height": height, "sill_height": sill_height, "rotation": rotation},
@@ -5194,7 +5809,7 @@ def vw_insert_window(
 
 @_tool("vw_create_slab")
 def vw_create_slab(points: PolygonPointList, thickness: PositiveLength = 200, elevation: float = 0) -> str:
-    """Create an extruded floor-like solid from a polygon. This is not a BIM slab object."""
+    """Disabled compatibility entry; use vw_apply with the native true-Slab SDK object type."""
     return _send_tool("vw_create_slab", {"points": points, "thickness": thickness, "elevation": elevation})
 
 
@@ -5206,7 +5821,7 @@ def vw_create_roof(
     overhang: float = 500,
     thickness: PositiveLength = 200,
 ) -> str:
-    """Try to create a roof custom object from a footprint, with flat extrusion fallback."""
+    """Disabled compatibility entry; use vw_apply with the native true-Roof SDK object type."""
     return _send_tool(
         "vw_create_roof",
         {
@@ -5221,7 +5836,7 @@ def vw_create_roof(
 
 @_tool("vw_inspect_object")
 def vw_inspect_object(handle: str = "", plugin_name: str = "", confirm: str = "") -> str:
-    """Discover configurable parameters of a VW object. Plugin probing requires confirm='PROBE_PLUGIN'."""
+    """Inspect an existing object only; use vw_catalog for non-mutating native parametric schemas."""
     if plugin_name and confirm != "PROBE_PLUGIN":
         return _confirmation_error(
             "vw_inspect_object",
@@ -5229,6 +5844,605 @@ def vw_inspect_object(handle: str = "", plugin_name: str = "", confirm: str = ""
             "plugin probing creates and deletes a temporary Vectorworks object and requires explicit confirmation",
         )
     return _send_tool("vw_inspect_object", {"handle": handle, "plugin_name": plugin_name, "confirm": confirm})
+
+
+def _grouped_bridge_summary(status: Any) -> dict[str, Any]:
+    if not isinstance(status, dict):
+        return {}
+    return {
+        key: status.get(key)
+        for key in (
+            "version",
+            "bridge_kind",
+            "dispatch_mode",
+            "native_bridge",
+            "native_phase",
+            "cad_api_safe",
+            "transport_only",
+            "main_context_pump_ready",
+            "capability_revision",
+            "capability_fingerprint",
+        )
+        if key in status
+    }
+
+
+def _grouped_finish(
+    tool: str,
+    action: str,
+    payload: dict[str, Any],
+    trace: dict[str, Any],
+    outcome: str,
+) -> str:
+    result = {"tool": tool, "action": action, **payload}
+    result["timing"] = _finish_request_trace(trace, outcome)
+    _emit_request_trace(trace, result["timing"])
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+def _grouped_error(
+    tool: str,
+    action: str,
+    code: str,
+    message: str,
+    trace: dict[str, Any],
+    *,
+    status: Any = None,
+    required_action: str = "",
+    detail: Any = None,
+    commit_state: str = "",
+) -> str:
+    safety = TOOL_SAFETY.get(tool, {})
+    action_param = safety.get("action_param")
+    actions = safety.get("actions")
+    if isinstance(action_param, str) and isinstance(actions, dict):
+        variant = actions.get(action)
+        if isinstance(variant, dict):
+            safety = {**safety, **variant}
+
+    retry_policy = str(safety.get("retryPolicy", "never_after_send"))
+    retryable = retry_policy == "safe"
+    writes_started: Optional[bool] = None
+    if code in {
+        "capability_unavailable",
+        "capability_manifest_mismatch",
+        "validation_error",
+        "preflight_failed",
+        "request_not_sent",
+    }:
+        writes_started = False
+        commit_state = commit_state or "not_started"
+    if code in {"preflight_failed", "capability_manifest_mismatch"}:
+        retryable = True
+        retry_policy = "after_preflight_repair"
+    elif code == "request_not_sent":
+        retryable = True
+        retry_policy = "safe"
+    elif code == "unknown_commit_state":
+        retryable = False
+        retry_policy = "never_after_send"
+        commit_state = "unknown"
+
+    error: dict[str, Any] = {
+        "code": code,
+        "message": message,
+        "retryable": retryable,
+        "retry_policy": retry_policy,
+        "writes_started": writes_started,
+    }
+    if commit_state:
+        error["commit_state"] = commit_state
+    if required_action:
+        error["required_native_action"] = required_action
+    if detail is not None:
+        error["detail"] = detail
+    return _grouped_finish(
+        tool,
+        action,
+        {
+            "ok": False,
+            "error": error,
+            "bridge": _grouped_bridge_summary(status),
+        },
+        trace,
+        code,
+    )
+
+
+def _grouped_preflight(
+    tool: str,
+    action: str,
+    required_native_action: str,
+    trace: dict[str, Any],
+) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    status, status_error = _fast_execution_bridge_status(trace)
+    if status_error or not isinstance(status, dict):
+        return status, _grouped_error(
+            tool,
+            action,
+            "preflight_failed",
+            "The phase-4 native bridge is not ready for this grouped call.",
+            trace,
+            status=status,
+            required_action=required_native_action,
+            detail=status_error or "bridge status unavailable",
+        )
+    implemented = status.get("implemented_actions")
+    implemented_actions = set(implemented) if isinstance(implemented, list) else set()
+    if required_native_action and required_native_action not in implemented_actions:
+        return status, _grouped_error(
+            tool,
+            action,
+            "capability_unavailable",
+            "The native bridge does not advertise this action; no compatibility fallback was attempted.",
+            trace,
+            status=status,
+            required_action=required_native_action,
+            detail={"implemented_actions": sorted(str(item) for item in implemented_actions)},
+        )
+    return status, None
+
+
+def _grouped_native_call(
+    tool: str,
+    action: str,
+    native_action: str,
+    params: Optional[dict[str, Any]],
+    trace: dict[str, Any],
+) -> tuple[Any, Optional[dict[str, Any]], Optional[str]]:
+    status, preflight_error = _grouped_preflight(tool, action, native_action, trace)
+    if preflight_error is not None:
+        return None, status, preflight_error
+    raw = _send(native_action, params, require_cad_safe=False, trace=trace)
+    decoded = _decode_tool_result(raw)
+    if _tool_result_failed(raw, decoded):
+        error_text = decoded if isinstance(decoded, str) else raw
+        if isinstance(error_text, str) and error_text.startswith("Unknown commit state"):
+            return None, status, _grouped_error(
+                tool,
+                action,
+                "unknown_commit_state",
+                "Vectorworks accepted the non-retryable native action, but the host did not receive a reliable result.",
+                trace,
+                status=status,
+                required_action=native_action,
+                detail=decoded,
+                commit_state="unknown",
+            )
+        if isinstance(error_text, str) and error_text.startswith("Request was not sent"):
+            return None, status, _grouped_error(
+                tool,
+                action,
+                "request_not_sent",
+                "The native request did not cross the transport boundary and is safe to retry.",
+                trace,
+                status=status,
+                required_action=native_action,
+                detail=decoded,
+                commit_state="not_started",
+            )
+        return None, status, _grouped_error(
+            tool,
+            action,
+            "native_action_failed",
+            "The advertised native action failed; no fallback was attempted.",
+            trace,
+            status=status,
+            required_action=native_action,
+            detail=decoded,
+        )
+    return decoded, status, None
+
+
+def _grouped_page_offset(cursor: str) -> int:
+    text = str(cursor or "").strip()
+    if not text:
+        return 0
+    if not re.fullmatch(r"0|[1-9][0-9]{0,9}", text):
+        raise ValueError("cursor must be empty or a non-negative decimal offset")
+    return int(text)
+
+
+def _grouped_project_record(record: Any, fields: list[str]) -> Any:
+    if not fields or not isinstance(record, dict):
+        return record
+    return {field: record.get(field) for field in fields if field in record}
+
+
+def _grouped_page_data(
+    value: Any,
+    *,
+    limit: int,
+    offset: int,
+    fields: list[str],
+) -> tuple[Any, Optional[dict[str, Any]]]:
+    collection: Optional[list[Any]] = value if isinstance(value, list) else None
+    collection_key = ""
+    if isinstance(value, dict):
+        for candidate in ("items", "objects", "layers", "classes", "symbols", "worksheets", "resources", "schemas"):
+            if isinstance(value.get(candidate), list):
+                collection = value[candidate]
+                collection_key = candidate
+                break
+    if collection is None:
+        return _grouped_project_record(value, fields), None
+
+    page_items = [_grouped_project_record(item, fields) for item in collection[offset : offset + limit]]
+    has_more = len(collection) > offset + limit
+    page = {
+        "limit": limit,
+        "cursor": str(offset) if offset else "",
+        "next_cursor": str(offset + limit) if has_more else None,
+        "returned": len(page_items),
+    }
+    if collection_key and isinstance(value, dict):
+        paged = dict(value)
+        paged[collection_key] = page_items
+        return paged, page
+    return page_items, page
+
+
+def _grouped_options(options: Optional[dict[str, Any]]) -> dict[str, Any]:
+    if options is None:
+        return {}
+    if not isinstance(options, dict) or len(options) > 32:
+        raise ValueError("options must be an object with at most 32 scalar entries")
+    normalised: dict[str, Any] = {}
+    for key, value in options.items():
+        key = str(key)
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", key):
+            raise ValueError(f"invalid option name: {key}")
+        if value is not None and not isinstance(value, (str, bool, int, float)):
+            raise ValueError(f"option '{key}' must be a JSON scalar")
+        normalised[key] = value
+    return normalised
+
+
+def _grouped_io_native_action(action: str, format_name: str, file_path: str = "") -> str:
+    canonical_format = str(format_name or "auto").lower()
+    if canonical_format == "auto":
+        extension = Path(str(file_path or "")).suffix.lower().lstrip(".")
+        canonical_format = {"jpeg": "jpg", "tiff": "tif"}.get(extension, extension)
+        if canonical_format not in {"dwg", "pdf", "vwx", "png", "jpg", "tif"}:
+            raise ValueError(
+                "format='auto' requires a .dwg, .pdf, .vwx, .png, .jpg/.jpeg, or .tif/.tiff file path"
+            )
+    if action == "import":
+        return "import_dwg" if canonical_format == "dwg" else f"import_{canonical_format}"
+    if action == "capture":
+        return "capture_view"
+    return {
+        "dwg": "export_dwg",
+        "pdf": "export_pdf",
+        "vwx": "export_vectorworks_document",
+        "image": "export_image",
+        "png": "export_image",
+        "jpg": "export_image",
+        "jpeg": "export_image",
+        "tif": "export_image",
+        "tiff": "export_image",
+    }[canonical_format]
+
+
+@_tool("vw_status")
+def vw_status(
+    action: GroupedStatusAction = "context",
+    limit: GroupedPageLimit = 100,
+    include_examples: bool = False,
+) -> str:
+    """Native health or a compact phase-4 drawing context."""
+    trace = _new_request_trace("vw_status", action)
+    if action == "health":
+        status, error = _grouped_preflight("vw_status", action, "", trace)
+        if error is not None:
+            return error
+        return _grouped_finish(
+            "vw_status",
+            action,
+            {"ok": True, "bridge": _grouped_bridge_summary(status)},
+            trace,
+            "ok",
+        )
+
+    data, status, error = _grouped_native_call(
+        "vw_status",
+        action,
+        "drawing_summary",
+        {
+            "limit": limit,
+            "scan_limit": limit,
+            "include_examples": include_examples,
+            "example_limit": min(limit, 5) if include_examples else 0,
+        },
+        trace,
+    )
+    if error is not None:
+        return error
+    return _grouped_finish(
+        "vw_status",
+        action,
+        {"ok": True, "bridge": _grouped_bridge_summary(status), "data": data},
+        trace,
+        "ok",
+    )
+
+
+@_tool("vw_read")
+def vw_read(
+    action: GroupedReadAction,
+    criteria: str = "ALL",
+    layer: str = "",
+    object_type: str = "",
+    limit: GroupedPageLimit = 100,
+    cursor: GroupedCursor = "",
+    fields: Optional[ObjectFieldList] = None,
+) -> str:
+    """Read document, layers, summary, query, or selection with compact paging."""
+    trace = _new_request_trace("vw_read", action)
+    try:
+        offset = _grouped_page_offset(cursor)
+        projection = list(fields or [])
+    except ValueError as exc:
+        return _grouped_error("vw_read", action, "validation_error", str(exc), trace)
+
+    requested = min(MAX_OBJECT_QUERY_LIMIT, offset + limit + 1)
+    native_action, params = {
+        "document": ("get_document_info", {}),
+        "layers": ("get_layers", {}),
+        "summary": (
+            "drawing_summary",
+            {
+                "layer": layer,
+                "object_type": object_type,
+                "limit": requested,
+                "scan_limit": requested,
+                "include_examples": False,
+                "example_limit": 0,
+            },
+        ),
+        "query": ("find_objects", {"criteria": criteria or "ALL", "limit": requested}),
+        "selection": ("selection", {"action": "get", "limit": requested}),
+    }[action]
+    if action == "query":
+        params["layer"] = layer
+        params["object_type"] = object_type
+    data, status, error = _grouped_native_call("vw_read", action, native_action, params, trace)
+    if error is not None:
+        return error
+    page: Optional[dict[str, Any]] = None
+    if action in {"layers", "query", "selection"}:
+        data, page = _grouped_page_data(data, limit=limit, offset=offset, fields=projection)
+    elif projection:
+        data = _grouped_project_record(data, projection)
+    payload: dict[str, Any] = {
+        "ok": True,
+        "bridge": _grouped_bridge_summary(status),
+        "data": data,
+    }
+    if page is not None:
+        payload["page"] = page
+    return _grouped_finish("vw_read", action, payload, trace, "ok")
+
+
+@_tool("vw_catalog")
+def vw_catalog(
+    action: GroupedCatalogAction,
+    query: str = "",
+    limit: GroupedPageLimit = 100,
+    cursor: GroupedCursor = "",
+    fields: Optional[ObjectFieldList] = None,
+) -> str:
+    """List native capabilities, classes, symbols, schemas, worksheets, or resources."""
+    trace = _new_request_trace("vw_catalog", action)
+    try:
+        offset = _grouped_page_offset(cursor)
+        projection = list(fields or [])
+    except ValueError as exc:
+        return _grouped_error("vw_catalog", action, "validation_error", str(exc), trace)
+
+    if action == "capabilities":
+        capability_data, status, error = _grouped_native_call(
+            "vw_catalog", action, "capabilities", {}, trace
+        )
+        if error is not None:
+            return error
+        capability_revision = (
+            capability_data.get("capability_revision")
+            if isinstance(capability_data, dict)
+            else None
+        )
+        capability_fingerprint = (
+            capability_data.get("capability_fingerprint")
+            if isinstance(capability_data, dict)
+            else None
+        )
+        if (
+            capability_revision != status.get("capability_revision")
+            or capability_fingerprint != status.get("capability_fingerprint")
+        ):
+            return _grouped_error(
+                "vw_catalog",
+                action,
+                "capability_manifest_mismatch",
+                "The ping and capability manifest identities differ. Restart or upgrade the native bridge before CAD work.",
+                trace,
+                status=status,
+                required_action="capabilities",
+                detail={
+                    "status_revision": status.get("capability_revision"),
+                    "manifest_revision": capability_revision,
+                    "status_fingerprint": status.get("capability_fingerprint"),
+                    "manifest_fingerprint": capability_fingerprint,
+                },
+            )
+        data = {
+            "capability_revision": capability_revision,
+            "capability_fingerprint": capability_fingerprint,
+            "native_phase": _native_phase(status or {}),
+            "implemented_actions": sorted(status.get("implemented_actions") or []) if status else [],
+            "capabilities": capability_data,
+            "create_object_types": sorted(_native_create_object_types(status or {})),
+        }
+        return _grouped_finish(
+            "vw_catalog",
+            action,
+            {"ok": True, "bridge": _grouped_bridge_summary(status), "data": data},
+            trace,
+            "ok",
+        )
+
+    native_action, params = {
+        "classes": ("manage_classes", {"action": "list", "query": query}),
+        "symbols": ("symbol", {"action": "list", "query": query, "limit": min(1000, offset + limit + 1)}),
+        "parametric_schemas": ("describe_parametric_schema", {"plugin_name": query}),
+        "worksheets": ("worksheet", {"action": "list", "query": query, "limit": min(1000, offset + limit + 1)}),
+        "resources": ("resources", {"action": "list", "query": query, "limit": min(1000, offset + limit + 1)}),
+    }[action]
+    data, status, error = _grouped_native_call("vw_catalog", action, native_action, params, trace)
+    if error is not None:
+        return error
+    data, page = _grouped_page_data(data, limit=limit, offset=offset, fields=projection)
+    payload: dict[str, Any] = {"ok": True, "bridge": _grouped_bridge_summary(status), "data": data}
+    if page is not None:
+        payload["page"] = page
+    return _grouped_finish("vw_catalog", action, payload, trace, "ok")
+
+
+@_tool("vw_apply")
+def vw_apply(operations: ExecuteOperationList, idempotency_key: IdempotencyKey) -> str:
+    """Apply one canonical atomic native mutation plan; never decomposes or falls back."""
+    raw = vw_execute_operations(operations, idempotency_key)
+    decoded = _decode_tool_result(raw)
+    if not isinstance(decoded, dict):
+        return json.dumps(
+            {
+                "ok": False,
+                "tool": "vw_apply",
+                "action": "apply",
+                "error": {
+                    "code": "native_action_failed",
+                    "message": "The atomic native operation failed; no fallback was attempted.",
+                    "detail": decoded,
+                },
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    payload = dict(decoded)
+    if payload.get("ok") is False:
+        original_error = payload.get("error")
+        error_text = str(original_error or "atomic native operation failed")
+        execution_outcome = str((payload.get("timing") or {}).get("outcome", ""))
+        if execution_outcome == "unsupported" or payload.get("unsupported_object_types"):
+            code = "capability_unavailable"
+        elif execution_outcome in {"validation_error", "idempotency_conflict"}:
+            code = "validation_error"
+        elif execution_outcome == "preflight_error":
+            code = "preflight_failed"
+        elif "does not advertise required phase-4 action" in error_text or "requires the native SDK bridge" in error_text:
+            code = "capability_unavailable"
+        elif "preflight failed" in error_text.lower():
+            code = "preflight_failed"
+        elif "idempotency_key" in error_text or "must " in error_text:
+            code = "validation_error"
+        else:
+            code = "native_action_failed"
+        payload["error"] = {
+            "code": code,
+            "message": error_text,
+            "required_native_action": "apply_operations",
+            "writes_started": False if code in {"capability_unavailable", "preflight_failed", "validation_error"} else None,
+        }
+    payload["delegated_tool"] = "vw_execute_operations"
+    payload["tool"] = "vw_apply"
+    payload["action"] = "apply"
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
+@_tool("vw_io")
+def vw_io(
+    action: GroupedIOAction,
+    file_path: NonEmptyPath,
+    format: GroupedIOFormat = "auto",
+    options: Optional[dict[str, Any]] = None,
+) -> str:
+    """Run an advertised native import, export, or capture without automatic retry."""
+    trace = _new_request_trace("vw_io", action)
+    try:
+        native_action = _grouped_io_native_action(action, format, file_path)
+        params = {"file_path": file_path, "format": format, **_grouped_options(options)}
+    except (KeyError, ValueError) as exc:
+        return _grouped_error("vw_io", action, "validation_error", str(exc), trace)
+    data, status, error = _grouped_native_call("vw_io", action, native_action, params, trace)
+    if error is not None:
+        return error
+    return _grouped_finish(
+        "vw_io",
+        action,
+        {"ok": True, "bridge": _grouped_bridge_summary(status), "data": data},
+        trace,
+        "ok",
+    )
+
+
+@_tool("vw_view")
+def vw_view(
+    action: GroupedViewAction,
+    file_path: str = "",
+    options: Optional[dict[str, Any]] = None,
+) -> str:
+    """Get/set the active view or capture it through advertised native actions."""
+    trace = _new_request_trace("vw_view", action)
+    try:
+        params = {"file_path": file_path, **_grouped_options(options)}
+    except ValueError as exc:
+        return _grouped_error("vw_view", action, "validation_error", str(exc), trace)
+    native_action = {"get": "get_view", "set": "set_view", "capture": "capture_view"}[action]
+    data, status, error = _grouped_native_call("vw_view", action, native_action, params, trace)
+    if error is not None:
+        return error
+    return _grouped_finish(
+        "vw_view",
+        action,
+        {"ok": True, "bridge": _grouped_bridge_summary(status), "data": data},
+        trace,
+        "ok",
+    )
+
+
+@_tool("vw_document")
+def vw_document(
+    action: GroupedDocumentAction,
+    file_path: str = "",
+    format: GroupedIOFormat = "auto",
+    options: Optional[dict[str, Any]] = None,
+) -> str:
+    """Inspect or change a document through an advertised native action without automatic retry."""
+    trace = _new_request_trace("vw_document", action)
+    try:
+        params = {"file_path": file_path, "format": format, **_grouped_options(options)}
+        if action == "export":
+            native_action = _grouped_io_native_action("export", format, file_path)
+        else:
+            native_action = {
+                "info": "get_document_info",
+                "save": "save_document",
+                "open": "open_document",
+                "new": "new_document",
+            }[action]
+    except (KeyError, ValueError) as exc:
+        return _grouped_error("vw_document", action, "validation_error", str(exc), trace)
+    data, status, error = _grouped_native_call("vw_document", action, native_action, params, trace)
+    if error is not None:
+        return error
+    return _grouped_finish(
+        "vw_document",
+        action,
+        {"ok": True, "bridge": _grouped_bridge_summary(status), "data": data},
+        trace,
+        "ok",
+    )
 
 
 def _apply_tool_profile() -> str:

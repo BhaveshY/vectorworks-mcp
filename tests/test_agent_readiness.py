@@ -165,8 +165,12 @@ class AgentReadinessTests(unittest.TestCase):
         work_skill = (ROOT / "plugins/vectorworks/skills/work/SKILL.md").read_text(encoding="utf-8")
         tool_map = (ROOT / "plugins/vectorworks/references/tool-map.md").read_text(encoding="utf-8")
         for content in (work_skill, tool_map):
+            self.assertIn("capability_revision", content)
+            self.assertIn("capability_fingerprint", content)
             self.assertIn("set_properties", content)
             self.assertNotIn("create-only", content)
+        self.assertIn("nine top-level tools", tool_map)
+        self.assertIn("They are not fallback paths", tool_map)
 
         companion_check = (
             ROOT / "plugins/vectorworks/scripts/check-companion-contract.ps1"
@@ -1064,7 +1068,7 @@ exit 0
         self.assertIn("kCadHandlersImplemented", combined)
         self.assertIn("IsUserVisibleObjectType", combined)
         self.assertIn("kUndoPlaceholderNode", combined)
-        self.assertIn("OpenDocumentPath(nullptr, false)", combined)
+        self.assertNotIn("OpenDocumentPath(nullptr, false)", combined)
         self.assertIn('GetBoundedIntParam(params, "limit", 1000, 1, 1000)', combined)
         self.assertIn("native bridge phase 0 CAD handlers are not implemented", combined)
         self.assertIn("native bridge CAD handlers are not ready: main context pump is not running", combined)
@@ -1073,7 +1077,13 @@ exit 0
         self.assertIn('"cad_api_safe":false', combined)
         self.assertIn('"transport_only":true', combined)
         self.assertIn('"native_phase":0', combined)
-        self.assertIn('"implemented_actions":["ping","stop"]', combined)
+        capability_registry = (
+            (src / "CapabilityRegistry.hpp").read_text(encoding="utf-8")
+            + (src / "CapabilityRegistry.cpp").read_text(encoding="utf-8")
+        )
+        self.assertIn("kCapabilityRevision = 4u", capability_registry)
+        self.assertIn("CapabilityFingerprint", capability_registry)
+        self.assertIn('"apply_operations"', capability_registry)
 
         for name in scaffold_files:
             text = (src / name).read_text(encoding="utf-8")

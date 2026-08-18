@@ -12,9 +12,17 @@ ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins" / "vectorworks"
 
 
-def _server_tool_names():
-    text = (ROOT / "server.py").read_text(encoding="utf-8")
-    return set(re.findall(r"def (vw_[a-zA-Z0-9_]+)\(", text))
+FAST_NATIVE_TOOL_NAMES = {
+    "vw_apply",
+    "vw_catalog",
+    "vw_document",
+    "vw_execute_operations",
+    "vw_io",
+    "vw_read",
+    "vw_status",
+    "vw_tool_safety",
+    "vw_view",
+}
 
 
 def _tool_map_names():
@@ -246,18 +254,24 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("companion contract", result.stderr + result.stdout)
         self.assertIn(".vectorworks-mcp-contract.json", result.stderr + result.stdout)
 
-    def test_plugin_tool_map_covers_server_tools(self):
-        self.assertEqual(_tool_map_names(), _server_tool_names())
+    def test_plugin_tool_map_covers_compact_fast_native_tools(self):
+        self.assertEqual(_tool_map_names(), FAST_NATIVE_TOOL_NAMES)
 
-    def test_plugin_skills_mention_host_side_blocked_guard(self):
+    def test_plugin_skills_document_rev4_compact_native_guard(self):
         work = (PLUGIN / "skills" / "work" / "SKILL.md").read_text(encoding="utf-8")
         diagnose = (PLUGIN / "skills" / "diagnose" / "SKILL.md").read_text(encoding="utf-8")
         setup = (PLUGIN / "skills" / "setup" / "SKILL.md").read_text(encoding="utf-8")
         ping = (PLUGIN / "skills" / "ping" / "SKILL.md").read_text(encoding="utf-8")
 
-        self.assertIn("blocked: true", work)
         self.assertIn("vw_tool_safety", work)
-        self.assertIn("unknown commit state", work)
+        self.assertIn('error.code="unknown_commit_state"', work)
+        self.assertIn("capability_revision >= 4", work)
+        self.assertIn("capability_fingerprint", work)
+        self.assertIn("Never infer support from the native phase", work)
+        self.assertIn("Do not switch to compatibility tools, a Python listener", work)
+        self.assertIn("Neither tool decomposes the plan", work)
+        for tool_name in FAST_NATIVE_TOOL_NAMES:
+            self.assertIn(f"`{tool_name}`", work)
         self.assertIn("blocked: true", diagnose)
         self.assertIn("vectorworksctl doctor --json", diagnose)
         self.assertIn("native-next", diagnose)
@@ -270,49 +284,33 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("cad_api_safe", ping)
         self.assertIn("transport_only", ping)
         self.assertIn("transport_only=false", work)
-        self.assertIn("native-next", work)
-        self.assertIn("fast-native` profile is mandatory", work)
-        self.assertIn("internal CAD preflight", work)
-        self.assertIn("self-verifying tool response", work)
-        self.assertIn("substitute independent lines", work)
-        self.assertIn("administrator-only diagnostic surface", work)
-        self.assertIn("never routes to a legacy, decomposed, batch, or modal fallback", work)
         self.assertIn("vw_execute_operations", work)
         self.assertIn("idempotency_key", work)
-        self.assertIn("create-and-property-edit plan", work)
-        self.assertIn("`create` and `set_properties`", work)
+        self.assertIn("set_properties", work)
 
-    def test_plugin_tool_map_documents_safety_metadata_and_mixed_actions(self):
+    def test_plugin_tool_map_documents_grouped_safety_and_retry_contract(self):
         tool_map = (PLUGIN / "references" / "tool-map.md").read_text(encoding="utf-8")
 
         for text in (
-            "## Safety Metadata",
-            "requires_cad_preflight",
-            "readOnlyHint",
-            "destructiveHint",
-            "idempotentHint",
-            "openWorldHint",
-            "## Mixed Tool Actions",
-            "## Workflow Profiles",
-            "Fast native (mandatory)",
-            "preflight internally",
-            "self-verifying",
-            "manual administrator diagnostic only",
-            "no legacy, decomposed, batch, or modal fallback",
+            "## Production contract",
+            "nine top-level tools",
+            "capability revision 4 or newer",
+            "capability_fingerprint",
+            "They are not fallback paths",
+            "## Safety and retry policy",
+            "retryPolicy",
+            "unknownCommitState",
+            "never_after_send",
+            "unknown_commit_state",
             "`vw_execute_operations`",
-            "`apply_operations`",
-            "create-and-property-edit plan",
-            '"type":"set_properties"',
-            "`vw_selection.get`",
-            "`vw_selection.delete`",
-            "`vw_manage_classes.list`",
-            "`vw_manage_classes.delete`",
-            "`vw_worksheet.read_range`",
-            "`vw_worksheet.write`",
-            "`vw_symbol.list`",
-            "`vw_symbol.insert`",
+            "apply_operations",
+            "`set_properties`",
+            "`vw_read(action=\"query\")`",
+            "`vw_catalog(action=\"parametric_schemas\", query=\"Space\")`",
         ):
             self.assertIn(text, tool_map)
+        self.assertNotIn("`vw_selection.get`", tool_map)
+        self.assertNotIn("`vw_manage_classes.list`", tool_map)
 
     def test_bundled_wrappers_require_current_connector_contract(self):
         for relative_path in (
@@ -421,7 +419,11 @@ class BlockOptionalHostDeps(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, BlockOptionalHostDeps())
 sys.path.insert(0, {json.dumps(str(ROOT))})
 import server
-print(json.dumps({{"tool_count": len(server.TOOL_SAFETY), "vw_ping_read_only": server.TOOL_SAFETY["vw_ping"]["readOnlyHint"]}}, sort_keys=True))
+print(json.dumps({{
+    "fast_native_tools": sorted(server.FAST_NATIVE_TOOL_NAMES),
+    "all_have_safety": all(name in server.TOOL_SAFETY for name in server.FAST_NATIVE_TOOL_NAMES),
+    "status_read_only": server.TOOL_SAFETY["vw_status"]["readOnlyHint"],
+}}, sort_keys=True))
 """
 
         result = subprocess.run(
@@ -433,8 +435,9 @@ print(json.dumps({{"tool_count": len(server.TOOL_SAFETY), "vw_ping_read_only": s
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         payload = json.loads(result.stdout)
-        self.assertGreaterEqual(payload["tool_count"], 25)
-        self.assertTrue(payload["vw_ping_read_only"])
+        self.assertEqual(set(payload["fast_native_tools"]), FAST_NATIVE_TOOL_NAMES)
+        self.assertTrue(payload["all_have_safety"])
+        self.assertTrue(payload["status_read_only"])
 
     def test_readme_uses_canonical_repo_override_env_var(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

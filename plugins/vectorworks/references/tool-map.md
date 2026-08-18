@@ -1,177 +1,154 @@
 # Vectorworks MCP Tool Map
 
-## Workflow Profiles
+## Production contract
 
-The normal runtime has one mandatory production profile:
+The `fast-native` profile is the only production workflow. Every grouped call
+requires the native SDK bridge, phase 4, capability revision 4 or newer, a
+non-empty capability fingerprint, CAD-safe dispatch, and a ready main-context
+pump. The host uses only `implemented_actions` and `create_object_types` from
+the bridge manifest. It does not derive support from the phase number.
 
-- **Fast native (mandatory):** non-modal, capability-checked native reads and
-  writes. For a fully specified, self-contained write, call the native tool
-  directly; the host performs internal CAD preflight. Use one
-  `vw_execute_operations` call for a complete create-and-property-edit plan.
-  Successful responses that include handles/UUIDs, exact created counts, atomic status, or
-  verified readback are self-verifying and do not need an automatic screenshot
-  or full drawing scan.
-- **Compat (manual administrator diagnostic only):** broader Python/legacy
-  tools for explicitly authorized troubleshooting. It is not an automatic or
-  alternative drawing workflow. Never switch to it, decompose a request, or
-  launch the modal Python listener after a fast-native capability failure.
+The profile has nine top-level tools. No capability adds another MCP tool.
 
-Use document context only when the requested result depends on existing state.
-Prefer `vw_lookup_objects`, `vw_get_document_info`, or a focused
-`vw_drawing_summary(include_examples=false)` before the broad
-`vw_agent_context(profile="production")`. Reserve explicit ping/preflight calls
-for diagnosis, recovery, or a requested connection check; document tools already
-preflight internally.
+| Tool | Actions | Purpose |
+|------|---------|---------|
+| `vw_status` | `health`, `context` | Bridge health or compact document context. |
+| `vw_read` | `document`, `layers`, `summary`, `query`, `selection` | Read-only document data with field projection and paging. |
+| `vw_catalog` | `capabilities`, `classes`, `symbols`, `parametric_schemas`, `worksheets`, `resources` | Manifest and parameter discovery. |
+| `vw_apply` | atomic plan | Canonical atomic document mutation entry. |
+| `vw_execute_operations` | atomic plan | The same write core and native transaction as `vw_apply`. |
+| `vw_io` | `import`, `export`, `capture` | Advertised native file and capture actions. |
+| `vw_view` | `get`, `set`, `capture` | Advertised native view actions. |
+| `vw_document` | `info`, `save`, `export`, `open`, `new` | Advertised document lifecycle actions. |
+| `vw_tool_safety` | none | Exact action safety, effects, and retry policy. |
 
-Core health and escape hatch:
-
-- `vw_ping`: confirm the listener and MCP server are connected; check bridge mode and CAD safety before real work.
-- `vw_bridge_status`: same listener status payload as `vw_ping`, named for agent preflight checks.
-- `vw_preflight_for_cad`: structured JSON go/no-go check before real CAD/API handlers.
-- `vw_agent_context`: one-call compact Codex planning snapshot with preflight, key capabilities, and bounded drawing summary.
-- `vw_capabilities`: bridge capability report plus current native/tool support.
-- `vw_tool_safety`: structured read/write/destructive metadata for every tool.
-- `vw_run_script`: disabled by default; run trusted Python inside Vectorworks only after `VW_MCP_ENABLE_RUN_SCRIPT=1` and `confirm="RUN_TRUSTED_CODE"`.
-- `vw_stop_listener`: ask the Vectorworks listener to stop gracefully.
-
-Document context:
-
-- `vw_get_document_info`: active document metadata and object counts.
-- `vw_get_layers`: list layers.
-- `vw_get_objects`: list objects filtered by layer/type.
-- `vw_drawing_summary`: bounded document/layer/object inventory for planning and verification. Use `include_examples=false` or a small `example_limit` for fast, token-efficient large-project context.
-- `vw_lookup_objects`: compact object lookup for large files. Returns agent refs such as `uuid:...`, `name:...`, and `handle:...` plus caller-selected fields/detail.
-- `vw_find_objects`: Vectorworks criteria search, such as `T=WALL`. On the native bridge, simple `ALL`, `T=...`, `C=...`, and exact-name `((N='Name'))` criteria are resolved through bounded `get_objects` when the dedicated listener search handler is unavailable.
-- `vw_inspect_object`: discover object/plugin parameters; plugin probing creates a temporary object and requires `confirm="PROBE_PLUGIN"`.
-
-Create and edit:
-
-- `vw_create_object`: compatibility-surface primitive helper. Fast-native work
-  uses `vw_execute_operations`. Polygon/polyline creation requires the bridge
-  to report those phase-4 object types; otherwise stop.
-- `vw_batch_create_objects`: lower-level compatibility-surface batch helper,
-  not a fallback for `vw_execute_operations`. `atomic=false` is a legacy
-  per-object route and is unavailable to mandatory fast-native agent work.
-- `vw_execute_operations`: execute one strictly validated plan using canonical
-  `{"type":"create","operation_id":"item","params":{...}}` and
-  `{"type":"set_properties","params":{"edits":[...]}}` operations with a
-  stable caller-generated `idempotency_key`. Property edits may target existing
-  `uuid:...`, `name:...`, or `handle:...` refs, or `$<operation_id>` for an
-  object created earlier in the same transaction. It requires native phase-4
-  `apply_operations`; missing support is a hard upgrade/restart failure. There
-  is no legacy, decomposed, batch, or modal fallback. Reuse a key only for the
-  identical plan; delete and other operation types are not part of the current
-  contract.
-- `vw_plan_schematic_floor_plan`: dry-run a multi-room schematic floor plan and return the primitives.
-- `vw_create_schematic_floor_plan`: create a multi-room schematic floor plan from rooms, walls, doors, and windows.
-- `vw_create_bim_floor_plan`: create true wall objects plus optional room text labels and linear dimensions from rooms/walls.
-- `vw_create_schematic_room`: rectangular schematic room from native 2D wall rectangles.
-- `vw_create_schematic_door`: schematic door leaf and swing arc from native 2D primitives.
-- `vw_create_schematic_window`: schematic double-line window marker from native 2D primitives.
-- `vw_set_object_property`: name, class, color, line weight, opacity.
-- `vw_batch_set_object_properties`: resolve `uuid:...`, `name:...`, or `handle:...` refs, reject ambiguous/stale refs before writing, apply multiple property edits, and optionally verify readback. Requires the native phase-2 `set_property` action in the active bridge.
-- `vw_selection`: fast-native exposes get, select, clear, and delete; selected-object delete requires `confirm="DELETE_SELECTED"` and exact-name criteria delete requires `confirm="DELETE_EXACT_NAME"`. Legacy move/duplicate are explicit diagnostic `compat` actions only.
-
-Architecture:
-
-- `vw_create_wall`: native true wall objects.
-- `vw_create_text`: native text annotations.
-- `vw_create_linear_dimension`: native linear dimensions.
-- `vw_insert_door`, `vw_insert_window`, `vw_create_slab`, and
-  `vw_create_roof`: manual compat/admin surface only; unavailable for mandatory
-  fast-native agent work until dedicated native operations are implemented.
-
-Resources and files:
-
-- `vw_manage_classes`: native phase-2 class management; list/create/delete classes; delete requires `confirm="DELETE_CLASS"`.
-- `vw_worksheet`: read/write worksheet cells and ranges.
-- `vw_symbol`: list and insert symbols.
-- `vw_export`: export PDF, DXF, DWG, or image where supported.
-- `vw_import_file`: import DXF, DWG, or image files.
-- `vw_screenshot`: capture a viewport screenshot where supported.
-
-## Safety Metadata
-
-Agents should consult `vw_tool_safety` when planning mixed, destructive, file,
-or trusted-code operations. It is not a required extra call before a
-self-contained native write because those tools preflight internally.
-
-Rules:
-
-- Tools with `requires_cad_preflight: true` enforce that preflight internally.
-  Call `vw_preflight_for_cad` explicitly for diagnosis or recovery.
-- Prefer `readOnlyHint: true` tools for discovery and verification.
-- Ask for explicit confirmation before `destructiveHint: true` tools or variants.
-- Never automatically retry `idempotentHint: false` operations after timeout,
-  protocol failure, or unknown commit state.
-- Treat `openWorldHint: true` tools as dependent on the current Vectorworks
-  document, selected objects, filesystem, or bridge state.
+The server publishes this top-level safety metadata for the production tools:
 
 | Tool | Category | Wire action | Read-only | Destructive | Idempotent | Open-world | CAD preflight |
 |------|----------|-------------|-----------|-------------|------------|------------|---------------|
-| `vw_agent_context` | `metadata` | `` | `true` | `false` | `true` | `true` | `false` |
-| `vw_batch_create_objects` | `document-write` | `batch_create_objects` | `false` | `false` | `false` | `true` | `true` |
-| `vw_batch_set_object_properties` | `document-write` | `` | `false` | `false` | `false` | `true` | `true` |
-| `vw_bridge_status` | `health` | `ping` | `true` | `false` | `true` | `true` | `false` |
-| `vw_capabilities` | `metadata` | `ping` | `true` | `false` | `true` | `true` | `false` |
-| `vw_create_bim_floor_plan` | `bim-floor-plan` | `` | `false` | `false` | `false` | `true` | `true` |
-| `vw_create_linear_dimension` | `document-write` | `create_linear_dimension` | `false` | `false` | `false` | `true` | `true` |
-| `vw_create_object` | `document-write` | `create_object` | `false` | `false` | `false` | `true` | `true` |
-| `vw_create_roof` | `document-write` | `create_roof` | `false` | `false` | `false` | `true` | `true` |
-| `vw_create_slab` | `document-write` | `create_slab` | `false` | `false` | `false` | `true` | `true` |
-| `vw_create_schematic_door` | `schematic-floor-plan` | `` | `false` | `false` | `false` | `true` | `true` |
-| `vw_create_schematic_floor_plan` | `schematic-floor-plan` | `` | `false` | `false` | `false` | `true` | `true` |
-| `vw_create_schematic_room` | `schematic-floor-plan` | `` | `false` | `false` | `false` | `true` | `true` |
-| `vw_create_schematic_window` | `schematic-floor-plan` | `` | `false` | `false` | `false` | `true` | `true` |
-| `vw_create_text` | `document-write` | `create_text` | `false` | `false` | `false` | `true` | `true` |
-| `vw_create_wall` | `document-write` | `create_wall` | `false` | `false` | `false` | `true` | `true` |
-| `vw_drawing_summary` | `document-read` | `drawing_summary` | `true` | `false` | `true` | `true` | `true` |
-| `vw_execute_operations` | `document-write` | `apply_operations` | `false` | `false` | `true` | `true` | `true` |
-| `vw_export` | `file-write` | `export` | `false` | `false` | `false` | `true` | `true` |
-| `vw_find_objects` | `document-read` | `find_objects` | `true` | `false` | `true` | `true` | `true` |
-| `vw_get_document_info` | `document-read` | `get_document_info` | `true` | `false` | `true` | `true` | `true` |
-| `vw_get_layers` | `document-read` | `get_layers` | `true` | `false` | `true` | `true` | `true` |
-| `vw_get_objects` | `document-read` | `get_objects` | `true` | `false` | `true` | `true` | `true` |
-| `vw_import_file` | `document-write` | `import_file` | `false` | `false` | `false` | `true` | `true` |
-| `vw_insert_door` | `document-write` | `insert_door` | `false` | `false` | `false` | `true` | `true` |
-| `vw_insert_window` | `document-write` | `insert_window` | `false` | `false` | `false` | `true` | `true` |
-| `vw_inspect_object` | `document-write` | `inspect_object` | `false` | `false` | `false` | `true` | `true` |
-| `vw_lookup_objects` | `document-read` | `` | `true` | `false` | `true` | `true` | `true` |
-| `vw_manage_classes` | `mixed-destructive` | `manage_classes` | `false` | `true` | `false` | `true` | `true` |
-| `vw_ping` | `health` | `ping` | `true` | `false` | `true` | `true` | `false` |
-| `vw_plan_schematic_floor_plan` | `schematic-floor-plan` | `` | `true` | `false` | `true` | `false` | `false` |
-| `vw_preflight_for_cad` | `health` | `ping` | `true` | `false` | `true` | `true` | `false` |
-| `vw_run_script` | `trusted-code` | `run_script` | `false` | `true` | `false` | `true` | `true` |
-| `vw_screenshot` | `document-export` | `screenshot` | `false` | `false` | `false` | `true` | `true` |
-| `vw_selection` | `mixed-destructive` | `selection` | `false` | `true` | `false` | `true` | `true` |
-| `vw_set_object_property` | `document-write` | `set_property` | `false` | `false` | `false` | `true` | `true` |
-| `vw_stop_listener` | `listener-control` | `stop` | `false` | `false` | `false` | `true` | `false` |
-| `vw_symbol` | `mixed-document-write` | `symbol` | `false` | `false` | `false` | `true` | `true` |
+| `vw_apply` | `grouped-atomic-write` | `` | `false` | `true` | `true` | `true` | `true` |
+| `vw_catalog` | `grouped-catalog` | `` | `true` | `false` | `true` | `true` | `true` |
+| `vw_document` | `grouped-native-document` | `` | `false` | `true` | `false` | `true` | `true` |
+| `vw_execute_operations` | `document-write` | `apply_operations` | `false` | `true` | `true` | `true` | `true` |
+| `vw_io` | `grouped-native-io` | `` | `false` | `false` | `false` | `true` | `true` |
+| `vw_read` | `grouped-read` | `` | `true` | `false` | `true` | `true` | `true` |
+| `vw_status` | `grouped-status` | `` | `true` | `false` | `true` | `true` | `true` |
 | `vw_tool_safety` | `metadata` | `` | `true` | `false` | `true` | `false` | `false` |
-| `vw_worksheet` | `mixed-document-write` | `worksheet` | `false` | `false` | `false` | `true` | `true` |
+| `vw_view` | `grouped-native-view` | `` | `false` | `false` | `false` | `true` | `true` |
 
-## Mixed Tool Actions
+The compatibility profile and the modal Python listener are administrator
+diagnostics. They are not fallback paths.
 
-Tool-level MCP annotations stay conservative for mixed tools. Use these action
-rows to choose the least risky variant before calling the tool.
-For `vw_selection.delete`, current-selection delete requires
-`confirm="DELETE_SELECTED"`; criteria delete is restricted to exact object-name
-criteria such as `((N='Fixture'))` and requires `confirm="DELETE_EXACT_NAME"`.
+## Reads
 
-| Tool action | Read-only | Destructive | Idempotent | Writes document | Writes selection | Writes files | Confirmation |
-|-------------|-----------|-------------|------------|-----------------|------------------|--------------|--------------|
-| `vw_manage_classes.create` | `false` | `false` | `false` | `true` | `false` | `false` | `false` |
-| `vw_manage_classes.delete` | `false` | `true` | `false` | `true` | `false` | `false` | `true` |
-| `vw_manage_classes.list` | `true` | `false` | `true` | `false` | `false` | `false` | `false` |
-| `vw_selection.clear` | `false` | `false` | `false` | `false` | `true` | `false` | `false` |
-| `vw_selection.delete` | `false` | `true` | `false` | `true` | `true` | `false` | `true` |
-| `vw_selection.duplicate` | `false` | `false` | `false` | `true` | `false` | `false` | `false` |
-| `vw_selection.get` | `true` | `false` | `true` | `false` | `false` | `false` | `false` |
-| `vw_selection.move` | `false` | `false` | `false` | `true` | `false` | `false` | `false` |
-| `vw_selection.select` | `false` | `false` | `false` | `false` | `true` | `false` | `false` |
-| `vw_symbol.insert` | `false` | `false` | `false` | `true` | `false` | `false` | `false` |
-| `vw_symbol.list` | `true` | `false` | `true` | `false` | `false` | `false` | `false` |
-| `vw_worksheet.list` | `true` | `false` | `true` | `false` | `false` | `false` | `false` |
-| `vw_worksheet.read` | `true` | `false` | `true` | `false` | `false` | `false` | `false` |
-| `vw_worksheet.read_range` | `true` | `false` | `true` | `false` | `false` | `false` | `false` |
-| `vw_worksheet.write` | `false` | `false` | `false` | `true` | `false` | `false` | `false` |
+`vw_read(action="query")` forwards `criteria`, `layer`, `object_type`, and the
+bounded native limit. Use all three filters when they narrow the result. The
+cursor is an offset for the returned native collection. Use `fields` to keep
+the response compact.
+
+`vw_catalog(action="parametric_schemas", query="Space")` sends `Space` as the
+native `plugin_name`. The result includes the universal plug-in name,
+descriptor fingerprint, and universal parameter descriptors. Use that schema
+before a generic parametric write.
+
+`vw_catalog(action="capabilities")` returns both
+`capability_revision` and `capability_fingerprint`. The manifest response must
+match the identity reported by ping. A mismatch blocks work until the native
+bridge is restarted or upgraded.
+
+## Atomic writes
+
+`vw_apply` and `vw_execute_operations` accept the same arguments:
+
+```json
+{
+  "operations": [
+    {
+      "type": "create",
+      "operation_id": "living",
+      "params": {
+        "object_type": "space",
+        "points": [[200, 200], [6300, 200], [6300, 4300], [200, 4300]],
+        "closed": true,
+        "height": 3000,
+        "name": "Living / Dining",
+        "room_id": "LIVING"
+      }
+    }
+  ],
+  "idempotency_key": "floor-plan-2026-08-18-a"
+}
+```
+
+Supported operation families are `create`, `set_properties`, `transform`,
+`duplicate`, and `delete`. The grouped write uses one native
+`apply_operations` transaction. Native apply prevalidates the whole plan, runs one
+undo transaction, registers each created object with undo, and returns compact
+semantic receipts. The host never retries through another action.
+
+Create only object types present in the manifest. The production bridge can
+advertise primitives, walls, text, dimensions, true slabs, true roofs, true
+Spaces, hosted doors and windows, symbols, and generic parametric objects.
+Availability comes from the loaded binary, not this list.
+
+Dedicated hosted openings use this normalized wire shape inside the atomic
+plan:
+
+```json
+{
+  "op": "create",
+  "object_type": "window",
+  "plugin_name": "Window",
+  "descriptor_fingerprint": "<live schema fingerprint>",
+  "x1": 3200.0,
+  "y1": 0.0,
+  "rotation": 0.0,
+  "require_wall_host": true,
+  "wall_uuid": "<raw Vectorworks wall UUID>",
+  "width": 1200.0,
+  "height": 1500.0,
+  "sill_height": 900.0,
+  "parameter_count": 0,
+  "local_ref": "living-window"
+}
+```
+
+A door has the same shape without `sill_height`. `plugin_name` must be exactly
+`Door` or `Window`, and insertion `x`/`y`, width, height, and window sill height
+are explicit rather than defaulted. Optional typed parameters use
+`parameter_count` plus `parameter_N_name`, `parameter_N_type`, and the matching
+typed value field. The host emits this flattened wire form from the public
+`parameters` list, but rejects parameters duplicating dedicated width/height or
+window elevation semantics. A missing wall UUID, stale schema fingerprint, failed host
+verification, or absent `door` or `window` manifest type is a hard failure.
+
+## Safety and retry policy
+
+`vw_tool_safety` includes action-level `retryPolicy`,
+`unknownCommitState`, `writesDocument`, `writesFiles`, and confirmation
+metadata.
+
+| Grouped action | Effect | Retry policy after send |
+|----------------|--------|-------------------------|
+| `vw_status.*`, `vw_read.*`, `vw_catalog.*`, `vw_view.get` | Read only | `safe` |
+| `vw_apply`, `vw_execute_operations` | Atomic document write | Reuse the same key only for the identical plan after state inspection. |
+| `vw_io.import` | Document write | `never_after_send` |
+| `vw_io.export`, `vw_io.capture` | File write | `never_after_send` |
+| `vw_view.set` | View-state write | `never_after_send` |
+| `vw_view.capture` | File write | `never_after_send` |
+| `vw_document.save`, `vw_document.export` | File write | `never_after_send` |
+| `vw_document.open`, `vw_document.new` | Destructive document lifecycle | `never_after_send` |
+
+`vw_io` and `vw_document` do not accept `idempotency_key`. The native bridge
+does not provide a durable replay ledger for those actions.
+
+Grouped errors distinguish transport state:
+
+- `request_not_sent` means that no native work started. Retry is safe.
+- `preflight_failed` means that no native work started. Repair the bridge, then
+  retry.
+- `capability_unavailable` and `capability_manifest_mismatch` mean that no
+  fallback was attempted.
+- `unknown_commit_state` means that Vectorworks accepted a non-retryable action
+  but the host did not receive a reliable result. Do not retry. Inspect the
+  document and the target file through read-only calls.

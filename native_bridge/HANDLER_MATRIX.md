@@ -29,18 +29,18 @@ Legend:
 | `manage_classes` | `handle_manage_classes` | mixed/destructive | main/plugin event context | 2 | Lists, creates, and deletes a temporary class; delete has separate destructive confirmation |
 | `find_objects` | `handle_find_objects` | read | main/plugin event context | 3 | Criteria search returns known test object |
 | `drawing_summary` | `handle_drawing_summary` | read | main/plugin event context | 3 | Returns compact counts by type/layer/class plus bounded examples without dumping every object |
-| `apply_operations` | no Python fallback | idempotent write | main/plugin event context | 4 | Atomically creates objects and applies property edits with local/handle/UUID/exact-name refs; returns verified receipts and rejects idempotency-key reuse across payloads/documents |
+| `apply_operations` | no Python fallback | idempotent write | main/plugin event context | 4 | Uses one `NativeTransaction` for create, property, transform, duplicate, and delete operations. Supports local, handle, UUID, and exact-name refs. Verifies semantic receipts, exact cleanup, undo commit, and idempotency-key reuse. |
 | `worksheet` | `handle_worksheet` | mixed/write | main/plugin event context | 3 | Lists worksheets and reads/writes a temporary cell |
 | `symbol` | `handle_symbol` | mixed/write | main/plugin event context | 3 | Lists symbols and inserts a known symbol in a test document |
-| `export` | `handle_export` | write | main/plugin event context | 3 | Exports test document to a temporary file or opens expected export dialog |
-| `import_file` | `handle_import_file` | write | main/plugin event context | 3 | Imports a temporary DXF/image fixture |
-| `screenshot` | `handle_screenshot` | read/write-file | main/plugin event context | 3 | Writes a screenshot/image to the requested path |
-| `run_script` | `handle_run_script` | destructive/open-ended | main/plugin event context | 4 | Disabled by default or explicitly gated as trusted code execution |
-| `insert_door` | `handle_insert_door` | write | main/plugin event context | 4 | Inserts a door into a temporary wall/document |
-| `insert_window` | `handle_insert_window` | write | main/plugin event context | 4 | Inserts a window into a temporary wall/document |
-| `create_slab` | `handle_create_slab` | write | main/plugin event context | 4 | Creates and deletes a slab from a test footprint |
-| `create_roof` | `handle_create_roof` | write | main/plugin event context | 4 | Creates and deletes a roof from a test footprint |
-| `inspect_object` | `handle_inspect_object` | read | main/plugin event context | 4 | Reports plugin/object parameters for a selected test object |
+| `export` | `handle_export` | write-file | compatibility only | deferred | Disabled. Production uses the native non-modal `export_image`, `export_pdf`, `export_vectorworks_document`, or `export_dwg` action. |
+| `import_file` | `handle_import_file` | document write | compatibility only | deferred | Disabled for production. The native `import_dwg` action uses silent `IImportExportDWG` and returns a document mutation receipt. |
+| `screenshot` | `handle_screenshot` | write-file | compatibility only | deferred | Disabled. Production uses native `capture_view`, which writes and verifies an image without a dialog. |
+| `run_script` | `handle_run_script` | destructive/open-ended | compatibility only | deferred | Not registered by the native bridge. The fast-native profile never exposes arbitrary code execution. |
+| `insert_door` | `handle_insert_door` | write | compatibility only | deferred | Disabled. Production uses `create_object` kind `door`, a runtime schema fingerprint, an exact wall UUID, and semantic host readback. |
+| `insert_window` | `handle_insert_window` | write | compatibility only | deferred | Disabled. Production uses `create_object` kind `window`, a runtime schema fingerprint, an exact wall UUID, and semantic host readback. |
+| `create_slab` | `handle_create_slab` | write | compatibility only | deferred | Disabled. Production uses `create_object` kind `slab`, which calls `ISDK::CreateSlab` and verifies `kSlabNode`. |
+| `create_roof` | `handle_create_roof` | write | compatibility only | deferred | Disabled. Production uses `create_object` kind `roof`, which calls `ISDK::CreateRoof` and verifies `kRoofContainerNode`. No extrusion substitute exists. |
+| `inspect_object` | `handle_inspect_object` | read | compatibility only | deferred | Existing-object inspection is read-only. Temporary plug-in probing is disabled. Production schema discovery uses `describe_parametric_schema`. |
 
 ## Mixed Action Safety
 

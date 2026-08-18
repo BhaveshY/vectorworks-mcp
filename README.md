@@ -52,16 +52,21 @@ Prefer a focused `vw_lookup_objects`, `vw_get_document_info`, or
 `vw_drawing_summary(include_examples=false)` call; use
 `vw_agent_context(profile="production")` for broad multi-step planning.
 
-`vw_execute_operations` is the mandatory fast-native one-call path for a
-complete create-and-property-edit plan. Send canonical `create` and
-`set_properties` operations with a stable caller-generated `idempotency_key`,
-and reuse that key only for the identical plan. A property edit can target an
-existing `uuid:...`, `name:...`, or `handle:...` ref, or `$<operation_id>` for
-an object created earlier in the same transaction. The host validates the plan
-before writing and requires native phase-4 `apply_operations`. Missing support
-is a hard upgrade/restart failure; it never routes through a legacy,
-decomposed, batch, or modal fallback. Delete and other guessed operation types
-are not accepted.
+Use `vw_apply` for one atomic native plan. `vw_execute_operations` is a strict
+alias to the same write engine. Both accept create, property, transform,
+duplicate, and delete operations with a stable caller-generated
+`idempotency_key`. Reuse the key only for the identical plan. An operation can
+target an existing `uuid:...`, `name:...`, or `handle:...` ref, or an object
+created earlier in the transaction through `$<operation_id>`.
+
+The create variants include primitives, walls, text, dimensions, symbols,
+generic parametric objects, true Spaces, true Slabs, true Roofs, and hosted
+Doors and Windows. Door and Window creation requires a runtime schema
+fingerprint and an exact wall UUID. The native bridge verifies the universal
+plug-in name, dimensions, and wall host before commit. The host requires
+capability revision 4 and an exact manifest fingerprint. Missing support is an
+upgrade or restart failure. The host never switches to a decomposed batch,
+Python listener, modal dialog, primitive substitute, or extrusion substitute.
 
 `fast-native` is mandatory for normal agent work and is also the default when
 `VW_MCP_TOOL_PROFILE` is absent. It exposes only the compact native production
@@ -601,7 +606,7 @@ Core:
 | `vw_run_script` | Disabled by default; execute trusted Python inside Vectorworks only after `VW_MCP_ENABLE_RUN_SCRIPT=1` and `confirm="RUN_TRUSTED_CODE"` |
 | `vw_create_object` | Compat/admin primitive helper; hidden from mandatory fast-native work |
 | `vw_batch_create_objects` | Compat/admin batch helper; `atomic=false` is legacy and never a fast-native fallback |
-| `vw_execute_operations` | Mandatory fast-native create-and-property-edit plan with a stable idempotency key; accepts `create` and `set_properties`, requires native phase-4 `apply_operations`, and hard-fails when unavailable |
+| `vw_execute_operations` | Atomic native create, property, transform, duplicate, and delete plan. This calls the same engine as `vw_apply`. |
 | `vw_plan_schematic_floor_plan` | Dry-run a multi-room schematic floor plan and return the native primitives |
 | `vw_create_schematic_floor_plan` | Create a multi-room schematic floor plan from rooms, wall segments, doors, and windows |
 | `vw_create_bim_floor_plan` | Create a native wall-based floor plan with optional room labels and linear dimensions |
@@ -618,10 +623,10 @@ Core:
 | `vw_manage_classes` | Native phase-2 class management; list, create, delete classes; delete requires `confirm="DELETE_CLASS"` |
 | `vw_worksheet` | Read/write worksheet cells and ranges |
 | `vw_symbol` | List and insert symbols |
-| `vw_export` | Open the matching Vectorworks export dialog and report that manual save confirmation is required |
-| `vw_import_file` | Import DXF, DWG, or image files |
+| `vw_export` | Compatibility handler disabled. Use `vw_io(action="export", ...)`, which calls native non-modal exporters. |
+| `vw_import_file` | Compatibility handler disabled. Use `vw_io(action="import", variant="dwg", ...)`, which calls the silent SDK importer and returns a mutation receipt. |
 | `vw_get_document_info` | Document metadata |
-| `vw_screenshot` | Open the Vectorworks Export Image File dialog with the requested path |
+| `vw_screenshot` | Compatibility handler disabled. Use `vw_view(action="capture", ...)` or `vw_io(action="capture", ...)`, which writes and verifies an image without a dialog. |
 | `vw_stop_listener` | Ask the listener to stop gracefully |
 | `vw_selection` | Fast-native: get, select, clear, or delete; selected-object delete requires `confirm="DELETE_SELECTED"` and exact-name criteria delete requires `confirm="DELETE_EXACT_NAME"`. Legacy move/duplicate are exposed only in explicit diagnostic `compat` mode. |
 
@@ -632,16 +637,18 @@ Architectural:
 | `vw_create_wall` | Create native true wall objects |
 | `vw_create_text` | Create native text annotations |
 | `vw_create_linear_dimension` | Create native linear dimensions |
-| `vw_insert_door` | Manual compat/admin diagnostic only; unavailable in fast-native |
-| `vw_insert_window` | Manual compat/admin diagnostic only; unavailable in fast-native |
-| `vw_create_slab` | Manual compat/admin diagnostic only; unavailable in fast-native |
-| `vw_create_roof` | Manual compat/admin diagnostic only; unavailable in fast-native |
-| `vw_inspect_object` | Manual compat/admin diagnostic only; plugin probing requires `confirm="PROBE_PLUGIN"` |
+| `vw_insert_door` | Compatibility handler disabled. Use `vw_apply` with `object_type="door"`. |
+| `vw_insert_window` | Compatibility handler disabled. Use `vw_apply` with `object_type="window"`. |
+| `vw_create_slab` | Compatibility handler disabled. Use `vw_apply` with `object_type="slab"`. |
+| `vw_create_roof` | Compatibility handler disabled. Use `vw_apply` with `object_type="roof"`. |
+| `vw_inspect_object` | Existing-object reads remain available in compatibility diagnostics. Temporary plug-in probing is disabled. Use `vw_catalog(action="parametric_schemas", query="<universal name>")` for production schema discovery. |
 
 ## Agent Handoff
 
 Project instructions are in `AGENTS.md`; client-specific entrypoints are
 `CLAUDE.md` for Claude Code and `CODEX.md` for Codex.
+Use `CONTINUE_ON_ANOTHER_PC.md` to resume the current revision 4 work and run
+the remaining live acceptance cycle from another PC.
 
 Known-good host checks:
 
@@ -656,9 +663,10 @@ End-to-end requires:
 - compiled native SDK bridge installed and loaded
 - MCP client restarted after registration
 - `vectorworks` trusted/loaded in the MCP client; Claude Code users can confirm this with `/mcp`
-- first tool call `vw_ping` proving `dispatch_mode=native_sdk`,
-  `cad_api_safe=true`, `transport_only=false`, and
-  `main_context_pump_ready=true`
+- first production tool call `vw_status(action="health")` proving
+  `dispatch_mode=native_sdk`, `capability_revision >= 4`, a non-empty
+  `capability_fingerprint`, `cad_api_safe=true`, `transport_only=false`, and a
+  ready main-context pump
 
 The modal Python diagnostic never replaces native end-to-end acceptance. If an
 administrator runs it separately, record that manual Vectorworks use is blocked
@@ -671,7 +679,7 @@ until its dialog closes.
 - The setup script updates `~\.claude.json` directly when the CLI is missing.
 - Restart Claude Code afterward.
 
-`vw_ping` reports a connection error:
+`vw_status(action="health")` reports a connection error:
 
 - Start Vectorworks.
 - Run the native doctor/plan and confirm the compiled SDK plug-in is installed
@@ -686,7 +694,7 @@ Vectorworks hangs after explicitly starting the Python fallback:
 - Regenerate the explicitly enabled fallback launcher with `.\scripts\bootstrap-agent.ps1 -EnablePythonDialogFallback -Verify` or, for host-only clients, `.\scripts\bootstrap-agent.ps1 -Client HostOnly -EnablePythonDialogFallback -Verify`.
 - Run `.\scripts\copy-vectorworks-loader.ps1`, then replace any old pasted Vectorworks script with the clipboard contents from `vw_load_listener_2024.py`; it loads the current launcher from disk and prevents stale pasted listener code from lingering in a menu command.
 - Confirm the generated launcher contains `os.environ["VW_MCP_MODE"] = "dialog"`.
-- Confirm `vw_ping` reports `dispatch_mode=dialog`,
+- Confirm the compatibility diagnostic ping reports `dispatch_mode=dialog`,
   `bridge_kind=python_dialog_agent_session`, `cad_api_safe=true`, and
   `transport_only=false` before CAD work.
 - If Vectorworks is already stuck from an older foreground launcher, create

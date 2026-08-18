@@ -2,6 +2,7 @@ import ast
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import time
 import unittest
@@ -616,12 +617,12 @@ class NativeBridgeContractTests(unittest.TestCase):
 
     def test_native_set_property_is_advertised_allowlisted_and_dispatched(self):
         bridge_source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
-        dispatcher_source = (ROOT / "native_bridge" / "src" / "BridgeDispatcher.hpp").read_text(encoding="utf-8")
+        registry_source = (ROOT / "native_bridge" / "src" / "CapabilityRegistry.cpp").read_text(encoding="utf-8")
 
         self.assertIn('"set_property"', bridge_source)
         self.assertIn("HandleSetProperty", bridge_source)
         self.assertIn('request.action == "set_property"', bridge_source)
-        self.assertIn('{"set_property", ExecutionContext::VectorworksMainPluginContext, true, false}', dispatcher_source)
+        self.assertIn('{"set_property", ExecutionContext::VectorworksMainPluginContext, 2u, true, false}', registry_source)
 
     def test_native_set_property_has_bounded_property_allowlist(self):
         source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
@@ -645,19 +646,19 @@ class NativeBridgeContractTests(unittest.TestCase):
 
     def test_native_manage_classes_is_advertised_allowlisted_and_confirmed(self):
         bridge_source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
-        dispatcher_source = (ROOT / "native_bridge" / "src" / "BridgeDispatcher.hpp").read_text(encoding="utf-8")
+        registry_source = (ROOT / "native_bridge" / "src" / "CapabilityRegistry.cpp").read_text(encoding="utf-8")
         manage_block = bridge_source[bridge_source.index("std::string HandleManageClasses"):]
 
         self.assertIn('"manage_classes"', bridge_source)
         self.assertIn("HandleManageClasses", bridge_source)
         self.assertIn('request.action == "manage_classes"', bridge_source)
-        self.assertIn('{"manage_classes", ExecutionContext::VectorworksMainPluginContext, true, false}', dispatcher_source)
+        self.assertIn('{"manage_classes", ExecutionContext::VectorworksMainPluginContext, 2u, true, false}', registry_source)
         self.assertIn('confirm") != "DELETE_CLASS"', manage_block)
         self.assertIn("refusing to delete the None class", manage_block)
 
     def test_native_phase_four_fast_path_and_read_handlers_are_advertised_and_allowlisted(self):
         bridge_source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
-        dispatcher_source = (ROOT / "native_bridge" / "src" / "BridgeDispatcher.hpp").read_text(encoding="utf-8")
+        registry_source = (ROOT / "native_bridge" / "src" / "CapabilityRegistry.cpp").read_text(encoding="utf-8")
 
         self.assertIn('"native_phase":4', bridge_source)
         self.assertIn('"find_objects"', bridge_source)
@@ -669,9 +670,71 @@ class NativeBridgeContractTests(unittest.TestCase):
         self.assertIn('request.action == "find_objects"', bridge_source)
         self.assertIn('request.action == "drawing_summary"', bridge_source)
         self.assertIn('request.action == "apply_operations"', bridge_source)
-        self.assertIn('{"find_objects", ExecutionContext::VectorworksMainPluginContext, false, false}', dispatcher_source)
-        self.assertIn('{"drawing_summary", ExecutionContext::VectorworksMainPluginContext, false, false}', dispatcher_source)
-        self.assertIn('{"apply_operations", ExecutionContext::VectorworksMainPluginContext, true, false}', dispatcher_source)
+        self.assertIn('{"find_objects", ExecutionContext::VectorworksMainPluginContext, 3u, false, false}', registry_source)
+        self.assertIn('{"drawing_summary", ExecutionContext::VectorworksMainPluginContext, 3u, false, false}', registry_source)
+        self.assertIn('{"apply_operations", ExecutionContext::VectorworksMainPluginContext, 4u, true, false}', registry_source)
+
+    def test_native_capability_registry_is_complete_truthful_and_wired(self):
+        registry_source = (ROOT / "native_bridge" / "src" / "CapabilityRegistry.cpp").read_text(encoding="utf-8")
+        registry_header = (ROOT / "native_bridge" / "src" / "CapabilityRegistry.hpp").read_text(encoding="utf-8")
+        domain_header = (ROOT / "native_bridge" / "src" / "NativeDomain.hpp").read_text(encoding="utf-8")
+        bridge_source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
+
+        expected_actions = {
+            "ping", "stop", "capabilities", "get_document_info", "get_layers", "get_objects",
+            "selection", "create_object", "batch_create_objects", "create_wall", "create_text",
+            "create_linear_dimension", "set_property", "manage_classes", "find_objects",
+            "drawing_summary", "apply_operations",
+        }
+        registry_actions = set(re.findall(r'\{"([^"]+)", ExecutionContext::', registry_source))
+        for action in expected_actions:
+            self.assertIn('{"' + action + '", ExecutionContext::', registry_source)
+        self.assertTrue(expected_actions <= registry_actions)
+        self.assertIn("constexpr std::uint32_t kCapabilityRevision = 4u", registry_header)
+        self.assertIn("struct ActionSpec", domain_header)
+        self.assertIn("CapabilitiesResultJson", bridge_source)
+        self.assertIn('request.action == "capabilities"', bridge_source)
+        self.assertIn("ImplementedActionsJson(true)", bridge_source)
+        self.assertIn("CreateObjectTypesJson(true)", bridge_source)
+        self.assertRegex(registry_source, r'\{"slab",\s*"slab",\s*"kSlabNode",\s*"available"')
+        self.assertRegex(registry_source, r'\{"roof",\s*"roof",\s*"kRoofContainerNode",\s*"available"')
+        self.assertRegex(registry_source, r'\{"space",\s*"space",\s*"kParametricNode",\s*"available"')
+        self.assertRegex(registry_source, r'\{"door",\s*"door",\s*"kParametricNode",\s*"requires_runtime_schema"')
+        self.assertRegex(registry_source, r'\{"window",\s*"window",\s*"kParametricNode",\s*"requires_runtime_schema"')
+        self.assertNotIn('"insert_door"', registry_source)
+        self.assertNotIn('"insert_window"', registry_source)
+        self.assertNotIn('"create_space"', registry_source)
+        self.assertNotIn('"create_slab"', registry_source)
+        self.assertNotIn('"create_roof"', registry_source)
+        self.assertNotIn('"insert_symbol"', registry_source)
+
+        for script_name in (
+            "copy-native-bridge-scaffold.ps1",
+            "build-native-bridge.ps1",
+            "wire-native-bridge-project.ps1",
+            "test-native-bridge-scaffold.ps1",
+        ):
+            script = (ROOT / "scripts" / script_name).read_text(encoding="utf-8")
+            self.assertIn("CapabilityRegistry.cpp", script)
+
+        for script_name in (
+            "copy-native-bridge-scaffold.ps1",
+            "build-native-bridge.ps1",
+            "wire-native-bridge-project.ps1",
+        ):
+            script = (ROOT / "scripts" / script_name).read_text(encoding="utf-8")
+            self.assertIn("ParametricObjectAdapter.hpp", script)
+            self.assertIn("ParametricObjectAdapter.cpp", script)
+            self.assertIn("NativeObjectFactory.hpp", script)
+            self.assertIn("NativeObjectFactory.cpp", script)
+            self.assertIn("NativeTransaction.hpp", script)
+            self.assertIn("NativeTransaction.cpp", script)
+            self.assertIn("BimObjectHandlers.hpp", script)
+            self.assertIn("BimObjectHandlers.cpp", script)
+            self.assertIn("SpaceObjectHandlers.hpp", script)
+            self.assertIn("SpaceObjectHandlers.cpp", script)
+            self.assertIn("NativeIOHandlers.hpp", script)
+            self.assertIn("NativeIOHandlers.cpp", script)
 
     def test_native_fast_path_supports_polygons_replay_guards_and_timing(self):
         bridge_source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
@@ -698,13 +761,46 @@ class NativeBridgeContractTests(unittest.TestCase):
         self.assertIn("dirtyHandles.insert(object)", bridge_source)
         self.assertIn("CompactCreatedPrimitiveListJson(created)", bridge_source)
 
-    def test_native_writable_layer_fallback_creates_design_layer(self):
+    def test_native_atomic_object_mutations_are_explicit_prevalidated_and_verified(self):
         source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
-        layer_block = source[source.index("MCObjectHandle EnsureWritableLayer()"):]
+        parser = source[source.index("std::vector<ApplyOperation> ParseApplyOperations"):]
+        transaction = source[source.index("std::string HandleApplyOperations"):]
 
-        self.assertIn('CreateLayer(TXString("Vectorworks MCP Layer"), 1)', layer_block)
-        self.assertIn("CreateLayerN", layer_block)
-        self.assertLess(layer_block.index("CreateLayer(TXString"), layer_block.index("CreateLayerN"))
+        for operation in ("object.transform", "object.duplicate", "object.delete"):
+            self.assertIn(operation, parser)
+            self.assertIn(operation, transaction)
+        self.assertIn("target must be an explicit uuid:, name:, or handle: object reference", source)
+        self.assertIn("PreparedApplyOperationTargets preparedTargets = PrepareApplyOperationTargets(operations)", transaction)
+        self.assertLess(
+            transaction.index("PrepareApplyOperationTargets(operations)"),
+            transaction.index("Transactions::NativeTransaction transaction("),
+        )
+        self.assertIn("gSDK->MoveObject(object, operation.deltaX, operation.deltaY)", transaction)
+        self.assertIn("gSDK->RotateObjectN(rotatedObject, pivot, operation.rotationDegrees)", transaction)
+        self.assertIn("gSDK->ScaleObjectN(object, pivot, operation.scaleX, operation.scaleY)", transaction)
+        self.assertIn("gSDK->DuplicateObject(object)", transaction)
+        self.assertIn("gSDK->InsertObjectAfter(duplicate, object)", transaction)
+        self.assertIn("gSDK->DeleteObject(object, true)", transaction)
+        self.assertIn("gSDK->GetObjectByUuid(TXString(uuid.c_str())) != nullptr", transaction)
+        self.assertIn("transaction.TrackExternalBefore(object)", transaction)
+        self.assertIn("transaction.TrackExternalDeleted(mutation->second)", transaction)
+        self.assertIn("transaction.DisposeFinal(artifactEntry->second)", transaction)
+        self.assertIn("transaction.Commit()", transaction)
+        self.assertIn("transaction.RollbackAndRethrow(std::current_exception())", transaction)
+        self.assertIn("CreatePrimitiveFromSpec(\n                    operation.primitive, transaction, &artifact, &warnings)", transaction)
+        self.assertNotIn(
+            "gSDK->AddAfterSwapObject(object)",
+            transaction[:transaction.index("if (operation.kind == ApplyOperationKind::SetProperty)")],
+        )
+        self.assertNotIn("CollectSelectedObjects", transaction)
+
+    def test_native_writable_layer_requires_an_existing_design_layer(self):
+        source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
+        layer_block = source[source.index("MCObjectHandle EnsureWritableLayer("):]
+
+        self.assertIn("active Vectorworks document has no writable design layer", layer_block)
+        self.assertNotIn('CreateLayer(TXString("Vectorworks MCP Layer"), 1)', layer_block)
+        self.assertNotIn("OpenDocumentPath(nullptr", layer_block)
         self.assertIn("if (gSDK->GetCurrentLayer() != layer)", layer_block)
 
     def test_native_smoke_write_fixture_aborts_cleanup_when_create_fails(self):

@@ -35,11 +35,16 @@ std::uint16_t NativeTransportPortForDiagnostics();
 }  // namespace VectorworksMCP
 
 using VectorworksMCP::CadRequestQueue;
+using VectorworksMCP::CapabilitiesResultJson;
+using VectorworksMCP::CreateObjectTypesJson;
 using VectorworksMCP::FindActionSpec;
+using VectorworksMCP::ImplementedActionCount;
+using VectorworksMCP::ImplementedActionsJson;
 using VectorworksMCP::NativeTransport;
 using VectorworksMCP::NativeTransportOptions;
 using VectorworksMCP::NativeTransportPortForDiagnostics;
 using VectorworksMCP::RequiresCadMainContext;
+using VectorworksMCP::RegisteredActionCount;
 using VectorworksMCP::StopRequested;
 using VectorworksMCP::DispatchFromSocketWorker;
 using VectorworksMCP::OnPluginLoadStartTransport;
@@ -113,6 +118,11 @@ public:
 
     TestSocket Get() const {
         return socket_;
+    }
+
+    void Close() {
+        CloseTestSocket(socket_);
+        socket_ = kInvalidTestSocket;
     }
 
 private:
@@ -224,9 +234,18 @@ void TestProtocol() {
 }
 
 void TestDispatcherMetadata() {
+    Require(RegisteredActionCount() == 31u, "native action registry count drifted");
+    Require(ImplementedActionCount(true) == 31u, "SDK action count drifted");
+    Require(ImplementedActionCount(false) == 3u, "scaffold action count drifted");
     const auto* ping = FindActionSpec("ping");
     Require(ping != nullptr, "ping action spec missing");
     Require(!RequiresCadMainContext("ping"), "ping should not require CAD main context");
+    const auto* capabilities = FindActionSpec("capabilities");
+    Require(capabilities != nullptr, "capabilities action spec missing");
+    Require(!RequiresCadMainContext("capabilities"), "capabilities should run on the transport thread");
+    Require(!capabilities->mayWriteDocument, "capabilities should be read-only");
+    Require(!capabilities->destructive, "capabilities should not be destructive");
+    Require(capabilities->nativePhase == 0u, "capabilities should be available in the scaffold");
     Require(RequiresCadMainContext("get_layers"), "get_layers should require CAD main context");
     const auto* apply = FindActionSpec("apply_operations");
     Require(apply != nullptr, "apply_operations action spec missing");
@@ -234,6 +253,30 @@ void TestDispatcherMetadata() {
     Require(apply->mayWriteDocument, "apply_operations should be classified as a write");
     Require(!apply->destructive, "apply_operations should not be classified as destructive");
     Require(FindActionSpec("missing") == nullptr, "missing action should not have a spec");
+
+    const std::string sdkActions = ImplementedActionsJson(true);
+    RequireContains(sdkActions, R"("apply_operations")", "SDK actions should preserve apply_operations");
+    RequireContains(sdkActions, R"("capabilities")", "SDK actions should advertise capabilities");
+    const std::string scaffoldActions = ImplementedActionsJson(false);
+    RequireContains(scaffoldActions, R"("ping")", "scaffold actions should advertise ping");
+    RequireContains(scaffoldActions, R"("stop")", "scaffold actions should advertise stop");
+    RequireContains(scaffoldActions, R"("capabilities")", "scaffold actions should advertise capabilities");
+    Require(scaffoldActions.find("get_layers") == std::string::npos, "scaffold actions should not advertise CAD handlers");
+
+    const std::string capabilityJson = CapabilitiesResultJson(true);
+    RequireContains(capabilityJson, R"("capability_revision":4)", "capability revision drifted");
+    RequireContains(capabilityJson, R"("capability_fingerprint":)", "capability fingerprint missing");
+    RequireContains(capabilityJson, R"("descriptors":[)", "capability descriptors missing");
+    RequireContains(capabilityJson, R"("execution_context":"vectorworks_main_plugin_context")", "CAD execution context missing");
+    RequireContains(capabilityJson, R"("object_kind":"slab","semantic_node_type":"kSlabNode")", "slab semantic capability missing");
+    RequireContains(capabilityJson, R"("object_kind":"roof","semantic_node_type":"kRoofContainerNode")", "roof semantic capability missing");
+    RequireContains(capabilityJson, R"("object_kind":"space","semantic_node_type":"kParametricNode","verifier":"ISpaceObjectSupport NetPoly/GrossPoly geometry plus area readback")", "verified Space capability missing");
+    RequireContains(CreateObjectTypesJson(true), R"("slab")", "SDK object types should advertise slab");
+    RequireContains(CreateObjectTypesJson(true), R"("roof")", "SDK object types should advertise roof");
+    RequireContains(CreateObjectTypesJson(true), R"("space")", "SDK object types should advertise Space");
+    Require(CreateObjectTypesJson(false) == "[]", "scaffold should not advertise object creation types");
+    Require(capabilityJson.find("insert_door") == std::string::npos, "registry must not advertise an unimplemented door action");
+    Require(capabilityJson.find("insert_window") == std::string::npos, "registry must not advertise an unimplemented window action");
 }
 
 void TestQueue() {
@@ -287,6 +330,13 @@ void TestPhaseZeroDispatch() {
     const auto ping = DispatchFromSocketWorker(RequestEnvelope{"p1", "ping", "{}"});
     Require(ping.success, "phase-0 ping should succeed");
     RequireContains(ping.resultJson, "native_sdk_bridge_scaffold", "phase-0 ping result drifted");
+    RequireContains(ping.resultJson, R"("handlers":3)", "phase-0 ping should derive its handler count from the registry");
+    RequireContains(ping.resultJson, R"("implemented_actions":["ping","stop","capabilities"])", "phase-0 ping actions drifted");
+
+    const auto capabilities = DispatchFromSocketWorker(RequestEnvelope{"caps-1", "capabilities", "{}"});
+    Require(capabilities.success, "phase-0 capabilities should succeed");
+    RequireContains(capabilities.resultJson, R"("capability_revision":4)", "phase-0 capabilities revision drifted");
+    RequireContains(capabilities.resultJson, R"("may_write_document":false)", "phase-0 capabilities should expose safety metadata");
 
     const auto cad = DispatchFromSocketWorker(RequestEnvelope{"c1", "get_layers", "{}"});
     Require(!cad.success, "phase-0 CAD request should fail immediately");
@@ -362,6 +412,7 @@ void TestNativeTransportRoundTrip() {
     const auto stop = ReadClientFrame(client.Get());
     RequireContains(stop, R"("id":"tcp-stop")", "transport stop response id drifted");
     RequireContains(stop, R"("success":true)", "transport stop should succeed");
+    client.Close();
     transport.Stop();
     Require(!transport.IsRunning(), "native transport should stop after stop request");
 
@@ -384,6 +435,8 @@ void TestNativeTransportRoundTrip() {
     const auto healthyPing = ReadClientFrame(healthyClient.Get());
     RequireContains(healthyPing, R"("id":"after-bad-frame")", "transport should accept clients after malformed frame");
     RequireContains(healthyPing, R"("success":true)", "transport ping after malformed frame should succeed");
+    malformedClient.Close();
+    healthyClient.Close();
     malformed.Stop();
 
     SetEnv("VW_MCP_INSECURE_NO_AUTH", "");
@@ -407,6 +460,8 @@ void TestNativeTransportRoundTrip() {
     const auto authorizedStop = ReadClientFrame(authorizedClient.Get());
     RequireContains(authorizedStop, R"("id":"tcp-auth-stop")", "authorized stop response id drifted");
     RequireContains(authorizedStop, R"("success":true)", "authorized stop should succeed");
+    unauthorizedClient.Close();
+    authorizedClient.Close();
     authed.Stop();
     SetEnv("VW_MCP_AUTH_TOKEN", "");
     SetEnv("VW_MCP_INSECURE_NO_AUTH", "");

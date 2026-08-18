@@ -47,8 +47,9 @@ class McpStdioContractTests(unittest.TestCase):
                         initialized = await session.initialize()
                         self.assertEqual(initialized.serverInfo.version, "0.5.0")
                         self.assertIn("fast-native phase-4", initialized.instructions[:512])
-                        self.assertIn("one atomic vw_execute_operations", initialized.instructions[:512])
-                        self.assertIn("Never use the modal Python listener", initialized.instructions[:512])
+                        self.assertIn("capability revision 4 or newer", initialized.instructions[:512])
+                        self.assertIn("one atomic vw_apply or vw_execute_operations", initialized.instructions[:512])
+                        self.assertIn("Never use modal Python", initialized.instructions[:512])
                         tools = await session.list_tools()
                         names = {tool.name for tool in tools.tools}
                         by_name = {tool.name: tool for tool in tools.tools}
@@ -57,8 +58,12 @@ class McpStdioContractTests(unittest.TestCase):
                         self.assertNotIn("vw_run_script", names)
                         self.assertNotIn("vw_create_object", names)
                         self.assertNotIn("vw_insert_door", names)
-                        selection_actions = by_name["vw_selection"].inputSchema["properties"]["action"]["enum"]
-                        self.assertEqual(selection_actions, ["get", "select", "clear", "delete"])
+                        self.assertEqual(
+                            by_name["vw_catalog"].inputSchema["properties"]["action"]["enum"],
+                            ["capabilities", "classes", "symbols", "parametric_schemas", "worksheets", "resources"],
+                        )
+                        self.assertNotIn("idempotency_key", by_name["vw_io"].inputSchema["properties"])
+                        self.assertNotIn("idempotency_key", by_name["vw_document"].inputSchema["properties"])
                         for tool in tools.tools:
                             self.assertEqual(tool.outputSchema, {"type": "object", "additionalProperties": True})
 
@@ -69,13 +74,10 @@ class McpStdioContractTests(unittest.TestCase):
                             json.loads(safety_result.content[0].text),
                         )
 
-                        failure_result = await session.call_tool(
-                            "vw_manage_classes",
-                            {"action": "delete", "class_name": "Test Class"},
+                        self.assertEqual(
+                            safety_result.structuredContent["vw_document"]["actions"]["open"]["retryPolicy"],
+                            "never_after_send",
                         )
-                        self.assertTrue(failure_result.isError)
-                        self.assertFalse(failure_result.structuredContent["ok"])
-                        self.assertTrue(failure_result.structuredContent["confirmation_required"])
 
     def test_server_starts_over_stdio_and_exposes_expected_contract(self):
         contract_checked = False

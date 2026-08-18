@@ -730,21 +730,7 @@ def handle_symbol(p):
     except Exception: return _err(traceback.format_exc())
 
 def handle_export(p):
-    fmt, fp = p.get("format", "").lower(), p.get("file_path", "")
-    if not fp: return _err("file_path is required")
-    menu = {"pdf": "Export PDF", "dxf": "Export DXF/DWG", "dwg": "Export DXF/DWG", "image": "Export Image File"}
-    if fmt not in menu: return _err(f"Unknown format: {fmt}. Use: pdf, dxf, dwg, image")
-    try:
-        vs.DoMenuTextByName(menu[fmt], 0)
-        return _ok({
-            "dialog_opened": True,
-            "format": fmt,
-            "requested_path": fp,
-            "saved": False,
-            "requires_user_save": True,
-            "message": "{fmt} export dialog opened; choose the requested path in Vectorworks to save.".format(fmt=fmt.upper()),
-        })
-    except Exception: return _err(traceback.format_exc())
+    return _err("compatibility export is disabled; use the advertised non-modal native SDK export action")
 
 def handle_import_file(p):
     fp, fmt = p.get("file_path", ""), p.get("format", "auto").lower()
@@ -770,21 +756,7 @@ def handle_get_document_info(p):
     except Exception: return _err(traceback.format_exc())
 
 def handle_screenshot(p):
-    fp = p.get("file_path", "") or os.path.join(SCREENSHOT_DIR, "screenshot.png")
-    try:
-        os.makedirs(os.path.dirname(fp), exist_ok=True)
-    except OSError:
-        pass
-    try:
-        vs.DoMenuTextByName("Export Image File", 0)
-        return _ok({
-            "dialog_opened": True,
-            "requested_path": fp,
-            "saved": False,
-            "requires_user_save": True,
-            "message": "Export Image File dialog opened; choose the requested path in Vectorworks to save.",
-        })
-    except Exception: return _err(traceback.format_exc())
+    return _err("compatibility screenshot is disabled; use the advertised non-modal native SDK capture action")
 
 
 def handle_stop(p):
@@ -937,84 +909,16 @@ def handle_create_linear_dimension(p):
     except Exception: return _err(traceback.format_exc())
 
 def handle_insert_door(p):
-    try:
-        h = vs.CreateCustomObjectN('Door', (p.get("x", 0), p.get("y", 0)), p.get("rotation", 0), False)
-        if h is None: return _err("Failed to create Door. Is the plugin available?")
-        field_errors = [
-            err for err in (
-                _set_rfield(h, 'Door', 'Width', p.get("width", 900)),
-                _set_rfield(h, 'Door', 'Height', p.get("height", 2100)),
-            ) if err
-        ]
-        vs.ReDrawAll()
-        result = {"message": f"Inserted door {p.get('width',900)}x{p.get('height',2100)}", "handle": _reg(h)}
-        if field_errors:
-            result["field_warnings"] = field_errors
-        return _ok(result)
-    except Exception: return _err(traceback.format_exc())
+    return _err("compatibility Door creation is disabled; use the native hosted Door operation with an exact wall reference")
 
 def handle_insert_window(p):
-    try:
-        h = vs.CreateCustomObjectN('Window', (p.get("x", 0), p.get("y", 0)), p.get("rotation", 0), False)
-        if h is None: return _err("Failed to create Window. Is the plugin available?")
-        field_errors = [
-            err for err in (
-                _set_rfield(h, 'Window', 'Width', p.get("width", 1200)),
-                _set_rfield(h, 'Window', 'Height', p.get("height", 1500)),
-                _set_rfield(h, 'Window', 'Elevation In Wall', p.get("sill_height", 900)),
-                _set_rfield(h, 'Window', 'SillHeight', p.get("sill_height", 900)),
-            ) if err
-        ]
-        vs.ReDrawAll()
-        result = {"message": "Inserted window", "handle": _reg(h)}
-        if field_errors:
-            result["field_warnings"] = field_errors
-        return _ok(result)
-    except Exception: return _err(traceback.format_exc())
+    return _err("compatibility Window creation is disabled; use the native hosted Window operation with an exact wall reference")
 
 def handle_create_slab(p):
-    try:
-        pts = _point_pairs(p.get("points", []), min_points=3)
-    except ValueError as e:
-        return _err(str(e))
-    thickness, elev = p.get("thickness", 200), p.get("elevation", 0)
-    try:
-        vs.BeginXtrd(elev, elev + thickness)
-        vs.ClosePoly(); vs.BeginPoly()
-        for x, y in pts: vs.AddPoint(x, y)
-        vs.EndPoly(); vs.EndXtrd()
-        h = vs.LNewObj(); vs.ReDrawAll()
-        return _ok(f"Created slab, {len(pts)} pts, t={thickness}, handle: {_reg(h)}")
-    except Exception: return _err(traceback.format_exc())
+    return _err("compatibility slab creation is disabled; use the native true-Slab SDK operation")
 
 def handle_create_roof(p):
-    try:
-        pts = _point_pairs(p.get("points", []), min_points=3)
-    except ValueError as e:
-        return _err(str(e))
-    bh, slope, oh, thick = p.get("bearing_height", 3000), p.get("slope", 30), p.get("overhang", 500), p.get("thickness", 200)
-    try:
-        cx, cy = sum(x[0] for x in pts)/len(pts), sum(x[1] for x in pts)/len(pts)
-        h = vs.CreateCustomObjectN('Roof', (cx, cy), 0, False)
-        if h is not None:
-            field_errors = []
-            for f, v in [('Slope', slope), ('Bearing Height', bh), ('Overhang', oh), ('Thickness', thick)]:
-                err = _set_rfield(h, 'Roof', f, v)
-                if err:
-                    field_errors.append(err)
-            vs.ReDrawAll()
-            result = {"message": f"Created roof, slope={slope}deg", "handle": _reg(h)}
-            if field_errors:
-                result["field_warnings"] = field_errors
-            return _ok(result)
-        # Fallback: flat extrusion
-        vs.BeginXtrd(bh, bh + thick)
-        vs.ClosePoly(); vs.BeginPoly()
-        for x, y in pts: vs.AddPoint(x, y)
-        vs.EndPoly(); vs.EndXtrd()
-        vs.ReDrawAll()
-        return _ok(f"Created flat roof at z={bh}, handle: {_reg(vs.LNewObj())}")
-    except Exception: return _err(traceback.format_exc())
+    return _err("compatibility roof creation is disabled; use the native true-Roof SDK operation")
 
 def handle_inspect_object(p):
     hid, pname = p.get("handle", ""), p.get("plugin_name", "")
@@ -1024,11 +928,7 @@ def handle_inspect_object(p):
             h = _get(hid)
             if h is None: return _err(f"Handle '{hid}' not found")
         elif pname:
-            if p.get("confirm") != "PROBE_PLUGIN":
-                return _err("plugin probing requires confirm='PROBE_PLUGIN'")
-            h = vs.CreateCustomObjectN(pname, (0, 0), 0, False)
-            if h is None: return _err(f"Cannot create '{pname}'. Check plugin name.")
-            temp = True
+            return _err("temporary plug-in probing is disabled; inspect an existing object or use native parametric schema discovery")
         else: return _err("Provide handle or plugin_name")
 
         tn = vs.GetTypeN(h) if hasattr(vs, 'GetTypeN') else vs.GetType(h)

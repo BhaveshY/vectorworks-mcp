@@ -3,7 +3,18 @@
 #include "BridgeDispatcher.hpp"
 #include "BridgeProtocol.hpp"
 #include "CadRequestQueue.hpp"
+#include "NativeIOHandlers.hpp"
 #include "NativeTransport.hpp"
+#include "ViewDocumentHandlers.hpp"
+
+#if defined(SDK_VERSION)
+#include "BimObjectHandlers.hpp"
+#include "NativeObjectFactory.hpp"
+#include "NativeTransaction.hpp"
+#include "ParametricObjectAdapter.hpp"
+#include "ResourceWorksheetHandlers.hpp"
+#include "SpaceObjectHandlers.hpp"
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -13,7 +24,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
+#include <exception>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <limits>
 #include <map>
@@ -775,14 +788,20 @@ bool RequestAuthAccepted(const Protocol::RequestEnvelope& request) {
 Protocol::ResponseEnvelope HandlePingOnTransportThread(const Protocol::RequestEnvelope& request) {
 #if VECTORWORKS_MCP_HAS_SDK
     const bool ready = CadHandlersRuntimeReady();
-    std::string payload = R"({"pong":true,"version":"native-sdk-bridge-phase4","bridge_kind":"native_sdk_bridge_phase4","dispatch_mode":"native_sdk","handlers":16)";
+    std::string payload = R"({"pong":true,"version":"native-sdk-bridge-phase4","bridge_kind":"native_sdk_bridge_phase4","dispatch_mode":"native_sdk","handlers":)";
+    payload += std::to_string(ImplementedActionCount(true));
     payload += ",\"cad_api_safe\":";
     payload += ready ? "true" : "false";
     payload += ",\"transport_only\":";
     payload += ready ? "false" : "true";
     payload += R"(,"native_bridge":true,"native_phase":4)";
-    payload += ",\"implemented_actions\":[\"ping\",\"stop\",\"get_document_info\",\"get_layers\",\"get_objects\",\"selection\",\"create_object\",\"batch_create_objects\",\"create_wall\",\"create_text\",\"create_linear_dimension\",\"set_property\",\"manage_classes\",\"find_objects\",\"drawing_summary\",\"apply_operations\"]";
-    payload += ",\"create_object_types\":[\"arc\",\"box\",\"circle\",\"line\",\"oval\",\"polygon\",\"polyline\",\"rect\",\"rectangle\",\"wall\",\"text\",\"dimension\",\"linear_dimension\"]";
+    payload += ",\"capability_revision\":" + std::to_string(kCapabilityRevision);
+    payload += ",\"capability_fingerprint\":";
+    payload += JsonString(CapabilityFingerprint(true));
+    payload += ",\"implemented_actions\":";
+    payload += ImplementedActionsJson(true);
+    payload += ",\"create_object_types\":";
+    payload += CreateObjectTypesJson(true);
     payload += ",\"cad_handlers_implemented\":true";
     payload += ",\"main_context_pump\":";
     payload += JsonString(MainContextPumpName());
@@ -797,13 +816,32 @@ Protocol::ResponseEnvelope HandlePingOnTransportThread(const Protocol::RequestEn
         "",
     };
 #else
+    std::string payload = R"({"pong":true,"version":"native-scaffold-phase0","bridge_kind":"native_sdk_bridge_scaffold","dispatch_mode":"native_sdk","handlers":)";
+    payload += std::to_string(ImplementedActionCount(false));
+    payload += R"(,"cad_api_safe":false,"transport_only":true,"native_bridge":true,"native_phase":0,"implemented_actions":)";
+    payload += ImplementedActionsJson(false);
+    payload += ",\"capability_revision\":" + std::to_string(kCapabilityRevision);
+    payload += ",\"capability_fingerprint\":";
+    payload += JsonString(CapabilityFingerprint(false));
+    payload += ",\"create_object_types\":";
+    payload += CreateObjectTypesJson(false);
+    payload += R"(,"cad_handlers_implemented":false})";
     return {
         request.id,
         true,
-        R"({"pong":true,"version":"native-scaffold-phase0","bridge_kind":"native_sdk_bridge_scaffold","dispatch_mode":"native_sdk","handlers":2,"cad_api_safe":false,"transport_only":true,"native_bridge":true,"native_phase":0,"implemented_actions":["ping","stop"],"cad_handlers_implemented":false})",
+        payload,
         "",
     };
 #endif
+}
+
+Protocol::ResponseEnvelope HandleCapabilitiesOnTransportThread(const Protocol::RequestEnvelope& request) {
+    return {
+        request.id,
+        true,
+        CapabilitiesResultJson(VECTORWORKS_MCP_HAS_SDK != 0),
+        "",
+    };
 }
 
 #if VECTORWORKS_MCP_HAS_SDK
@@ -840,6 +878,29 @@ std::string ObjectUuidString(MCObjectHandle handle) {
     return "";
 }
 
+class UnregisteredCreatedObjectGuard {
+public:
+    explicit UnregisteredCreatedObjectGuard(MCObjectHandle object) : object_(object) {}
+    ~UnregisteredCreatedObjectGuard() {
+        if (object_) {
+            gSDK->DeleteObject(object_, false);
+        }
+    }
+    void Release() { object_ = nullptr; }
+    UnregisteredCreatedObjectGuard(const UnregisteredCreatedObjectGuard&) = delete;
+    UnregisteredCreatedObjectGuard& operator=(const UnregisteredCreatedObjectGuard&) = delete;
+
+private:
+    MCObjectHandle object_;
+};
+
+void EndUndoEventOrThrow(const char* operation) {
+    if (!gSDK->EndUndoEvent()) {
+        throw std::runtime_error(
+            std::string("Vectorworks failed to commit the undo event for ") + operation);
+    }
+}
+
 std::string ObjectTypeName(short type) {
     switch (type) {
         case kLineNode:
@@ -874,6 +935,8 @@ std::string ObjectTypeName(short type) {
             return "wall";
         case kSlabNode:
             return "slab";
+        case kRoofContainerNode:
+            return "roof";
         case kParametricNode:
             return "parametric";
         default:
@@ -1343,11 +1406,41 @@ std::vector<MCObjectHandle> CollectObjectsByCriteria(const std::string& criteria
 
 std::string HandleFindObjects(const Params& params) {
     const std::string criteria = TrimCopy(GetStringParam(params, "criteria", "ALL"));
+    const std::string layer = TrimCopy(GetStringParam(params, "layer"));
+    const std::string objectType = TrimCopy(GetStringParam(params, "object_type"));
     const int limit = GetBoundedIntParam(params, "limit", 100, 1, 1000);
     if (criteria.empty()) {
         throw std::invalid_argument("criteria is required");
     }
-    return ObjectListJson(CollectObjectsByCriteria(criteria, limit));
+    if (!layer.empty()) {
+        bool layerFound = false;
+        for (MCObjectHandle layerHandle : CollectLayerHandles()) {
+            TXString layerName;
+            gSDK->GetObjectName(layerHandle, layerName);
+            if (TxToUtf8(layerName) == layer) {
+                layerFound = true;
+                break;
+            }
+        }
+        if (!layerFound) {
+            throw std::invalid_argument("layer filter was not found: " + layer);
+        }
+    }
+    std::vector<MCObjectHandle> filtered;
+    filtered.reserve(static_cast<std::size_t>(limit));
+    for (MCObjectHandle object : CollectObjectsByCriteria(criteria, 1000)) {
+        if (!layer.empty() && LayerNameForObject(object) != layer) {
+            continue;
+        }
+        if (!objectType.empty() && !MatchesObjectType(gSDK->GetObjectTypeN(object), objectType)) {
+            continue;
+        }
+        filtered.push_back(object);
+        if (static_cast<int>(filtered.size()) >= limit) {
+            break;
+        }
+    }
+    return ObjectListJson(filtered);
 }
 
 std::optional<std::string> ExactNameFromCriteria(const std::string& criteria) {
@@ -1457,11 +1550,13 @@ std::string HandleSelection(const Params& params) {
         int deleted = 0;
         try {
             for (MCObjectHandle object : targets) {
-                gSDK->AddBeforeSwapObject(object);
+                if (!gSDK->AddBeforeSwapObject(object)) {
+                    throw std::runtime_error("Vectorworks failed to register an object before selection deletion");
+                }
                 gSDK->DeleteObject(object, true);
                 ++deleted;
             }
-            gSDK->EndUndoEvent();
+            EndUndoEventOrThrow("selection deletion");
         } catch (...) {
             gSDK->UndoAndRemove();
             throw;
@@ -1593,7 +1688,15 @@ struct PrimitiveSpec {
     double sweepAngle = 90.0;
     double height = 3000.0;
     double thickness = 200.0;
+    double elevation = 0.0;
+    double slope = 30.0;
+    double overhang = 500.0;
+    double bearingInset = 0.0;
+    double verticalMiter = 0.0;
+    int miterType = 1;
+    bool generateGableWalls = false;
     double width = 0.0;
+    double sillHeight = 0.0;
     double rotation = 0.0;
     double textSize = 0.0;
     double dimensionOffset = 300.0;
@@ -1604,11 +1707,23 @@ struct PrimitiveSpec {
     bool fixedSizeText = false;
     bool wrapText = false;
     bool closed = true;
+    bool hasExplicitX = false;
+    bool hasExplicitY = false;
+    bool hasExplicitWidth = false;
+    bool hasExplicitHeight = false;
+    bool hasExplicitSill = false;
     std::vector<WorldPt> points;
     std::string text;
     std::string styleName;
     std::string name;
     std::string className;
+    std::string roomId;
+    std::string symbolDefinitionName;
+    std::string pluginName;
+    std::string descriptorFingerprint;
+    std::string wallUuid;
+    bool requireWallHost = false;
+    std::vector<ParametricValue> parametricValues;
 };
 
 struct CreatedPrimitive {
@@ -1618,6 +1733,8 @@ struct CreatedPrimitive {
     std::vector<std::string> warnings;
     std::size_t vertexCount = 0u;
     bool closed = false;
+    short nativeNodeType = 0;
+    bool semanticallyVerified = false;
 };
 
 MCObjectHandle EnsureWritableLayer() {
@@ -1626,31 +1743,15 @@ MCObjectHandle EnsureWritableLayer() {
         layer = gSDK->GetCurrentLayer();
     }
     if (!layer) {
-        // Vectorworks can start on the Home/no-document screen. Open the
-        // default blank document before write smoke or production writes.
-        gSDK->OpenDocumentPath(nullptr, false);
-        layer = gSDK->GetActiveLayer();
-        if (!layer) {
-            layer = gSDK->GetCurrentLayer();
-        }
-    }
-    if (!layer) {
         const auto layers = CollectLayerHandles();
         if (!layers.empty()) {
             layer = layers.front();
         }
     }
     if (!layer) {
-        layer = gSDK->CreateLayer(TXString("Vectorworks MCP Layer"), 1);
-        if (!layer) {
-            layer = gSDK->CreateLayerN(TXString("Vectorworks MCP Layer"), 1.0);
-        }
-        if (layer) {
-            gSDK->AddAfterSwapObject(layer);
-        }
-    }
-    if (!layer) {
-        throw std::runtime_error("active Vectorworks document has no writable design layer");
+        throw std::runtime_error(
+            "active Vectorworks document has no writable design layer; "
+            "open a document with a design layer before running CAD operations");
     }
     // Re-selecting the already-active layer for every object can trigger a
     // costly Vectorworks layer/document refresh. Only switch when recovery
@@ -1659,6 +1760,312 @@ MCObjectHandle EnsureWritableLayer() {
         gSDK->SetCurrentLayer(layer);
     }
     return layer;
+}
+
+std::string ParametricDescriptorJson(const ParametricDescriptor& descriptor) {
+    std::string json = "{\"universal_plugin_name\":" + JsonString(descriptor.universalPluginName);
+    json += ",\"localized_plugin_name\":" + JsonString(descriptor.localizedPluginName);
+    json += ",\"descriptor_fingerprint\":" + JsonString(descriptor.descriptorFingerprint);
+    json += ",\"parameters\":[";
+    for (std::size_t index = 0; index < descriptor.parameters.size(); ++index) {
+        if (index != 0u) {
+            json += ",";
+        }
+        const auto& parameter = descriptor.parameters[index];
+        json += "{\"id\":" + JsonString(parameter.universalName);
+        json += ",\"display_name\":" + JsonString(parameter.localizedName);
+        json += ",\"field_style\":" + std::to_string(parameter.fieldStyle);
+        json += ",\"value\":" + JsonString(parameter.value) + "}";
+    }
+    json += "]}";
+    return json;
+}
+
+std::string HandleDescribeParametricSchema(const Params& params) {
+    const std::string pluginName = TrimCopy(GetStringParam(params, "plugin_name"));
+    if (pluginName.empty()) {
+        throw std::invalid_argument("plugin_name is required for parametric schema discovery");
+    }
+    return ParametricDescriptorJson(DescribeParametricDefinition(pluginName));
+}
+
+std::string JsonStringArray(const std::vector<std::string>& values);
+
+std::string NativeIOLayerSnapshotJson(const NativeIO::LayerSnapshot& layer) {
+    return "{\"uuid\":" + JsonString(layer.uuid) +
+        ",\"name\":" + JsonString(layer.name) +
+        ",\"native_node_type\":" + std::to_string(layer.actualNodeType) +
+        ",\"visible\":" + (layer.visible ? "true" : "false") + "}";
+}
+
+std::string NativeIOLayerSnapshotsJson(const std::vector<NativeIO::LayerSnapshot>& layers) {
+    std::string json = "[";
+    for (std::size_t index = 0; index < layers.size(); ++index) {
+        if (index != 0u) json += ",";
+        json += NativeIOLayerSnapshotJson(layers[index]);
+    }
+    return json + "]";
+}
+
+std::string NativeIODocumentSnapshotJson(const NativeIO::DocumentMutationSnapshot& snapshot) {
+    return "{\"document_path\":" + JsonString(snapshot.documentPath) +
+        ",\"active_layer_uuid\":" + JsonString(snapshot.activeLayerUuid) +
+        ",\"active_layer_name\":" + JsonString(snapshot.activeLayerName) +
+        ",\"layer_count\":" + std::to_string(snapshot.layers.size()) +
+        ",\"object_count\":" + std::to_string(snapshot.objectUuids.size()) + "}";
+}
+
+std::string NativeIOResultJson(const NativeIO::Result& result) {
+    std::string json = "{\"operation\":" + JsonString(result.operation);
+    json += ",\"path\":" + JsonString(result.canonicalPath);
+    json += ",\"size_bytes\":" + std::to_string(result.sizeBytes);
+    json += ",\"replaced_existing\":";
+    json += result.replacedExisting ? "true" : "false";
+    if (result.hasDocumentMutationReceipt) {
+        const auto& mutation = result.documentMutationReceipt;
+        json += ",\"document_mutation\":{\"verified\":";
+        json += mutation.verified ? "true" : "false";
+        json += ",\"before\":" + NativeIODocumentSnapshotJson(mutation.before);
+        json += ",\"after\":" + NativeIODocumentSnapshotJson(mutation.after);
+        json += ",\"created_object_uuids\":" + JsonStringArray(mutation.createdObjectUuids);
+        json += ",\"deleted_object_uuids\":" + JsonStringArray(mutation.deletedObjectUuids);
+        json += ",\"created_layers\":" + NativeIOLayerSnapshotsJson(mutation.createdLayers);
+        json += ",\"deleted_layers\":" + NativeIOLayerSnapshotsJson(mutation.deletedLayers);
+        json += ",\"changed_layers\":" + NativeIOLayerSnapshotsJson(mutation.changedLayers);
+        json += ",\"active_layer_changed\":";
+        json += mutation.activeLayerChanged ? "true" : "false";
+        json += "}";
+    }
+    json += "}";
+    return json;
+}
+
+NativeIO::OutputTarget ParseOutputTarget(const Params& params) {
+    NativeIO::OutputTarget output;
+    output.absolutePath = GetStringParam(params, "file_path");
+    const bool replace = GetBoolParam(params, "replace", false);
+    output.overwritePolicy = replace
+        ? NativeIO::OverwritePolicy::Replace
+        : NativeIO::OverwritePolicy::FailIfExists;
+    output.replaceConfirmation = GetStringParam(params, "replace_confirmation");
+    return output;
+}
+
+std::string HandleNativeIO(const std::string& action, const Params& params) {
+    if (action == "export_image" || action == "capture_view") {
+        NativeIO::ImageExportRequest request;
+        request.output = ParseOutputTarget(params);
+        request.updateViewports = GetBoolParam(params, "update_viewports", true);
+        request.resetPlugInObjects = GetBoolParam(params, "reset_plugin_objects", true);
+        request.exportGeoreferencing = GetBoolParam(params, "export_georeferencing", false);
+        return NativeIOResultJson(action == "capture_view"
+            ? NativeIO::CaptureView(request)
+            : NativeIO::ExportImage(request));
+    }
+    if (action == "export_pdf") {
+        NativeIO::PDFExportRequest request;
+        request.output = ParseOutputTarget(params);
+        request.currentViewOnly = GetBoolParam(params, "current_view_only", false);
+        request.resolutionDpi = GetBoundedIntParam(params, "resolution_dpi", 300, 72, 2400);
+        request.updateViewports = GetBoolParam(params, "update_viewports", true);
+        request.resetPlugInObjects = GetBoolParam(params, "reset_plugin_objects", true);
+        request.recalculateWorksheets = GetBoolParam(params, "recalculate_worksheets", true);
+        return NativeIOResultJson(NativeIO::ExportPDF(request));
+    }
+    if (action == "export_vectorworks_document") {
+        NativeIO::VectorworksExportRequest request;
+        request.output = ParseOutputTarget(params);
+        request.targetFileVersion = static_cast<short>(GetBoundedIntParam(
+            params, "target_file_version", 29, 1, std::numeric_limits<short>::max()));
+        return NativeIOResultJson(NativeIO::ExportVectorworksDocument(request));
+    }
+    if (action == "import_dwg") {
+        NativeIO::DWGImportRequest request;
+        request.absolutePath = GetStringParam(params, "file_path");
+        return NativeIOResultJson(NativeIO::ImportDWG(request));
+    }
+    if (action == "export_dwg") {
+        NativeIO::DWGExportRequest request;
+        request.output = ParseOutputTarget(params);
+        request.updateViewports = GetBoolParam(params, "update_viewports", true);
+        request.resetPlugInObjects = GetBoolParam(params, "reset_plugin_objects", true);
+        request.recalculateWorksheets = GetBoolParam(params, "recalculate_worksheets", true);
+        return NativeIOResultJson(NativeIO::ExportDWG(request));
+    }
+    throw std::invalid_argument("unsupported native I/O action: " + action);
+}
+
+std::string ResourceRecordsJson(
+    const std::vector<ResourceWorksheets::ResourceRecord>& records,
+    const std::string& query) {
+    const std::string lowerQuery = ToLower(query);
+    std::string json = "[";
+    bool first = true;
+    for (const auto& record : records) {
+        if (!lowerQuery.empty() && ToLower(record.name).find(lowerQuery) == std::string::npos) {
+            continue;
+        }
+        if (!first) json += ",";
+        first = false;
+        json += "{\"name\":" + JsonString(record.name) +
+            ",\"native_node_type\":" + std::to_string(record.actualNodeType) + "}";
+    }
+    json += "]";
+    return json;
+}
+
+std::string HandleResources(const Params& params) {
+    const std::string query = GetStringParam(params, "query");
+    std::string json = "{\"symbols\":" + ResourceRecordsJson(
+        ResourceWorksheets::ListSymbolDefinitions(*gSDK), query);
+    const auto worksheets = ResourceWorksheets::ListWorksheets(*gSDK);
+    json += ",\"worksheets\":[";
+    bool first = true;
+    for (const auto& worksheet : worksheets) {
+        if (!query.empty() && ToLower(worksheet.name).find(ToLower(query)) == std::string::npos) continue;
+        if (!first) json += ",";
+        first = false;
+        json += "{\"name\":" + JsonString(worksheet.name) +
+            ",\"rows\":" + std::to_string(worksheet.rowCount) +
+            ",\"columns\":" + std::to_string(worksheet.columnCount) +
+            ",\"native_node_type\":" + std::to_string(worksheet.actualNodeType) + "}";
+    }
+    json += "]}";
+    return json;
+}
+
+std::string HandleSymbol(const Params& params) {
+    const std::string action = ToLower(GetStringParam(params, "action", "list"));
+    if (action == "list") {
+        return "{\"symbols\":" + ResourceRecordsJson(
+            ResourceWorksheets::ListSymbolDefinitions(*gSDK), GetStringParam(params, "query")) + "}";
+    }
+    if (action == "insert") {
+        ResourceWorksheets::SymbolInsertionRequest request;
+        request.definitionName = GetStringParam(params, "definition_name");
+        request.x = GetFiniteNumberParam(params, "x", 0.0);
+        request.y = GetFiniteNumberParam(params, "y", 0.0);
+        request.rotationDegrees = GetFiniteNumberParam(params, "rotation_deg", 0.0);
+        gSDK->SupportUndoAndRemove();
+        gSDK->SetUndoMethod(kUndoSwapObjects);
+        gSDK->NameUndoEvent(TXString("Vectorworks MCP insert symbol"));
+        try {
+            const auto receipt = ResourceWorksheets::InsertSymbol(*gSDK, request);
+            if (!gSDK->AddAfterSwapObject(receipt.handle)) {
+                throw std::runtime_error("Vectorworks failed to register the inserted symbol with undo");
+            }
+            EndUndoEventOrThrow("symbol insertion");
+            return "{\"inserted\":true,\"definition_name\":" + JsonString(receipt.definitionName) +
+                ",\"native_node_type\":" + std::to_string(receipt.actualNodeType) +
+                ",\"object\":" + ObjectJson(receipt.handle) + "}";
+        } catch (...) {
+            gSDK->UndoAndRemove();
+            throw;
+        }
+    }
+    throw std::invalid_argument("symbol.action must be list or insert");
+}
+
+std::string WorksheetCellJson(const ResourceWorksheets::WorksheetCellSnapshot& cell) {
+    return "{\"worksheet\":" + JsonString(cell.worksheetName) +
+        ",\"row\":" + std::to_string(cell.row) +
+        ",\"column\":" + std::to_string(cell.column) +
+        ",\"formula\":" + JsonString(cell.formula) +
+        ",\"displayed_value\":" + JsonString(cell.displayedValue) + "}";
+}
+
+std::string HandleWorksheet(const Params& params) {
+    const std::string action = ToLower(GetStringParam(params, "action", "list"));
+    if (action == "list") {
+        const std::string query = ToLower(GetStringParam(params, "query"));
+        const auto worksheets = ResourceWorksheets::ListWorksheets(*gSDK);
+        std::string json = "{\"worksheets\":[";
+        bool first = true;
+        for (const auto& worksheet : worksheets) {
+            if (!query.empty() && ToLower(worksheet.name).find(query) == std::string::npos) continue;
+            if (!first) json += ",";
+            first = false;
+            json += "{\"name\":" + JsonString(worksheet.name) +
+                ",\"rows\":" + std::to_string(worksheet.rowCount) +
+                ",\"columns\":" + std::to_string(worksheet.columnCount) + "}";
+        }
+        return json + "]}";
+    }
+    const std::string worksheetName = GetStringParam(params, "worksheet_name");
+    const int row = GetRequiredBoundedIntParam(params, "row", 1, 32767);
+    const int column = GetRequiredBoundedIntParam(params, "column", 1, 32767);
+    if (action == "read") {
+        return WorksheetCellJson(ResourceWorksheets::ReadWorksheetCell(
+            *gSDK, worksheetName, row, column));
+    }
+    if (action == "write") {
+        ResourceWorksheets::WorksheetCellWriteRequest request{
+            worksheetName, row, column, GetStringParam(params, "formula")};
+        MCObjectHandle worksheetHandle = nullptr;
+        for (const auto& item : ResourceWorksheets::ListWorksheets(*gSDK)) {
+            if (item.name == worksheetName) {
+                if (worksheetHandle) throw std::invalid_argument("worksheet name is ambiguous");
+                worksheetHandle = item.handle;
+            }
+        }
+        if (!worksheetHandle) throw std::invalid_argument("worksheet was not found by exact name");
+        gSDK->SupportUndoAndRemove();
+        gSDK->SetUndoMethod(kUndoSwapObjects);
+        gSDK->NameUndoEvent(TXString("Vectorworks MCP worksheet write"));
+        try {
+            if (!gSDK->AddBeforeSwapObject(worksheetHandle)) {
+                throw std::runtime_error("Vectorworks failed to register the worksheet before mutation");
+            }
+            const auto receipt = ResourceWorksheets::WriteWorksheetCell(*gSDK, request);
+            if (!gSDK->AddAfterSwapObject(receipt.after.worksheetHandle)) {
+                throw std::runtime_error("Vectorworks failed to register the worksheet after mutation");
+            }
+            EndUndoEventOrThrow("worksheet write");
+            return "{\"verified\":true,\"before\":" + WorksheetCellJson(receipt.before) +
+                ",\"after\":" + WorksheetCellJson(receipt.after) + "}";
+        } catch (...) {
+            gSDK->UndoAndRemove();
+            throw;
+        }
+    }
+    throw std::invalid_argument("worksheet.action must be list, read, or write");
+}
+
+std::string ViewStateJson(const ViewDocument::ViewState& state) {
+    return "{\"standard_view\":" + std::to_string(state.standardView) +
+        ",\"projection\":" + std::to_string(state.projection) +
+        ",\"render_mode\":" + std::to_string(state.renderMode) + "}";
+}
+
+std::string HandleView(const std::string& action, const Params& params) {
+    if (action == "get_view") return ViewStateJson(ViewDocument::GetView());
+    ViewDocument::SetViewRequest request;
+    request.setStandardView = params.find("standard_view") != params.end();
+    request.standardView = static_cast<short>(GetBoundedIntParam(params, "standard_view", 0, 0, 16));
+    request.setProjection = params.find("projection") != params.end();
+    request.projection = static_cast<short>(GetBoundedIntParam(params, "projection", 0, 0, 6));
+    request.setRenderMode = params.find("render_mode") != params.end();
+    request.renderMode = static_cast<short>(GetBoundedIntParam(params, "render_mode", 0, 0, 15));
+    return ViewStateJson(ViewDocument::SetView(request));
+}
+
+std::string HandleDocumentLifecycle(const std::string& action, const Params& params) {
+    ViewDocument::DocumentResult result;
+    if (action == "save_document") {
+        result = ViewDocument::SaveDocument(
+            GetStringParam(params, "file_path"), GetStringParam(params, "replace_confirmation"));
+    } else if (action == "open_document") {
+        result = ViewDocument::OpenDocument(
+            GetStringParam(params, "file_path"), GetStringParam(params, "replace_dirty_confirmation"));
+    } else {
+        throw std::invalid_argument("unsupported document lifecycle action: " + action);
+    }
+    return "{\"operation\":" + JsonString(result.operation) +
+        ",\"path\":" + JsonString(result.canonicalPath) +
+        ",\"saved\":" + (result.saved ? "true" : "false") +
+        ",\"requested_path\":" + JsonString(result.requestedPath) +
+        ",\"active_path\":" + JsonString(result.activePath) +
+        ",\"commit_state\":" + JsonString(ViewDocument::CommitStateName(result.commitState)) + "}";
 }
 
 std::string CanonicalCreateObjectType(std::string objectType) {
@@ -1740,7 +2147,8 @@ void ValidatePrimitiveSpec(const PrimitiveSpec& spec, const std::string& label) 
         }
         return;
     }
-    if (spec.objectType == "polygon") {
+    if (spec.objectType == "polygon" || spec.objectType == "slab" ||
+        spec.objectType == "roof" || spec.objectType == "space") {
         const std::size_t minimum = spec.closed ? 3u : 2u;
         if (spec.points.size() < minimum) {
             throw std::invalid_argument(
@@ -1753,6 +2161,24 @@ void ValidatePrimitiveSpec(const PrimitiveSpec& spec, const std::string& label) 
                 throw std::invalid_argument(label + ".points contains consecutive duplicate points");
             }
         }
+        if (spec.objectType == "slab") {
+            RequirePositiveNumber(spec.thickness, label + ".thickness");
+        }
+        if (spec.objectType == "space") {
+            RequirePositiveNumber(spec.height, label + ".height");
+        }
+        if (spec.objectType == "roof") {
+            RequirePositiveNumber(spec.thickness, label + ".thickness");
+            if (spec.slope <= 0.0 || spec.slope > 89.0) {
+                throw std::invalid_argument(label + ".slope must be > 0 and <= 89 degrees");
+            }
+            if (spec.overhang < 0.0 || spec.bearingInset < 0.0 || spec.verticalMiter < 0.0) {
+                throw std::invalid_argument(label + " roof offsets must be >= 0");
+            }
+            if (spec.miterType < 1 || spec.miterType > 4) {
+                throw std::invalid_argument(label + ".miter_type must be between 1 and 4");
+            }
+        }
         return;
     }
     if (spec.objectType == "wall") {
@@ -1761,6 +2187,60 @@ void ValidatePrimitiveSpec(const PrimitiveSpec& spec, const std::string& label) 
         }
         RequirePositiveNumber(spec.thickness, label + ".thickness");
         RequirePositiveNumber(spec.height, label + ".height");
+        return;
+    }
+    if (spec.objectType == "parametric") {
+        if (spec.pluginName.empty()) {
+            throw std::invalid_argument(label + ".plugin_name is required");
+        }
+        if (spec.requireWallHost && spec.wallUuid.empty()) {
+            throw std::invalid_argument(label + ".wall_uuid is required for hosted placement");
+        }
+        return;
+    }
+    if (spec.objectType == "door" || spec.objectType == "window") {
+        if (!spec.hasExplicitX || !spec.hasExplicitY) {
+            throw std::invalid_argument(label + ".x1 and y1 are required for hosted placement");
+        }
+        if (!spec.hasExplicitWidth || !spec.hasExplicitHeight) {
+            throw std::invalid_argument(label + ".width and height are required");
+        }
+        RequirePositiveNumber(spec.width, label + ".width");
+        RequirePositiveNumber(spec.height, label + ".height");
+        if (spec.wallUuid.empty()) {
+            throw std::invalid_argument(label + ".wall_uuid is required for hosted placement");
+        }
+        if (!spec.requireWallHost) {
+            throw std::invalid_argument(label + ".require_wall_host must be true");
+        }
+        const std::string expectedPlugin = spec.objectType == "door" ? "Door" : "Window";
+        if (!spec.pluginName.empty() && spec.pluginName != expectedPlugin) {
+            throw std::invalid_argument(
+                label + ".plugin_name must be the exact universal name " + expectedPlugin);
+        }
+        if (!spec.parametricValues.empty()) {
+            throw std::invalid_argument(
+                label + " dedicated opening dimensions cannot be overridden by generic parameters");
+        }
+        if (spec.descriptorFingerprint.empty()) {
+            throw std::invalid_argument(
+                label + ".descriptor_fingerprint is required from parametric schema discovery");
+        }
+        if (spec.objectType == "window" && spec.sillHeight < 0.0) {
+            throw std::invalid_argument(label + ".sill_height must be >= 0");
+        }
+        if (spec.objectType == "window" && !spec.hasExplicitSill) {
+            throw std::invalid_argument(label + ".sill_height is required");
+        }
+        if (spec.objectType == "door" && spec.hasExplicitSill) {
+            throw std::invalid_argument(label + ".sill_height is supported only for window");
+        }
+        return;
+    }
+    if (spec.objectType == "symbol") {
+        if (spec.symbolDefinitionName.empty()) {
+            throw std::invalid_argument(label + ".definition_name is required");
+        }
         return;
     }
     if (spec.objectType == "text") {
@@ -1789,6 +2269,12 @@ void ValidatePrimitiveSpec(const PrimitiveSpec& spec, const std::string& label) 
 
 PrimitiveSpec ParsePrimitiveSpec(const Params& params, const std::string& label) {
     PrimitiveSpec spec;
+    spec.hasExplicitX = HasParam(params, "x1") || HasParam(params, "start_x");
+    spec.hasExplicitY = HasParam(params, "y1") || HasParam(params, "start_y");
+    spec.hasExplicitWidth = HasParam(params, "width");
+    spec.hasExplicitHeight = HasParam(params, "height");
+    spec.hasExplicitSill = HasParam(params, "sill_height") ||
+        HasParam(params, "window_sill_height");
     spec.objectType = GetStringParam(params, "object_type");
     if (spec.objectType.empty()) {
         spec.objectType = GetStringParam(params, "type");
@@ -1812,7 +2298,47 @@ PrimitiveSpec ParsePrimitiveSpec(const Params& params, const std::string& label)
     spec.sweepAngle = GetFiniteNumberParam(params, "sweep_angle", 90.0);
     spec.height = GetFiniteNumberParam(params, "height", 3000.0);
     spec.thickness = GetFiniteNumberParam(params, "thickness", 200.0);
+    spec.elevation = GetFiniteNumberParam(params, "elevation", GetFiniteNumberParam(params, "bearing_height", 0.0));
+    spec.slope = GetFiniteNumberParam(params, "slope", 30.0);
+    spec.overhang = GetFiniteNumberParam(params, "overhang", 500.0);
+    spec.bearingInset = GetFiniteNumberParam(params, "bearing_inset", 0.0);
+    spec.verticalMiter = GetFiniteNumberParam(params, "vertical_miter", 0.0);
+    spec.miterType = GetBoundedIntParam(params, "miter_type", 1, 1, 4);
+    spec.generateGableWalls = GetBoolParam(params, "generate_gable_walls", false);
+    spec.pluginName = GetStringParam(params, "plugin_name");
+    spec.descriptorFingerprint = GetStringParam(params, "descriptor_fingerprint");
+    spec.wallUuid = GetStringParam(params, "wall_uuid");
+    spec.requireWallHost = GetBoolParam(params, "require_wall_host", false);
+    const int parameterCount = GetBoundedIntParam(params, "parameter_count", 0, 0, 256);
+    spec.parametricValues.reserve(static_cast<std::size_t>(parameterCount));
+    for (int parameterIndex = 1; parameterIndex <= parameterCount; ++parameterIndex) {
+        const std::string prefix = "parameter_" + std::to_string(parameterIndex) + "_";
+        ParametricValue value;
+        value.universalName = GetStringParam(params, prefix + "name");
+        const std::string kind = ToLower(GetStringParam(params, prefix + "type"));
+        if (kind == "integer") {
+            value.kind = ParametricValueKind::Integer;
+            value.integerValue = static_cast<std::int32_t>(GetBoundedIntParam(
+                params, prefix + "integer", 0, std::numeric_limits<int>::min(), std::numeric_limits<int>::max()));
+        } else if (kind == "boolean") {
+            value.kind = ParametricValueKind::Boolean;
+            value.booleanValue = GetBoolParam(params, prefix + "boolean", false);
+        } else if (kind == "real") {
+            value.kind = ParametricValueKind::Real;
+            value.realValue = GetFiniteNumberParam(params, prefix + "real", 0.0);
+        } else if (kind == "string") {
+            value.kind = ParametricValueKind::String;
+            value.stringValue = GetStringParam(params, prefix + "string");
+        } else {
+            throw std::invalid_argument(prefix + "type must be integer, boolean, real, or string");
+        }
+        spec.parametricValues.push_back(std::move(value));
+    }
     spec.width = GetFiniteNumberParam(params, "width", 0.0);
+    spec.sillHeight = GetFiniteNumberParam(
+        params,
+        "sill_height",
+        GetFiniteNumberParam(params, "window_sill_height", 0.0));
     spec.rotation = GetFiniteNumberParam(params, "rotation", 0.0);
     spec.textSize = GetFiniteNumberParam(params, "text_size", GetFiniteNumberParam(params, "size", 0.0));
     spec.dimensionOffset = GetFiniteNumberParam(params, "offset", GetFiniteNumberParam(params, "dimension_offset", 300.0));
@@ -1823,7 +2349,8 @@ PrimitiveSpec ParsePrimitiveSpec(const Params& params, const std::string& label)
     spec.fixedSizeText = GetBoolParam(params, "fixed_size", false);
     spec.wrapText = GetBoolParam(params, "wrap", false);
     spec.closed = GetBoolParam(params, "closed", true);
-    if (spec.objectType == "polygon") {
+    if (spec.objectType == "polygon" || spec.objectType == "slab" ||
+        spec.objectType == "roof" || spec.objectType == "space") {
         std::string pointsJson;
         const auto points = params.find("points");
         if (points != params.end() && points->second.type != ParamValue::Type::Null) {
@@ -1845,6 +2372,8 @@ PrimitiveSpec ParsePrimitiveSpec(const Params& params, const std::string& label)
     spec.styleName = GetStringParam(params, "style_name");
     spec.name = GetStringParam(params, "name");
     spec.className = GetStringParam(params, "class_name");
+    spec.roomId = GetStringParam(params, "room_id");
+    spec.symbolDefinitionName = GetStringParam(params, "definition_name");
     ValidatePrimitiveSpec(spec, label);
     return spec;
 }
@@ -1890,10 +2419,17 @@ void ApplyWallStyleIfRequested(MCObjectHandle wall, const PrimitiveSpec& spec, s
     }
 }
 
-MCObjectHandle CreatePrimitiveFromSpec(const PrimitiveSpec& spec, std::vector<std::string>* warnings = nullptr) {
+MCObjectHandle CreatePrimitiveFromSpec(
+    const PrimitiveSpec& spec,
+    Transactions::NativeTransaction& transaction,
+    Transactions::ArtifactId* transactionArtifact,
+    std::vector<std::string>* warnings = nullptr) {
     EnsureWritableLayer();
 
     MCObjectHandle object = nullptr;
+    std::optional<Transactions::ArtifactId> adoptedArtifact;
+    std::optional<Transactions::ExternalMutationId> pendingExternalAfter;
+    MCObjectHandle pendingExternalHandle = nullptr;
     if (spec.objectType == "rect") {
         object = gSDK->CreateRectangle(WorldRect(WorldPt(spec.x1, spec.y1), WorldPt(spec.x2, spec.y2)));
     } else if (spec.objectType == "oval") {
@@ -1913,6 +2449,110 @@ MCObjectHandle CreatePrimitiveFromSpec(const PrimitiveSpec& spec, std::vector<st
             gSDK->SetPolyShapeClose(object, spec.closed);
             gSDK->ResetObject(object);
         }
+    } else if (spec.objectType == "slab") {
+        BimObjects::SlabRequest request;
+        request.elevation = spec.elevation;
+        request.thickness = spec.thickness;
+        request.styleName = spec.styleName;
+        request.boundary.reserve(spec.points.size());
+        for (const auto& point : spec.points) {
+            request.boundary.push_back({point.x, point.y});
+        }
+        const auto receipt = BimObjects::CreateTrueSlab(*gSDK, request, transaction);
+        object = receipt.handle;
+        adoptedArtifact = receipt.transactionArtifact;
+    } else if (spec.objectType == "roof") {
+        BimObjects::RoofRequest request;
+        request.slopeDegrees = spec.slope;
+        request.projection = spec.overhang;
+        request.eaveHeight = spec.elevation;
+        request.bearingInset = spec.bearingInset;
+        request.thickness = spec.thickness;
+        request.miterType = static_cast<short>(spec.miterType);
+        request.verticalMiter = spec.verticalMiter;
+        request.generateGableWalls = spec.generateGableWalls;
+        request.boundary.reserve(spec.points.size());
+        for (const auto& point : spec.points) {
+            request.boundary.push_back({point.x, point.y});
+        }
+        const auto receipt = BimObjects::CreateTrueRoof(*gSDK, request, transaction);
+        object = receipt.handle;
+        adoptedArtifact = receipt.transactionArtifact;
+    } else if (spec.objectType == "space") {
+        SpaceCreateSpec request;
+        request.height = spec.height;
+        request.name = spec.name;
+        request.roomId = spec.roomId;
+        request.boundary.reserve(spec.points.size());
+        for (const auto& point : spec.points) {
+            request.boundary.push_back({point.x, point.y});
+        }
+        const auto receipt = CreateVerifiedSpace(request, transaction);
+        object = receipt.object;
+        adoptedArtifact = receipt.transactionArtifact;
+    } else if (spec.objectType == "door" || spec.objectType == "window") {
+        MCObjectHandle wall = gSDK->GetObjectByUuid(TXString(spec.wallUuid.c_str()));
+        if (!wall || gSDK->GetObjectTypeN(wall) != kWallNode) {
+            throw std::invalid_argument("host wall UUID was not found or is not a wall");
+        }
+        const auto wallMutation = transaction.TrackExternalBefore(wall);
+        BuiltInOpeningCreateSpec request;
+        request.kind = spec.objectType == "door"
+            ? BuiltInParametricKind::Door
+            : BuiltInParametricKind::Window;
+        request.expectedWall = wall;
+        request.x = spec.x1;
+        request.y = spec.y1;
+        request.rotationDegrees = spec.rotation;
+        request.width = spec.width;
+        request.height = spec.height;
+        request.windowSillHeight = spec.sillHeight;
+        request.descriptorFingerprint = spec.descriptorFingerprint;
+        const auto receipt = CreateVerifiedBuiltInOpening(request);
+        object = receipt.object;
+        UnregisteredCreatedObjectGuard openingGuard(object);
+        adoptedArtifact = transaction.AdoptFinal(
+            object,
+            spec.objectType == "door"
+                ? Transactions::ObjectFamily::Door
+                : Transactions::ObjectFamily::Window,
+            kParametricNode,
+            [receipt](MCObjectHandle verifiedOpening) {
+                VerifyBuiltInOpeningReceipt(verifiedOpening, receipt);
+            });
+        openingGuard.Release();
+        transaction.TrackExternalAfter(wallMutation, wall);
+    } else if (spec.objectType == "parametric") {
+        MCObjectHandle wall = nullptr;
+        std::optional<Transactions::ExternalMutationId> wallMutation;
+        if (spec.requireWallHost) {
+            wall = gSDK->GetObjectByUuid(TXString(spec.wallUuid.c_str()));
+            if (!wall || gSDK->GetObjectTypeN(wall) != kWallNode) {
+                throw std::invalid_argument("host wall UUID was not found or is not a wall");
+            }
+            wallMutation = transaction.TrackExternalBefore(wall);
+        }
+        ParametricCreateSpec request;
+        request.universalPluginName = spec.pluginName;
+        request.x = spec.x1;
+        request.y = spec.y1;
+        request.rotationDegrees = spec.rotation;
+        request.requireWallHost = spec.requireWallHost;
+        request.expectedWall = wall;
+        request.descriptorFingerprint = spec.descriptorFingerprint;
+        request.parameters = spec.parametricValues;
+        object = CreateVerifiedParametricObject(request);
+        if (wallMutation) {
+            pendingExternalAfter = *wallMutation;
+            pendingExternalHandle = wall;
+        }
+    } else if (spec.objectType == "symbol") {
+        object = PlaceVerifiedSymbol({
+            spec.symbolDefinitionName,
+            spec.x1,
+            spec.y1,
+            spec.rotation,
+        });
     } else if (spec.objectType == "wall") {
         object = gSDK->CreateWall(WorldPt(spec.x1, spec.y1), WorldPt(spec.x2, spec.y2), spec.thickness);
         if (object) {
@@ -1956,7 +2596,54 @@ MCObjectHandle CreatePrimitiveFromSpec(const PrimitiveSpec& spec, std::vector<st
         throw std::runtime_error("Vectorworks did not return a handle for created " + spec.objectType);
     }
 
+    UnregisteredCreatedObjectGuard unregisteredGuard(adoptedArtifact ? nullptr : object);
     ApplyObjectNameAndClass(object, spec);
+    if (!adoptedArtifact) {
+        const short expectedNodeType = gSDK->GetObjectTypeN(object);
+        Transactions::SemanticVerifier verifier;
+        if (spec.objectType == "parametric") {
+            const std::string expectedPlugin = spec.pluginName;
+            const std::string expectedFingerprint = spec.descriptorFingerprint;
+            const bool requiresWall = spec.requireWallHost;
+            MCObjectHandle expectedWall = pendingExternalHandle;
+            verifier = [expectedPlugin, expectedFingerprint, requiresWall, expectedWall](
+                           MCObjectHandle verifiedObject) {
+                const auto descriptor = DescribeParametricObject(verifiedObject);
+                if (descriptor.universalPluginName != expectedPlugin ||
+                    descriptor.descriptorFingerprint != expectedFingerprint) {
+                    throw std::runtime_error(
+                        "parametric object failed plugin/schema verification at commit");
+                }
+                if (requiresWall && !IsObjectHostedByWall(verifiedObject, expectedWall)) {
+                    throw std::runtime_error(
+                        "parametric object failed exact wall-host verification at commit");
+                }
+            };
+        } else {
+            verifier = [expectedNodeType](MCObjectHandle verifiedObject) {
+                if (!verifiedObject || gSDK->GetObjectTypeN(verifiedObject) != expectedNodeType ||
+                    !IsUserVisibleObjectType(expectedNodeType)) {
+                    throw std::runtime_error(
+                        "created object failed semantic node-type verification");
+                }
+            };
+        }
+        adoptedArtifact = transaction.AdoptFinal(
+            object,
+            Transactions::ObjectFamily::Simple,
+            expectedNodeType,
+            std::move(verifier));
+        unregisteredGuard.Release();
+    }
+    if (pendingExternalAfter) {
+        transaction.TrackExternalAfter(*pendingExternalAfter, pendingExternalHandle);
+    }
+    if (!adoptedArtifact) {
+        throw std::runtime_error("created object left the factory without transaction ownership");
+    }
+    if (transactionArtifact) {
+        *transactionArtifact = *adoptedArtifact;
+    }
     return object;
 }
 
@@ -1982,6 +2669,10 @@ std::string CreatedPrimitiveJson(const CreatedPrimitive& created) {
         json += ",\"closed\":";
         json += created.closed ? "true" : "false";
     }
+    json += ",\"native_node_type\":";
+    json += std::to_string(created.nativeNodeType);
+    json += ",\"verified\":";
+    json += created.semanticallyVerified ? "true" : "false";
     json += ",\"object\":";
     json += ObjectJson(created.handle);
     json += "}";
@@ -2013,6 +2704,10 @@ std::string CompactCreatedPrimitiveListJson(const std::vector<CreatedPrimitive>&
         json += JsonString(item.objectType);
         json += ",\"handle\":";
         json += JsonString(HandleId(item.handle));
+        json += ",\"native_node_type\":";
+        json += std::to_string(item.nativeNodeType);
+        json += ",\"verified\":";
+        json += item.semanticallyVerified ? "true" : "false";
         if (!item.warnings.empty()) {
             json += ",\"warnings\":";
             json += JsonStringArray(item.warnings);
@@ -2032,15 +2727,20 @@ std::string CompactCreatedPrimitiveListJson(const std::vector<CreatedPrimitive>&
 std::string HandleCreateTypedObject(const Params& params, const std::string& label, const TXString& undoName) {
     const PrimitiveSpec spec = ParsePrimitiveSpec(params, label);
 
-    gSDK->SupportUndoAndRemove();
-    gSDK->SetUndoMethod(kUndoSwapObjects);
-    gSDK->NameUndoEvent(undoName);
-
+    Transactions::TransactionOptions options;
+    options.expectedArtifactCount = 2u;
+    options.sdkManagedRegistrationFamilies = {
+        Transactions::ObjectFamily::Space,
+        Transactions::ObjectFamily::Roof,
+        Transactions::ObjectFamily::Door,
+        Transactions::ObjectFamily::Window,
+    };
+    Transactions::NativeTransaction transaction(*gSDK, undoName, std::move(options));
     try {
         std::vector<std::string> warnings;
-        MCObjectHandle object = CreatePrimitiveFromSpec(spec, &warnings);
-        gSDK->AddAfterSwapObject(object);
-        gSDK->EndUndoEvent();
+        Transactions::ArtifactId artifact = 0;
+        MCObjectHandle object = CreatePrimitiveFromSpec(spec, transaction, &artifact, &warnings);
+        const auto transactionReceipt = transaction.Commit();
 
         std::string json = "{\"type\":";
         json += JsonString(spec.objectType);
@@ -2063,11 +2763,14 @@ std::string HandleCreateTypedObject(const Params& params, const std::string& lab
         }
         json += ",\"object\":";
         json += ObjectJson(object);
+        json += ",\"transaction_artifact\":";
+        json += std::to_string(artifact);
+        json += ",\"undo_committed\":";
+        json += transactionReceipt.endUndoEventSucceeded ? "true" : "false";
         json += "}";
         return json;
     } catch (...) {
-        gSDK->UndoAndRemove();
-        throw;
+        transaction.RollbackAndRethrow(std::current_exception());
     }
 }
 
@@ -2223,11 +2926,15 @@ std::string HandleSetProperty(const Params& params) {
     gSDK->SetUndoMethod(kUndoSwapObjects);
     gSDK->NameUndoEvent(TXString("Vectorworks MCP set property"));
     try {
-        gSDK->AddBeforeSwapObject(object);
+        if (!gSDK->AddBeforeSwapObject(object)) {
+            throw std::runtime_error("Vectorworks failed to register the object before property mutation");
+        }
         ApplyObjectProperty(object, propertyName, value);
         gSDK->ResetObject(object);
-        gSDK->AddAfterSwapObject(object);
-        gSDK->EndUndoEvent();
+        if (!gSDK->AddAfterSwapObject(object)) {
+            throw std::runtime_error("Vectorworks failed to register the object after property mutation");
+        }
+        EndUndoEventOrThrow("property mutation");
     } catch (...) {
         gSDK->UndoAndRemove();
         throw;
@@ -2283,14 +2990,19 @@ std::string HandleManageClasses(const Params& params) {
         bool created = false;
         if (!existed) {
             gSDK->SupportUndoAndRemove();
+            gSDK->SetUndoMethod(kUndoSwapObjects);
             gSDK->NameUndoEvent(TXString("Vectorworks MCP create class"));
-            classId = gSDK->AddClass(txClassName);
-            created = gSDK->ValidClass(classId);
-            if (!created) {
+            try {
+                classId = gSDK->AddClass(txClassName);
+                created = gSDK->ValidClass(classId);
+                if (!created) {
+                    throw std::runtime_error("Vectorworks rejected class: " + className);
+                }
+                EndUndoEventOrThrow("class creation");
+            } catch (...) {
                 gSDK->UndoAndRemove();
-                throw std::runtime_error("Vectorworks rejected class: " + className);
+                throw;
             }
-            gSDK->EndUndoEvent();
         }
         std::string json = "{\"action\":\"create\",\"class_name\":";
         json += JsonString(className);
@@ -2313,10 +3025,20 @@ std::string HandleManageClasses(const Params& params) {
     }
 
     gSDK->SupportUndoAndRemove();
+    gSDK->SetUndoMethod(kUndoSwapObjects);
     gSDK->NameUndoEvent(TXString("Vectorworks MCP delete class"));
-    gSDK->DeleteClass(txClassName);
-    gSDK->EndUndoEvent();
-    const bool stillExists = gSDK->ValidClass(gSDK->ClassNameToID(txClassName));
+    bool stillExists = true;
+    try {
+        gSDK->DeleteClass(txClassName);
+        stillExists = gSDK->ValidClass(gSDK->ClassNameToID(txClassName));
+        if (stillExists) {
+            throw std::runtime_error("Vectorworks did not delete class: " + className);
+        }
+        EndUndoEventOrThrow("class deletion");
+    } catch (...) {
+        gSDK->UndoAndRemove();
+        throw;
+    }
     std::string json = "{\"action\":\"delete\",\"class_name\":";
     json += JsonString(className);
     json += ",\"deleted\":";
@@ -2328,6 +3050,9 @@ std::string HandleManageClasses(const Params& params) {
 enum class ApplyOperationKind {
     Create,
     SetProperty,
+    Transform,
+    Duplicate,
+    Delete,
 };
 
 struct ApplyOperation {
@@ -2337,6 +3062,15 @@ struct ApplyOperation {
     std::string target;
     std::string propertyName;
     std::string propertyValue;
+    double deltaX = 0.0;
+    double deltaY = 0.0;
+    double rotationDegrees = 0.0;
+    double scaleX = 1.0;
+    double scaleY = 1.0;
+    bool hasPivot = false;
+    double pivotX = 0.0;
+    double pivotY = 0.0;
+    std::string confirmation;
 };
 
 struct ApplyOperationsCacheEntry {
@@ -2360,6 +3094,25 @@ bool IsSupportedPropertyName(const std::string& propertyName) {
         propertyName == "opacity";
 }
 
+bool IsExplicitExternalObjectReference(const std::string& target) {
+    return target.rfind("uuid:", 0u) == 0u ||
+        target.rfind("name:", 0u) == 0u ||
+        target.rfind("handle:", 0u) == 0u;
+}
+
+void ValidateMutationTarget(const ApplyOperation& operation, const std::string& label) {
+    if (operation.target.empty()) {
+        throw std::invalid_argument(label + ".target is required");
+    }
+    if (operation.target.size() > kMaxApplyReferenceChars) {
+        throw std::invalid_argument(label + ".target is too long");
+    }
+    if (!IsExplicitExternalObjectReference(operation.target)) {
+        throw std::invalid_argument(
+            label + ".target must be an explicit uuid:, name:, or handle: object reference");
+    }
+}
+
 std::string ActiveDocumentIdentity() {
     std::string identity;
     VectorWorks::Filing::IFileIdentifierPtr activeFile(VectorWorks::Filing::IID_FileIdentifier);
@@ -2374,8 +3127,6 @@ std::string ActiveDocumentIdentity() {
             identity = TxToUtf8(name);
         }
     }
-    identity += "|layer:";
-    identity += HandleIdFromRaw(reinterpret_cast<std::uintptr_t>(gSDK->GetActiveLayer()));
     return identity;
 }
 
@@ -2534,7 +3285,105 @@ std::vector<ApplyOperation> ParseApplyOperations(const Params& params) {
             operations.push_back(std::move(operation));
             continue;
         }
-        throw std::invalid_argument(label + ".op must be create or set_property");
+        if (op == "object.transform") {
+            ApplyOperation operation;
+            operation.kind = ApplyOperationKind::Transform;
+            operation.target = GetStringParam(operationParams, "target");
+            if (!operation.target.empty() && operation.target.front() == '$') {
+                const std::string localRef = operation.target.substr(1);
+                if (declaredLocalRefs.find(localRef) == declaredLocalRefs.end()) {
+                    throw std::invalid_argument(label + ".target references an unknown local_ref: " + localRef);
+                }
+            } else {
+                ValidateMutationTarget(operation, label);
+            }
+            operation.deltaX = GetFiniteNumberParam(operationParams, "delta_x", 0.0);
+            operation.deltaY = GetFiniteNumberParam(operationParams, "delta_y", 0.0);
+            operation.rotationDegrees = GetFiniteNumberParam(operationParams, "rotation_degrees", 0.0);
+            operation.scaleX = GetFiniteNumberParam(operationParams, "scale_x", 1.0);
+            operation.scaleY = GetFiniteNumberParam(operationParams, "scale_y", 1.0);
+            if (operation.scaleX <= 0.0 || operation.scaleY <= 0.0 ||
+                operation.scaleX > 1000000.0 || operation.scaleY > 1000000.0) {
+                throw std::invalid_argument(label + ".scale_x and scale_y must be > 0 and <= 1000000");
+            }
+            if (std::abs(operation.deltaX) > 1000000000.0 ||
+                std::abs(operation.deltaY) > 1000000000.0 ||
+                std::abs(operation.rotationDegrees) > 360000.0) {
+                throw std::invalid_argument(label + " transform values exceed supported bounds");
+            }
+            const bool hasPivotX = HasParam(operationParams, "pivot_x");
+            const bool hasPivotY = HasParam(operationParams, "pivot_y");
+            if (hasPivotX != hasPivotY) {
+                throw std::invalid_argument(label + ".pivot_x and pivot_y must be provided together");
+            }
+            operation.hasPivot = hasPivotX;
+            if (operation.hasPivot) {
+                operation.pivotX = GetFiniteNumberParam(operationParams, "pivot_x", 0.0);
+                operation.pivotY = GetFiniteNumberParam(operationParams, "pivot_y", 0.0);
+            }
+            if (operation.deltaX == 0.0 && operation.deltaY == 0.0 &&
+                operation.rotationDegrees == 0.0 &&
+                operation.scaleX == 1.0 && operation.scaleY == 1.0) {
+                throw std::invalid_argument(label + " transform must change translation, rotation, or scale");
+            }
+            operations.push_back(std::move(operation));
+            continue;
+        }
+        if (op == "object.duplicate") {
+            ApplyOperation operation;
+            operation.kind = ApplyOperationKind::Duplicate;
+            operation.target = GetStringParam(operationParams, "target");
+            if (!operation.target.empty() && operation.target.front() == '$') {
+                const std::string localRef = operation.target.substr(1);
+                if (declaredLocalRefs.find(localRef) == declaredLocalRefs.end()) {
+                    throw std::invalid_argument(label + ".target references an unknown local_ref: " + localRef);
+                }
+            } else {
+                ValidateMutationTarget(operation, label);
+            }
+            operation.localRef = GetStringParam(operationParams, "local_ref");
+            if (operation.localRef.empty()) {
+                throw std::invalid_argument(label + ".local_ref is required for object.duplicate");
+            }
+            if (operation.localRef.size() > kMaxApplyReferenceChars) {
+                throw std::invalid_argument(label + ".local_ref is too long");
+            }
+            if (!declaredLocalRefs.insert(operation.localRef).second) {
+                throw std::invalid_argument(label + ".local_ref is duplicated: " + operation.localRef);
+            }
+            operation.deltaX = GetFiniteNumberParam(operationParams, "delta_x", 0.0);
+            operation.deltaY = GetFiniteNumberParam(operationParams, "delta_y", 0.0);
+            if (std::abs(operation.deltaX) > 1000000000.0 ||
+                std::abs(operation.deltaY) > 1000000000.0) {
+                throw std::invalid_argument(label + " duplicate offsets exceed supported bounds");
+            }
+            operations.push_back(std::move(operation));
+            continue;
+        }
+        if (op == "object.delete") {
+            ApplyOperation operation;
+            operation.kind = ApplyOperationKind::Delete;
+            operation.target = GetStringParam(operationParams, "target");
+            if (!operation.target.empty() && operation.target.front() == '$') {
+                const std::string localRef = operation.target.substr(1);
+                const auto found = declaredLocalRefs.find(localRef);
+                if (found == declaredLocalRefs.end()) {
+                    throw std::invalid_argument(
+                        label + ".target references an unknown or deleted local_ref: " + localRef);
+                }
+                declaredLocalRefs.erase(found);
+            } else {
+                ValidateMutationTarget(operation, label);
+            }
+            operation.confirmation = GetStringParam(operationParams, "confirm");
+            if (operation.confirmation != "DELETE_OBJECT") {
+                throw std::invalid_argument(label + ".confirm must be DELETE_OBJECT");
+            }
+            operations.push_back(std::move(operation));
+            continue;
+        }
+        throw std::invalid_argument(
+            label + ".op must be create, set_property, object.transform, object.duplicate, or object.delete");
     }
     return operations;
 }
@@ -2595,6 +3444,54 @@ MCObjectHandle ResolveApplyOperationTarget(
     return ObjectHandleFromSessionId(handleId);
 }
 
+struct PreparedApplyOperationTargets {
+    std::vector<MCObjectHandle> handles;
+    std::vector<std::string> deleteUuids;
+};
+
+PreparedApplyOperationTargets PrepareApplyOperationTargets(
+    const std::vector<ApplyOperation>& operations) {
+    PreparedApplyOperationTargets prepared;
+    prepared.handles.resize(operations.size(), nullptr);
+    prepared.deleteUuids.resize(operations.size());
+    const std::unordered_map<std::string, MCObjectHandle> noLocalObjects;
+    std::unordered_set<MCObjectHandle> deletedTargets;
+
+    for (std::size_t index = 0; index < operations.size(); ++index) {
+        const auto& operation = operations[index];
+        if (operation.kind == ApplyOperationKind::Create ||
+            ((operation.kind == ApplyOperationKind::SetProperty ||
+              operation.kind == ApplyOperationKind::Transform ||
+              operation.kind == ApplyOperationKind::Duplicate ||
+              operation.kind == ApplyOperationKind::Delete) &&
+             !operation.target.empty() && operation.target.front() == '$')) {
+            continue;
+        }
+        MCObjectHandle object = ResolveApplyOperationTarget(operation.target, noLocalObjects);
+        if (!object || !IsUserVisibleObjectType(gSDK->GetObjectTypeN(object))) {
+            throw std::invalid_argument(
+                "operation_" + std::to_string(index + 1u) + ".target is not a user-visible object");
+        }
+        if (deletedTargets.find(object) != deletedTargets.end()) {
+            throw std::invalid_argument(
+                "operation_" + std::to_string(index + 1u) +
+                ".target refers to an object deleted earlier in the same transaction");
+        }
+        prepared.handles[index] = object;
+        if (operation.kind == ApplyOperationKind::Delete) {
+            TXString uuid;
+            if (!gSDK->GetObjectUuid(object, uuid) || uuid.IsEmpty()) {
+                throw std::invalid_argument(
+                    "operation_" + std::to_string(index + 1u) +
+                    ".target does not expose a UUID required for verified deletion");
+            }
+            prepared.deleteUuids[index] = TxToUtf8(uuid);
+            deletedTargets.insert(object);
+        }
+    }
+    return prepared;
+}
+
 std::string HandleApplyOperations(const Params& params) {
     const std::string idempotencyKey = GetStringParam(params, "idempotency_key");
     if (idempotencyKey.size() > kMaxApplyReferenceChars) {
@@ -2608,28 +3505,62 @@ std::string HandleApplyOperations(const Params& params) {
             operationsFingerprint)) {
         return WrapApplyOperationsResult(*cached, idempotencyKey, true);
     }
+    PreparedApplyOperationTargets preparedTargets = PrepareApplyOperationTargets(operations);
 
     std::unordered_map<std::string, MCObjectHandle> localObjects;
+    std::unordered_map<std::string, Transactions::ArtifactId> localArtifacts;
     std::unordered_set<MCObjectHandle> createdHandles;
     std::unordered_set<MCObjectHandle> dirtyHandles;
-    std::unordered_map<MCObjectHandle, std::string> externalBefore;
+    std::unordered_set<std::string> deletedExternalUuids;
+    std::unordered_map<std::string, std::string> externalBefore;
+    std::unordered_map<std::string, MCObjectHandle> externalFinalHandles;
+    std::unordered_map<std::string, Transactions::ExternalMutationId> externalMutationIds;
     std::vector<CreatedPrimitive> created;
     std::vector<std::string> operationResults;
+    Transactions::TransactionReceipt transactionReceipt;
     created.reserve(operations.size());
     operationResults.reserve(operations.size());
 
-    gSDK->SupportUndoAndRemove();
-    gSDK->SetUndoMethod(kUndoSwapObjects);
-    gSDK->NameUndoEvent(TXString("Vectorworks MCP apply operations"));
+    Transactions::TransactionOptions transactionOptions;
+    transactionOptions.expectedArtifactCount = operations.size() * 2u;
+    transactionOptions.sdkManagedRegistrationFamilies = {
+        Transactions::ObjectFamily::Space,
+        Transactions::ObjectFamily::Roof,
+        Transactions::ObjectFamily::Door,
+        Transactions::ObjectFamily::Window,
+    };
+    Transactions::NativeTransaction transaction(
+        *gSDK,
+        TXString("Vectorworks MCP apply operations"),
+        std::move(transactionOptions));
     try {
+        const auto trackExternalBefore = [&](MCObjectHandle object) -> std::string {
+            const std::string uuid = ObjectUuidString(object);
+            if (uuid.empty()) {
+                throw std::runtime_error(
+                    "external mutation target does not expose a stable Vectorworks UUID");
+            }
+            if (externalMutationIds.find(uuid) == externalMutationIds.end()) {
+                externalBefore.emplace(uuid, ObjectJson(object));
+                externalFinalHandles.emplace(uuid, object);
+                externalMutationIds.emplace(uuid, transaction.TrackExternalBefore(object));
+            } else {
+                externalFinalHandles[uuid] = object;
+            }
+            return uuid;
+        };
+
         for (std::size_t index = 0; index < operations.size(); ++index) {
             const auto& operation = operations[index];
             if (operation.kind == ApplyOperationKind::Create) {
                 std::vector<std::string> warnings;
-                MCObjectHandle object = CreatePrimitiveFromSpec(operation.primitive, &warnings);
+                Transactions::ArtifactId artifact = 0;
+                MCObjectHandle object = CreatePrimitiveFromSpec(
+                    operation.primitive, transaction, &artifact, &warnings);
                 createdHandles.insert(object);
                 if (!operation.localRef.empty()) {
                     localObjects.emplace(operation.localRef, object);
+                    localArtifacts.emplace(operation.localRef, artifact);
                 }
                 created.push_back({
                     static_cast<int>(index + 1u),
@@ -2638,6 +3569,8 @@ std::string HandleApplyOperations(const Params& params) {
                     warnings,
                     operation.primitive.points.size(),
                     operation.primitive.closed,
+                    gSDK->GetObjectTypeN(object),
+                    true,
                 });
                 std::string result = "{\"index\":" + std::to_string(index + 1u) +
                     ",\"op\":\"create\",\"handle\":" + JsonString(HandleId(object));
@@ -2650,77 +3583,241 @@ std::string HandleApplyOperations(const Params& params) {
                 continue;
             }
 
-            MCObjectHandle object = ResolveApplyOperationTarget(operation.target, localObjects);
-            if (createdHandles.find(object) == createdHandles.end() &&
-                externalBefore.find(object) == externalBefore.end()) {
-                externalBefore.emplace(object, ObjectJson(object));
-                gSDK->AddBeforeSwapObject(object);
+            MCObjectHandle object = preparedTargets.handles[index];
+            if (!object) {
+                object = ResolveApplyOperationTarget(operation.target, localObjects);
             }
-            ApplyObjectProperty(object, operation.propertyName, operation.propertyValue);
-            // A plan can apply several properties to the same object. Resetting
-            // after every property makes Vectorworks regenerate that object
-            // repeatedly and dominates otherwise-small transactions. Defer to
-            // one reset per changed object before the undo event is committed.
-            dirtyHandles.insert(object);
-            std::string result = "{\"index\":" + std::to_string(index + 1u) +
-                ",\"op\":\"set_property\",\"target\":" + JsonString(operation.target) +
-                ",\"property_name\":" + JsonString(operation.propertyName) +
-                ",\"value\":" + JsonString(operation.propertyValue) + "}";
-            operationResults.push_back(std::move(result));
+            std::string externalUuid;
+            if (operation.kind != ApplyOperationKind::Duplicate &&
+                createdHandles.find(object) == createdHandles.end()) {
+                externalUuid = trackExternalBefore(object);
+            }
+            if (operation.kind == ApplyOperationKind::SetProperty) {
+                ApplyObjectProperty(object, operation.propertyName, operation.propertyValue);
+                dirtyHandles.insert(object);
+                std::string result = "{\"index\":" + std::to_string(index + 1u) +
+                    ",\"op\":\"set_property\",\"target\":" + JsonString(operation.target) +
+                    ",\"property_name\":" + JsonString(operation.propertyName) +
+                    ",\"value\":" + JsonString(operation.propertyValue) + "}";
+                operationResults.push_back(std::move(result));
+                continue;
+            }
+            if (operation.kind == ApplyOperationKind::Transform) {
+                const short semanticTypeBefore = gSDK->GetObjectTypeN(object);
+                const std::string before = ObjectJson(object);
+                WorldRect bounds;
+                gSDK->GetObjectBounds(object, bounds);
+                const WorldPt pivot = operation.hasPivot
+                    ? WorldPt(operation.pivotX, operation.pivotY)
+                    : WorldPt(
+                        (bounds.Left() + bounds.Right()) / 2.0,
+                        (bounds.Top() + bounds.Bottom()) / 2.0);
+                if (operation.scaleX != 1.0 || operation.scaleY != 1.0) {
+                    gSDK->ScaleObjectN(object, pivot, operation.scaleX, operation.scaleY);
+                }
+                if (operation.rotationDegrees != 0.0) {
+                    MCObjectHandle rotatedObject = object;
+                    gSDK->RotateObjectN(rotatedObject, pivot, operation.rotationDegrees);
+                    if (!rotatedObject) {
+                        throw std::runtime_error("Vectorworks returned a null handle after object.transform rotation");
+                    }
+                    if (rotatedObject != object) {
+                        for (auto& preparedHandle : preparedTargets.handles) {
+                            if (preparedHandle == object) {
+                                preparedHandle = rotatedObject;
+                            }
+                        }
+                        if (dirtyHandles.erase(object) != 0u) {
+                            dirtyHandles.insert(rotatedObject);
+                        }
+                        for (auto& localEntry : localObjects) {
+                            if (localEntry.second == object) {
+                                localEntry.second = rotatedObject;
+                            }
+                        }
+                        if (createdHandles.erase(object) != 0u) {
+                            createdHandles.insert(rotatedObject);
+                        }
+                        if (!externalUuid.empty()) {
+                            externalFinalHandles[externalUuid] = rotatedObject;
+                        }
+                        object = rotatedObject;
+                    }
+                }
+                if (operation.deltaX != 0.0 || operation.deltaY != 0.0) {
+                    gSDK->MoveObject(object, operation.deltaX, operation.deltaY);
+                }
+                gSDK->ResetObject(object);
+                if (gSDK->GetObjectTypeN(object) != semanticTypeBefore) {
+                    throw std::runtime_error("object.transform changed the object's semantic node type");
+                }
+                dirtyHandles.insert(object);
+                std::string result = "{\"index\":" + std::to_string(index + 1u) +
+                    ",\"op\":\"object.transform\",\"target\":" + JsonString(operation.target) +
+                    ",\"applied\":{\"delta_x\":" + JsonNumber(operation.deltaX) +
+                    ",\"delta_y\":" + JsonNumber(operation.deltaY) +
+                    ",\"rotation_degrees\":" + JsonNumber(operation.rotationDegrees) +
+                    ",\"scale_x\":" + JsonNumber(operation.scaleX) +
+                    ",\"scale_y\":" + JsonNumber(operation.scaleY) +
+                    ",\"pivot\":[" + JsonNumber(pivot.x) + "," + JsonNumber(pivot.y) + "]}" +
+                    ",\"before\":" + before + ",\"after\":" + ObjectJson(object) + "}";
+                operationResults.push_back(std::move(result));
+                continue;
+            }
+            if (operation.kind == ApplyOperationKind::Duplicate) {
+                const short sourceType = gSDK->GetObjectTypeN(object);
+                MCObjectHandle duplicate = gSDK->DuplicateObject(object);
+                if (!duplicate) {
+                    throw std::runtime_error("Vectorworks failed to duplicate the explicit object target");
+                }
+                UnregisteredCreatedObjectGuard duplicateGuard(duplicate);
+                if (!gSDK->InsertObjectAfter(duplicate, object)) {
+                    throw std::runtime_error("Vectorworks failed to duplicate and insert the explicit object target");
+                }
+                if (gSDK->GetObjectTypeN(duplicate) != sourceType) {
+                    throw std::runtime_error("object.duplicate changed the object's semantic node type");
+                }
+                if (operation.deltaX != 0.0 || operation.deltaY != 0.0) {
+                    gSDK->MoveObject(duplicate, operation.deltaX, operation.deltaY);
+                    gSDK->ResetObject(duplicate);
+                }
+                TXString sourceUuid;
+                TXString duplicateUuid;
+                if (!gSDK->GetObjectUuid(object, sourceUuid) || sourceUuid.IsEmpty() ||
+                    !gSDK->GetObjectUuid(duplicate, duplicateUuid) || duplicateUuid.IsEmpty() ||
+                    sourceUuid == duplicateUuid ||
+                    gSDK->ParentObject(duplicate) != gSDK->ParentObject(object)) {
+                    throw std::runtime_error("object.duplicate failed semantic identity or container readback");
+                }
+                const auto artifact = transaction.AdoptFinal(
+                    duplicate,
+                    Transactions::ObjectFamily::Simple,
+                    sourceType,
+                    [sourceType](MCObjectHandle verifiedDuplicate) {
+                        if (!verifiedDuplicate ||
+                            gSDK->GetObjectTypeN(verifiedDuplicate) != sourceType) {
+                            throw std::runtime_error(
+                                "object.duplicate failed semantic verification at commit");
+                        }
+                    });
+                duplicateGuard.Release();
+                createdHandles.insert(duplicate);
+                localObjects.emplace(operation.localRef, duplicate);
+                localArtifacts.emplace(operation.localRef, artifact);
+                std::string result = "{\"index\":" + std::to_string(index + 1u) +
+                    ",\"op\":\"object.duplicate\",\"target\":" + JsonString(operation.target) +
+                    ",\"local_ref\":" + JsonString(operation.localRef) +
+                    ",\"delta_x\":" + JsonNumber(operation.deltaX) +
+                    ",\"delta_y\":" + JsonNumber(operation.deltaY) +
+                    ",\"source\":" + ObjectJson(object) +
+                    ",\"duplicate\":" + ObjectJson(duplicate) + "}";
+                operationResults.push_back(std::move(result));
+                continue;
+            }
+            if (operation.kind == ApplyOperationKind::Delete) {
+                const std::string before = ObjectJson(object);
+                std::string uuid;
+                if (!operation.target.empty() && operation.target.front() == '$') {
+                    const std::string localRef = operation.target.substr(1);
+                    const auto artifactEntry = localArtifacts.find(localRef);
+                    if (artifactEntry == localArtifacts.end()) {
+                        throw std::runtime_error(
+                            "local deletion target has no transaction artifact: " + localRef);
+                    }
+                    uuid = transaction.Uuid(artifactEntry->second);
+                    transaction.DisposeFinal(artifactEntry->second);
+                    createdHandles.erase(object);
+                    dirtyHandles.erase(object);
+                    localObjects.erase(localRef);
+                    localArtifacts.erase(artifactEntry);
+                } else {
+                    uuid = preparedTargets.deleteUuids[index];
+                    gSDK->DeleteObject(object, true);
+                    if (gSDK->GetObjectByUuid(TXString(uuid.c_str())) != nullptr) {
+                        throw std::runtime_error("Vectorworks did not delete the explicit object target");
+                    }
+                    const auto mutation = externalMutationIds.find(uuid);
+                    if (mutation == externalMutationIds.end()) {
+                        throw std::runtime_error(
+                            "external deletion target was not registered before mutation");
+                    }
+                    transaction.TrackExternalDeleted(mutation->second);
+                    deletedExternalUuids.insert(uuid);
+                    dirtyHandles.erase(object);
+                }
+                std::string result = "{\"index\":" + std::to_string(index + 1u) +
+                    ",\"op\":\"object.delete\",\"target\":" + JsonString(operation.target) +
+                    ",\"before\":" + before + ",\"deleted\":true,\"uuid\":" + JsonString(uuid) + "}";
+                operationResults.push_back(std::move(result));
+                continue;
+            }
+            throw std::runtime_error("unsupported prepared apply operation kind");
         }
 
         for (MCObjectHandle object : dirtyHandles) {
             gSDK->ResetObject(object);
         }
-        for (MCObjectHandle object : createdHandles) {
-            gSDK->AddAfterSwapObject(object);
+        for (const auto& entry : externalMutationIds) {
+            if (deletedExternalUuids.find(entry.first) != deletedExternalUuids.end()) {
+                continue;
+            }
+            const auto finalHandle = externalFinalHandles.find(entry.first);
+            if (finalHandle == externalFinalHandles.end() || !finalHandle->second) {
+                throw std::runtime_error(
+                    "external mutation target lost its final handle before commit");
+            }
+            transaction.TrackExternalAfter(entry.second, finalHandle->second);
         }
-        for (const auto& entry : externalBefore) {
-            gSDK->AddAfterSwapObject(entry.first);
-        }
-        gSDK->EndUndoEvent();
+        transactionReceipt = transaction.Commit();
     } catch (...) {
-        gSDK->UndoAndRemove();
-        throw;
+        transaction.RollbackAndRethrow(std::current_exception());
     }
 
-    std::string transaction = "{\"committed\":true,\"verified\":true,\"operation_count\":";
-    transaction += std::to_string(operations.size());
-    transaction += ",\"applied_count\":";
-    transaction += std::to_string(operations.size());
-    transaction += ",\"operations\":[";
+    std::string transactionJson = "{\"committed\":true,\"verified\":true,\"operation_count\":";
+    transactionJson += std::to_string(operations.size());
+    transactionJson += ",\"applied_count\":";
+    transactionJson += std::to_string(operations.size());
+    transactionJson += ",\"operations\":[";
     for (std::size_t index = 0; index < operationResults.size(); ++index) {
         if (index != 0u) {
-            transaction += ",";
+            transactionJson += ",";
         }
-        transaction += operationResults[index];
+        transactionJson += operationResults[index];
     }
-    transaction += "],\"created\":";
+    transactionJson += "],\"created\":";
     // apply_operations already returns one receipt per wire operation. Keep
     // its created summary handle-based so the fast path does not perform
     // duplicate UUID, color, class, bounds, and object snapshot queries.
-    transaction += CompactCreatedPrimitiveListJson(created);
-    transaction += ",\"changed\":[";
+    transactionJson += CompactCreatedPrimitiveListJson(created);
+    transactionJson += ",\"changed\":[";
     bool firstChanged = true;
     for (const auto& entry : externalBefore) {
+        if (deletedExternalUuids.find(entry.first) != deletedExternalUuids.end()) {
+            continue;
+        }
         if (!firstChanged) {
-            transaction += ",";
+            transactionJson += ",";
         }
         firstChanged = false;
-        transaction += "{\"before\":";
-        transaction += entry.second;
-        transaction += ",\"after\":";
-        transaction += ObjectJson(entry.first);
-        transaction += "}";
+        transactionJson += "{\"before\":";
+        transactionJson += entry.second;
+        transactionJson += ",\"after\":";
+        const auto finalHandle = externalFinalHandles.find(entry.first);
+        transactionJson += finalHandle == externalFinalHandles.end()
+            ? "null"
+            : ObjectJson(finalHandle->second);
+        transactionJson += "}";
     }
-    transaction += "]}";
+    transactionJson += "],\"undo_committed\":";
+    transactionJson += transactionReceipt.endUndoEventSucceeded ? "true" : "false";
+    transactionJson += "}";
 
     StoreCachedApplyOperations(
         idempotencyKey,
         ActiveDocumentIdentity(),
         operationsFingerprint,
-        transaction);
-    return WrapApplyOperationsResult(transaction, idempotencyKey, false);
+        transactionJson);
+    return WrapApplyOperationsResult(transactionJson, idempotencyKey, false);
 }
 
 std::string HandleBatchCreateObjects(const Params& params) {
@@ -2736,17 +3833,26 @@ std::string HandleBatchCreateObjects(const Params& params) {
         specs.push_back(ParsePrimitiveSpec(ParseParams(objectJson), key));
     }
 
-    gSDK->SupportUndoAndRemove();
-    gSDK->SetUndoMethod(kUndoSwapObjects);
-    gSDK->NameUndoEvent(TXString("Vectorworks MCP atomic batch create objects"));
-
     std::vector<CreatedPrimitive> created;
     created.reserve(specs.size());
+    Transactions::TransactionOptions options;
+    options.expectedArtifactCount = specs.size() * 2u;
+    options.sdkManagedRegistrationFamilies = {
+        Transactions::ObjectFamily::Space,
+        Transactions::ObjectFamily::Roof,
+        Transactions::ObjectFamily::Door,
+        Transactions::ObjectFamily::Window,
+    };
+    Transactions::NativeTransaction transaction(
+        *gSDK,
+        TXString("Vectorworks MCP atomic batch create objects"),
+        std::move(options));
     try {
         for (std::size_t index = 0; index < specs.size(); ++index) {
             std::vector<std::string> warnings;
-            MCObjectHandle object = CreatePrimitiveFromSpec(specs[index], &warnings);
-            gSDK->AddAfterSwapObject(object);
+            Transactions::ArtifactId artifact = 0;
+            MCObjectHandle object = CreatePrimitiveFromSpec(
+                specs[index], transaction, &artifact, &warnings);
             created.push_back({
                 static_cast<int>(index + 1u),
                 specs[index].objectType,
@@ -2754,12 +3860,13 @@ std::string HandleBatchCreateObjects(const Params& params) {
                 warnings,
                 specs[index].points.size(),
                 specs[index].closed,
+                gSDK->GetObjectTypeN(object),
+                true,
             });
         }
-        gSDK->EndUndoEvent();
+        transaction.Commit();
     } catch (...) {
-        gSDK->UndoAndRemove();
-        throw;
+        transaction.RollbackAndRethrow(std::current_exception());
     }
 
     std::string json = "{\"atomic\":true,\"rollback_on_error\":true,\"created_count\":";
@@ -2778,6 +3885,29 @@ Protocol::ResponseEnvelope DispatchCadRequestOnVectorworksMainContext(const Prot
         const Params params = ParseParams(request.paramsJson);
         if (request.action == "get_document_info") {
             return {request.id, true, HandleGetDocumentInfo(), ""};
+        }
+        if (request.action == "describe_parametric_schema") {
+            return {request.id, true, HandleDescribeParametricSchema(params), ""};
+        }
+        if (request.action == "export_image" || request.action == "capture_view" ||
+            request.action == "export_pdf" || request.action == "export_vectorworks_document" ||
+            request.action == "import_dwg" || request.action == "export_dwg") {
+            return {request.id, true, HandleNativeIO(request.action, params), ""};
+        }
+        if (request.action == "resources") {
+            return {request.id, true, HandleResources(params), ""};
+        }
+        if (request.action == "symbol") {
+            return {request.id, true, HandleSymbol(params), ""};
+        }
+        if (request.action == "worksheet") {
+            return {request.id, true, HandleWorksheet(params), ""};
+        }
+        if (request.action == "get_view" || request.action == "set_view") {
+            return {request.id, true, HandleView(request.action, params), ""};
+        }
+        if (request.action == "save_document" || request.action == "open_document") {
+            return {request.id, true, HandleDocumentLifecycle(request.action, params), ""};
         }
         if (request.action == "get_layers") {
             return {request.id, true, HandleGetLayers(), ""};
@@ -2819,6 +3949,19 @@ Protocol::ResponseEnvelope DispatchCadRequestOnVectorworksMainContext(const Prot
             return {request.id, true, HandleManageClasses(params), ""};
         }
         return {request.id, false, "", "unknown native bridge CAD action: " + request.action};
+    } catch (const ViewDocument::Error& exc) {
+        std::string error = "{\"code\":";
+        const bool unknown = exc.State() == ViewDocument::CommitState::Unknown;
+        error += JsonString(unknown
+            ? "unknown_commit_state"
+            : ViewDocument::ErrorCodeName(exc.Code()));
+        error += ",\"message\":" + JsonString(exc.what());
+        error += ",\"requested_path\":" + JsonString(exc.RequestedPath());
+        error += ",\"active_path\":" + JsonString(exc.ActivePath());
+        error += ",\"commit_state\":" +
+            JsonString(ViewDocument::CommitStateName(exc.State()));
+        error += ",\"retryable\":false}";
+        return {request.id, false, "", error};
     } catch (const std::exception& exc) {
         return {request.id, false, "", exc.what()};
     } catch (...) {
@@ -2912,16 +4055,22 @@ Protocol::ResponseEnvelope DispatchFromSocketWorker(const Protocol::RequestEnvel
     if (!RequestAuthAccepted(request)) {
         return {request.id, false, "", "native bridge authentication failed"};
     }
+    const ActionSpec* actionSpec = FindActionSpec(request.action);
+    if (actionSpec == nullptr) {
+        return {request.id, false, "", "unknown native bridge action: " + request.action};
+    }
     if (request.action == "ping") {
         return HandlePingOnTransportThread(request);
+    }
+    if (request.action == "capabilities") {
+        return HandleCapabilitiesOnTransportThread(request);
     }
     if (request.action == "stop") {
         gStopRequested.store(true);
         gCadQueue.CancelAll("native bridge stop requested");
         return {request.id, true, R"("Native bridge stop requested")", ""};
     }
-    if (RequiresCadMainContext(request.action)) {
-        const ActionSpec* actionSpec = FindActionSpec(request.action);
+    if (actionSpec->context == ExecutionContext::VectorworksMainPluginContext) {
         if (!CadHandlersRuntimeReady()) {
 #if VECTORWORKS_MCP_HAS_SDK
             return {
@@ -2944,9 +4093,9 @@ Protocol::ResponseEnvelope DispatchFromSocketWorker(const Protocol::RequestEnvel
         return gCadQueue.WaitForResponseOnSocketThread(
             request.id,
             kCadRequestTimeout,
-            actionSpec != nullptr && actionSpec->mayWriteDocument);
+            actionSpec->mayWriteDocument);
     }
-    return {request.id, false, "", "unknown native bridge action: " + request.action};
+    return {request.id, false, "", "native bridge action has no transport handler: " + request.action};
 }
 
 bool StopRequested() {
