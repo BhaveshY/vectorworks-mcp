@@ -277,6 +277,10 @@ void ClearDeferredDocumentOpen() {
     std::lock_guard<std::mutex> lock(gDeferredDocumentOpenMutex);
     gDeferredDocumentOpen.reset();
 }
+#else
+void MarkDeferredDocumentOpenResponseSent(
+    const Protocol::RequestEnvelope&,
+    const Protocol::ResponseEnvelope&) {}
 #endif
 
 bool CadHandlersRuntimeReady() {
@@ -4203,7 +4207,7 @@ void OnPluginLoadStartTransport() {
         return;
     }
 #endif
-    if (!StartMainContextPump()) {
+    if (!StartMainContextPump() && kCadHandlersImplemented) {
         AppendTransportStartupDiagnostic(
             "pump_failed",
             "Vectorworks main-context timer window could not be created");

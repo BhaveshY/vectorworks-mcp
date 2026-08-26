@@ -167,6 +167,12 @@ class NativeAuthoritativeCapabilitiesContractTests(unittest.TestCase):
         self.assertIn("LaunchPreparedOpenDocument", deferred)
         self.assertNotIn("gTransport.Stop()", deferred)
         self.assertIn("ResponseSentCallback", transport_header)
+        self.assertRegex(
+            bridge,
+            r"#else\s+void MarkDeferredDocumentOpenResponseSent\(\s*"
+            r"const Protocol::RequestEnvelope&,\s*"
+            r"const Protocol::ResponseEnvelope&\) \{\}",
+        )
         callback_start = transport_source.index("if (responseSentCallback_)")
         write_start = transport_source.rfind("WriteFrame", 0, callback_start)
         self.assertGreater(callback_start, write_start)

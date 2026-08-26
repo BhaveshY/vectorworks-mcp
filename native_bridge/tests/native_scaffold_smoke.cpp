@@ -268,9 +268,10 @@ void TestDispatcherMetadata() {
     RequireContains(capabilityJson, R"("capability_fingerprint":)", "capability fingerprint missing");
     RequireContains(capabilityJson, R"("descriptors":[)", "capability descriptors missing");
     RequireContains(capabilityJson, R"("execution_context":"vectorworks_main_plugin_context")", "CAD execution context missing");
-    RequireContains(capabilityJson, R"("object_kind":"slab","semantic_node_type":"kSlabNode")", "slab semantic capability missing");
-    RequireContains(capabilityJson, R"("object_kind":"roof","semantic_node_type":"kRoofContainerNode")", "roof semantic capability missing");
-    RequireContains(capabilityJson, R"("object_kind":"space","semantic_node_type":"kParametricNode","verifier":"ISpaceObjectSupport NetPoly/GrossPoly geometry plus area readback")", "verified Space capability missing");
+    RequireContains(capabilityJson, R"("object_kind":"slab","canonical_object_kind":"slab","is_alias":false,"semantic_node_type":"kSlabNode")", "slab semantic capability missing");
+    RequireContains(capabilityJson, R"("object_kind":"roof","canonical_object_kind":"roof","is_alias":false,"semantic_node_type":"kRoofContainerNode")", "roof semantic capability missing");
+    RequireContains(capabilityJson, R"("object_kind":"space","canonical_object_kind":"space","is_alias":false,"semantic_node_type":"kParametricNode")", "Space semantic capability missing");
+    RequireContains(capabilityJson, R"("verifier":"ISpaceObjectSupport NetPoly/GrossPoly geometry, name, room id, height, and area readback")", "verified Space capability missing");
     RequireContains(CreateObjectTypesJson(true), R"("slab")", "SDK object types should advertise slab");
     RequireContains(CreateObjectTypesJson(true), R"("roof")", "SDK object types should advertise roof");
     RequireContains(CreateObjectTypesJson(true), R"("space")", "SDK object types should advertise Space");
