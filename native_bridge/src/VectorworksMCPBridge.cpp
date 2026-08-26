@@ -8,6 +8,7 @@
 #include "ViewDocumentHandlers.hpp"
 
 #if defined(SDK_VERSION)
+#include "Interfaces/VectorWorks/Extension/ISpaceObjectSupport.h"
 #include "BimObjectHandlers.hpp"
 #include "NativeObjectFactory.hpp"
 #include "NativeTransaction.hpp"
@@ -1040,7 +1041,25 @@ std::string ObjectTypeName(short type) {
     }
 }
 
-bool MatchesObjectType(short actualType, std::string requestedType) {
+bool IsSpaceObject(MCObjectHandle object) {
+    if (!object || gSDK->GetObjectTypeN(object) != kParametricNode) {
+        return false;
+    }
+    try {
+        VWFC::VWObjects::VWParametricObj parametric(object);
+        return TxToUtf8(parametric.GetParametricName()) == "Space";
+    } catch (...) {
+        return false;
+    }
+}
+
+std::string SemanticObjectTypeName(MCObjectHandle object) {
+    return IsSpaceObject(object)
+        ? "space"
+        : ObjectTypeName(gSDK->GetObjectTypeN(object));
+}
+
+bool MatchesObjectType(MCObjectHandle object, std::string requestedType) {
     requestedType = ToLower(requestedType);
     if (requestedType.empty()) {
         return true;
@@ -1050,7 +1069,10 @@ bool MatchesObjectType(short actualType, std::string requestedType) {
     } else if (requestedType == "linear_dimension") {
         requestedType = "dimension";
     }
-    return ObjectTypeName(actualType) == requestedType;
+    if (requestedType == "space") {
+        return IsSpaceObject(object);
+    }
+    return ObjectTypeName(gSDK->GetObjectTypeN(object)) == requestedType;
 }
 
 bool IsUserVisibleObjectType(short type) {
@@ -1090,6 +1112,7 @@ std::string RgbStringFromColorRef(ColorRef colorRef) {
 
 std::string ObjectJson(MCObjectHandle object) {
     const short type = gSDK->GetObjectTypeN(object);
+    const bool isSpace = IsSpaceObject(object);
     TXString name;
     gSDK->GetObjectName(object, name);
 
@@ -1101,11 +1124,32 @@ std::string ObjectJson(MCObjectHandle object) {
         json += JsonString(uuid);
     }
     json += ",\"type\":";
-    json += JsonString(ObjectTypeName(type));
+    json += JsonString(isSpace ? "space" : ObjectTypeName(type));
     json += ",\"type_id\":";
     json += std::to_string(static_cast<int>(type));
+    if (isSpace) {
+        json += ",\"native_type\":\"parametric\",\"plugin_name\":\"Space\"";
+    }
     json += ",\"name\":";
     json += JsonString(TxToUtf8(name));
+
+    if (isSpace) {
+        VWFC::VWObjects::VWParametricObj parametric(object);
+        json += ",\"room_id\":";
+        json += JsonString(TxToUtf8(parametric.GetParamString(TXString("11_Room ID"))));
+        json += ",\"height\":";
+        json += JsonNumber(parametric.GetParamReal(TXString("11_Net Height")));
+        VCOMPtr<VectorWorks::Extension::ISpaceObjectSupport> support(
+            VectorWorks::Extension::IID_VCOMSpace);
+        WorldCoord netArea = 0.0;
+        WorldCoord grossArea = 0.0;
+        if (support && support->NetArea(object, netArea) && support->GrossArea(object, grossArea)) {
+            json += ",\"net_area\":";
+            json += JsonNumber(static_cast<double>(netArea));
+            json += ",\"gross_area\":";
+            json += JsonNumber(static_cast<double>(grossArea));
+        }
+    }
 
     const auto layerName = LayerNameForObject(object);
     if (!layerName.empty()) {
@@ -1305,7 +1349,7 @@ void CollectObjectsInLayer(
         if (!IsUserVisibleObjectType(type)) {
             continue;
         }
-        if (MatchesObjectType(type, objectType)) {
+        if (MatchesObjectType(object, objectType)) {
             outObjects.push_back(object);
         }
     }
@@ -1368,7 +1412,7 @@ std::string HandleDrawingSummary(const Params& params) {
              object && gSDK->GetObjectTypeN(object) != kTermNode;
              object = gSDK->NextObject(object)) {
             const short type = gSDK->GetObjectTypeN(object);
-            if (!IsUserVisibleObjectType(type) || !MatchesObjectType(type, objectTypeFilter)) {
+            if (!IsUserVisibleObjectType(type) || !MatchesObjectType(object, objectTypeFilter)) {
                 continue;
             }
             if (scanned >= scanLimit) {
@@ -1376,7 +1420,7 @@ std::string HandleDrawingSummary(const Params& params) {
                 break;
             }
             ++scanned;
-            const std::string objectType = ObjectTypeName(type);
+            const std::string objectType = SemanticObjectTypeName(object);
             ++byType[objectType];
             ++byLayer[layerName.empty() ? "unknown" : layerName];
             ++byLayerType[layerName.empty() ? "unknown" : layerName][objectType];
@@ -1528,7 +1572,7 @@ std::string HandleFindObjects(const Params& params) {
         if (!layer.empty() && LayerNameForObject(object) != layer) {
             continue;
         }
-        if (!objectType.empty() && !MatchesObjectType(gSDK->GetObjectTypeN(object), objectType)) {
+        if (!objectType.empty() && !MatchesObjectType(object, objectType)) {
             continue;
         }
         filtered.push_back(object);

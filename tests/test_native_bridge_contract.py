@@ -615,6 +615,22 @@ class NativeBridgeContractTests(unittest.TestCase):
         self.assertIn('requestedType == "linear_dimension"', matches_block)
         self.assertIn('requestedType = "dimension"', matches_block)
 
+    def test_native_space_filter_and_readback_are_semantic(self):
+        source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
+        filter_block = source[source.index("bool IsSpaceObject"):source.index("bool IsUserVisibleObjectType")]
+        object_json = source[source.index("std::string ObjectJson"):source.index("std::string ObjectListJson")]
+
+        self.assertIn('parametric.GetParametricName()) == "Space"', filter_block)
+        self.assertIn('requestedType == "space"', filter_block)
+        self.assertIn("return IsSpaceObject(object)", filter_block)
+        self.assertIn(r'\"native_type\":\"parametric\",\"plugin_name\":\"Space\"', object_json)
+        self.assertIn('GetParamString(TXString("11_Room ID"))', object_json)
+        self.assertIn('GetParamReal(TXString("11_Net Height"))', object_json)
+        self.assertIn("support->NetArea(object, netArea)", object_json)
+        self.assertIn("support->GrossArea(object, grossArea)", object_json)
+        self.assertIn(r'\"net_area\"', object_json)
+        self.assertIn(r'\"gross_area\"', object_json)
+
     def test_native_set_property_is_advertised_allowlisted_and_dispatched(self):
         bridge_source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
         registry_source = (ROOT / "native_bridge" / "src" / "CapabilityRegistry.cpp").read_text(encoding="utf-8")
