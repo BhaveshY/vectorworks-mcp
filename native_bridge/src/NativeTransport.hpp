@@ -18,6 +18,9 @@ struct NativeTransportOptions {
 class NativeTransport {
 public:
     using Dispatcher = std::function<Protocol::ResponseEnvelope(const Protocol::RequestEnvelope&)>;
+    using ResponseSentCallback = std::function<void(
+        const Protocol::RequestEnvelope&,
+        const Protocol::ResponseEnvelope&)>;
 
     NativeTransport();
     ~NativeTransport();
@@ -25,7 +28,10 @@ public:
     NativeTransport(const NativeTransport&) = delete;
     NativeTransport& operator=(const NativeTransport&) = delete;
 
-    void Start(const NativeTransportOptions& options, Dispatcher dispatcher);
+    void Start(
+        const NativeTransportOptions& options,
+        Dispatcher dispatcher,
+        ResponseSentCallback responseSentCallback = {});
     void RequestStop();
     void Stop();
 

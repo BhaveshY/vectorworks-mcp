@@ -226,7 +226,7 @@ class ListenerProtocolTests(unittest.TestCase):
         self.assertFalse(delete_selection["success"])
         self.assertIn("confirm", delete_selection["error"])
         self.assertFalse(inspect_plugin["success"])
-        self.assertIn("confirm", inspect_plugin["error"])
+        self.assertIn("probing is disabled", inspect_plugin["error"])
 
     def test_raw_selection_delete_rejects_arbitrary_criteria(self):
         listener, _alerts = self.load_listener()
@@ -493,16 +493,14 @@ class ListenerProtocolTests(unittest.TestCase):
         self.assertTrue(any(call[0] == "SetFillFore" and call[2] == (1, 2, 3) for call in fake_vs.calls))
 
         export = listener.handle_export({"format": "pdf", "file_path": "C:\\Temp\\out.pdf"})
-        self.assertTrue(export["success"])
-        self.assertTrue(export["result"]["requires_user_save"])
-        self.assertFalse(export["result"]["saved"])
-        self.assertIn(("DoMenuTextByName", "Export PDF", 0), fake_vs.calls)
+        self.assertFalse(export["success"])
+        self.assertIn("compatibility export is disabled", export["error"])
+        self.assertNotIn(("DoMenuTextByName", "Export PDF", 0), fake_vs.calls)
 
         screenshot = listener.handle_screenshot({"file_path": "C:\\Temp\\view.png"})
-        self.assertTrue(screenshot["success"])
-        self.assertTrue(screenshot["result"]["requires_user_save"])
-        self.assertFalse(screenshot["result"]["saved"])
-        self.assertIn(("DoMenuTextByName", "Export Image File", 0), fake_vs.calls)
+        self.assertFalse(screenshot["success"])
+        self.assertIn("compatibility screenshot is disabled", screenshot["error"])
+        self.assertNotIn(("DoMenuTextByName", "Export Image File", 0), fake_vs.calls)
 
     def test_default_autostart_mode_is_dialog(self):
         listener, _alerts = self.load_listener()

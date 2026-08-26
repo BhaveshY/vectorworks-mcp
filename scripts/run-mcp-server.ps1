@@ -82,7 +82,10 @@ function Protect-AuthTokenFile {
         $Acl.SetOwner($Identity.User)
         $Acl.SetAccessRuleProtection($true, $false)
         $Acl.AddAccessRule($Rule)
-        Set-Acl -LiteralPath $ResolvedPath -AclObject $Acl
+        # Use the framework API directly. PowerShell processes spawned by
+        # Python can inherit a module environment where built-in cmdlet
+        # autoloading is unavailable (notably from the Codex desktop app).
+        [System.IO.File]::SetAccessControl($ResolvedPath, $Acl)
     } catch {
         return
     }
@@ -90,16 +93,40 @@ function Protect-AuthTokenFile {
 
 function Get-HostPythonCommand {
     $Py = Get-Command py -ErrorAction SilentlyContinue
-    if ($Py) {
+    if ($Py -and (Test-HostPythonCandidate -Path $Py.Source -PrefixArgs @("-3"))) {
         return @{ Command = $Py.Source; Args = @("-3") }
     }
 
     $Python = Get-Command python -ErrorAction SilentlyContinue
-    if ($Python) {
+    if ($Python -and (Test-HostPythonCandidate -Path $Python.Source)) {
         return @{ Command = $Python.Source; Args = @() }
     }
 
     throw "Python 3 was not found. Install Python 3.10+ and rerun setup. See $LogPath"
+}
+
+function Test-HostPythonCandidate {
+    param(
+        [string]$Path,
+        [string[]]$PrefixArgs = @()
+    )
+
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $false
+    }
+
+    $OldErrorActionPreference = $ErrorActionPreference
+    try {
+        # Ignore nonfunctional Windows Store app-execution aliases. They are
+        # discoverable through Get-Command but cannot create the MCP venv.
+        $ErrorActionPreference = "Continue"
+        & $Path @PrefixArgs -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" *> $null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    } finally {
+        $ErrorActionPreference = $OldErrorActionPreference
+    }
 }
 
 function Test-PythonExecutable {
@@ -230,7 +257,7 @@ function Ensure-AuthToken {
 
 function Ensure-Requirements {
     $StampPath = Join-Path $VenvDir ".requirements.sha256"
-    $RequirementsHash = (Get-FileHash -Algorithm SHA256 $RequirementsPath).Hash
+    $RequirementsHash = Get-Sha256Hex -Path $RequirementsPath
     $ExistingHash = if (Test-Path $StampPath) { Get-Content -Raw $StampPath } else { "" }
 
     if (($ExistingHash.Trim() -ne $RequirementsHash) -or (-not (Test-FastMcpImport))) {
@@ -244,6 +271,23 @@ function Ensure-Requirements {
             throw "fastmcp import failed after requirements installation. See $LogPath"
         }
         Set-Content -Path $StampPath -Value $RequirementsHash -Encoding ASCII
+    }
+}
+
+function Get-Sha256Hex {
+    param([string]$Path)
+
+    $ResolvedPath = (Resolve-Path -LiteralPath $Path).ProviderPath
+    $Stream = [System.IO.File]::OpenRead($ResolvedPath)
+    try {
+        $Sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            return ([System.BitConverter]::ToString($Sha256.ComputeHash($Stream))).Replace("-", "")
+        } finally {
+            $Sha256.Dispose()
+        }
+    } finally {
+        $Stream.Dispose()
     }
 }
 

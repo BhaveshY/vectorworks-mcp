@@ -347,9 +347,7 @@ function Get-ModuleMainLifecycleHookStatus {
         $Text = Get-Content -Raw -LiteralPath $Path
         $RequiredTokens = @(
             "VectorworksMCP::OnPluginLoadStartTransport",
-            "VectorworksMCP::OnPluginUnloadStopTransport",
             "kPluginModuleInit",
-            "kPluginModuleDeinit",
             $LifecycleHookMarker
         )
         $Missing = @()
@@ -360,6 +358,9 @@ function Get-ModuleMainLifecycleHookStatus {
         }
         if ($Text -match "else\s*\{\s*VectorworksMCP::OnVectorworksMainPluginEvent\(\);\s*\}") {
             $Missing += "remove broad OnVectorworksMainPluginEvent fallback"
+        }
+        if ($Text -match "kPluginModuleDeinit[\s\S]{0,160}OnPluginUnloadStopTransport") {
+            $Missing += "remove unsafe kPluginModuleDeinit transport stop"
         }
         $Status.missing = @($Missing)
         $Status.hooked = @($Missing).Count -eq 0
@@ -386,7 +387,6 @@ function Ensure-ModuleMainLifecycleHook {
     $Declarations = @"
 namespace VectorworksMCP {
 void OnPluginLoadStartTransport();
-void OnPluginUnloadStopTransport();
 }
 
 "@
@@ -406,8 +406,6 @@ void OnPluginUnloadStopTransport();
     // $LifecycleHookMarker.
     if (action == kPluginModuleInit) {
         VectorworksMCP::OnPluginLoadStartTransport();
-    } else if (action == kPluginModuleDeinit) {
-        VectorworksMCP::OnPluginUnloadStopTransport();
     }
 
 "@
@@ -422,6 +420,16 @@ void OnPluginUnloadStopTransport();
     $Text = [regex]::Replace(
         $Text,
         "\s*else\s*\{\s*VectorworksMCP::OnVectorworksMainPluginEvent\(\);\s*\}",
+        "",
+        1)
+    $Text = [regex]::Replace(
+        $Text,
+        "\s*else\s+if\s*\(\s*action\s*==\s*kPluginModuleDeinit\s*\)\s*\{\s*VectorworksMCP::OnPluginUnloadStopTransport\(\);\s*\}",
+        "",
+        1)
+    $Text = [regex]::Replace(
+        $Text,
+        "\r?\nvoid\s+OnPluginUnloadStopTransport\s*\(\s*\)\s*;",
         "",
         1)
 

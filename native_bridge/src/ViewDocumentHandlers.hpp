@@ -18,6 +18,7 @@ enum class ErrorCode {
 
 enum class CommitState {
     NotStarted,
+    Accepted,
     Committed,
     Unknown,
 };
@@ -66,14 +67,19 @@ struct DocumentResult {
     CommitState commitState = CommitState::NotStarted;
 };
 
+struct PreparedOpenDocument {
+    std::string canonicalPath;
+};
+
 ViewState GetView();
 ViewState SetView(const SetViewRequest& request);
 DocumentResult SaveDocument(
     const std::string& absolutePath,
     const std::string& replaceExistingConfirmation);
-DocumentResult OpenDocument(
+PreparedOpenDocument PrepareOpenDocument(
     const std::string& absolutePath,
     const std::string& replaceDirtyConfirmation);
+bool LaunchPreparedOpenDocument(const PreparedOpenDocument& request);
 
 const char* ErrorCodeName(ErrorCode code) noexcept;
 const char* CommitStateName(CommitState state) noexcept;

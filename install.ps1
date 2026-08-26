@@ -216,17 +216,41 @@ function Test-PythonReady {
         (Join-ExistingBasePath $env:LOCALAPPDATA "Programs\Python\Launcher\py.exe")
     )
     if ($Py) {
-        & $Py -3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" 2>$null
-        if ($LASTEXITCODE -eq 0) { return $true }
+        if (Test-PythonCandidate -Path $Py -PrefixArgs @("-3")) { return $true }
     }
     $Python = Resolve-CommandPath -Names @("python.exe", "python") -FallbackPaths @(
         (Join-ExistingBasePath $env:LOCALAPPDATA "Programs\Python\Python312\python.exe")
     )
     if ($Python) {
-        & $Python -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" 2>$null
-        if ($LASTEXITCODE -eq 0) { return $true }
+        if (Test-PythonCandidate -Path $Python) { return $true }
     }
     return $false
+}
+
+function Test-PythonCandidate {
+    param(
+        [string]$Path,
+        [string[]]$PrefixArgs = @()
+    )
+
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $false
+    }
+
+    $OldErrorActionPreference = $ErrorActionPreference
+    try {
+        # Windows app-execution aliases look like real executables to
+        # Get-Command, but invoking the Python Store shim can emit a native
+        # command error. Probe candidates quietly so a broken shim causes the
+        # normal winget install path instead of aborting the installer.
+        $ErrorActionPreference = "Continue"
+        & $Path @PrefixArgs -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" *> $null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    } finally {
+        $ErrorActionPreference = $OldErrorActionPreference
+    }
 }
 
 function Add-DependencyCheck {

@@ -13,6 +13,8 @@ class ResourceWorksheetHandlersContractTests(unittest.TestCase):
 
         self.assertIn("sdk.ForEachObjectN(allSymbolDefs, collect)", source)
         self.assertIn("sdk.PlaceSymbolN(", source)
+        self.assertIn("sdk.AddObjectToContainer(symbol, layer)", source)
+        self.assertIn("sdk.ParentObject(symbol) != layer", source)
         self.assertIn("sdk.GetDefinition(symbol)", source)
         self.assertIn("actualNodeType != kSymbolNode", source)
         self.assertIn("kSymDefNode", source)

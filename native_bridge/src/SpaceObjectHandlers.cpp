@@ -242,8 +242,17 @@ SpaceCreateReceipt CreateVerifiedSpace(
     profileGuard.Release();
 
     MCObjectHandle space = support->Create(profile, spec.height);
-    if (!space || gSDK->GetObjectTypeN(space) != kParametricNode) {
-        throw std::runtime_error("Vectorworks did not create a true Space object");
+    if (!space) {
+        throw std::runtime_error(
+            "Vectorworks Space support returned no object for the validated polygon profile");
+    }
+    const short createdNodeType = gSDK->GetObjectTypeN(space);
+    if (createdNodeType != kParametricNode) {
+        throw std::runtime_error(
+            "Vectorworks Space support returned node type " +
+            std::to_string(createdNodeType) +
+            " instead of the required parametric Space node type " +
+            std::to_string(kParametricNode));
     }
     CreatedObjectGuard spaceGuard(space);
     const auto artifact = transaction.AdoptFinal(

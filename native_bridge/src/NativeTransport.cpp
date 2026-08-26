@@ -229,7 +229,10 @@ public:
         Stop();
     }
 
-    void Start(const NativeTransportOptions& options, Dispatcher dispatcher) {
+    void Start(
+        const NativeTransportOptions& options,
+        Dispatcher dispatcher,
+        ResponseSentCallback responseSentCallback) {
         if (!dispatcher) {
             throw std::invalid_argument("native transport dispatcher is required");
         }
@@ -257,6 +260,7 @@ public:
         }
 
         dispatcher_ = std::move(dispatcher);
+        responseSentCallback_ = std::move(responseSentCallback);
         maxClients_ = options.maxClients < 1 ? 1 : options.maxClients;
         clientIdleSeconds_ = options.clientIdleSeconds < 30 ? 30 : options.clientIdleSeconds;
         stopRequested_.store(false);
@@ -370,6 +374,13 @@ private:
                     if (!WriteFrame(client, Protocol::SerializeResponseEnvelope(response))) {
                         break;
                     }
+                    if (responseSentCallback_) {
+                        try {
+                            responseSentCallback_(request, response);
+                        } catch (...) {
+                            SetLastError("native transport response-sent callback failed");
+                        }
+                    }
                 } catch (const std::exception& error) {
                     auto response = ErrorResponse("", error);
                     if (!WriteFrame(client, Protocol::SerializeResponseEnvelope(response))) {
@@ -407,6 +418,7 @@ private:
 
     mutable std::mutex mutex_;
     Dispatcher dispatcher_;
+    ResponseSentCallback responseSentCallback_;
     std::atomic<SocketHandle> listenSocket_{kInvalidSocket};
     std::vector<SocketHandle> clientSockets_;
     std::vector<std::thread> clientThreads_;
@@ -425,8 +437,11 @@ NativeTransport::~NativeTransport() {
     delete impl_;
 }
 
-void NativeTransport::Start(const NativeTransportOptions& options, Dispatcher dispatcher) {
-    impl_->Start(options, std::move(dispatcher));
+void NativeTransport::Start(
+    const NativeTransportOptions& options,
+    Dispatcher dispatcher,
+    ResponseSentCallback responseSentCallback) {
+    impl_->Start(options, std::move(dispatcher), std::move(responseSentCallback));
 }
 
 void NativeTransport::RequestStop() {

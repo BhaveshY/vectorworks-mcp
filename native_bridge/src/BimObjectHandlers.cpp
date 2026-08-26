@@ -1,6 +1,7 @@
 #include "StdAfx.h"
 
 #include "BimObjectHandlers.hpp"
+#include "ParametricObjectAdapter.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -15,6 +16,7 @@ constexpr std::size_t kMinProfileVertices = 3;
 constexpr std::size_t kMaxProfileVertices = 1024;
 constexpr long double kGeometryEpsilon = 1.0e-9L;
 constexpr double kMaxRoofSlopeDegrees = 89.0;
+constexpr const char* kSlabUniversalPluginName = "Slab";
 
 class CreatedObjectGuard {
 public:
@@ -38,6 +40,20 @@ private:
     VectorWorks::ISDK& sdk_;
     MCObjectHandle handle_;
 };
+
+bool IsTrueSlabObject(VectorWorks::ISDK& sdk, MCObjectHandle object) {
+    if (!object) {
+        return false;
+    }
+    const short nodeType = sdk.GetObjectTypeN(object);
+    if (nodeType == kSlabNode) {
+        return true;
+    }
+    if (nodeType != kParametricNode) {
+        return false;
+    }
+    return DescribeParametricObject(object).universalPluginName == kSlabUniversalPluginName;
+}
 
 bool SamePoint(const ProfilePoint& left, const ProfilePoint& right) {
     return left.x == right.x && left.y == right.y;
@@ -212,7 +228,7 @@ std::pair<double, double> VerifySlabSemantics(
     VectorWorks::ISDK& sdk,
     MCObjectHandle slab,
     const SlabRequest& request) {
-    if (!slab || sdk.GetObjectTypeN(slab) != kSlabNode) {
+    if (!IsTrueSlabObject(sdk, slab)) {
         throw std::runtime_error("Vectorworks slab is no longer a true Slab object");
     }
     short componentCount = 0;
@@ -308,13 +324,21 @@ CreationReceipt CreateTrueSlab(
         throw std::runtime_error("Vectorworks CreateSlab rejected the validated polygon profile");
     }
     CreatedObjectGuard slabGuard(sdk, slab);
-    if (sdk.GetObjectTypeN(slab) != kSlabNode) {
-        throw std::runtime_error("Vectorworks did not create a true Slab object");
+    const short createdNodeType = sdk.GetObjectTypeN(slab);
+    if (!IsTrueSlabObject(sdk, slab)) {
+        std::string parametricIdentity;
+        if (createdNodeType == kParametricNode) {
+            parametricIdentity =
+                ", universal plugin " + DescribeParametricObject(slab).universalPluginName;
+        }
+        throw std::runtime_error(
+            "Vectorworks CreateSlab returned node type " + std::to_string(createdNodeType) +
+            parametricIdentity + " instead of a genuine Slab object");
     }
     const auto artifact = transaction.AdoptFinal(
         slab,
         Transactions::ObjectFamily::Slab,
-        kSlabNode,
+        createdNodeType,
         [&sdk, request](MCObjectHandle object) {
             (void) VerifySlabSemantics(sdk, object, request);
         });
@@ -343,7 +367,7 @@ CreationReceipt CreateTrueSlab(
     CreationReceipt receipt = VerifiedReceipt(
         sdk,
         slab,
-        kSlabNode,
+        createdNodeType,
         SemanticNodeKind::Slab,
         boundary.size(),
         reversed);

@@ -93,7 +93,10 @@ function Protect-AuthTokenFile {
         $Acl.SetOwner($Identity.User)
         $Acl.SetAccessRuleProtection($true, $false)
         $Acl.AddAccessRule($Rule)
-        Set-Acl -LiteralPath $ResolvedPath -AclObject $Acl
+        # Avoid reliance on PowerShell module autoloading. Codex launches this
+        # script through a Python-managed environment where Set-Acl may not be
+        # discoverable even though the framework ACL APIs are available.
+        [System.IO.File]::SetAccessControl($ResolvedPath, $Acl)
     } catch {
         return
     }

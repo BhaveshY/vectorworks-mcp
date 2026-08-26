@@ -212,6 +212,39 @@ class GroupedToolSurfaceTests(unittest.TestCase):
         self.assertEqual(result["error"]["retry_policy"], "never_after_send")
         self.assertFalse(result["error"]["retryable"])
 
+    def test_document_open_confirms_deferred_native_acceptance_with_readback(self):
+        status = _native_phase_four_status()
+        status["implemented_actions"] = sorted(set(status["implemented_actions"]) | {"open_document"})
+        requested_path = r"C:\models\sample.vwx"
+        actions = []
+
+        def handler(request):
+            actions.append(request["action"])
+            if request["action"] == "ping":
+                return _response(request, status)
+            if request["action"] == "open_document":
+                return _response(
+                    request,
+                    {
+                        "operation": "open_document",
+                        "path": requested_path,
+                        "requested_path": requested_path,
+                        "active_path": "",
+                        "commit_state": "accepted",
+                    },
+                )
+            self.assertEqual(request["action"], "get_document_info")
+            return _response(request, {"filepath": requested_path, "filename": "sample.vwx"})
+
+        with FakeListener(handler, max_requests=3) as listener:
+            _configure_server(listener.port)
+            result = json.loads(server.vw_document("open", file_path=requested_path))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["data"]["commit_state"], "committed")
+        self.assertEqual(result["data"]["readback"]["filepath"], requested_path)
+        self.assertEqual(actions, ["ping", "open_document", "get_document_info"])
+
     def test_grouped_apply_is_only_an_atomic_execute_operations_adapter(self):
         native_result = json.dumps(
             {

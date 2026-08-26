@@ -30,6 +30,7 @@
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -56,8 +57,22 @@ CadRequestQueue gCadQueue;
 NativeTransport gTransport;
 std::atomic_bool gStopRequested{false};
 std::atomic_bool gCadQueuePumpActive{false};
+std::mutex gTransportStartMutex;
+std::chrono::steady_clock::time_point gNextTransportStartAttempt{};
 constexpr auto kCadRequestTimeout = std::chrono::seconds(30);
+constexpr auto kTransportStartRetryInterval = std::chrono::seconds(2);
 constexpr bool kCadHandlersImplemented = VECTORWORKS_MCP_HAS_SDK != 0;
+
+#if VECTORWORKS_MCP_HAS_SDK
+struct DeferredDocumentOpen {
+    std::string requestId;
+    ViewDocument::PreparedOpenDocument request;
+    bool responseSent = false;
+};
+
+std::mutex gDeferredDocumentOpenMutex;
+std::optional<DeferredDocumentOpen> gDeferredDocumentOpen;
+#endif
 
 class ScopedAtomicBoolReset {
 public:
@@ -104,6 +119,15 @@ HINSTANCE MainContextPumpModuleHandle() {
         return reinterpret_cast<HINSTANCE>(module);
     }
     return GetModuleHandleW(nullptr);
+}
+
+bool PinBridgeModuleForProcessLifetime() {
+    HMODULE module = nullptr;
+    return GetModuleHandleExW(
+               GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+               reinterpret_cast<LPCWSTR>(&gMainContextPumpModuleAnchor),
+               &module) != 0 &&
+        module != nullptr;
 }
 
 void UnregisterMainContextPumpWindowClass() {
@@ -205,6 +229,53 @@ void NotifyMainContextPump() {}
 
 constexpr const char* MainContextPumpName() {
     return "unavailable";
+}
+#endif
+
+#if VECTORWORKS_MCP_HAS_SDK
+void StageDeferredDocumentOpen(
+    const std::string& requestId,
+    ViewDocument::PreparedOpenDocument request) {
+    std::lock_guard<std::mutex> lock(gDeferredDocumentOpenMutex);
+    if (gDeferredDocumentOpen) {
+        throw std::runtime_error("another document open is already pending");
+    }
+    gDeferredDocumentOpen = DeferredDocumentOpen{
+        requestId,
+        std::move(request),
+        false,
+    };
+}
+
+void MarkDeferredDocumentOpenResponseSent(
+    const Protocol::RequestEnvelope& request,
+    const Protocol::ResponseEnvelope& response) {
+    if (request.action != "open_document" || !response.success) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(gDeferredDocumentOpenMutex);
+        if (!gDeferredDocumentOpen || gDeferredDocumentOpen->requestId != request.id) {
+            return;
+        }
+        gDeferredDocumentOpen->responseSent = true;
+    }
+    NotifyMainContextPump();
+}
+
+std::optional<ViewDocument::PreparedOpenDocument> TakeReadyDeferredDocumentOpen() {
+    std::lock_guard<std::mutex> lock(gDeferredDocumentOpenMutex);
+    if (!gDeferredDocumentOpen || !gDeferredDocumentOpen->responseSent) {
+        return std::nullopt;
+    }
+    auto request = std::move(gDeferredDocumentOpen->request);
+    gDeferredDocumentOpen.reset();
+    return request;
+}
+
+void ClearDeferredDocumentOpen() {
+    std::lock_guard<std::mutex> lock(gDeferredDocumentOpenMutex);
+    gDeferredDocumentOpen.reset();
 }
 #endif
 
@@ -766,6 +837,27 @@ NativeTransportOptions GetTransportOptionsFromEnvironment() {
         }
     }
     return options;
+}
+
+void AppendTransportStartupDiagnostic(
+    const std::string& state,
+    const std::string& detail) noexcept {
+    try {
+        const char* userProfile = std::getenv("USERPROFILE");
+        if (!userProfile || userProfile[0] == '\0') {
+            return;
+        }
+        std::string path = userProfile;
+        if (!path.empty() && path.back() != '\\' && path.back() != '/') {
+            path += "\\";
+        }
+        path += ".vectorworks-mcp\\native-bridge-startup.log";
+        std::ofstream output(path, std::ios::app);
+        if (output) {
+            output << state << ": " << detail << '\n';
+        }
+    } catch (...) {
+    }
 }
 
 std::string RequiredAuthTokenFromEnvironment() {
@@ -1946,21 +2038,42 @@ std::string HandleSymbol(const Params& params) {
         request.x = GetFiniteNumberParam(params, "x", 0.0);
         request.y = GetFiniteNumberParam(params, "y", 0.0);
         request.rotationDegrees = GetFiniteNumberParam(params, "rotation_deg", 0.0);
-        gSDK->SupportUndoAndRemove();
-        gSDK->SetUndoMethod(kUndoSwapObjects);
-        gSDK->NameUndoEvent(TXString("Vectorworks MCP insert symbol"));
+        Transactions::TransactionOptions options;
+        options.expectedArtifactCount = 1u;
+        options.sdkManagedRegistrationFamilies = {Transactions::ObjectFamily::Symbol};
+        Transactions::NativeTransaction transaction(
+            *gSDK,
+            TXString("Vectorworks MCP insert symbol"),
+            std::move(options));
         try {
             const auto receipt = ResourceWorksheets::InsertSymbol(*gSDK, request);
-            if (!gSDK->AddAfterSwapObject(receipt.handle)) {
-                throw std::runtime_error("Vectorworks failed to register the inserted symbol with undo");
-            }
-            EndUndoEventOrThrow("symbol insertion");
+            UnregisteredCreatedObjectGuard guard(receipt.handle);
+            const auto artifact = transaction.AdoptFinal(
+                receipt.handle,
+                Transactions::ObjectFamily::Symbol,
+                kSymbolNode,
+                [definitionName = receipt.definitionName](MCObjectHandle verifiedSymbol) {
+                    if (!verifiedSymbol || gSDK->GetObjectTypeN(verifiedSymbol) != kSymbolNode) {
+                        throw std::runtime_error("inserted symbol changed native node type before commit");
+                    }
+                    MCObjectHandle definition = gSDK->GetDefinition(verifiedSymbol);
+                    TXString actualName;
+                    if (definition) {
+                        gSDK->GetObjectName(definition, actualName);
+                    }
+                    if (!definition || gSDK->GetObjectTypeN(definition) != kSymDefNode ||
+                        TxToUtf8(actualName) != definitionName) {
+                        throw std::runtime_error("inserted symbol lost its exact definition before commit");
+                    }
+                });
+            (void) artifact;
+            guard.Release();
+            transaction.Commit();
             return "{\"inserted\":true,\"definition_name\":" + JsonString(receipt.definitionName) +
                 ",\"native_node_type\":" + std::to_string(receipt.actualNodeType) +
                 ",\"object\":" + ObjectJson(receipt.handle) + "}";
         } catch (...) {
-            gSDK->UndoAndRemove();
-            throw;
+            transaction.RollbackAndRethrow(std::current_exception());
         }
     }
     throw std::invalid_argument("symbol.action must be list or insert");
@@ -2049,14 +2162,27 @@ std::string HandleView(const std::string& action, const Params& params) {
     return ViewStateJson(ViewDocument::SetView(request));
 }
 
-std::string HandleDocumentLifecycle(const std::string& action, const Params& params) {
+std::string HandleDocumentLifecycle(
+    const std::string& action,
+    const Params& params,
+    const std::string& requestId) {
     ViewDocument::DocumentResult result;
     if (action == "save_document") {
         result = ViewDocument::SaveDocument(
             GetStringParam(params, "file_path"), GetStringParam(params, "replace_confirmation"));
     } else if (action == "open_document") {
-        result = ViewDocument::OpenDocument(
+        auto prepared = ViewDocument::PrepareOpenDocument(
             GetStringParam(params, "file_path"), GetStringParam(params, "replace_dirty_confirmation"));
+        const std::string requestedPath = prepared.canonicalPath;
+        StageDeferredDocumentOpen(requestId, std::move(prepared));
+        result = {
+            "open_document",
+            requestedPath,
+            false,
+            requestedPath,
+            "",
+            ViewDocument::CommitState::Accepted,
+        };
     } else {
         throw std::invalid_argument("unsupported document lifecycle action: " + action);
     }
@@ -2630,7 +2756,11 @@ MCObjectHandle CreatePrimitiveFromSpec(
         }
         adoptedArtifact = transaction.AdoptFinal(
             object,
-            Transactions::ObjectFamily::Simple,
+            spec.objectType == "parametric"
+                ? Transactions::ObjectFamily::Parametric
+                : spec.objectType == "symbol"
+                    ? Transactions::ObjectFamily::Symbol
+                    : Transactions::ObjectFamily::Simple,
             expectedNodeType,
             std::move(verifier));
         unregisteredGuard.Release();
@@ -2677,6 +2807,34 @@ std::string CreatedPrimitiveJson(const CreatedPrimitive& created) {
     json += ObjectJson(created.handle);
     json += "}";
     return json;
+}
+
+Transactions::ObjectFamily ExternalMutationFamily(MCObjectHandle object) {
+    if (!object || !gSDK) {
+        return Transactions::ObjectFamily::Simple;
+    }
+    const short nodeType = gSDK->GetObjectTypeN(object);
+    if (nodeType == kSlabNode) {
+        return Transactions::ObjectFamily::Slab;
+    }
+    if (nodeType == kRoofContainerNode) {
+        return Transactions::ObjectFamily::Roof;
+    }
+    if (nodeType != kParametricNode) {
+        return Transactions::ObjectFamily::Simple;
+    }
+    try {
+        const std::string plugin = DescribeParametricObject(object).universalPluginName;
+        if (plugin == "Space") return Transactions::ObjectFamily::Space;
+        if (plugin == "Slab") return Transactions::ObjectFamily::Slab;
+        if (plugin == "Door") return Transactions::ObjectFamily::Door;
+        if (plugin == "Window") return Transactions::ObjectFamily::Window;
+        return Transactions::ObjectFamily::Parametric;
+    } catch (...) {
+        // An unclassifiable parametric object must retain strict explicit
+        // after-state registration instead of inheriting compound BIM policy.
+    }
+    return Transactions::ObjectFamily::Simple;
 }
 
 std::string CreatedPrimitiveListJson(const std::vector<CreatedPrimitive>& created) {
@@ -2730,7 +2888,10 @@ std::string HandleCreateTypedObject(const Params& params, const std::string& lab
     Transactions::TransactionOptions options;
     options.expectedArtifactCount = 2u;
     options.sdkManagedRegistrationFamilies = {
+        Transactions::ObjectFamily::Symbol,
+        Transactions::ObjectFamily::Parametric,
         Transactions::ObjectFamily::Space,
+        Transactions::ObjectFamily::Slab,
         Transactions::ObjectFamily::Roof,
         Transactions::ObjectFamily::Door,
         Transactions::ObjectFamily::Window,
@@ -3524,7 +3685,10 @@ std::string HandleApplyOperations(const Params& params) {
     Transactions::TransactionOptions transactionOptions;
     transactionOptions.expectedArtifactCount = operations.size() * 2u;
     transactionOptions.sdkManagedRegistrationFamilies = {
+        Transactions::ObjectFamily::Symbol,
+        Transactions::ObjectFamily::Parametric,
         Transactions::ObjectFamily::Space,
+        Transactions::ObjectFamily::Slab,
         Transactions::ObjectFamily::Roof,
         Transactions::ObjectFamily::Door,
         Transactions::ObjectFamily::Window,
@@ -3543,7 +3707,9 @@ std::string HandleApplyOperations(const Params& params) {
             if (externalMutationIds.find(uuid) == externalMutationIds.end()) {
                 externalBefore.emplace(uuid, ObjectJson(object));
                 externalFinalHandles.emplace(uuid, object);
-                externalMutationIds.emplace(uuid, transaction.TrackExternalBefore(object));
+                externalMutationIds.emplace(
+                    uuid,
+                    transaction.TrackExternalBefore(object, ExternalMutationFamily(object)));
             } else {
                 externalFinalHandles[uuid] = object;
             }
@@ -3838,7 +4004,10 @@ std::string HandleBatchCreateObjects(const Params& params) {
     Transactions::TransactionOptions options;
     options.expectedArtifactCount = specs.size() * 2u;
     options.sdkManagedRegistrationFamilies = {
+        Transactions::ObjectFamily::Symbol,
+        Transactions::ObjectFamily::Parametric,
         Transactions::ObjectFamily::Space,
+        Transactions::ObjectFamily::Slab,
         Transactions::ObjectFamily::Roof,
         Transactions::ObjectFamily::Door,
         Transactions::ObjectFamily::Window,
@@ -3907,7 +4076,7 @@ Protocol::ResponseEnvelope DispatchCadRequestOnVectorworksMainContext(const Prot
             return {request.id, true, HandleView(request.action, params), ""};
         }
         if (request.action == "save_document" || request.action == "open_document") {
-            return {request.id, true, HandleDocumentLifecycle(request.action, params), ""};
+            return {request.id, true, HandleDocumentLifecycle(request.action, params, request.id), ""};
         }
         if (request.action == "get_layers") {
             return {request.id, true, HandleGetLayers(), ""};
@@ -3984,20 +4153,66 @@ Protocol::ResponseEnvelope DispatchCadRequestOnVectorworksMainContext(const Prot
 
 Protocol::ResponseEnvelope DispatchFromSocketWorker(const Protocol::RequestEnvelope& request);
 
+bool TryStartNativeTransport() {
+    std::lock_guard<std::mutex> lock(gTransportStartMutex);
+    if (gTransport.IsRunning()) {
+        return true;
+    }
+
+    const auto options = GetTransportOptionsFromEnvironment();
+    try {
+        gTransport.Start(
+            options,
+            DispatchFromSocketWorker,
+            MarkDeferredDocumentOpenResponseSent);
+        gNextTransportStartAttempt = {};
+        AppendTransportStartupDiagnostic(
+            "started",
+            options.host + ":" + std::to_string(options.port));
+        return true;
+    } catch (const std::exception& exc) {
+        gNextTransportStartAttempt =
+            std::chrono::steady_clock::now() + kTransportStartRetryInterval;
+        AppendTransportStartupDiagnostic(
+            "start_failed",
+            options.host + ":" + std::to_string(options.port) + " - " + exc.what());
+        return false;
+    } catch (...) {
+        gNextTransportStartAttempt =
+            std::chrono::steady_clock::now() + kTransportStartRetryInterval;
+        AppendTransportStartupDiagnostic(
+            "start_failed",
+            options.host + ":" + std::to_string(options.port) + " - unknown exception");
+        return false;
+    }
+}
+
 void OnPluginLoadStartTransport() {
     gStopRequested.store(false);
     gCadQueue.ResetCancellation();
 #if VECTORWORKS_MCP_HAS_SDK
     gApplyOperationsCache.clear();
 #endif
-    try {
-        StartMainContextPump();
-        gTransport.Start(GetTransportOptionsFromEnvironment(), DispatchFromSocketWorker);
-    } catch (...) {
+#if VECTORWORKS_MCP_HAS_SDK && defined(_WINDOWS)
+    if (!PinBridgeModuleForProcessLifetime()) {
+        AppendTransportStartupDiagnostic(
+            "pin_failed",
+            "the native bridge DLL could not be pinned for the Vectorworks process lifetime");
+        gStopRequested.store(true);
+        gCadQueue.CancelAll("native bridge module lifetime could not be secured");
+        return;
+    }
+#endif
+    if (!StartMainContextPump()) {
+        AppendTransportStartupDiagnostic(
+            "pump_failed",
+            "Vectorworks main-context timer window could not be created");
         gStopRequested.store(true);
         StopMainContextPump();
-        gCadQueue.CancelAll("native bridge transport failed to start");
+        gCadQueue.CancelAll("native bridge main-context pump failed to start");
+        return;
     }
+    TryStartNativeTransport();
 }
 
 void OnPluginUnloadStopTransport() {
@@ -4006,6 +4221,7 @@ void OnPluginUnloadStopTransport() {
     gCadQueue.CancelAll("native bridge is unloading");
     gTransport.Stop();
 #if VECTORWORKS_MCP_HAS_SDK
+    ClearDeferredDocumentOpen();
     gApplyOperationsCache.clear();
 #endif
 }
@@ -4015,6 +4231,22 @@ void OnVectorworksMainPluginEvent() {
         return;
     }
     ScopedAtomicBoolReset resetPumpActive(gCadQueuePumpActive);
+    if (!gStopRequested.load() && !gTransport.IsRunning()) {
+        const auto now = std::chrono::steady_clock::now();
+        if (gNextTransportStartAttempt == std::chrono::steady_clock::time_point{} ||
+            now >= gNextTransportStartAttempt) {
+            TryStartNativeTransport();
+        }
+    }
+#if VECTORWORKS_MCP_HAS_SDK
+    if (auto deferredOpen = TakeReadyDeferredDocumentOpen()) {
+        try {
+            ViewDocument::LaunchPreparedOpenDocument(*deferredOpen);
+        } catch (...) {
+        }
+        return;
+    }
+#endif
     constexpr std::size_t kMaxRequestsPerPump = 8u;
     constexpr auto kPumpBudget = std::chrono::milliseconds(8);
     const auto pumpStarted = std::chrono::steady_clock::now();

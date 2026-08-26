@@ -782,7 +782,17 @@ class NativeBridgeContractTests(unittest.TestCase):
         self.assertIn("gSDK->InsertObjectAfter(duplicate, object)", transaction)
         self.assertIn("gSDK->DeleteObject(object, true)", transaction)
         self.assertIn("gSDK->GetObjectByUuid(TXString(uuid.c_str())) != nullptr", transaction)
-        self.assertIn("transaction.TrackExternalBefore(object)", transaction)
+        self.assertIn(
+            "transaction.TrackExternalBefore(object, ExternalMutationFamily(object))",
+            transaction,
+        )
+        classifier = source[
+            source.index("Transactions::ObjectFamily ExternalMutationFamily") :
+            source.index("std::string CreatedPrimitiveListJson")
+        ]
+        for family in ("Parametric", "Space", "Slab", "Roof", "Door", "Window"):
+            self.assertIn(f"Transactions::ObjectFamily::{family}", classifier)
+        self.assertIn("return Transactions::ObjectFamily::Simple", classifier)
         self.assertIn("transaction.TrackExternalDeleted(mutation->second)", transaction)
         self.assertIn("transaction.DisposeFinal(artifactEntry->second)", transaction)
         self.assertIn("transaction.Commit()", transaction)

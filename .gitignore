@@ -64,6 +64,9 @@ native_bridge/worktree/
 # Logs
 *.log
 
+# Generated Vectorworks smoke/acceptance output
+test-artifacts/
+
 # Machine-generated setup artifacts
 vw_start_listener_2024.py
 vw_load_listener_2024.py

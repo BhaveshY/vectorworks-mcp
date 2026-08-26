@@ -12,6 +12,8 @@ namespace VectorworksMCP::Transactions {
 
 enum class ObjectFamily {
     Simple,
+    Symbol,
+    Parametric,
     Space,
     Slab,
     Roof,
@@ -73,9 +75,11 @@ struct TransactionReceipt {
     struct ExternalMutationReceipt {
         ExternalMutationId id = 0;
         std::string uuid;
+        ObjectFamily family = ObjectFamily::Simple;
         short expectedNodeType = 0;
         bool beforeRegistered = false;
         bool afterRegistered = false;
+        bool afterSdkManaged = false;
         bool deleted = false;
     };
     std::vector<ExternalMutationReceipt> externalMutations;
@@ -118,7 +122,9 @@ public:
     // Existing objects are registered before their first mutation. Surviving
     // objects are marked after their final mutation and registered at commit;
     // deleted objects deliberately have no AddAfter record.
-    ExternalMutationId TrackExternalBefore(MCObjectHandle handle);
+    ExternalMutationId TrackExternalBefore(
+        MCObjectHandle handle,
+        ObjectFamily family = ObjectFamily::Simple);
     void TrackExternalAfter(ExternalMutationId id, MCObjectHandle handle);
     void TrackExternalDeleted(ExternalMutationId id);
 

@@ -26,10 +26,12 @@ struct NativeTransaction::Artifact {
 struct NativeTransaction::ExternalMutation {
     ExternalMutationId id = 0;
     std::string uuid;
+    ObjectFamily family = ObjectFamily::Simple;
     short expectedNodeType = 0;
     bool beforeRegistered = false;
     bool afterRequired = false;
     bool afterRegistered = false;
+    bool afterSdkManaged = false;
     bool deleted = false;
 };
 
@@ -187,7 +189,9 @@ void NativeTransaction::DisposeFinal(ArtifactId id) {
     artifact.absentBeforeCommit = true;
 }
 
-ExternalMutationId NativeTransaction::TrackExternalBefore(MCObjectHandle handle) {
+ExternalMutationId NativeTransaction::TrackExternalBefore(
+    MCObjectHandle handle,
+    ObjectFamily family) {
     if (state_ != TransactionState::Active) {
         throw std::logic_error("cannot track an external object outside an active native transaction");
     }
@@ -211,6 +215,7 @@ ExternalMutationId NativeTransaction::TrackExternalBefore(MCObjectHandle handle)
     ExternalMutation mutation;
     mutation.id = id;
     mutation.uuid = uuid;
+    mutation.family = family;
     mutation.expectedNodeType = sdk_.GetObjectTypeN(handle);
     // Persist the identity before AddBefore. A false/throwing AddBefore then
     // still leaves a complete transaction diagnostic and rollback scope.
@@ -307,9 +312,11 @@ TransactionReceipt NativeTransaction::Commit() {
             receipt.externalMutations.push_back({
                 mutation.id,
                 mutation.uuid,
+                mutation.family,
                 mutation.expectedNodeType,
                 mutation.beforeRegistered,
                 mutation.afterRegistered,
+                mutation.afterSdkManaged,
                 mutation.deleted,
             });
         }
@@ -469,12 +476,22 @@ void NativeTransaction::RegisterExternalAfterStates() {
                 "external Vectorworks object disappeared or changed type before commit: " +
                 mutation.uuid);
         }
-        if (!sdk_.AddAfterSwapObject(handle)) {
+        if (sdk_.AddAfterSwapObject(handle)) {
+            mutation.afterRegistered = true;
+            continue;
+        }
+        // Resetting live compound BIM objects can make Vectorworks own their
+        // after-state registration, just as it does for newly created generic
+        // parametric, Space, Slab, Roof, Door, and Window objects. Accept that false return only
+        // for the same explicitly whitelisted, live-proven families. Unknown
+        // and simple objects remain fail-closed.
+        if (!AllowsSdkManagedRegistration(mutation.family)) {
             throw std::runtime_error(
                 "Vectorworks rejected external-object after-state undo registration: " +
                 mutation.uuid);
         }
         mutation.afterRegistered = true;
+        mutation.afterSdkManaged = true;
     }
 }
 

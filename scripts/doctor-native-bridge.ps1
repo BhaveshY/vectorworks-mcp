@@ -104,9 +104,26 @@ function Test-SameFileContent {
         return $false
     }
 
-    $LeftHash = (Get-FileHash -LiteralPath $Left -Algorithm SHA256).Hash
-    $RightHash = (Get-FileHash -LiteralPath $Right -Algorithm SHA256).Hash
+    $LeftHash = Get-Sha256Hex -Path $Left
+    $RightHash = Get-Sha256Hex -Path $Right
     return $LeftHash -eq $RightHash
+}
+
+function Get-Sha256Hex {
+    param([string]$Path)
+
+    $ResolvedPath = (Resolve-Path -LiteralPath $Path).ProviderPath
+    $Stream = [System.IO.File]::OpenRead($ResolvedPath)
+    try {
+        $Sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            return ([System.BitConverter]::ToString($Sha256.ComputeHash($Stream))).Replace("-", "")
+        } finally {
+            $Sha256.Dispose()
+        }
+    } finally {
+        $Stream.Dispose()
+    }
 }
 
 function Add-NextAction {
@@ -318,11 +335,29 @@ $InstallPerformed = $false
 $InstallWhatIf = [bool]$WhatIfPreference
 $InstalledPath = ""
 $InstalledArtifactMatchesCandidate = $false
+$ResourceArtifact = ""
+$ResourceRequired = $false
+$ResourceInstallDestination = ""
+$ResourceInstallPerformed = $false
+$InstalledResourcePath = ""
+$InstalledResourceMatchesCandidate = $false
 if ($InstallCandidate) {
     $InstallDestination = Join-Path $InstallDir (Split-Path -Leaf $InstallCandidate)
+    if ([System.IO.Path]::GetExtension($InstallCandidate) -ieq ".vlb") {
+        $ResourceRequired = $true
+        $ResourceCandidate = [System.IO.Path]::ChangeExtension($InstallCandidate, ".vwr")
+        if (Test-Path -LiteralPath $ResourceCandidate -PathType Leaf) {
+            $ResourceArtifact = (Resolve-Path -LiteralPath $ResourceCandidate).Path
+            $ResourceInstallDestination = Join-Path $InstallDir (Split-Path -Leaf $ResourceArtifact)
+            if (Test-SameFileContent -Left $ResourceArtifact -Right $ResourceInstallDestination) {
+                $InstalledResourcePath = (Resolve-Path -LiteralPath $ResourceInstallDestination).Path
+                $InstalledResourceMatchesCandidate = $true
+            }
+        }
+    }
     if (Test-SameFileContent -Left $InstallCandidate -Right $InstallDestination) {
         $InstalledPath = (Resolve-Path -LiteralPath $InstallDestination).Path
-        $InstalledArtifactMatchesCandidate = $true
+        $InstalledArtifactMatchesCandidate = -not $ResourceRequired -or $InstalledResourceMatchesCandidate
     }
 }
 if ($Install) {
@@ -331,12 +366,24 @@ if ($Install) {
         throw "Pass an explicit -BuiltArtifact before using -Install; auto-discovered artifacts are reported as candidates only and are not installed implicitly.$CandidateHint"
     }
     $InstallDestination = Join-Path $InstallDir (Split-Path -Leaf $InstallArtifact)
+    if ($ResourceRequired -and -not $ResourceArtifact) {
+        throw "The native .vlb requires its same-basename .vwr resource sidecar before installation: $([System.IO.Path]::ChangeExtension($InstallArtifact, '.vwr'))"
+    }
     if (-not $WhatIfPreference -and $PSCmdlet.ShouldProcess($InstallDestination, "Install native Vectorworks bridge artifact")) {
         New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
         Copy-Item -LiteralPath $InstallArtifact -Destination $InstallDestination -Force
+        if ($ResourceRequired) {
+            Copy-Item -LiteralPath $ResourceArtifact -Destination $ResourceInstallDestination -Force
+            $InstalledResourcePath = (Resolve-Path -LiteralPath $ResourceInstallDestination).Path
+            $ResourceInstallPerformed = $true
+            $InstalledResourceMatchesCandidate = Test-SameFileContent -Left $ResourceArtifact -Right $ResourceInstallDestination
+            if (-not $InstalledResourceMatchesCandidate) {
+                throw "Installed native bridge resource sidecar does not match the built artifact: $ResourceInstallDestination"
+            }
+        }
         $InstalledPath = (Resolve-Path -LiteralPath $InstallDestination).Path
         $InstallPerformed = $true
-        $InstalledArtifactMatchesCandidate = $true
+        $InstalledArtifactMatchesCandidate = -not $ResourceRequired -or $InstalledResourceMatchesCandidate
     }
 }
 
@@ -531,6 +578,12 @@ $Report = [pscustomobject]@{
     installWhatIf = [bool]$InstallWhatIf
     installedPath = $InstalledPath
     installedArtifactMatchesCandidate = [bool]$InstalledArtifactMatchesCandidate
+    resourceArtifact = $ResourceArtifact
+    resourceRequired = [bool]$ResourceRequired
+    resourceInstallDestination = $ResourceInstallDestination
+    resourceInstallPerformed = [bool]$ResourceInstallPerformed
+    installedResourcePath = $InstalledResourcePath
+    installedResourceMatchesCandidate = [bool]$InstalledResourceMatchesCandidate
     nextCommand = $NextCommand
     nextCommandReason = $NextCommandReason
     nextCommandSpec = $NextCommandSpec

@@ -32,6 +32,8 @@ class NativeTransactionContractTests(unittest.TestCase):
         source = SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("sdkManagedRegistrationFamilies", header)
+        self.assertIn("Parametric", header)
+        self.assertIn("Symbol", header)
         self.assertIn("AllowsSdkManagedRegistration(artifact.family)", source)
         self.assertIn("UndoRegistration::SdkManaged", source)
         self.assertIn("live-proven SDK-managed ownership", source)
@@ -52,7 +54,10 @@ class NativeTransactionContractTests(unittest.TestCase):
         self.assertIn("TrackExternalAfter", header)
         self.assertIn("TrackExternalDeleted", header)
         self.assertIn("if (!sdk_.AddBeforeSwapObject(handle))", source)
-        self.assertIn("if (!sdk_.AddAfterSwapObject(handle))", source)
+        self.assertIn("if (sdk_.AddAfterSwapObject(handle))", source)
+        self.assertIn("AllowsSdkManagedRegistration(mutation.family)", source)
+        self.assertIn("mutation.afterSdkManaged = true", source)
+        self.assertIn("Unknown\n        // and simple objects remain fail-closed", source)
         self.assertNotIn("externalMutations_", source[source.index("for (const Artifact& artifact : artifacts_)", source.index("RollbackReceipt NativeTransaction::RollbackImpl")) :])
 
     def test_handlers_do_not_own_undo_event_boundaries(self):

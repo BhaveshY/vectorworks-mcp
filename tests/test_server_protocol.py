@@ -933,6 +933,62 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertEqual(result["timing"]["native"]["total_native_ms"], 3.5)
         self.assertEqual([request["action"] for request in listener.requests], ["ping", "apply_operations"])
 
+    def test_execute_operations_promotes_duplicate_identity_from_native_snapshot(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {"id": request["id"], "success": True, "result": _native_phase_four_status()}
+            if request["action"] == "apply_operations":
+                operation = json.loads(request["params"]["operation_1_json"])
+                self.assertEqual(operation["op"], "object.duplicate")
+                self.assertEqual(operation["target"], "uuid:source-1")
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": {
+                        "ok": True,
+                        "atomic": True,
+                        "replayed": False,
+                        "transaction": {
+                            "committed": True,
+                            "operation_count": 1,
+                            "operations": [
+                                {
+                                    "index": 1,
+                                    "op": "object.duplicate",
+                                    "target": "uuid:source-1",
+                                    "local_ref": "copy-1",
+                                    "source": {"uuid": "source-1", "handle": "h-source"},
+                                    "duplicate": {
+                                        "uuid": "duplicate-1",
+                                        "handle": "h-duplicate",
+                                        "type": "rect",
+                                        "name": "",
+                                    },
+                                }
+                            ],
+                        },
+                    },
+                }
+            self.fail(f"Unexpected action: {request['action']}")
+
+        operations = [
+            {
+                "type": "duplicate",
+                "operation_id": "copy-1",
+                "params": {"target": "uuid:source-1", "dx": 100, "dy": 0},
+            }
+        ]
+        with FakeListener(handler, max_requests=2) as listener:
+            _configure_server(listener.port)
+            result = json.loads(server.vw_execute_operations(operations, "duplicate-receipt-001"))
+
+        receipt = result["verification"]["receipts"][0]
+        self.assertEqual(receipt["uuid"], "duplicate-1")
+        self.assertEqual(receipt["handle"], "h-duplicate")
+        self.assertEqual(receipt["type"], "rect")
+        self.assertEqual(receipt["target"], "uuid:source-1")
+        self.assertEqual(receipt["local_ref"], "copy-1")
+
     def test_execute_operations_resends_identical_key_for_native_document_replay(self):
         apply_requests = 0
 
@@ -2266,6 +2322,30 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertIn("Unknown commit state", result)
         self.assertIn("did not retry", result)
         self.assertEqual([request["action"] for request in listener.requests], ["ping", "worksheet"])
+
+    def test_symbol_insert_supplies_native_and_legacy_wire_names(self):
+        with patch.object(server, "_send_tool", return_value='{"inserted": true}') as send_tool:
+            result = server.vw_symbol(
+                "insert",
+                "Space Tag 1 Line wo Boundary",
+                x=1250,
+                y=2500,
+                rotation=30,
+            )
+
+        self.assertEqual(json.loads(result), {"inserted": True})
+        send_tool.assert_called_once_with(
+            "vw_symbol",
+            {
+                "action": "insert",
+                "symbol_name": "Space Tag 1 Line wo Boundary",
+                "definition_name": "Space Tag 1 Line wo Boundary",
+                "x": 1250,
+                "y": 2500,
+                "rotation": 30,
+                "rotation_deg": 30,
+            },
+        )
 
     def test_action_retry_policy_uses_tool_safety_metadata(self):
         self.assertTrue(server._action_safe_to_retry("get_layers"))

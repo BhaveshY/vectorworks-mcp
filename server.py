@@ -4365,6 +4365,16 @@ def _compact_operation_receipts(value: Any) -> list[dict[str, Any]]:
             field = entry.get(key)
             if isinstance(field, (str, bool)) and field != "":
                 receipt[key] = field
+        # Native duplicate receipts carry the newly created object's stable
+        # identity in the nested semantic snapshot. Promote only the compact
+        # identity fields so callers can safely target the duplicate in a
+        # later transaction without requiring a drawing scan.
+        duplicate = entry.get("duplicate")
+        if isinstance(duplicate, dict):
+            for key in ("uuid", "handle", "type"):
+                field = duplicate.get(key)
+                if key not in receipt and isinstance(field, str) and field:
+                    receipt[key] = field
         receipts.append(receipt)
     return receipts
 
@@ -5599,7 +5609,21 @@ def vw_worksheet(
 @_tool("vw_symbol")
 def vw_symbol(action: SymbolAction, symbol_name: str = "", x: float = 0, y: float = 0, rotation: float = 0) -> str:
     """List symbols or insert a symbol at x/y with rotation."""
-    return _send_tool("vw_symbol", {"action": action, "symbol_name": symbol_name, "x": x, "y": y, "rotation": rotation})
+    # Keep the legacy fallback field names while also supplying the native
+    # bridge's explicit resource/angle names. This lets one public tool
+    # contract address both transports without either side guessing aliases.
+    return _send_tool(
+        "vw_symbol",
+        {
+            "action": action,
+            "symbol_name": symbol_name,
+            "definition_name": symbol_name,
+            "x": x,
+            "y": y,
+            "rotation": rotation,
+            "rotation_deg": rotation,
+        },
+    )
 
 
 @_tool("vw_export")
@@ -6436,6 +6460,39 @@ def vw_document(
     data, status, error = _grouped_native_call("vw_document", action, native_action, params, trace)
     if error is not None:
         return error
+    if action == "open" and isinstance(data, dict) and data.get("commit_state") == "accepted":
+        requested_path = os.path.normcase(os.path.abspath(file_path))
+        deadline = time.monotonic() + 45.0
+        last_readback: Any = None
+        _clear_operation_idempotency_cache()
+        while time.monotonic() < deadline:
+            _clear_cad_safe_cache()
+            raw_readback = _send("get_document_info", {}, require_cad_safe=False, trace=trace)
+            decoded_readback = _decode_tool_result(raw_readback)
+            last_readback = decoded_readback
+            if not _tool_result_failed(raw_readback, decoded_readback) and isinstance(decoded_readback, dict):
+                active_path = str(decoded_readback.get("filepath", "") or "")
+                if active_path and os.path.normcase(os.path.abspath(active_path)) == requested_path:
+                    data = {
+                        **data,
+                        "active_path": active_path,
+                        "commit_state": "committed",
+                        "readback": decoded_readback,
+                    }
+                    break
+            time.sleep(0.2)
+        else:
+            return _grouped_error(
+                "vw_document",
+                action,
+                "unknown_commit_state",
+                "Vectorworks accepted the deferred open, but the requested document was not confirmed by readback.",
+                trace,
+                status=status,
+                required_action="open_document",
+                detail={"accepted": data, "last_readback": last_readback},
+                commit_state="unknown",
+            )
     return _grouped_finish(
         "vw_document",
         action,

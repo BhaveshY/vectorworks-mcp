@@ -1,3 +1,5 @@
+import importlib.machinery
+import importlib.util
 import json
 import re
 import shutil
@@ -31,6 +33,40 @@ def _tool_map_names():
 
 
 class ClaudePluginTests(unittest.TestCase):
+    def test_vectorworksctl_live_native_readiness_overrides_stale_restart_guidance(self):
+        helper_path = PLUGIN / "bin" / "vectorworksctl"
+        loader = importlib.machinery.SourceFileLoader("vectorworksctl_test", str(helper_path))
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        self.assertIsNotNone(spec)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+
+        listener_doctor = {
+            "overall": "native-phase4-ready",
+            "ping": {
+                "success": True,
+                "result": {
+                    "native_bridge": True,
+                    "dispatch_mode": "native_sdk",
+                    "native_phase": 4,
+                    "cad_api_safe": True,
+                    "transport_only": False,
+                    "main_context_pump_ready": True,
+                    "implemented_actions": sorted(module.NATIVE_PRODUCTION_REQUIRED_ACTIONS),
+                },
+            },
+        }
+        native_plan = {
+            "status": "plan_only",
+            "steps": [{"stage": "smoke-phase-0", "nextCommand": "restart-vectorworks"}],
+        }
+
+        summary = module.effective_native_summary(native_plan, listener_doctor)
+        self.assertFalse(summary["ready"])
+        self.assertTrue(summary["live_ready"])
+        self.assertTrue(summary["effective_ready"])
+        self.assertIn("no restart is required", module.doctor_next_action(listener_doctor).lower())
+
     def test_codex_repo_marketplace_targets_bundled_plugin(self):
         marketplace_path = ROOT / ".agents" / "plugins" / "marketplace.json"
         marketplace = json.loads(marketplace_path.read_text(encoding="utf-8"))

@@ -64,7 +64,7 @@ def _assert_token_file_user_only(testcase, powershell, token_path):
 
     token_literal = str(token_path).replace("'", "''")
     command = "$TokenPath = '{0}'\n".format(token_literal) + r"""
-$Acl = Get-Acl -LiteralPath $TokenPath
+$Acl = [System.IO.File]::GetAccessControl($TokenPath)
 $CurrentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $AllowRules = @($Acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' })
 if (-not $Acl.AreAccessRulesProtected) { throw 'token file ACL inheritance is enabled' }
@@ -650,8 +650,13 @@ exit 0
 
     def test_mcp_runner_recovers_stale_virtualenv_python(self):
         runner = (ROOT / "scripts" / "run-mcp-server.ps1").read_text(encoding="utf-8")
+        installer = (ROOT / "install.ps1").read_text(encoding="utf-8")
 
+        self.assertIn("function Test-HostPythonCandidate", runner)
+        self.assertIn("Test-HostPythonCandidate -Path $Python.Source", runner)
         self.assertIn("function Test-PythonExecutable", runner)
+        self.assertIn("function Get-Sha256Hex", runner)
+        self.assertNotIn("Get-FileHash", runner)
         self.assertIn("function Test-PythonPip", runner)
         self.assertIn("Reset-Venv -Reason \"Existing virtual environment python could not run\"", runner)
         self.assertIn('Write-BootstrapLog "$Reason; recreating $VenvDir"', runner)
@@ -663,10 +668,15 @@ exit 0
         self.assertIn("Using fallback virtual environment", runner)
         self.assertIn("Remove-Item -LiteralPath $VenvDir -Recurse -Force", runner)
         self.assertIn("function Protect-AuthTokenFile", runner)
+        self.assertIn("[System.IO.File]::SetAccessControl", runner)
         self.assertIn("Protect-AuthTokenFile -Path $AuthTokenPath", runner)
         self.assertIn('$env:VW_MCP_AUTH_TOKEN_FILE = $AuthTokenPath', runner)
         self.assertIn("Remove-Item Env:\\VW_MCP_AUTH_TOKEN", runner)
         self.assertNotIn('$env:VW_MCP_AUTH_TOKEN = $Token', runner)
+
+        self.assertIn("function Test-PythonCandidate", installer)
+        self.assertIn("Test-PythonCandidate -Path $Python", installer)
+        self.assertIn('Windows app-execution aliases', installer)
 
         verifier = (ROOT / "scripts" / "verify-no-vectorworks.ps1").read_text(encoding="utf-8")
         self.assertIn("Resolve-ActiveVenvPython", verifier)
@@ -706,6 +716,7 @@ exit 0
         self.assertNotIn('$env:VW_MCP_AUTH_TOKEN = $Token', register_script)
         self.assertIn("Remove-Item Env:\\VW_MCP_AUTH_TOKEN", register_script)
         self.assertIn("function Protect-AuthTokenFile", register_script)
+        self.assertIn("[System.IO.File]::SetAccessControl", register_script)
         self.assertIn("Protect-AuthTokenFile -Path $AuthTokenPath", register_script)
 
         launcher_path = ROOT / "vw_start_listener_2024.py"
@@ -1148,6 +1159,8 @@ exit 0
 
         self.assertIn("check-native-bridge-prereqs.ps1", build)
         self.assertIn("wire-native-bridge-project.ps1", build)
+        self.assertIn("Native bridge scaffold is missing from the SDK project", build)
+        self.assertIn("copy-native-bridge-scaffold.ps1 first", build)
         self.assertIn("not wired into the SDK project", build)
         self.assertIn("MSBuild", build)
         self.assertIn("*$VectorworksVersion.sln", build)
@@ -1361,7 +1374,8 @@ extern "C" Sint32 GS_EXTERNAL_ENTRY plugin_module_main(Sint32 action, void* modu
             self.assertIn("<LanguageStandard>stdcpp17</LanguageStandard>", project_text)
             self.assertIn("Vectorworks MCP native bridge lifecycle hook", module_text)
             self.assertIn("VectorworksMCP::OnPluginLoadStartTransport", module_text)
-            self.assertIn("VectorworksMCP::OnPluginUnloadStopTransport", module_text)
+            self.assertNotIn("VectorworksMCP::OnPluginUnloadStopTransport", module_text)
+            self.assertNotIn("kPluginModuleDeinit", module_text)
             self.assertNotIn("VectorworksMCP::OnVectorworksMainPluginEvent", module_text)
             for include in (
                 "Source\\VectorworksMCPBridge\\BridgeProtocol.cpp",
@@ -2247,6 +2261,60 @@ if ($Json) {
             self.assertEqual(report["nextCommandSpec"]["stage"], "smoke-phase-0")
             self.assertTrue(report["nextCommandSpec"]["requiresVectorworksRestartBeforeRun"])
 
+    def test_native_doctor_installs_required_vwr_sidecar_with_vlb(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise the native doctor")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            artifact = temp_root / "ObjectExample.vlb"
+            resource = temp_root / "ObjectExample.vwr"
+            install_dir = temp_root / "Plug-ins With Spaces"
+            artifact.write_text("fake native bridge artifact\n", encoding="utf-8")
+            resource.write_text("fake native bridge resources\n", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/doctor-native-bridge.ps1"),
+                    "-VectorworksVersion",
+                    "2024",
+                    "-BuiltArtifact",
+                    str(artifact),
+                    "-InstallDir",
+                    str(install_dir),
+                    "-Install",
+                    "-Json",
+                ],
+                cwd=str(ROOT),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            report = json.loads(result.stdout)
+            _assert_same_path(self, report["installedPath"], install_dir / artifact.name)
+            _assert_same_path(self, report["resourceArtifact"], resource)
+            _assert_same_path(
+                self,
+                report["resourceInstallDestination"],
+                install_dir / resource.name,
+            )
+            _assert_same_path(self, report["installedResourcePath"], install_dir / resource.name)
+            self.assertTrue(report["resourceRequired"])
+            self.assertTrue(report["resourceInstallPerformed"])
+            self.assertTrue(report["installedResourceMatchesCandidate"])
+            self.assertTrue(report["installedArtifactMatchesCandidate"])
+            self.assertEqual((install_dir / artifact.name).read_text(encoding="utf-8"), artifact.read_text(encoding="utf-8"))
+            self.assertEqual((install_dir / resource.name).read_text(encoding="utf-8"), resource.read_text(encoding="utf-8"))
+
     def test_native_doctor_recognizes_already_installed_candidate(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
         if not powershell:
@@ -2628,6 +2696,53 @@ if ($Json) {
             self.assertIn("-SdkArchivePath", report["nextCommand"])
             _assert_path_in_collection(self, archive, report["nextCommandSpec"]["arguments"])
             self.assertNotIn("-DownloadSdk", report["nextCommandSpec"]["arguments"])
+
+    def test_native_prereq_checker_rejects_parent_containing_only_another_sdk_version(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
+        if not powershell:
+            self.skipTest("PowerShell is required to exercise the native prerequisite checker")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            sdk_parent = temp_root / "VectorworksSDK"
+            wrong_version = sdk_parent / "2024" / "SDKLib" / "Include"
+            wrong_version.mkdir(parents=True)
+            (wrong_version / "VectorworksSDK.h").write_text(
+                "// wrong-version marker\n", encoding="utf-8"
+            )
+            env = os.environ.copy()
+            env["VW_MCP_IGNORE_REPO_SDK_CANDIDATES"] = "1"
+
+            result = subprocess.run(
+                [
+                    powershell,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "scripts/check-native-bridge-prereqs.ps1"),
+                    "-VectorworksVersion",
+                    "2025",
+                    "-SdkDir",
+                    str(sdk_parent),
+                    "-Advisory",
+                    "-Json",
+                ],
+                cwd=str(ROOT),
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=env,
+            )
+
+            report = json.loads(result.stdout)
+            sdk_check = next(
+                check for check in report["checks"] if check["name"] == "Vectorworks 2025 SDK"
+            )
+            self.assertFalse(sdk_check["ok"])
+            self.assertNotEqual(Path(sdk_check["detail"]), sdk_parent)
 
     def test_native_prereq_checker_reports_supported_versions_for_unknown_version(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")

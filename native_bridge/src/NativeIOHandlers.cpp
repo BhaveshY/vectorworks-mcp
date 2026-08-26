@@ -33,6 +33,14 @@ namespace fs = std::filesystem;
 
 constexpr const char* kReplaceConfirmation = "REPLACE_EXISTING_FILE";
 
+#if VECTORWORKS_MCP_NATIVE_IO_HAS_SDK
+#if SDK_VERSION >= 3000
+constexpr auto kDwgExportMode = VectorWorks::Filing::EExportMode::eDWGDXF;
+#else
+constexpr auto kDwgExportMode = VectorWorks::Filing::eExportDWGDXF;
+#endif
+#endif
+
 std::string Lower(std::string value) {
     std::transform(
         value.begin(),
@@ -635,7 +643,7 @@ Result ExportDWG(const DWGExportRequest& request) {
     }
 
     VectorWorks::Filing::SExportOptionsForPublish options{};
-    if (VCOM_FAILED(exporter->InitExportOptions(VectorWorks::Filing::eExportDWGDXF, &options))) {
+    if (VCOM_FAILED(exporter->InitExportOptions(kDwgExportMode, &options))) {
         throw Error(ErrorCode::SdkOperationFailed, "IImportExportDWG::InitExportOptions failed");
     }
     options.fCustomLocation = true;
@@ -650,7 +658,7 @@ Result ExportDWG(const DWGExportRequest& request) {
 
     const TXString displayName(PathText(output.target.stem()));
     const VCOMError exportResult = exporter->Export(
-        static_cast<short>(VectorWorks::Filing::eExportDWGDXF),
+        static_cast<short>(kDwgExportMode),
         &folder,
         displayName,
         &options,

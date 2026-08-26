@@ -66,14 +66,51 @@ class NativeAuthoritativeCapabilitiesContractTests(unittest.TestCase):
         self.assertIn('{"Width"}', source)
         self.assertIn('{"Height"}', source)
         self.assertIn('{"Elevation"}', source)
+        self.assertIn("DefineCustomObject", helper)
+        self.assertIn("kCustomObjectPrefNever", helper)
         self.assertIn("CreateCustomObject", helper)
-        self.assertRegex(helper, r"spec\.rotationDegrees,\s*true\)")
+        self.assertIn("spec.rotationDegrees", helper)
+        self.assertRegex(helper, r"spec\.rotationDegrees,\s*false\)")
+        self.assertIn("AddObjectToContainer", helper)
+        self.assertNotIn("gSDK->SetObjectWallInsertMode", helper)
         self.assertIn("RequireInstanceControlled", helper)
         self.assertIn("SetParamReal", helper)
         self.assertIn("ResetObject", helper)
         self.assertGreaterEqual(helper.count("IsObjectHostedByWall"), 2)
         self.assertIn("GetParamReal", helper)
         self.assertNotRegex(helper, r"localized|Localized|GetNamedObject|RunMenu|Alert|Python")
+
+        generic_start = source.index("MCObjectHandle CreateVerifiedParametricObject")
+        generic_end = source.index("void UpdateVerifiedParametricObject", generic_start)
+        generic = source[generic_start:generic_end]
+        self.assertIn("DefineCustomObject", generic)
+        self.assertIn("kCustomObjectPrefNever", generic)
+        self.assertIn("const bool insertOnActiveLayer = !spec.requireWallHost", generic)
+        self.assertRegex(
+            generic,
+            r"spec\.rotationDegrees,\s*insertOnActiveLayer\)",
+        )
+        self.assertIn("AddObjectToContainer(object, spec.expectedWall)", generic)
+
+        bridge = self.source("VectorworksMCPBridge.cpp")
+        generic_factory = bridge[
+            bridge.index('} else if (spec.objectType == "parametric")') :
+            bridge.index('} else if (spec.objectType == "symbol")')
+        ]
+        self.assertIn("ObjectFamily::Parametric", bridge)
+        self.assertIn("ObjectFamily::Symbol", bridge)
+        self.assertIn("CreateVerifiedParametricObject", generic_factory)
+
+        symbol_factory = bridge[
+            bridge.index('} else if (spec.objectType == "symbol")') :
+            bridge.index('} else if (spec.objectType == "wall")')
+        ]
+        native_factory = self.source("NativeObjectFactory.cpp")
+        self.assertIn("PlaceVerifiedSymbol", symbol_factory)
+        self.assertIn("gSDK->PlaceSymbolN(", native_factory)
+        self.assertIn("gSDK->AddObjectToContainer(instance, layer)", native_factory)
+        self.assertIn("gSDK->ParentObject(instance) != layer", native_factory)
+        self.assertNotIn("PlaceSymbolByNameN", native_factory)
 
         verifier_start = source.index("void VerifyBuiltInOpeningReceipt")
         verifier_end = source.index("bool IsObjectHostedByWall", verifier_start)
@@ -88,14 +125,64 @@ class NativeAuthoritativeCapabilitiesContractTests(unittest.TestCase):
     def test_view_and_document_readback_model_semantic_truth(self):
         header = self.source("ViewDocumentHandlers.hpp")
         source = self.source("ViewDocumentHandlers.cpp")
+        bridge = self.source("VectorworksMCPBridge.cpp")
+        transport_header = self.source("NativeTransport.hpp")
+        transport_source = self.source("NativeTransport.cpp")
 
         self.assertIn("enum class CommitState", header)
         self.assertIn("RequestedPath()", header)
         self.assertIn("ActivePath()", header)
         self.assertIn("CommitState commitState", header)
         self.assertIn("CommitState::Unknown", source)
-        self.assertIn("SameExistingPath", source)
-        self.assertIn("sdkReportedSuccess", source)
+        self.assertIn("CommitState::Accepted", source)
+        self.assertIn("PreparedOpenDocument", header)
+        self.assertIn("PrepareOpenDocument", source)
+        self.assertIn("LaunchPreparedOpenDocument", source)
+        self.assertIn("SDK_VERSION >= 3000", source)
+        self.assertIn("replacementConfirmationRequired = true", source)
+        self.assertIn("IsActiveFileChangedAfterLastSave", source)
+        self.assertIn("gSDK->OpenDocumentPath(identifier, false)", source)
+        self.assertIn("auto identifier = FileIdentifier(path)", source)
+        self.assertIn("gSDK->GetOpenFilesList(openFiles)", source)
+        self.assertIn("gSDK->SwitchToOpenFile(openFile.fFileRef)", source)
+        self.assertIn("fs::equivalent(path, openPath, error)", source)
+        self.assertNotIn("ShellExecuteExW", source)
+        self.assertNotIn("SEE_MASK_NOCLOSEPROCESS", source)
+        self.assertNotIn("GetModuleFileNameW", source)
+        self.assertNotIn('L"explorer.exe', source)
+        self.assertNotIn("CreateProcessW", source)
+
+        native_io = self.source("NativeIOHandlers.cpp")
+        self.assertIn("EExportMode::eDWGDXF", native_io)
+        self.assertIn("VectorWorks::Filing::eExportDWGDXF", native_io)
+        self.assertIn("kDwgExportMode", native_io)
+        lifecycle_start = bridge.index("std::string HandleDocumentLifecycle")
+        lifecycle_end = bridge.index("int ParseIntegerString", lifecycle_start)
+        lifecycle = bridge[lifecycle_start:lifecycle_end]
+        self.assertIn("StageDeferredDocumentOpen", lifecycle)
+        self.assertNotIn("ViewDocument::OpenDocument(", lifecycle)
+        deferred_start = bridge.index("if (auto deferredOpen = TakeReadyDeferredDocumentOpen())")
+        deferred_end = bridge.index("constexpr std::size_t kMaxRequestsPerPump", deferred_start)
+        deferred = bridge[deferred_start:deferred_end]
+        self.assertIn("LaunchPreparedOpenDocument", deferred)
+        self.assertNotIn("gTransport.Stop()", deferred)
+        self.assertIn("ResponseSentCallback", transport_header)
+        callback_start = transport_source.index("if (responseSentCallback_)")
+        write_start = transport_source.rfind("WriteFrame", 0, callback_start)
+        self.assertGreater(callback_start, write_start)
+        self.assertIn("TryStartNativeTransport", bridge)
+        self.assertIn("native-bridge-startup.log", bridge)
+        self.assertIn("kTransportStartRetryInterval", bridge)
+        self.assertIn("GET_MODULE_HANDLE_EX_FLAG_PIN", bridge)
+        self.assertIn("PinBridgeModuleForProcessLifetime", bridge)
+        pump_start = bridge.index("void OnVectorworksMainPluginEvent()")
+        deferred_start = bridge.index(
+            "if (auto deferredOpen = TakeReadyDeferredDocumentOpen())",
+            pump_start,
+        )
+        pump_prefix = bridge[pump_start:deferred_start]
+        self.assertIn("!gTransport.IsRunning()", pump_prefix)
+        self.assertIn("TryStartNativeTransport()", pump_prefix)
         self.assertNotRegex(
             source,
             r"setRenderMode\s*&&\s*!gSDK->SetRenderMode",

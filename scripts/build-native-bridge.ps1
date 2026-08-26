@@ -130,25 +130,29 @@ $RequiredScaffoldFiles = @(
 $ScaffoldPresent = @($RequiredScaffoldFiles | Where-Object {
     Test-Path -LiteralPath (Join-Path $ScaffoldSourceDir $_) -PathType Leaf
 }).Count -eq $RequiredScaffoldFiles.Count
-if ($ScaffoldPresent) {
-    if (-not (Test-Path -LiteralPath $WirePath -PathType Leaf)) {
-        throw "Native project wiring helper was not found at $WirePath"
-    }
-    $ProjectFile = Get-ChildItem -LiteralPath $Solution.DirectoryName -Recurse -File -Filter "*.vcxproj" -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -notmatch '\\(Source|include|SDKLib|ThirdPartySource)\\' } |
-        Select-Object -First 1
-    if (-not $ProjectFile) {
-        throw "Native bridge scaffold is present, but no SDK Visual C++ project (*.vcxproj) was found next to the solution."
-    }
-    $WireJson = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $WirePath -VectorworksVersion $VectorworksVersion -ProjectPath $ProjectFile.FullName -SourceDir $ScaffoldSourceDir -CheckOnly -Json | Out-String
-    if ($LASTEXITCODE -ne 0) {
-        throw "Native bridge project wiring check failed with exit code $LASTEXITCODE"
-    }
-    $WireReport = $WireJson | ConvertFrom-Json
-    if (-not $WireReport.projectWired) {
-        $MissingItems = @($WireReport.missingProjectItems | ForEach-Object { [string]$_ }) -join ", "
-        throw "Native bridge scaffold is present but not wired into the SDK project. Run scripts\wire-native-bridge-project.ps1 first. Missing: $MissingItems"
-    }
+if (-not $ScaffoldPresent) {
+    $MissingScaffoldFiles = @($RequiredScaffoldFiles | Where-Object {
+        -not (Test-Path -LiteralPath (Join-Path $ScaffoldSourceDir $_) -PathType Leaf)
+    }) -join ", "
+    throw "Native bridge scaffold is missing from the SDK project. Run scripts\copy-native-bridge-scaffold.ps1 first. Missing: $MissingScaffoldFiles"
+}
+if (-not (Test-Path -LiteralPath $WirePath -PathType Leaf)) {
+    throw "Native project wiring helper was not found at $WirePath"
+}
+$ProjectFile = Get-ChildItem -LiteralPath $Solution.DirectoryName -Recurse -File -Filter "*.vcxproj" -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -notmatch '\\(Source|include|SDKLib|ThirdPartySource)\\' } |
+    Select-Object -First 1
+if (-not $ProjectFile) {
+    throw "Native bridge scaffold is present, but no SDK Visual C++ project (*.vcxproj) was found next to the solution."
+}
+$WireJson = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $WirePath -VectorworksVersion $VectorworksVersion -ProjectPath $ProjectFile.FullName -SourceDir $ScaffoldSourceDir -CheckOnly -Json | Out-String
+if ($LASTEXITCODE -ne 0) {
+    throw "Native bridge project wiring check failed with exit code $LASTEXITCODE"
+}
+$WireReport = $WireJson | ConvertFrom-Json
+if (-not $WireReport.projectWired) {
+    $MissingItems = @($WireReport.missingProjectItems | ForEach-Object { [string]$_ }) -join ", "
+    throw "Native bridge scaffold is present but not wired into the SDK project. Run scripts\wire-native-bridge-project.ps1 first. Missing: $MissingItems"
 }
 
 Write-Host "Building native bridge worktree"

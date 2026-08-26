@@ -462,16 +462,31 @@ BuiltInOpeningReceipt CreateVerifiedBuiltInOpening(
     RequireFingerprint(schema, spec.descriptorFingerprint);
     const BuiltInOpeningSemanticIds ids = ResolveBuiltInOpeningSemanticIds(spec.kind, schema);
     const std::string pluginName = BuiltInParametricUniversalName(spec.kind);
+    // Match VWFC::VWObjects::VWParametricObj's SDK creation sequence.  Built-in
+    // objects such as Door and Window otherwise honor their "show preferences"
+    // extended property and block this non-modal bridge on a preferences dialog.
+    gSDK->DefineCustomObject(
+        TXString(pluginName.c_str()),
+        kCustomObjectPrefNever);
     MCObjectHandle object = gSDK->CreateCustomObject(
         TXString(pluginName.c_str()),
         WorldPt(spec.x, spec.y),
         spec.rotationDegrees,
-        true);
+        false);
     if (!object || gSDK->GetObjectTypeN(object) != kParametricNode) {
         throw std::runtime_error(
             "Vectorworks did not create the requested built-in opening object");
     }
     CreatedParametricGuard guard(object);
+    if (!gSDK->AddObjectToContainer(object, spec.expectedWall)) {
+        throw std::runtime_error(
+            "Vectorworks did not attach the built-in opening to the exact requested wall");
+    }
+    // Built-in Door/Window parametrics become wall-hosted when moved into the
+    // exact wall container.  SetObjectWallInsertMode is intended for symbol
+    // definitions/instances and returns false for these built-in parametrics in
+    // Vectorworks 2024 even after the attachment succeeds.  The strict parent
+    // check below is the authoritative hosting proof.
     VWParametricObj parametric(object);
     if (Utf8(parametric.GetParametricName()) != pluginName) {
         throw std::runtime_error(
@@ -624,12 +639,21 @@ MCObjectHandle CreateVerifiedParametricObject(const ParametricCreateSpec& spec) 
     }
 
     RequireFingerprint(DescribeParametricDefinition(spec.universalPluginName), spec.descriptorFingerprint);
+    // Define the instance with preferences disabled before creation, as the
+    // official VWParametricObj constructors do for programmatic objects.
+    gSDK->DefineCustomObject(
+        TXString(spec.universalPluginName.c_str()),
+        kCustomObjectPrefNever);
     const WorldPt location(spec.x, spec.y);
+    // Generic point parametrics must be inserted into the active document.
+    // Hosted parametrics are created detached and then moved into the exact
+    // requested wall container, matching the dedicated Door/Window path.
+    const bool insertOnActiveLayer = !spec.requireWallHost;
     MCObjectHandle object = gSDK->CreateCustomObject(
         TXString(spec.universalPluginName.c_str()),
         location,
         spec.rotationDegrees,
-        spec.requireWallHost);
+        insertOnActiveLayer);
     if (!object || gSDK->GetObjectTypeN(object) != kParametricNode) {
         throw std::runtime_error(
             "Vectorworks did not create the requested parametric object: " +
@@ -639,6 +663,10 @@ MCObjectHandle CreateVerifiedParametricObject(const ParametricCreateSpec& spec) 
     VWParametricObj parametric(object);
     if (Utf8(parametric.GetParametricName()) != spec.universalPluginName) {
         throw std::runtime_error("created parametric object has the wrong universal plugin name");
+    }
+    if (spec.requireWallHost && !gSDK->AddObjectToContainer(object, spec.expectedWall)) {
+        throw std::runtime_error(
+            "Vectorworks did not attach the parametric object to the exact requested wall");
     }
     ValidateParameters(parametric, spec.parameters);
     ApplyParameters(parametric, spec.parameters);

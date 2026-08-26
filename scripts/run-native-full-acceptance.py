@@ -34,6 +34,81 @@ EXPECTED_TOOLS = {
     "vw_document",
     "vw_tool_safety",
 }
+EXPECTED_NATIVE_ACTIONS = {
+    "ping",
+    "stop",
+    "capabilities",
+    "describe_parametric_schema",
+    "export_image",
+    "capture_view",
+    "export_pdf",
+    "export_vectorworks_document",
+    "import_dwg",
+    "export_dwg",
+    "resources",
+    "symbol",
+    "worksheet",
+    "get_view",
+    "set_view",
+    "save_document",
+    "open_document",
+    "get_document_info",
+    "get_layers",
+    "get_objects",
+    "selection",
+    "create_object",
+    "batch_create_objects",
+    "create_wall",
+    "create_text",
+    "create_linear_dimension",
+    "set_property",
+    "manage_classes",
+    "find_objects",
+    "drawing_summary",
+    "apply_operations",
+}
+EXPECTED_CREATE_TYPES = {
+    "arc",
+    "box",
+    "circle",
+    "line",
+    "oval",
+    "polygon",
+    "polyline",
+    "rect",
+    "rectangle",
+    "wall",
+    "door",
+    "window",
+    "text",
+    "dimension",
+    "linear_dimension",
+    "slab",
+    "roof",
+    "space",
+    "parametric",
+    "symbol",
+}
+EXPECTED_APPLY_OPERATION_TYPES = {
+    "create",
+    "transform",
+    "duplicate",
+    "set_properties",
+    "delete",
+}
+
+# Vectorworks object names are limited to 63 characters. Keep the run prefix
+# short enough for the longest acceptance suffix used below so exact-name
+# readback remains a valid verifier instead of observing a truncated name.
+VECTORWORKS_OBJECT_NAME_LIMIT = 63
+LONGEST_FIXTURE_OBJECT_SUFFIX = "_TYPE_LINEAR_DIMENSION"
+
+
+def fixture_prefix(run_id: str) -> str:
+    prefix = f"VW_MCP_P4_{run_id}"
+    if len(prefix + LONGEST_FIXTURE_OBJECT_SUFFIX) > VECTORWORKS_OBJECT_NAME_LIMIT:
+        raise ValueError("acceptance fixture prefix exceeds the Vectorworks object-name limit")
+    return prefix
 
 
 def parse_args() -> argparse.Namespace:
@@ -136,6 +211,17 @@ def require_exactly_one(payload: dict[str, Any], description: str) -> dict[str, 
     return objects[0]
 
 
+def first_receipt_uuid(payload: dict[str, Any], description: str) -> str:
+    verification = payload.get("verification")
+    receipts = verification.get("receipts") if isinstance(verification, dict) else None
+    if not isinstance(receipts, list):
+        raise RuntimeError(f"{description} omitted native operation receipts")
+    for receipt in receipts:
+        if isinstance(receipt, dict) and receipt.get("uuid"):
+            return str(receipt["uuid"])
+    raise RuntimeError(f"{description} omitted its created-object UUID")
+
+
 async def run_acceptance(
     args: argparse.Namespace,
     source: Path,
@@ -195,8 +281,8 @@ async def run_acceptance(
                     payload = result.structuredContent or {}
                     ok = (
                         isinstance(payload, dict)
-                        and payload.get("ok") is True
                         and not result.isError
+                        and payload.get("ok") is not False
                     )
                     if expect_ok and not ok:
                         excerpt = json.dumps(payload, ensure_ascii=False)[:4000]
@@ -204,6 +290,17 @@ async def run_acceptance(
                     if not expect_ok and ok:
                         raise RuntimeError(f"{key} unexpectedly succeeded")
                     return payload
+
+                async def query_named(name: str, *, label: str) -> dict[str, Any]:
+                    return await call(
+                        "vw_read",
+                        {
+                            "action": "query",
+                            "criteria": f"((N='{name}'))",
+                            "limit": 20,
+                        },
+                        label=label,
+                    )
 
                 health = await call("vw_status", {"action": "health"}, label="health")
                 bridge = health.get("bridge", {})
@@ -232,23 +329,24 @@ async def run_acceptance(
                     "capability_fingerprint"
                 ):
                     raise RuntimeError("health and manifest fingerprints differ")
-                required_types = {
-                    "wall",
-                    "space",
-                    "slab",
-                    "roof",
-                    "door",
-                    "window",
-                    "text",
-                    "linear_dimension",
-                }
-                missing_types = sorted(
-                    required_types - set(cap_data.get("create_object_types") or [])
-                )
-                if missing_types:
+                advertised_actions = set(cap_data.get("implemented_actions") or [])
+                advertised_types = set(cap_data.get("create_object_types") or [])
+                if advertised_actions != EXPECTED_NATIVE_ACTIONS:
                     raise RuntimeError(
-                        f"manifest is missing required create types: {missing_types}"
+                        "native action manifest mismatch: missing={0}, unexpected={1}".format(
+                            sorted(EXPECTED_NATIVE_ACTIONS - advertised_actions),
+                            sorted(advertised_actions - EXPECTED_NATIVE_ACTIONS),
+                        )
                     )
+                if advertised_types != EXPECTED_CREATE_TYPES:
+                    raise RuntimeError(
+                        "create-type manifest mismatch: missing={0}, unexpected={1}".format(
+                            sorted(EXPECTED_CREATE_TYPES - advertised_types),
+                            sorted(advertised_types - EXPECTED_CREATE_TYPES),
+                        )
+                    )
+                report["advertised_native_actions"] = sorted(advertised_actions)
+                report["advertised_create_types"] = sorted(advertised_types)
 
                 active = await call(
                     "vw_read", {"action": "document"}, label="document_before_open"
@@ -266,7 +364,13 @@ async def run_acceptance(
                         )
                     await call(
                         "vw_document",
-                        {"action": "open", "file_path": str(source)},
+                        {
+                            "action": "open",
+                            "file_path": str(source),
+                            "options": {
+                                "replace_dirty_confirmation": "REPLACE_DIRTY_DOCUMENT"
+                            },
+                        },
                         label="document_open",
                     )
 
@@ -301,14 +405,42 @@ async def run_acceptance(
                     {"action": "parametric_schemas", "query": "Window"},
                     label="window_schema",
                 )
+                generic_parametric_schema = await call(
+                    "vw_catalog",
+                    {"action": "parametric_schemas", "query": "Stake Object"},
+                    label="generic_parametric_schema",
+                )
                 door_fingerprint = str(
                     (payload_data(door_schema) or {}).get("descriptor_fingerprint", "")
                 )
                 window_fingerprint = str(
                     (payload_data(window_schema) or {}).get("descriptor_fingerprint", "")
                 )
-                if not door_fingerprint or not window_fingerprint:
-                    raise RuntimeError("Door/Window schema discovery omitted fingerprints")
+                generic_parametric_fingerprint = str(
+                    (payload_data(generic_parametric_schema) or {}).get(
+                        "descriptor_fingerprint", ""
+                    )
+                )
+                if (
+                    not door_fingerprint
+                    or not window_fingerprint
+                    or not generic_parametric_fingerprint
+                ):
+                    raise RuntimeError(
+                        "Door/Window/Stake Object schema discovery omitted fingerprints"
+                    )
+
+                symbol_catalog = await call(
+                    "vw_catalog",
+                    {"action": "symbols", "limit": 100},
+                    label="symbol_catalog_for_create_type",
+                )
+                symbol_records = collection(symbol_catalog, "symbols")
+                if not symbol_records or not symbol_records[0].get("name"):
+                    raise RuntimeError(
+                        "strict full acceptance requires one symbol definition in the disposable source"
+                    )
+                symbol_definition_name = str(symbol_records[0]["name"])
 
                 rollback_name = f"{prefix}_ROLLBACK_SPACE"
                 rollback_payload = await call(
@@ -571,7 +703,7 @@ async def run_acceptance(
                 }
                 main_payload = await call("vw_apply", main_args, label="main_2bhk_apply")
                 replay_payload = await call("vw_apply", main_args, label="main_2bhk_replay")
-                if not replay_payload.get("replayed"):
+                if not replay_payload.get("idempotency_replay"):
                     raise RuntimeError("identical idempotent replay was not recognized")
                 await call(
                     "vw_apply",
@@ -609,13 +741,179 @@ async def run_acceptance(
                 wall_uuid = wall.get("uuid")
                 if not wall_uuid:
                     raise RuntimeError("south wall readback omitted its UUID")
-                openings_payload = await call(
+
+                strict_class_name = f"{prefix}_CLASS"
+                simple_type_specs: list[tuple[str, dict[str, Any], str]] = [
+                    (
+                        "arc",
+                        {"x1": 30000, "y1": 10000, "radius": 500, "start_angle": 15, "sweep_angle": 120},
+                        "arc",
+                    ),
+                    (
+                        "box",
+                        {"x1": 32000, "y1": 9500, "x2": 33000, "y2": 10500},
+                        "rect",
+                    ),
+                    (
+                        "circle",
+                        {"x1": 34500, "y1": 10000, "radius": 500},
+                        "oval",
+                    ),
+                    (
+                        "line",
+                        {"x1": 36000, "y1": 9500, "x2": 37000, "y2": 10500},
+                        "line",
+                    ),
+                    (
+                        "oval",
+                        {"x1": 38000, "y1": 9500, "x2": 39500, "y2": 10500},
+                        "oval",
+                    ),
+                    (
+                        "polygon",
+                        {"points": [[40500, 9500], [41500, 9500], [41250, 10500]], "closed": True},
+                        "polygon",
+                    ),
+                    (
+                        "polyline",
+                        {"points": [[42500, 9500], [43500, 10000], [42500, 10500]], "closed": False},
+                        "polygon",
+                    ),
+                    (
+                        "rect",
+                        {
+                            "x1": 44500,
+                            "y1": 9500,
+                            "x2": 45500,
+                            "y2": 10500,
+                            "class_name": strict_class_name,
+                        },
+                        "rect",
+                    ),
+                    (
+                        "rectangle",
+                        {"x1": 46500, "y1": 9500, "x2": 47500, "y2": 10500},
+                        "rect",
+                    ),
+                    (
+                        "wall",
+                        {"x1": 48500, "y1": 9500, "x2": 50500, "y2": 9500, "height": 3000, "thickness": 200},
+                        "wall",
+                    ),
+                    (
+                        "text",
+                        {"x": 51500, "y": 10000, "text": "Native text type", "text_size": 12},
+                        "text",
+                    ),
+                    (
+                        "dimension",
+                        {"x1": 53000, "y1": 9500, "x2": 54500, "y2": 9500, "offset": 400},
+                        "dimension",
+                    ),
+                    (
+                        "linear_dimension",
+                        {"x1": 55500, "y1": 9500, "x2": 57000, "y2": 9500, "offset": 400},
+                        "dimension",
+                    ),
+                    (
+                        "slab",
+                        {
+                            "points": [[58000, 9500], [59400, 9500], [59400, 10600], [58000, 10600]],
+                            "closed": True,
+                            "thickness": 180,
+                            "elevation": -180,
+                        },
+                        "parametric",
+                    ),
+                    (
+                        "roof",
+                        {
+                            "points": [[60500, 9500], [61900, 9500], [61900, 10600], [60500, 10600]],
+                            "closed": True,
+                            "thickness": 180,
+                            "bearing_height": 3000,
+                            "slope": 20,
+                            "overhang": 250,
+                        },
+                        "roof",
+                    ),
+                    (
+                        "space",
+                        {
+                            "points": [[63000, 9500], [64400, 9500], [64400, 10600], [63000, 10600]],
+                            "closed": True,
+                            "height": 3000,
+                            "room_id": "TYPE-SPACE",
+                        },
+                        "parametric",
+                    ),
+                    (
+                        "parametric",
+                        {
+                            "plugin_name": "Stake Object",
+                            "descriptor_fingerprint": generic_parametric_fingerprint,
+                            "x": 65500,
+                            "y": 10000,
+                        },
+                        "parametric",
+                    ),
+                    (
+                        "symbol",
+                        {
+                            "definition_name": symbol_definition_name,
+                            "x": 67500,
+                            "y": 10000,
+                            "rotation": 12,
+                        },
+                        "symbol",
+                    ),
+                ]
+                individual_type_results: dict[str, dict[str, Any]] = {}
+                individual_type_objects: dict[str, dict[str, Any]] = {}
+                for object_type, raw_params, native_type in simple_type_specs:
+                    object_name = f"{prefix}_TYPE_{object_type.upper()}"
+                    create_params = {
+                        "object_type": object_type,
+                        "name": object_name,
+                        **raw_params,
+                    }
+                    create_payload = await call(
+                        "vw_apply",
+                        {
+                            "operations": [
+                                {
+                                    "type": "create",
+                                    "operation_id": f"type-{object_type}",
+                                    "params": create_params,
+                                }
+                            ],
+                            "idempotency_key": f"{prefix}-type-{object_type}",
+                        },
+                        label=f"create_type_{object_type}",
+                    )
+                    created_query = await query_named(
+                        object_name,
+                        label=f"verify_type_{object_type}",
+                    )
+                    created_object = require_exactly_one(
+                        created_query, f"individually created {object_type}"
+                    )
+                    if created_object.get("type") != native_type:
+                        raise RuntimeError(
+                            f"{object_type} read back as {created_object.get('type')!r}, "
+                            f"expected native type {native_type!r}"
+                        )
+                    individual_type_results[object_type] = create_payload
+                    individual_type_objects[object_type] = created_object
+
+                door_name = f"{prefix}_TYPE_DOOR"
+                door_payload = await call(
                     "vw_apply",
                     {
                         "operations": [
                             {
                                 "type": "create",
-                                "operation_id": "entry-door",
+                                "operation_id": "type-door",
                                 "params": {
                                     "object_type": "door",
                                     "plugin_name": "Door",
@@ -626,12 +924,22 @@ async def run_acceptance(
                                     "rotation": 0,
                                     "width": 900,
                                     "height": 2100,
-                                    "name": f"{prefix}_ENTRY_DOOR",
+                                    "name": door_name,
                                 },
-                            },
+                            }
+                        ],
+                        "idempotency_key": f"{prefix}-type-door",
+                    },
+                    label="create_type_door_hosted",
+                )
+                window_name = f"{prefix}_TYPE_WINDOW"
+                window_payload = await call(
+                    "vw_apply",
+                    {
+                        "operations": [
                             {
                                 "type": "create",
-                                "operation_id": "living-window",
+                                "operation_id": "type-window",
                                 "params": {
                                     "object_type": "window",
                                     "plugin_name": "Window",
@@ -643,14 +951,247 @@ async def run_acceptance(
                                     "width": 1500,
                                     "height": 1200,
                                     "sill_height": 900,
-                                    "name": f"{prefix}_LIVING_WINDOW",
+                                    "name": window_name,
                                 },
                             },
                         ],
-                        "idempotency_key": f"{prefix}-openings",
+                        "idempotency_key": f"{prefix}-type-window",
                     },
-                    label="hosted_openings_apply",
+                    label="create_type_window_hosted",
                 )
+                for object_type, object_name, payload in (
+                    ("door", door_name, door_payload),
+                    ("window", window_name, window_payload),
+                ):
+                    created = require_exactly_one(
+                        await query_named(object_name, label=f"verify_type_{object_type}"),
+                        f"hosted {object_type}",
+                    )
+                    if created.get("type") != "parametric":
+                        raise RuntimeError(f"hosted {object_type} is not a parametric node")
+                    individual_type_results[object_type] = payload
+                    individual_type_objects[object_type] = created
+                if set(individual_type_results) != EXPECTED_CREATE_TYPES:
+                    raise RuntimeError(
+                        "individual create-type execution mismatch: missing={0}, unexpected={1}".format(
+                            sorted(EXPECTED_CREATE_TYPES - set(individual_type_results)),
+                            sorted(set(individual_type_results) - EXPECTED_CREATE_TYPES),
+                        )
+                    )
+
+                operation_coverage: dict[str, dict[str, Any]] = {
+                    "create": individual_type_results["rect"]
+                }
+                rect_object = individual_type_objects["rect"]
+                rect_uuid = str(rect_object.get("uuid") or "")
+                if not rect_uuid:
+                    raise RuntimeError("individual rect omitted its UUID")
+                transform_payload = await call(
+                    "vw_apply",
+                    {
+                        "operations": [
+                            {
+                                "type": "transform",
+                                "params": {
+                                    "target": f"uuid:{rect_uuid}",
+                                    "dx": 250,
+                                    "dy": 125,
+                                    "rotation_deg": 10,
+                                    "scale_x": 1.1,
+                                    "scale_y": 1.1,
+                                },
+                            }
+                        ],
+                        "idempotency_key": f"{prefix}-operation-transform",
+                    },
+                    label="operation_transform_individual",
+                )
+                transformed = require_exactly_one(
+                    await query_named(
+                        f"{prefix}_TYPE_RECT",
+                        label="operation_transform_readback",
+                    ),
+                    "transformed rect",
+                )
+                if transformed.get("uuid") != rect_uuid:
+                    raise RuntimeError("transform changed the rect identity")
+                operation_coverage["transform"] = transform_payload
+
+                duplicate_payload = await call(
+                    "vw_apply",
+                    {
+                        "operations": [
+                            {
+                                "type": "duplicate",
+                                "operation_id": "operation-duplicate",
+                                "params": {
+                                    "target": f"uuid:{rect_uuid}",
+                                    "dx": 1800,
+                                    "dy": 0,
+                                },
+                            }
+                        ],
+                        "idempotency_key": f"{prefix}-operation-duplicate",
+                    },
+                    label="operation_duplicate_individual",
+                )
+                duplicate_uuid = first_receipt_uuid(duplicate_payload, "duplicate operation")
+                operation_coverage["duplicate"] = duplicate_payload
+                duplicate_name = f"{prefix}_OPERATION_DUPLICATE"
+                set_duplicate_payload = await call(
+                    "vw_apply",
+                    {
+                        "operations": [
+                            {
+                                "type": "set_properties",
+                                "params": {
+                                    "edits": [
+                                        {
+                                            "ref": f"uuid:{duplicate_uuid}",
+                                            "properties": {"name": duplicate_name},
+                                        }
+                                    ]
+                                },
+                            }
+                        ],
+                        "idempotency_key": f"{prefix}-operation-set-properties",
+                    },
+                    label="operation_set_properties_individual",
+                )
+                renamed_duplicate = require_exactly_one(
+                    await query_named(
+                        duplicate_name,
+                        label="operation_set_properties_readback",
+                    ),
+                    "renamed duplicate",
+                )
+                if renamed_duplicate.get("uuid") != duplicate_uuid:
+                    raise RuntimeError("set_properties changed the duplicate identity")
+                operation_coverage["set_properties"] = set_duplicate_payload
+
+                delete_payload = await call(
+                    "vw_apply",
+                    {
+                        "operations": [
+                            {
+                                "type": "delete",
+                                "params": {"target": f"uuid:{rect_uuid}"},
+                            }
+                        ],
+                        "idempotency_key": f"{prefix}-operation-delete",
+                    },
+                    label="operation_delete_individual",
+                )
+                if collection(
+                    await query_named(
+                        f"{prefix}_TYPE_RECT",
+                        label="operation_delete_readback",
+                    )
+                ):
+                    raise RuntimeError("delete operation left its exact-name target behind")
+                operation_coverage["delete"] = delete_payload
+                if set(operation_coverage) != EXPECTED_APPLY_OPERATION_TYPES:
+                    raise RuntimeError("not every apply operation type was executed individually")
+
+                space_object = individual_type_objects["space"]
+                space_uuid = str(space_object.get("uuid") or "")
+                if not space_uuid:
+                    raise RuntimeError("individual Space omitted its UUID")
+                revised_space_name = f"{prefix}_TYPE_SPACE_REVISED"
+                space_revision_args = {
+                    "operations": [
+                        {
+                            "type": "set_properties",
+                            "params": {
+                                "edits": [
+                                    {
+                                        "ref": f"uuid:{space_uuid}",
+                                        "properties": {"name": revised_space_name},
+                                    }
+                                ]
+                            },
+                        }
+                    ],
+                    "idempotency_key": f"{prefix}-space-revision",
+                }
+                space_revision = await call(
+                    "vw_apply",
+                    space_revision_args,
+                    label="space_external_mutation",
+                )
+                space_revision_replay = await call(
+                    "vw_apply",
+                    space_revision_args,
+                    label="space_external_mutation_replay",
+                )
+                if not space_revision_replay.get("idempotency_replay"):
+                    raise RuntimeError("Space external-mutation replay was not recognized")
+                revised_space = require_exactly_one(
+                    await query_named(
+                        revised_space_name,
+                        label="space_external_mutation_readback",
+                    ),
+                    "revised Space",
+                )
+                if revised_space.get("uuid") != space_uuid:
+                    raise RuntimeError("Space external mutation changed object identity")
+
+                rejected_space_name = f"{prefix}_SPACE_SHOULD_ROLLBACK"
+                space_rollback = await call(
+                    "vw_apply",
+                    {
+                        "operations": [
+                            {
+                                "type": "set_properties",
+                                "params": {
+                                    "edits": [
+                                        {
+                                            "ref": f"uuid:{space_uuid}",
+                                            "properties": {"name": rejected_space_name},
+                                        }
+                                    ]
+                                },
+                            },
+                            {
+                                "type": "create",
+                                "operation_id": "space-rollback-forced-failure",
+                                "params": {
+                                    "object_type": "parametric",
+                                    "plugin_name": "__VW_MCP_INTENTIONAL_MISSING_PLUGIN__",
+                                    "descriptor_fingerprint": "intentional-mismatch",
+                                    "x": 70000,
+                                    "y": 10000,
+                                },
+                            },
+                        ],
+                        "idempotency_key": f"{prefix}-space-rollback",
+                    },
+                    expect_ok=False,
+                    label="space_external_mutation_rollback",
+                )
+                rolled_back_space = require_exactly_one(
+                    await query_named(
+                        revised_space_name,
+                        label="space_external_rollback_readback",
+                    ),
+                    "rolled-back Space",
+                )
+                if rolled_back_space.get("uuid") != space_uuid:
+                    raise RuntimeError("Space rollback restored the wrong object identity")
+                if collection(
+                    await query_named(
+                        rejected_space_name,
+                        label="space_external_rollback_residue_query",
+                    )
+                ):
+                    raise RuntimeError("Space rollback left the rejected name in the document")
+                report["checks"]["space_external_mutation_regression"] = {
+                    "passed": True,
+                    "uuid": space_uuid,
+                    "replayed": bool(space_revision_replay.get("idempotency_replay")),
+                    "rollback_error": space_rollback.get("error"),
+                    "successful_mutation_verified": (space_revision.get("verification") or {}).get("ok"),
+                }
 
                 for suffix, _display_name, room_id, _points in room_specs:
                     space = await call(
@@ -658,39 +1199,57 @@ async def run_acceptance(
                         {
                             "action": "query",
                             "criteria": f"((N='{prefix}_{suffix}'))",
-                            "object_type": "space",
                             "limit": 10,
                         },
                         label=f"verify_space_{room_id}",
                     )
-                    require_exactly_one(space, f"Space {room_id}")
-                for name, object_type in (
-                    (f"{prefix}_SLAB", "slab"),
-                    (f"{prefix}_ROOF", "roof"),
-                    (f"{prefix}_ENTRY_DOOR", "door"),
-                    (f"{prefix}_LIVING_WINDOW", "window"),
+                    verified_space = require_exactly_one(space, f"Space {room_id}")
+                    if verified_space.get("type") != "parametric":
+                        raise RuntimeError(f"Space {room_id} did not read back as a parametric node")
+                for name, logical_type, native_type in (
+                    # Vectorworks 2024 exposes its built-in Slab plug-in as a
+                    # kParametricNode (type 86), while roofs retain kRoofNode.
+                    (f"{prefix}_SLAB", "slab", "parametric"),
+                    (f"{prefix}_ROOF", "roof", "roof"),
+                    (door_name, "door", "parametric"),
+                    (window_name, "window", "parametric"),
                 ):
                     item = await call(
                         "vw_read",
                         {
                             "action": "query",
                             "criteria": f"((N='{name}'))",
-                            "object_type": object_type,
                             "limit": 10,
                         },
-                        label=f"verify_{object_type}",
+                        label=f"verify_{logical_type}",
                     )
-                    require_exactly_one(item, f"{object_type} {name}")
+                    verified_item = require_exactly_one(item, f"{logical_type} {name}")
+                    if verified_item.get("type") != native_type:
+                        raise RuntimeError(
+                            f"{logical_type} {name} read back as {verified_item.get('type')!r}, "
+                            f"expected native type {native_type!r}"
+                        )
 
                 final_summary = await call(
-                    "vw_read", {"action": "summary", "limit": 500}, label="final_summary"
+                    "vw_read", {"action": "summary", "limit": 200}, label="final_summary"
                 )
+                await call("vw_read", {"action": "layers", "limit": 100}, label="layers_read")
+                await call(
+                    "vw_read", {"action": "selection", "limit": 100}, label="selection_read"
+                )
+                await call("vw_document", {"action": "info"}, label="document_info_grouped")
+                catalog_payloads: dict[str, dict[str, Any]] = {}
                 for action in ("classes", "symbols", "worksheets", "resources"):
-                    await call(
+                    catalog_payloads[action] = await call(
                         "vw_catalog",
                         {"action": action, "limit": 20},
                         label=f"catalog_{action}",
                     )
+                if strict_class_name not in (payload_data(catalog_payloads["classes"]) or []):
+                    raise RuntimeError("native class creation was not visible in the class catalog")
+                resource_symbols = collection(catalog_payloads["resources"], "symbols")
+                if not any(item.get("name") == symbol_definition_name for item in resource_symbols):
+                    raise RuntimeError("resource catalog omitted the symbol used by strict acceptance")
                 safety = await call("vw_tool_safety", {}, label="tool_safety")
                 view = await call("vw_view", {"action": "get"}, label="view_get")
                 view_data = payload_data(view) or {}
@@ -709,8 +1268,19 @@ async def run_acceptance(
 
                 export_path = output_dir / f"{prefix}.png"
                 capture_path = output_dir / f"{prefix}-capture.png"
+                pdf_path = output_dir / f"{prefix}.pdf"
+                exported_vwx_path = output_dir / f"{prefix}-exported.vwx"
+                dwg_path = output_dir / f"{prefix}.dwg"
                 save_path = output_dir / f"{prefix}.vwx"
-                if source in {export_path.resolve(), capture_path.resolve(), save_path.resolve()}:
+                output_paths = (
+                    export_path,
+                    capture_path,
+                    pdf_path,
+                    exported_vwx_path,
+                    dwg_path,
+                    save_path,
+                )
+                if source in {path.resolve() for path in output_paths}:
                     raise RuntimeError("an output path resolves to the disposable source")
                 await call(
                     "vw_io",
@@ -723,20 +1293,92 @@ async def run_acceptance(
                     label="native_view_capture",
                 )
                 await call(
+                    "vw_io",
+                    {
+                        "action": "export",
+                        "file_path": str(pdf_path),
+                        "format": "pdf",
+                        "options": {"current_view_only": True, "resolution_dpi": 150},
+                    },
+                    label="native_pdf_export",
+                )
+                await call(
+                    "vw_document",
+                    {
+                        "action": "export",
+                        "file_path": str(exported_vwx_path),
+                        "format": "vwx",
+                        "options": {"target_file_version": 29},
+                    },
+                    label="native_vectorworks_export",
+                )
+                await call(
+                    "vw_io",
+                    {"action": "export", "file_path": str(dwg_path), "format": "dwg"},
+                    label="native_dwg_export",
+                )
+                await call(
+                    "vw_io",
+                    {"action": "import", "file_path": str(dwg_path), "format": "dwg"},
+                    label="native_dwg_import",
+                )
+                await call(
                     "vw_document",
                     {"action": "save", "file_path": str(save_path)},
                     label="native_document_save",
                 )
-                output_paths = (export_path, capture_path, save_path)
                 if not all(path.is_file() and path.stat().st_size > 0 for path in output_paths):
                     raise RuntimeError("one or more native output files were not created")
+
+                saved_document = await call(
+                    "vw_read", {"action": "document"}, label="saved_document_identity"
+                )
+                if Path(str((payload_data(saved_document) or {}).get("filepath", ""))).resolve() != save_path.resolve():
+                    raise RuntimeError("save_document did not make the output document active")
+                await call(
+                    "vw_document",
+                    {
+                        "action": "open",
+                        "file_path": str(source),
+                        "options": {
+                            "replace_dirty_confirmation": "REPLACE_DIRTY_DOCUMENT"
+                        },
+                    },
+                    label="document_open_source_roundtrip",
+                )
+                reopened_source = await call(
+                    "vw_read", {"action": "document"}, label="document_reopened_source_identity"
+                )
+                if Path(str((payload_data(reopened_source) or {}).get("filepath", ""))).resolve() != source:
+                    raise RuntimeError("open_document did not reopen the disposable source")
+                await call(
+                    "vw_document",
+                    {
+                        "action": "open",
+                        "file_path": str(save_path),
+                        "options": {
+                            "replace_dirty_confirmation": "REPLACE_DIRTY_DOCUMENT"
+                        },
+                    },
+                    label="document_open_output_roundtrip",
+                )
+                reopened_output = await call(
+                    "vw_read", {"action": "document"}, label="document_reopened_output_identity"
+                )
+                if Path(str((payload_data(reopened_output) or {}).get("filepath", ""))).resolve() != save_path.resolve():
+                    raise RuntimeError("open_document did not reopen the saved acceptance output")
+                accepted_summary = await call(
+                    "vw_read",
+                    {"action": "summary", "limit": 200},
+                    label="accepted_output_summary",
+                )
 
                 report["checks"].update(
                     {
                         "main_2bhk": {
                             "passed": True,
                             "operations": len(operations),
-                            "replayed": bool(replay_payload.get("replayed")),
+                            "replayed": bool(replay_payload.get("idempotency_replay")),
                             "created_count": main_payload.get("created_count"),
                             "atomic": main_payload.get("atomic"),
                             "verified": main_payload.get("verified"),
@@ -746,18 +1388,51 @@ async def run_acceptance(
                             "wall_uuid": wall_uuid,
                             "door_fingerprint": door_fingerprint,
                             "window_fingerprint": window_fingerprint,
-                            "created_count": openings_payload.get("created_count"),
-                            "atomic": openings_payload.get("atomic"),
-                            "verified": openings_payload.get("verified"),
+                            "door_atomic": door_payload.get("atomic"),
+                            "window_atomic": window_payload.get("atomic"),
+                            "door_verified": (door_payload.get("verification") or {}).get("ok"),
+                            "window_verified": (window_payload.get("verification") or {}).get("ok"),
+                        },
+                        "individual_create_types": {
+                            "passed": True,
+                            "advertised": sorted(EXPECTED_CREATE_TYPES),
+                            "executed": sorted(individual_type_results),
+                            "native_types": {
+                                object_type: item.get("type")
+                                for object_type, item in sorted(individual_type_objects.items())
+                            },
+                            "symbol_definition": symbol_definition_name,
+                        },
+                        "individual_apply_operations": {
+                            "passed": True,
+                            "advertised": sorted(EXPECTED_APPLY_OPERATION_TYPES),
+                            "executed": sorted(operation_coverage),
+                            "duplicate_uuid": duplicate_uuid,
                         },
                         "catalogs_and_safety": {
                             "passed": True,
                             "response_fields": sorted(safety),
+                            "class_created": strict_class_name,
+                            "selection_read": True,
+                            "layers_read": True,
+                            "worksheet_action_listed": True,
+                        },
+                        "document_and_io_workflows": {
+                            "passed": True,
+                            "formats": ["png", "pdf", "vwx", "dwg"],
+                            "dwg_roundtrip_imported": True,
+                            "document_saved": True,
+                            "source_reopened": True,
+                            "output_reopened": True,
+                            "view_get_set_capture": True,
                         },
                         "native_files": {
                             "passed": True,
                             "export": str(export_path),
                             "capture": str(capture_path),
+                            "pdf": str(pdf_path),
+                            "vectorworks_export": str(exported_vwx_path),
+                            "dwg": str(dwg_path),
                             "document": str(save_path),
                             "sizes": {
                                 path.name: path.stat().st_size for path in output_paths
@@ -766,9 +1441,10 @@ async def run_acceptance(
                     }
                 )
                 report["baseline_total"] = baseline_total
-                report["final_total"] = summary_total(final_summary)
+                report["pre_import_total"] = summary_total(final_summary)
+                report["final_total"] = summary_total(accepted_summary)
                 report["final_counts_by_type"] = (
-                    payload_data(final_summary) or {}
+                    payload_data(accepted_summary) or {}
                 ).get("counts_by_type")
                 report["passed"] = True
 
@@ -777,7 +1453,7 @@ def main() -> int:
     args = parse_args()
     source, output_dir, token_file = validate_args(args)
     run_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-    prefix = f"VW_MCP_FINAL_2BHK_{run_id}"
+    prefix = fixture_prefix(run_id)
     report: dict[str, Any] = {
         "run_id": run_id,
         "prefix": prefix,
@@ -792,7 +1468,17 @@ def main() -> int:
     try:
         anyio.run(run_acceptance, args, source, output_dir, token_file, report)
     except Exception as exc:  # A failed acceptance must still leave a portable report.
-        report["error"] = {"type": type(exc).__name__, "message": str(exc)}
+        def serialize_exception(error: BaseException) -> dict[str, Any]:
+            payload: dict[str, Any] = {
+                "type": type(error).__name__,
+                "message": str(error),
+            }
+            nested = getattr(error, "exceptions", None)
+            if nested:
+                payload["exceptions"] = [serialize_exception(item) for item in nested]
+            return payload
+
+        report["error"] = serialize_exception(exc)
         exit_code = 1
     report["report_path"] = str(report_path)
     report_path.write_text(

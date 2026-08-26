@@ -280,6 +280,18 @@ SymbolInsertionReceipt InsertSymbol(
         throw std::runtime_error("inserted symbol did not retain the exact resolved definition");
     }
 
+    if (!sdk.ParentObject(symbol)) {
+        MCObjectHandle layer = sdk.GetActiveLayer();
+        if (!layer) {
+            layer = sdk.GetCurrentLayer();
+        }
+        if (!layer || !sdk.AddObjectToContainer(symbol, layer) ||
+            sdk.ParentObject(symbol) != layer) {
+            throw std::runtime_error(
+                "Vectorworks created a detached symbol instance that could not be inserted on the active layer");
+        }
+    }
+
     symbolGuard.Release();
     return {
         symbol,

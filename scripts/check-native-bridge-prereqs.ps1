@@ -116,10 +116,30 @@ function Find-VectorworksInstall {
 }
 
 function Test-SdkLayout {
-    param([string]$Path)
+    param(
+        [string]$Path,
+        [string]$Version
+    )
 
     if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Container)) {
         return $false
+    }
+
+    # A shared parent such as third_party\VectorworksSDK may contain one SDK
+    # version beneath a four-digit child directory. Never let recursive header
+    # discovery under that parent satisfy a request for a different version.
+    $VersionChildren = @(
+        Get-ChildItem -LiteralPath $Path -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\d{4}$' }
+    )
+    if ($VersionChildren.Count -gt 0) {
+        $ExactVersion = $VersionChildren |
+            Where-Object { $_.Name -eq $Version } |
+            Select-Object -First 1
+        if (-not $ExactVersion) {
+            return $false
+        }
+        $Path = $ExactVersion.FullName
     }
 
     $DirectMarkers = @(
@@ -171,7 +191,7 @@ function Find-SdkInstall {
     }
 
     foreach ($Candidate in ($Candidates | Where-Object { $_ } | Select-Object -Unique)) {
-        if (Test-SdkLayout -Path $Candidate) {
+        if (Test-SdkLayout -Path $Candidate -Version $Version) {
             return (Resolve-Path -LiteralPath $Candidate).Path
         }
     }

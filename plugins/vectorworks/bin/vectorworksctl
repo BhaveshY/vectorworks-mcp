@@ -206,6 +206,27 @@ def live_native_ready(listener_doctor: Any) -> bool:
     )
 
 
+def effective_native_summary(native_plan: Any, listener_doctor: Any) -> dict[str, Any]:
+    """Keep the guarded install plan distinct from the proven live runtime."""
+    summary = native_summary(native_plan)
+    live_ready = live_native_ready(listener_doctor)
+    summary["live_ready"] = live_ready
+    summary["effective_ready"] = bool(summary["ready"] or live_ready)
+    return summary
+
+
+def doctor_next_action(listener_doctor: Any) -> str:
+    if live_native_ready(listener_doctor):
+        return (
+            "Native phase-4 bridge is live and CAD-ready; no restart is required. "
+            "Use vw_status(action=\"context\") or the grouped CAD tools."
+        )
+    return (
+        "Use native_plan.nextCommandSpec for long-term setup. "
+        "Treat Python listener findings as fallback diagnostics."
+    )
+
+
 def looks_like_companion_repo(path: str | Path) -> bool:
     root = Path(path).expanduser()
     return (
@@ -302,12 +323,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "mode": "native-first",
             "cad_ready": listener_cad_ready(listener_doctor),
             "native_ready": live_native_ready(listener_doctor),
-            "native_summary": native_summary(native_plan),
+            "native_summary": effective_native_summary(native_plan, listener_doctor),
             "listener_doctor": listener_doctor,
             "native_plan": native_plan,
             "listener_error": listener_error,
             "native_error": native_error,
-            "next_action": "Use native_plan.nextCommandSpec for long-term setup. Treat Python listener findings as fallback diagnostics.",
+            "next_action": doctor_next_action(listener_doctor),
         }
         print(json.dumps(payload, indent=2))
         return 0 if payload["ok"] else 1

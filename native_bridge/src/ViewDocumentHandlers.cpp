@@ -89,21 +89,6 @@ ActiveDocumentReadback ReadActiveDocument() {
     return readback;
 }
 
-bool SameExistingPath(const fs::path& left, const fs::path& right) {
-    std::error_code error;
-    const bool equivalent = fs::equivalent(left, right, error);
-    if (!error) {
-        return equivalent;
-    }
-    error.clear();
-    const fs::path canonicalLeft = fs::weakly_canonical(left, error);
-    if (error) {
-        return false;
-    }
-    const fs::path canonicalRight = fs::weakly_canonical(right, error);
-    return !error && canonicalLeft == canonicalRight;
-}
-
 ViewState ReadView() {
     if (!gSDK) {
         throw Error(ErrorCode::InterfaceUnavailable, "Vectorworks SDK is unavailable");
@@ -158,6 +143,7 @@ const char* ErrorCodeName(ErrorCode code) noexcept {
 const char* CommitStateName(CommitState state) noexcept {
     switch (state) {
         case CommitState::NotStarted: return "not_started";
+        case CommitState::Accepted: return "accepted";
         case CommitState::Committed: return "committed";
         case CommitState::Unknown: return "unknown";
     }
@@ -282,55 +268,65 @@ DocumentResult SaveDocument(
 #endif
 }
 
-DocumentResult OpenDocument(
+PreparedOpenDocument PrepareOpenDocument(
     const std::string& absolutePath,
     const std::string& replaceDirtyConfirmation) {
 #if VECTORWORKS_MCP_VIEW_DOCUMENT_HAS_SDK
     if (!gSDK) {
         throw Error(ErrorCode::InterfaceUnavailable, "Vectorworks SDK is unavailable");
     }
-    if (gSDK->IsActiveFileChangedAfterLastSave() && replaceDirtyConfirmation != kReplaceDirtyConfirmation) {
+#if SDK_VERSION >= 3000
+    // Vectorworks 2025 removed IsActiveFileChangedAfterLastSave from ISDK.
+    // Without an authoritative dirty-state read, fail conservatively and
+    // require the same explicit replacement confirmation used for a known
+    // dirty 2024 document.
+    const bool replacementConfirmationRequired = true;
+#else
+    const bool replacementConfirmationRequired = gSDK->IsActiveFileChangedAfterLastSave();
+#endif
+    if (replacementConfirmationRequired && replaceDirtyConfirmation != kReplaceDirtyConfirmation) {
         throw Error(
             ErrorCode::ConfirmationRequired,
-            "active document has unsaved changes; pass replace_dirty_confirmation=REPLACE_DIRTY_DOCUMENT");
+            "active document has or may have unsaved changes; pass replace_dirty_confirmation=REPLACE_DIRTY_DOCUMENT");
     }
-    const fs::path path = CanonicalAbsolutePath(absolutePath, true);
-    auto identifier = FileIdentifier(path);
-    const std::string requested = path.u8string();
-    const bool sdkReportedSuccess = gSDK->OpenDocumentPath(identifier, false);
-    const ActiveDocumentReadback active = ReadActiveDocument();
-    if (active.readable && SameExistingPath(fs::u8path(active.path), path)) {
-        return {
-            "open_document",
-            active.path,
-            active.saved,
-            requested,
-            active.path,
-            CommitState::Committed,
-        };
-    }
-    if (!active.readable) {
-        throw Error(
-            sdkReportedSuccess ? ErrorCode::ReadbackMismatch : ErrorCode::SdkOperationFailed,
-            sdkReportedSuccess
-                ? "OpenDocumentPath returned success but the active document path could not be read back"
-                : "OpenDocumentPath returned failure and the active document path could not be read back",
-            requested,
-            {},
-            CommitState::Unknown);
-    }
-    throw Error(
-        sdkReportedSuccess ? ErrorCode::ReadbackMismatch : ErrorCode::SdkOperationFailed,
-        sdkReportedSuccess
-            ? "OpenDocumentPath returned success but the active document path does not match the request"
-            : "OpenDocumentPath returned failure and the requested document is not active",
-        requested,
-        active.path,
-        CommitState::Unknown);
+    return {CanonicalAbsolutePath(absolutePath, true).u8string()};
 #else
     (void) absolutePath;
     (void) replaceDirtyConfirmation;
     throw Error(ErrorCode::InterfaceUnavailable, "document open requires the Vectorworks SDK build");
+#endif
+}
+
+bool LaunchPreparedOpenDocument(const PreparedOpenDocument& request) {
+#if VECTORWORKS_MCP_VIEW_DOCUMENT_HAS_SDK
+    const fs::path path = CanonicalAbsolutePath(request.canonicalPath, true);
+    VectorWorks::TVWArray_OpenFileInformation openFiles;
+    gSDK->GetOpenFilesList(openFiles);
+    for (size_t index = 0u; index < openFiles.GetSize(); ++index) {
+        const auto& openFile = openFiles[index];
+        if (!openFile.fpFileID || openFile.fIsInMemoryOnly) {
+            continue;
+        }
+        TXString openPathText;
+        if (VCOM_FAILED(openFile.fpFileID->GetFileFullPath(openPathText))) {
+            continue;
+        }
+        std::error_code error;
+        const fs::path openPath = fs::weakly_canonical(
+            fs::u8path(openPathText.GetStdString()), error);
+        if (error) {
+            continue;
+        }
+        const bool sameFile = fs::equivalent(path, openPath, error);
+        if (!error && sameFile) {
+            return openFile.fIsActive || gSDK->SwitchToOpenFile(openFile.fFileRef);
+        }
+    }
+    auto identifier = FileIdentifier(path);
+    return gSDK && gSDK->OpenDocumentPath(identifier, false);
+#else
+    (void) request;
+    return false;
 #endif
 }
 

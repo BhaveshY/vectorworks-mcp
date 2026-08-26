@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import sys
 import unittest
 from datetime import timedelta
@@ -22,6 +23,47 @@ def _all_broken_resource_errors(exc: BaseException) -> bool:
 
 
 class McpStdioContractTests(unittest.TestCase):
+    def test_bundled_codex_wrapper_starts_when_spawned_by_python(self):
+        powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+        if not powershell:
+            self.skipTest("Windows PowerShell is required to exercise the Codex plugin wrapper")
+
+        async def run_contract():
+            env = os.environ.copy()
+            env.update(
+                {
+                    "VW_MCP_REPO": str(ROOT),
+                    "VW_MCP_HOST": "127.0.0.1",
+                    "VW_MCP_PORT": "1",
+                    "VW_MCP_TIMEOUT": "0.5",
+                    "VW_MCP_HEALTH_TIMEOUT": "0.2",
+                    "VW_MCP_INSECURE_NO_AUTH": "1",
+                    "VW_MCP_TOOL_PROFILE": "fast-native",
+                }
+            )
+            params = StdioServerParameters(
+                command=powershell,
+                args=[
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(ROOT / "plugins" / "vectorworks" / "scripts" / "run-vectorworks-mcp.ps1"),
+                ],
+                cwd=ROOT,
+                env=env,
+            )
+            with open(os.devnull, "w", encoding="utf-8") as errlog:
+                async with stdio_client(params, errlog=errlog) as (read, write):
+                    async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=15)) as session:
+                        initialized = await session.initialize()
+                        self.assertEqual(initialized.serverInfo.version, "0.5.0")
+                        tools = await session.list_tools()
+                        self.assertEqual({tool.name for tool in tools.tools}, set(__import__("server").FAST_NATIVE_TOOL_NAMES))
+
+        anyio.run(run_contract)
+
     def test_fast_native_profile_exposes_only_curated_native_tools(self):
         async def run_contract():
             env = os.environ.copy()
