@@ -25,7 +25,7 @@ Legend:
 | `create_wall` | `handle_create_wall` | write | main/plugin event context | 2 | Creates and deletes a temporary true wall object; can set width and fixed corner height |
 | `create_text` | `handle_create_text` | write | main/plugin event context | 2 | Creates and deletes a temporary text label |
 | `create_linear_dimension` | `handle_create_linear_dimension` | write | main/plugin event context | 2 | Creates and deletes a temporary linear dimension |
-| `set_property` | `handle_set_property` | write | main/plugin event context | 2 | Changes name/class/fill color/pen color/line weight/opacity on a test object with host readback verification |
+| `set_property` | `handle_set_property` | write | main/plugin event context | 2 | Changes name/class/fill color/pen color/fill pattern/line weight/opacity on a test object with host readback verification |
 | `manage_classes` | `handle_manage_classes` | mixed/destructive | main/plugin event context | 2 | Lists, creates, and deletes a temporary class; delete has separate destructive confirmation |
 | `find_objects` | `handle_find_objects` | read | main/plugin event context | 3 | Criteria search returns known test object |
 | `drawing_summary` | `handle_drawing_summary` | read | main/plugin event context | 3 | Returns compact counts by type/layer/class plus bounded examples without dumping every object |

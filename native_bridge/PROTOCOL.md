@@ -177,7 +177,7 @@ responses must satisfy these minimum shapes:
   `handle`; accepts start/end coordinates and dimension offset.
 - `set_property`: object with `changed: true`, `handle`, `property_name`,
   `value`, and `before`/`after` object records. The native allowlist is
-  `name`, `class`, `fillColor`, `penColor`, `lineWeight`, and `opacity`; host
+  `name`, `class`, `fillColor`, `penColor`, `fillPattern`, `lineWeight`, and `opacity`; host
   tools resolve refs through `get_objects` and verify readback after writes.
 - `manage_classes`: `list` returns class names, `create` returns the created
   class name, and `delete` returns `deleted: true` after `confirm:

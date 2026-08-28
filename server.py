@@ -419,8 +419,24 @@ BatchObjectType = Literal[
     "window",
 ]
 DoorSwing = Literal["left", "right"]
-PropertyName = Literal["name", "class", "fillColor", "penColor", "lineWeight", "opacity"]
-PROPERTY_NAME_VALUES = {"name", "class", "fillColor", "penColor", "lineWeight", "opacity"}
+PropertyName = Literal[
+    "name",
+    "class",
+    "fillColor",
+    "penColor",
+    "fillPattern",
+    "lineWeight",
+    "opacity",
+]
+PROPERTY_NAME_VALUES = {
+    "name",
+    "class",
+    "fillColor",
+    "penColor",
+    "fillPattern",
+    "lineWeight",
+    "opacity",
+}
 MAX_PROPERTY_VALUE_CHARS = 1024
 ClassAction = Literal["list", "create", "delete"]
 WorksheetAction = Literal["list", "read", "write", "read_range"]
@@ -465,7 +481,7 @@ BatchPropertyEditList = Annotated[
         description=(
             "Property edits of the form "
             '{"ref":"uuid:...|name:...|handle:...","properties":{"name":"..."}}. '
-            "Supported properties: name, class, fillColor, penColor, lineWeight, opacity."
+            "Supported properties: name, class, fillColor, penColor, fillPattern, lineWeight, opacity."
         ),
         json_schema_extra={
             "items": {
@@ -490,6 +506,7 @@ BatchPropertyEditList = Annotated[
                             "class": {"type": "string", "minLength": 1, "maxLength": MAX_PROPERTY_VALUE_CHARS},
                             "fillColor": {"type": "string", "pattern": r"^\d{1,5},\d{1,5},\d{1,5}$"},
                             "penColor": {"type": "string", "pattern": r"^\d{1,5},\d{1,5},\d{1,5}$"},
+                            "fillPattern": {"type": "integer", "minimum": 0, "maximum": 32767},
                             "lineWeight": {"type": "integer", "minimum": 0, "maximum": 32767},
                             "opacity": {"type": "integer", "minimum": 0, "maximum": 100},
                         },
@@ -2797,12 +2814,12 @@ def _normalize_property_value(property_name: str, value: Any) -> tuple[str | Non
             return None, "class value is required"
         return class_name, None
 
-    if property_name in {"lineWeight", "opacity"}:
+    if property_name in {"fillPattern", "lineWeight", "opacity"}:
         trimmed = value_text.strip()
         if not re.fullmatch(r"[+-]?\d+", trimmed):
             return None, f"{property_name} must be an integer"
         parsed = int(trimmed, 10)
-        max_value = 32767 if property_name == "lineWeight" else 100
+        max_value = 100 if property_name == "opacity" else 32767
         if parsed < 0 or parsed > max_value:
             return None, f"{property_name} must be between 0 and {max_value}"
         return str(parsed), None

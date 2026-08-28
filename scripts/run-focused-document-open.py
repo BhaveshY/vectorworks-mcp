@@ -23,6 +23,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("document", type=Path)
     parser.add_argument("--timeout-seconds", type=float, default=90.0)
     parser.add_argument(
+        "--replace-dirty",
+        action="store_true",
+        help="Confirm replacement of the active dirty/disposable document.",
+    )
+    parser.add_argument(
         "--auth-token-file",
         type=Path,
         default=Path.home() / ".vectorworks-mcp" / "auth-token",
@@ -65,9 +70,15 @@ async def main() -> None:
             ) as session:
                 await session.initialize()
                 started = time.perf_counter()
-                result = await session.call_tool(
-                    "vw_document", {"action": "open", "file_path": str(target)}
-                )
+                open_args: dict[str, object] = {
+                    "action": "open",
+                    "file_path": str(target),
+                }
+                if args.replace_dirty:
+                    open_args["options"] = {
+                        "replace_dirty_confirmation": "REPLACE_DIRTY_DOCUMENT"
+                    }
+                result = await session.call_tool("vw_document", open_args)
                 report["elapsed_ms"] = round(
                     (time.perf_counter() - started) * 1000.0, 3
                 )

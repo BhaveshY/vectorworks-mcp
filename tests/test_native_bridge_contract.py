@@ -645,8 +645,18 @@ class NativeBridgeContractTests(unittest.TestCase):
         apply_block = source[source.index("void ApplyObjectProperty"):]
         set_property_block = source[source.index("std::string HandleSetProperty"):]
 
-        for property_name in ("name", "class", "lineWeight", "opacity", "fillColor", "penColor"):
+        for property_name in (
+            "name",
+            "class",
+            "lineWeight",
+            "opacity",
+            "fillColor",
+            "penColor",
+            "fillPattern",
+        ):
             self.assertIn(f'propertyName == "{property_name}"', apply_block)
+        self.assertIn("gSDK->SetFillPat(object", apply_block)
+        self.assertIn("gSDK->GetFillPat(object)", source)
         self.assertIn('throw std::invalid_argument("unsupported property: " + propertyName)', apply_block)
         self.assertIn("kMaxPropertyValueChars", set_property_block)
         self.assertIn("property value is too long", set_property_block)

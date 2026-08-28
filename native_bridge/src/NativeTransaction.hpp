@@ -12,6 +12,7 @@ namespace VectorworksMCP::Transactions {
 
 enum class ObjectFamily {
     Simple,
+    Wall,
     Symbol,
     Parametric,
     Space,

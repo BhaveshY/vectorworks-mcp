@@ -39,6 +39,23 @@ class NativeTransactionContractTests(unittest.TestCase):
         self.assertIn("UndoRegistration::SdkManaged", source)
         self.assertIn("live-proven SDK-managed ownership", source)
 
+    def test_walls_use_their_live_proven_sdk_managed_undo_family(self):
+        header = HEADER.read_text(encoding="utf-8")
+        bridge = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("Wall,", header)
+        self.assertIn(
+            'spec.objectType == "wall"\n                ? Transactions::ObjectFamily::Wall',
+            bridge,
+        )
+        self.assertIn(
+            "if (nodeType == kWallNode) {\n        return Transactions::ObjectFamily::Wall;",
+            bridge,
+        )
+        self.assertGreaterEqual(bridge.count("Transactions::ObjectFamily::Wall"), 6)
+
     def test_linear_dimensions_class_at_creation_and_remain_fail_closed(self):
         bridge = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(
             encoding="utf-8"

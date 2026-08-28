@@ -1176,6 +1176,8 @@ std::string ObjectJson(MCObjectHandle object) {
     }
     json += ",\"lineWeight\":";
     json += std::to_string(static_cast<int>(gSDK->GetLineWeight(object)));
+    json += ",\"fillPattern\":";
+    json += std::to_string(static_cast<int>(gSDK->GetFillPat(object)));
     json += ",\"opacity\":";
     json += std::to_string(static_cast<int>(gSDK->GetOpacity(object)));
 
@@ -2744,7 +2746,8 @@ MCObjectHandle CreatePrimitiveFromSpec(
         if (!wall || gSDK->GetObjectTypeN(wall) != kWallNode) {
             throw std::invalid_argument("host wall UUID was not found or is not a wall");
         }
-        const auto wallMutation = transaction.TrackExternalBefore(wall);
+        const auto wallMutation = transaction.TrackExternalBefore(
+            wall, Transactions::ObjectFamily::Wall);
         BuiltInOpeningCreateSpec request;
         request.kind = spec.objectType == "door"
             ? BuiltInParametricKind::Door
@@ -2779,7 +2782,8 @@ MCObjectHandle CreatePrimitiveFromSpec(
             if (!wall || gSDK->GetObjectTypeN(wall) != kWallNode) {
                 throw std::invalid_argument("host wall UUID was not found or is not a wall");
             }
-            wallMutation = transaction.TrackExternalBefore(wall);
+            wallMutation = transaction.TrackExternalBefore(
+                wall, Transactions::ObjectFamily::Wall);
         }
         ParametricCreateSpec request;
         request.universalPluginName = spec.pluginName;
@@ -2888,8 +2892,10 @@ MCObjectHandle CreatePrimitiveFromSpec(
         }
         adoptedArtifact = transaction.AdoptFinal(
             object,
-            spec.objectType == "parametric"
-                ? Transactions::ObjectFamily::Parametric
+            spec.objectType == "wall"
+                ? Transactions::ObjectFamily::Wall
+                : spec.objectType == "parametric"
+                    ? Transactions::ObjectFamily::Parametric
                 : spec.objectType == "symbol"
                     ? Transactions::ObjectFamily::Symbol
                     : Transactions::ObjectFamily::Simple,
@@ -2951,6 +2957,9 @@ Transactions::ObjectFamily ExternalMutationFamily(MCObjectHandle object) {
     }
     if (nodeType == kRoofContainerNode) {
         return Transactions::ObjectFamily::Roof;
+    }
+    if (nodeType == kWallNode) {
+        return Transactions::ObjectFamily::Wall;
     }
     if (nodeType != kParametricNode) {
         return Transactions::ObjectFamily::Simple;
@@ -3021,6 +3030,7 @@ std::string HandleCreateTypedObject(const Params& params, const std::string& lab
     options.expectedArtifactCount = 2u;
     options.sdkManagedRegistrationFamilies = {
         Transactions::ObjectFamily::Symbol,
+        Transactions::ObjectFamily::Wall,
         Transactions::ObjectFamily::Parametric,
         Transactions::ObjectFamily::Space,
         Transactions::ObjectFamily::Slab,
@@ -3171,6 +3181,15 @@ void ApplyObjectProperty(MCObjectHandle object, const std::string& propertyName,
     if (propertyName == "lineWeight") {
         const int lineWeight = ParseIntegerString(value, "lineWeight", 0, std::numeric_limits<short>::max());
         gSDK->SetLineWeight(object, static_cast<short>(lineWeight));
+        return;
+    }
+    if (propertyName == "fillPattern") {
+        const int fillPattern = ParseIntegerString(
+            value,
+            "fillPattern",
+            0,
+            std::numeric_limits<short>::max());
+        gSDK->SetFillPat(object, static_cast<InternalIndex>(fillPattern));
         return;
     }
     if (propertyName == "opacity") {
@@ -3383,6 +3402,7 @@ bool IsSupportedPropertyName(const std::string& propertyName) {
         propertyName == "class" ||
         propertyName == "fillColor" ||
         propertyName == "penColor" ||
+        propertyName == "fillPattern" ||
         propertyName == "lineWeight" ||
         propertyName == "opacity";
 }
@@ -3818,6 +3838,7 @@ std::string HandleApplyOperations(const Params& params) {
     transactionOptions.expectedArtifactCount = operations.size() * 2u;
     transactionOptions.sdkManagedRegistrationFamilies = {
         Transactions::ObjectFamily::Symbol,
+        Transactions::ObjectFamily::Wall,
         Transactions::ObjectFamily::Parametric,
         Transactions::ObjectFamily::Space,
         Transactions::ObjectFamily::Slab,
@@ -4137,6 +4158,7 @@ std::string HandleBatchCreateObjects(const Params& params) {
     options.expectedArtifactCount = specs.size() * 2u;
     options.sdkManagedRegistrationFamilies = {
         Transactions::ObjectFamily::Symbol,
+        Transactions::ObjectFamily::Wall,
         Transactions::ObjectFamily::Parametric,
         Transactions::ObjectFamily::Space,
         Transactions::ObjectFamily::Slab,

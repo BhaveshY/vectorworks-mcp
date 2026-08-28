@@ -1779,8 +1779,9 @@ class ServerProtocolTests(unittest.TestCase):
                     {"ref": "uuid:u1", "properties": {"name": "Valid Name"}},
                     {"ref": "uuid:u2", "properties": {"opacity": "101"}},
                     {"ref": "uuid:u3", "properties": {"lineWeight": "-1"}},
-                    {"ref": "uuid:u4", "properties": {"fillColor": "65536,0,0"}},
-                    {"ref": "uuid:u5", "properties": {"class": "  "}},
+                    {"ref": "uuid:u4", "properties": {"fillPattern": "-1"}},
+                    {"ref": "uuid:u5", "properties": {"fillColor": "65536,0,0"}},
+                    {"ref": "uuid:u6", "properties": {"class": "  "}},
                 ]
             )
         )
@@ -1793,8 +1794,9 @@ class ServerProtocolTests(unittest.TestCase):
             [
                 ("uuid:u2", "opacity"),
                 ("uuid:u3", "lineWeight"),
-                ("uuid:u4", "fillColor"),
-                ("uuid:u5", "class"),
+                ("uuid:u4", "fillPattern"),
+                ("uuid:u5", "fillColor"),
+                ("uuid:u6", "class"),
             ],
         )
 
@@ -1810,7 +1812,7 @@ class ServerProtocolTests(unittest.TestCase):
                 objects = (
                     [{"handle": "h1", "uuid": "u1", "type": "rect", "name": "Old", "layer": "Layer 1"}]
                     if get_objects_calls == 1
-                    else [{"handle": "h1", "uuid": "u1", "type": "rect", "name": "Old", "layer": "Layer 1", "opacity": 5, "fillColor": "1,2,3"}]
+                    else [{"handle": "h1", "uuid": "u1", "type": "rect", "name": "Old", "layer": "Layer 1", "opacity": 5, "fillColor": "1,2,3", "fillPattern": 0}]
                 )
                 return {"id": request["id"], "success": True, "result": objects}
             if request["action"] == "set_property":
@@ -1819,22 +1821,23 @@ class ServerProtocolTests(unittest.TestCase):
                     [
                         {"handle": "h1", "property_name": "opacity", "value": "5"},
                         {"handle": "h1", "property_name": "fillColor", "value": "1,2,3"},
+                        {"handle": "h1", "property_name": "fillPattern", "value": "0"},
                     ],
                 )
                 return {"id": request["id"], "success": True, "result": {"changed": True}}
             self.fail(f"Unexpected action: {request['action']}")
 
-        with FakeListener(handler, max_requests=5) as listener:
+        with FakeListener(handler, max_requests=6) as listener:
             _configure_server(listener.port)
             result = json.loads(
                 server.vw_batch_set_object_properties(
-                    edits=[{"ref": "uuid:u1", "properties": {"opacity": "005", "fillColor": "1, 2, 3"}}]
+                    edits=[{"ref": "uuid:u1", "properties": {"opacity": "005", "fillColor": "1, 2, 3", "fillPattern": "000"}}]
                 )
             )
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["edits"][0]["verified"])
-        self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_objects", "set_property", "set_property", "get_objects"])
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_objects", "set_property", "set_property", "set_property", "get_objects"])
 
     def test_batch_set_object_properties_blocks_native_bridge_without_set_property(self):
         def handler(request):
