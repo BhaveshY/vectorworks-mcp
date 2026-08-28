@@ -8,6 +8,7 @@
 
 #if defined(SDK_VERSION)
 #define VECTORWORKS_MCP_VIEW_DOCUMENT_HAS_SDK 1
+#include "Interfaces/VectorWorks/Extension/IExtendedProps.h"
 #include "Interfaces/VectorWorks/Filing/IFileIdentifier.h"
 #else
 #define VECTORWORKS_MCP_VIEW_DOCUMENT_HAS_SDK 0
@@ -300,6 +301,18 @@ PreparedOpenDocument PrepareOpenDocument(
 bool LaunchPreparedOpenDocument(const PreparedOpenDocument& request) {
 #if VECTORWORKS_MCP_VIEW_DOCUMENT_HAS_SDK
     const fs::path path = CanonicalAbsolutePath(request.canonicalPath, true);
+    if (!gSDK->GetActiveLayer()) {
+        VectorWorks::Extension::IExtendedPropsPtr extendedProps(
+            VectorWorks::Extension::IID_ExtendedProps);
+        if (!extendedProps) {
+            throw Error(ErrorCode::InterfaceUnavailable, "application document interface is unavailable");
+        }
+        const bool opened = extendedProps->OpenOrActivateFile(TXString(path.u8string()));
+        if (opened) {
+            gSDK->DrawScreen();
+        }
+        return opened;
+    }
     VectorWorks::TVWArray_OpenFileInformation openFiles;
     gSDK->GetOpenFilesList(openFiles);
     for (size_t index = 0u; index < openFiles.GetSize(); ++index) {
