@@ -198,7 +198,7 @@ async def main() -> None:
 
                 operations: list[dict[str, Any]] = []
 
-                # Floor and semantic room program. Spaces are inset from wall centre lines.
+                # Inset Space boundaries from wall centerlines so tags stay inside rooms.
                 operations.append(
                     create(
                         "floor-slab",
@@ -333,9 +333,7 @@ async def main() -> None:
                         label=f"atomic_wall_{wall_id}",
                     )
                 report["wall_operation_count"] = len(wall_specs)
-                operations = []
 
-                # Furniture and sanitary fixtures provide real plan-readability.
                 rectangles = [
                     ("sofa", 700, 1350, 2950, 2250, "A-Furn"),
                     ("coffee", 1350, 2700, 2550, 3300, "A-Furn"),
@@ -410,7 +408,6 @@ async def main() -> None:
                 )
                 operations = []
 
-                # Drawing sheet, hierarchy, north arrow, scale and coordinated dimensions.
                 operations.extend(
                     [
                         create("sheet-border", "rect", x1=-1500, y1=-1500, x2=18400, y2=9800, name=f"{prefix}_BORDER", class_name="A-Sheet-Border"),
