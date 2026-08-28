@@ -3023,11 +3023,10 @@ std::string CompactCreatedPrimitiveListJson(const std::vector<CreatedPrimitive>&
     return json;
 }
 
-std::string HandleCreateTypedObject(const Params& params, const std::string& label, const TXString& undoName) {
-    const PrimitiveSpec spec = ParsePrimitiveSpec(params, label);
-
+Transactions::TransactionOptions MakeSdkManagedObjectTransactionOptions(
+    std::size_t expectedArtifactCount) {
     Transactions::TransactionOptions options;
-    options.expectedArtifactCount = 2u;
+    options.expectedArtifactCount = expectedArtifactCount;
     options.sdkManagedRegistrationFamilies = {
         Transactions::ObjectFamily::Symbol,
         Transactions::ObjectFamily::Wall,
@@ -3038,6 +3037,13 @@ std::string HandleCreateTypedObject(const Params& params, const std::string& lab
         Transactions::ObjectFamily::Door,
         Transactions::ObjectFamily::Window,
     };
+    return options;
+}
+
+std::string HandleCreateTypedObject(const Params& params, const std::string& label, const TXString& undoName) {
+    const PrimitiveSpec spec = ParsePrimitiveSpec(params, label);
+
+    auto options = MakeSdkManagedObjectTransactionOptions(2u);
     Transactions::NativeTransaction transaction(*gSDK, undoName, std::move(options));
     try {
         std::vector<std::string> warnings;
@@ -3834,18 +3840,7 @@ std::string HandleApplyOperations(const Params& params) {
     created.reserve(operations.size());
     operationResults.reserve(operations.size());
 
-    Transactions::TransactionOptions transactionOptions;
-    transactionOptions.expectedArtifactCount = operations.size() * 2u;
-    transactionOptions.sdkManagedRegistrationFamilies = {
-        Transactions::ObjectFamily::Symbol,
-        Transactions::ObjectFamily::Wall,
-        Transactions::ObjectFamily::Parametric,
-        Transactions::ObjectFamily::Space,
-        Transactions::ObjectFamily::Slab,
-        Transactions::ObjectFamily::Roof,
-        Transactions::ObjectFamily::Door,
-        Transactions::ObjectFamily::Window,
-    };
+    auto transactionOptions = MakeSdkManagedObjectTransactionOptions(operations.size() * 2u);
     Transactions::NativeTransaction transaction(
         *gSDK,
         TXString("Vectorworks MCP apply operations"),
@@ -4154,18 +4149,7 @@ std::string HandleBatchCreateObjects(const Params& params) {
 
     std::vector<CreatedPrimitive> created;
     created.reserve(specs.size());
-    Transactions::TransactionOptions options;
-    options.expectedArtifactCount = specs.size() * 2u;
-    options.sdkManagedRegistrationFamilies = {
-        Transactions::ObjectFamily::Symbol,
-        Transactions::ObjectFamily::Wall,
-        Transactions::ObjectFamily::Parametric,
-        Transactions::ObjectFamily::Space,
-        Transactions::ObjectFamily::Slab,
-        Transactions::ObjectFamily::Roof,
-        Transactions::ObjectFamily::Door,
-        Transactions::ObjectFamily::Window,
-    };
+    auto options = MakeSdkManagedObjectTransactionOptions(specs.size() * 2u);
     Transactions::NativeTransaction transaction(
         *gSDK,
         TXString("Vectorworks MCP atomic batch create objects"),
