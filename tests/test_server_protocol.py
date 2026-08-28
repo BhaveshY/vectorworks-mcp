@@ -1047,6 +1047,35 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertIn("uuid:", result["error"])
         self.assertEqual(result["timing"]["attempts"], 0)
 
+    def test_execute_operations_rejects_wire_expansion_over_native_limit(self):
+        def handler(request):
+            if request["action"] == "ping":
+                return {
+                    "id": request["id"],
+                    "success": True,
+                    "result": _native_phase_four_status(),
+                }
+            self.fail(f"Unexpected action: {request['action']}")
+
+        edits = [
+            {
+                "ref": f"uuid:object-{index}",
+                "properties": {"class": "A-Detail", "lineWeight": 20, "opacity": 100},
+            }
+            for index in range(84)
+        ]
+        operations = [{"type": "set_properties", "params": {"edits": edits}}]
+        with FakeListener(handler, max_requests=1) as listener:
+            _configure_server(listener.port)
+            result = json.loads(
+                server.vw_execute_operations(operations, "wire-overflow-001")
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("expands to 252 native wire operations", result["error"])
+        self.assertIn("limit is 250", result["error"])
+        self.assertEqual([request["action"] for request in listener.requests], ["ping"])
+
     def test_request_trace_log_is_token_safe(self):
         original_trace_enabled = server.TRACE_ENABLED
         server.TRACE_ENABLED = True

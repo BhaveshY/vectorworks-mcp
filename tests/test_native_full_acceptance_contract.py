@@ -39,6 +39,21 @@ class NativeFullAcceptanceContractTests(unittest.TestCase):
             3,
         )
 
+    def test_linear_dimension_fixtures_do_not_send_unsupported_names(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+
+        self.assertNotIn("_DIM_WIDTH", source)
+        self.assertNotIn("_DIM_DEPTH", source)
+        self.assertIn('if object_type in {"dimension", "linear_dimension"}:', source)
+        self.assertIn('create_params = {"object_type": object_type, **raw_params}', source)
+
+    def test_space_fixture_expects_semantic_space_readback(self):
+        source = SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn('"room_id": "TYPE-SPACE"', source)
+        self.assertIn('\n                        "space",\n                    ),', source)
+        self.assertIn('verified_space.get("type") != "space"', source)
+
 
 if __name__ == "__main__":
     unittest.main()

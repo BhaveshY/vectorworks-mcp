@@ -809,7 +809,10 @@ int GetBoundedIntParam(
     if (value < minValue) {
         throw std::invalid_argument(key + " must be >= " + std::to_string(minValue));
     }
-    return std::min(value, maxValue);
+    if (value > maxValue) {
+        throw std::invalid_argument(key + " must be <= " + std::to_string(maxValue));
+    }
+    return value;
 }
 
 int GetRequiredBoundedIntParam(
@@ -2430,6 +2433,10 @@ void ValidatePrimitiveSpec(const PrimitiveSpec& spec, const std::string& label) 
         return;
     }
     if (spec.objectType == "linear_dimension") {
+        if (!spec.name.empty()) {
+            throw std::invalid_argument(
+                label + ".name is not supported for native linear dimensions");
+        }
         if (spec.x1 == spec.x2 && spec.y1 == spec.y2) {
             throw std::invalid_argument(label + " linear_dimension endpoints must not be identical");
         }
@@ -2570,6 +2577,73 @@ void ApplyObjectNameAndClass(MCObjectHandle object, const PrimitiveSpec& spec) {
     }
 }
 
+InternalIndex ResolveOrCreateClass(const std::string& className) {
+    InternalIndex classId = gSDK->ClassNameToID(TXString(className.c_str()));
+    if (!gSDK->ValidClass(classId)) {
+        classId = gSDK->AddClass(TXString(className.c_str()));
+    }
+    if (!gSDK->ValidClass(classId)) {
+        throw std::runtime_error("Vectorworks rejected class: " + className);
+    }
+    return classId;
+}
+
+MCObjectHandle CreateLinearDimensionWithClass(
+    const PrimitiveSpec& spec,
+    InternalIndex* expectedClassId) {
+    InternalIndex requestedClassId = 0;
+    const Sint32 previousClassId = static_cast<Sint32>(gSDK->GetDimensionClassID());
+    bool changedPreference = false;
+
+    if (!spec.className.empty()) {
+        requestedClassId = ResolveOrCreateClass(spec.className);
+        const Sint32 requestedClassRef = static_cast<Sint32>(requestedClassId);
+        if (requestedClassRef != previousClassId) {
+            if (!gSDK->SetProgramVariable(varDefaultDimensionClassID, &requestedClassRef)) {
+                throw std::runtime_error(
+                    "Vectorworks rejected the requested dimension class preference");
+            }
+            changedPreference = true;
+        }
+    }
+
+    MCObjectHandle object = nullptr;
+    std::exception_ptr creationFailure;
+    try {
+        object = gSDK->CreateLinearDimension(
+            WorldPt(spec.x1, spec.y1),
+            WorldPt(spec.x2, spec.y2),
+            spec.dimensionOffset,
+            spec.dimensionTextOffset,
+            Vector2(spec.directionX, spec.directionY),
+            static_cast<short>(spec.dimensionType));
+    } catch (...) {
+        creationFailure = std::current_exception();
+    }
+
+    if (changedPreference &&
+        !gSDK->SetProgramVariable(varDefaultDimensionClassID, &previousClassId)) {
+        if (object) {
+            gSDK->DeleteObject(object, false);
+        }
+        throw std::runtime_error(
+            "Vectorworks did not restore the previous dimension class preference");
+    }
+    if (creationFailure) {
+        std::rethrow_exception(creationFailure);
+    }
+    if (object && requestedClassId != 0 &&
+        gSDK->GetObjectClass(object) != requestedClassId) {
+        gSDK->DeleteObject(object, false);
+        throw std::runtime_error(
+            "Vectorworks did not create the dimension in the requested class");
+    }
+    if (expectedClassId) {
+        *expectedClassId = requestedClassId;
+    }
+    return object;
+}
+
 void ApplyWallStyleIfRequested(MCObjectHandle wall, const PrimitiveSpec& spec, std::vector<std::string>* warnings) {
     if (!wall || spec.styleName.empty()) {
         return;
@@ -2601,6 +2675,7 @@ MCObjectHandle CreatePrimitiveFromSpec(
     EnsureWritableLayer();
 
     MCObjectHandle object = nullptr;
+    InternalIndex expectedDimensionClassId = 0;
     std::optional<Transactions::ArtifactId> adoptedArtifact;
     std::optional<Transactions::ExternalMutationId> pendingExternalAfter;
     MCObjectHandle pendingExternalHandle = nullptr;
@@ -2757,13 +2832,7 @@ MCObjectHandle CreatePrimitiveFromSpec(
             }
         }
     } else if (spec.objectType == "linear_dimension") {
-        object = gSDK->CreateLinearDimension(
-            WorldPt(spec.x1, spec.y1),
-            WorldPt(spec.x2, spec.y2),
-            spec.dimensionOffset,
-            spec.dimensionTextOffset,
-            Vector2(spec.directionX, spec.directionY),
-            static_cast<short>(spec.dimensionType));
+        object = CreateLinearDimensionWithClass(spec, &expectedDimensionClassId);
     }
 
     if (!object) {
@@ -2771,7 +2840,9 @@ MCObjectHandle CreatePrimitiveFromSpec(
     }
 
     UnregisteredCreatedObjectGuard unregisteredGuard(adoptedArtifact ? nullptr : object);
-    ApplyObjectNameAndClass(object, spec);
+    if (spec.objectType != "linear_dimension") {
+        ApplyObjectNameAndClass(object, spec);
+    }
     if (!adoptedArtifact) {
         const short expectedNodeType = gSDK->GetObjectTypeN(object);
         Transactions::SemanticVerifier verifier;
@@ -2791,6 +2862,19 @@ MCObjectHandle CreatePrimitiveFromSpec(
                 if (requiresWall && !IsObjectHostedByWall(verifiedObject, expectedWall)) {
                     throw std::runtime_error(
                         "parametric object failed exact wall-host verification at commit");
+                }
+            };
+        } else if (spec.objectType == "linear_dimension" && expectedDimensionClassId != 0) {
+            const InternalIndex expectedClassId = expectedDimensionClassId;
+            verifier = [expectedNodeType, expectedClassId](MCObjectHandle verifiedObject) {
+                if (!verifiedObject || gSDK->GetObjectTypeN(verifiedObject) != expectedNodeType ||
+                    !IsUserVisibleObjectType(expectedNodeType)) {
+                    throw std::runtime_error(
+                        "created dimension failed semantic node-type verification");
+                }
+                if (gSDK->GetObjectClass(verifiedObject) != expectedClassId) {
+                    throw std::runtime_error(
+                        "created dimension failed class verification at commit");
                 }
             };
         } else {

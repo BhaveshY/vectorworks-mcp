@@ -34,9 +34,39 @@ class NativeTransactionContractTests(unittest.TestCase):
         self.assertIn("sdkManagedRegistrationFamilies", header)
         self.assertIn("Parametric", header)
         self.assertIn("Symbol", header)
+        self.assertNotIn("Dimension,", header)
         self.assertIn("AllowsSdkManagedRegistration(artifact.family)", source)
         self.assertIn("UndoRegistration::SdkManaged", source)
         self.assertIn("live-proven SDK-managed ownership", source)
+
+    def test_linear_dimensions_class_at_creation_and_remain_fail_closed(self):
+        bridge = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(
+            encoding="utf-8"
+        )
+        capabilities = (
+            ROOT / "native_bridge" / "src" / "CapabilityRegistry.cpp"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("GetDimensionClassID()", bridge)
+        self.assertIn("SetProgramVariable(varDefaultDimensionClassID", bridge)
+        self.assertIn("GetObjectClass(verifiedObject) != expectedClassId", bridge)
+        self.assertIn(".name is not supported for native linear dimensions", bridge)
+        self.assertNotIn("ObjectFamily::Dimension", bridge)
+        dimension_rows = "\n".join(
+            line for line in capabilities.splitlines()
+            if '"linear_dimension"' in line
+        )
+        self.assertNotIn('"name"', dimension_rows)
+        self.assertIn('"class_name"', dimension_rows)
+
+    def test_native_bounded_counts_reject_instead_of_silently_truncating(self):
+        bridge = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn('if (value > maxValue)', bridge)
+        self.assertIn('key + " must be <= " + std::to_string(maxValue)', bridge)
+        self.assertNotIn('return std::min(value, maxValue);', bridge)
 
     def test_local_create_delete_is_net_zero_at_commit(self):
         header = HEADER.read_text(encoding="utf-8")

@@ -4554,6 +4554,21 @@ def vw_execute_operations(
                             "value": value,
                         }
                     )
+        if len(wire_operations) > 250:
+            return _execute_operations_response(
+                {
+                    "ok": False,
+                    "tool": "vw_execute_operations",
+                    "error": (
+                        f"operation plan expands to {len(wire_operations)} native wire operations; "
+                        "the phase-4 bridge limit is 250"
+                    ),
+                    "idempotency_key": idempotency_key,
+                    "plan_hash": plan_hash,
+                },
+                trace,
+                "validation_error",
+            )
         wire_params = {"operation_count": len(wire_operations), "idempotency_key": idempotency_key}
         for index, wire_operation in enumerate(wire_operations, start=1):
             wire_params[f"operation_{index}_json"] = json.dumps(

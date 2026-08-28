@@ -642,7 +642,6 @@ async def run_acceptance(
                                 "x2": 10000,
                                 "y2": 0,
                                 "offset": -700,
-                                "name": f"{prefix}_DIM_WIDTH",
                             },
                         },
                         {
@@ -655,7 +654,6 @@ async def run_acceptance(
                                 "x2": 10000,
                                 "y2": 7000,
                                 "offset": 700,
-                                "name": f"{prefix}_DIM_DEPTH",
                             },
                         },
                         {
@@ -845,7 +843,7 @@ async def run_acceptance(
                             "height": 3000,
                             "room_id": "TYPE-SPACE",
                         },
-                        "parametric",
+                        "space",
                     ),
                     (
                         "parametric",
@@ -872,11 +870,30 @@ async def run_acceptance(
                 individual_type_objects: dict[str, dict[str, Any]] = {}
                 for object_type, raw_params, native_type in simple_type_specs:
                     object_name = f"{prefix}_TYPE_{object_type.upper()}"
-                    create_params = {
-                        "object_type": object_type,
-                        "name": object_name,
-                        **raw_params,
-                    }
+                    before_dimension_uuids: set[str] = set()
+                    if object_type in {"dimension", "linear_dimension"}:
+                        dimensions_before = await call(
+                            "vw_read",
+                            {
+                                "action": "query",
+                                "criteria": "ALL",
+                                "object_type": "dimension",
+                                "limit": 200,
+                            },
+                            label=f"before_type_{object_type}",
+                        )
+                        before_dimension_uuids = {
+                            str(item.get("uuid"))
+                            for item in collection(dimensions_before)
+                            if item.get("type") == "dimension" and item.get("uuid")
+                        }
+                        create_params = {"object_type": object_type, **raw_params}
+                    else:
+                        create_params = {
+                            "object_type": object_type,
+                            "name": object_name,
+                            **raw_params,
+                        }
                     create_payload = await call(
                         "vw_apply",
                         {
@@ -891,13 +908,38 @@ async def run_acceptance(
                         },
                         label=f"create_type_{object_type}",
                     )
-                    created_query = await query_named(
-                        object_name,
-                        label=f"verify_type_{object_type}",
-                    )
-                    created_object = require_exactly_one(
-                        created_query, f"individually created {object_type}"
-                    )
+                    if object_type in {"dimension", "linear_dimension"}:
+                        dimensions_after = await call(
+                            "vw_read",
+                            {
+                                "action": "query",
+                                "criteria": "ALL",
+                                "object_type": "dimension",
+                                "limit": 200,
+                            },
+                            label=f"verify_type_{object_type}",
+                        )
+                        new_dimensions = [
+                            item
+                            for item in collection(dimensions_after)
+                            if item.get("type") == "dimension"
+                            and item.get("uuid")
+                            and str(item.get("uuid")) not in before_dimension_uuids
+                        ]
+                        if len(new_dimensions) != 1:
+                            raise RuntimeError(
+                                f"individually created {object_type} produced "
+                                f"{len(new_dimensions)} new dimensions"
+                            )
+                        created_object = new_dimensions[0]
+                    else:
+                        created_query = await query_named(
+                            object_name,
+                            label=f"verify_type_{object_type}",
+                        )
+                        created_object = require_exactly_one(
+                            created_query, f"individually created {object_type}"
+                        )
                     if created_object.get("type") != native_type:
                         raise RuntimeError(
                             f"{object_type} read back as {created_object.get('type')!r}, "
@@ -1204,8 +1246,8 @@ async def run_acceptance(
                         label=f"verify_space_{room_id}",
                     )
                     verified_space = require_exactly_one(space, f"Space {room_id}")
-                    if verified_space.get("type") != "parametric":
-                        raise RuntimeError(f"Space {room_id} did not read back as a parametric node")
+                    if verified_space.get("type") != "space":
+                        raise RuntimeError(f"Space {room_id} did not read back as a semantic Space")
                 for name, logical_type, native_type in (
                     # Vectorworks 2024 exposes its built-in Slab plug-in as a
                     # kParametricNode (type 86), while roofs retain kRoofNode.
