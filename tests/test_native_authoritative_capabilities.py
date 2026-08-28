@@ -145,6 +145,7 @@ class NativeAuthoritativeCapabilitiesContractTests(unittest.TestCase):
         self.assertIn("auto identifier = FileIdentifier(path)", source)
         self.assertIn("gSDK->GetOpenFilesList(openFiles)", source)
         self.assertIn("gSDK->SwitchToOpenFile(openFile.fFileRef)", source)
+        self.assertGreaterEqual(source.count("gSDK->DrawScreen()"), 2)
         self.assertIn("fs::equivalent(path, openPath, error)", source)
         self.assertNotIn("ShellExecuteExW", source)
         self.assertNotIn("SEE_MASK_NOCLOSEPROCESS", source)

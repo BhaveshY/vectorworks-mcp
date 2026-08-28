@@ -319,11 +319,19 @@ bool LaunchPreparedOpenDocument(const PreparedOpenDocument& request) {
         }
         const bool sameFile = fs::equivalent(path, openPath, error);
         if (!error && sameFile) {
-            return openFile.fIsActive || gSDK->SwitchToOpenFile(openFile.fFileRef);
+            const bool activated = openFile.fIsActive || gSDK->SwitchToOpenFile(openFile.fFileRef);
+            if (activated) {
+                gSDK->DrawScreen();
+            }
+            return activated;
         }
     }
     auto identifier = FileIdentifier(path);
-    return gSDK && gSDK->OpenDocumentPath(identifier, false);
+    const bool opened = gSDK && gSDK->OpenDocumentPath(identifier, false);
+    if (opened) {
+        gSDK->DrawScreen();
+    }
+    return opened;
 #else
     (void) request;
     return false;
