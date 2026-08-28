@@ -56,6 +56,40 @@ class NativeTransactionContractTests(unittest.TestCase):
         )
         self.assertGreaterEqual(bridge.count("Transactions::ObjectFamily::Wall"), 6)
 
+    def test_production_transactions_allow_every_sdk_managed_family(self):
+        bridge = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(
+            encoding="utf-8"
+        )
+        create_start = bridge.index("std::string HandleCreateTypedObject(")
+        apply_start = bridge.index("std::string HandleApplyOperations(")
+        batch_start = bridge.index("std::string HandleBatchCreateObjects(")
+        handlers = {
+            "HandleCreateTypedObject": bridge[
+                create_start : bridge.index("std::string HandleCreateObject(", create_start)
+            ],
+            "HandleApplyOperations": bridge[apply_start:batch_start],
+            "HandleBatchCreateObjects": bridge[
+                batch_start : bridge.index("\n#endif", batch_start)
+            ],
+        }
+
+        for handler_name, handler in handlers.items():
+            with self.subTest(handler=handler_name):
+                for family in (
+                    "Symbol",
+                    "Wall",
+                    "Parametric",
+                    "Space",
+                    "Slab",
+                    "Roof",
+                    "Door",
+                    "Window",
+                ):
+                    self.assertIn(
+                        f"Transactions::ObjectFamily::{family}",
+                        handler,
+                    )
+
     def test_linear_dimensions_class_at_creation_and_remain_fail_closed(self):
         bridge = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(
             encoding="utf-8"
