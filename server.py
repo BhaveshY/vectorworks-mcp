@@ -41,6 +41,8 @@ import time
 import uuid
 from typing import Annotated, Any, Literal, Optional
 
+from plan_quality import PlanValidationError, evaluate_plan_payload
+
 try:
     from pydantic import Field
 except Exception:
@@ -452,7 +454,7 @@ SelectionAction = (
 )
 AgentContextProfile = Literal["brief", "production", "full"]
 GroupedStatusAction = Literal["health", "context"]
-GroupedReadAction = Literal["document", "layers", "summary", "query", "selection"]
+GroupedReadAction = Literal["document", "layers", "summary", "query", "selection", "plan_quality"]
 GroupedCatalogAction = Literal[
     "capabilities",
     "classes",
@@ -1179,7 +1181,7 @@ _GROUPED_VARIANT_SAFETY: dict[str, dict[str, dict[str, Any]]] = {
             "retryPolicy": "safe",
             "unknownCommitState": "not_applicable",
         }
-        for action in ("document", "layers", "summary", "query", "selection")
+        for action in ("document", "layers", "summary", "query", "selection", "plan_quality")
     },
     "vw_catalog": {
         action: {
@@ -1319,6 +1321,10 @@ _GROUPED_VARIANT_SAFETY: dict[str, dict[str, dict[str, Any]]] = {
         },
     },
 }
+
+_GROUPED_VARIANT_SAFETY["vw_read"]["plan_quality"].update(
+    {"requires_cad_preflight": False, "openWorldHint": False}
+)
 
 for _grouped_tool_name, _grouped_actions in _GROUPED_VARIANT_SAFETY.items():
     TOOL_SAFETY[_grouped_tool_name]["action_param"] = "action"
@@ -5962,6 +5968,7 @@ def _grouped_error(
     if code in {
         "capability_unavailable",
         "capability_manifest_mismatch",
+        "analysis_error",
         "validation_error",
         "preflight_failed",
         "request_not_sent",
@@ -6232,9 +6239,61 @@ def vw_read(
     limit: GroupedPageLimit = 100,
     cursor: GroupedCursor = "",
     fields: Optional[ObjectFieldList] = None,
+    plan: Optional[dict[str, Any]] = None,
 ) -> str:
-    """Read document, layers, summary, query, or selection with compact paging."""
+    """Read native data or run a zero-dispatch architectural plan-quality analysis."""
     trace = _new_request_trace("vw_read", action)
+    if action == "plan_quality":
+        if plan is None:
+            return _grouped_error(
+                "vw_read",
+                action,
+                "validation_error",
+                "plan is required for action='plan_quality'",
+                trace,
+                detail={"path": "/plan"},
+            )
+        try:
+            report = evaluate_plan_payload(plan)
+        except PlanValidationError as exc:
+            return _grouped_error(
+                "vw_read",
+                action,
+                "validation_error",
+                "Plan manifest is malformed.",
+                trace,
+                detail={"problems": exc.as_list()},
+            )
+        except Exception as exc:
+            incident = hashlib.sha256(type(exc).__name__.encode("utf-8")).hexdigest()[:12]
+            return _grouped_error(
+                "vw_read",
+                action,
+                "analysis_error",
+                "Plan analysis failed unexpectedly.",
+                trace,
+                detail={"incident": incident},
+            )
+        return _grouped_finish(
+            "vw_read",
+            action,
+            {
+                "ok": True,
+                "execution": {"mode": "host_only", "native_calls": 0},
+                "data": report,
+            },
+            trace,
+            "ok",
+        )
+    if plan is not None:
+        return _grouped_error(
+            "vw_read",
+            action,
+            "validation_error",
+            "plan is accepted only for action='plan_quality'",
+            trace,
+            detail={"path": "/plan"},
+        )
     try:
         offset = _grouped_page_offset(cursor)
         projection = list(fields or [])
