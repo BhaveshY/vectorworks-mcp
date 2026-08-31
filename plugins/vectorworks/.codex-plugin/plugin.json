@@ -1,6 +1,6 @@
 {
   "name": "vectorworks",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Control Vectorworks 2024/2025 through the production fast-native MCP connector.",
   "author": {
     "name": "Bhavesh",

@@ -70,16 +70,18 @@ DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024
 DEFAULT_PREFLIGHT_CACHE_MS = 5_000
 MAX_PREFLIGHT_CACHE_MS = 5_000
 DEFAULT_AUTH_TOKEN_FILENAME = "auth-token"
-CONNECTOR_VERSION = "0.5.0"
+CONNECTOR_VERSION = "0.6.0"
 MIN_FAST_NATIVE_CAPABILITY_REVISION = 4
 MCP_SERVER_INSTRUCTIONS = (
     "Use the fast-native phase-4 bridge with capability revision 4 or newer. "
+    "Never use modal Python, menus, schematic helpers, or any fallback. "
     "Start with vw_status(action='context') and require a capability fingerprint. "
     "Read through vw_read/vw_catalog and send one atomic vw_apply or "
-    "vw_execute_operations call with a unique idempotency key for edits; never decompose "
+    "vw_execute_operations call with explicit coordinate_units and a unique idempotency key for edits; "
+    "prefer reshape/update_parametric over delete-and-recreate revisions and never decompose "
     "work into per-object MCP calls. Use vw_io, vw_view, and vw_document only when their "
-    "native action is advertised. Never use modal Python, menus, schematic helpers, or any "
-    "fallback. If a capability is unavailable, stop and upgrade/restart the native bridge."
+    "native action is advertised. If a capability is unavailable, stop and upgrade/restart "
+    "the native bridge."
 )
 MCP_TOOL_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -465,8 +467,9 @@ GroupedCatalogAction = Literal[
 ]
 GroupedIOAction = Literal["import", "export", "capture"]
 GroupedIOFormat = Literal["auto", "dwg", "pdf", "image", "png", "jpg", "jpeg", "tif", "tiff", "vwx"]
-GroupedViewAction = Literal["get", "set", "capture"]
-GroupedDocumentAction = Literal["info", "save", "export", "open", "new"]
+GroupedViewAction = Literal["get", "set", "fit", "capture"]
+GroupedDocumentAction = Literal["info", "save", "export", "open"]
+CoordinateUnits = Literal["mm", "cm", "m", "in", "ft"]
 LookupDetail = Literal["brief", "normal", "full"]
 MAX_OBJECT_QUERY_LIMIT = 1000
 ObjectQueryLimit = Annotated[int, Field(ge=1, le=MAX_OBJECT_QUERY_LIMIT)]
@@ -533,7 +536,8 @@ ExecuteOperationList = Annotated[
         min_length=1,
         max_length=250,
         description=(
-            "One atomic plan: create, set_properties, transform, duplicate, or delete. "
+            "One atomic plan: create, set_properties, transform, reshape, update_parametric, "
+            "duplicate, or delete. Geometry is normalized to millimetres before dispatch. "
             "Targets are explicit uuid:/name:/handle: refs or $operation_id refs."
         ),
         json_schema_extra={
@@ -544,7 +548,15 @@ ExecuteOperationList = Annotated[
                 "properties": {
                     "type": {
                         "type": "string",
-                        "enum": ["create", "set_properties", "transform", "duplicate", "delete"],
+                        "enum": [
+                            "create",
+                            "set_properties",
+                            "transform",
+                            "reshape",
+                            "update_parametric",
+                            "duplicate",
+                            "delete",
+                        ],
                     },
                     "operation_id": {"type": "string", "minLength": 1, "maxLength": 128},
                     "params": {
@@ -1247,6 +1259,17 @@ _GROUPED_VARIANT_SAFETY: dict[str, dict[str, dict[str, Any]]] = {
             "unknownCommitState": "not_applicable",
         },
         "set": {
+            "readOnlyHint": False,
+            "destructiveHint": False,
+            "idempotentHint": False,
+            "writesDocument": False,
+            "writesFiles": False,
+            "writesViewState": True,
+            "confirmationRequired": False,
+            "retryPolicy": "never_after_send",
+            "unknownCommitState": "possible",
+        },
+        "fit": {
             "readOnlyHint": False,
             "destructiveHint": False,
             "idempotentHint": False,
@@ -2971,12 +2994,70 @@ def _optional_text(item: dict[str, Any], key: str, default: str = "") -> str:
     return str(value)
 
 
+_GEOMETRY_LENGTH_KEYS = {
+    "x",
+    "y",
+    "x1",
+    "y1",
+    "x2",
+    "y2",
+    "start_x",
+    "start_y",
+    "end_x",
+    "end_y",
+    "dx",
+    "dy",
+    "pivot_x",
+    "pivot_y",
+    "radius",
+    "width",
+    "height",
+    "thickness",
+    "elevation",
+    "sill_height",
+    "overhang",
+    "bearing_inset",
+    "vertical_miter",
+    "offset",
+    "text_offset",
+}
+
+
+def _coordinate_scale_to_mm(units: CoordinateUnits) -> float:
+    return {
+        "mm": 1.0,
+        "cm": 10.0,
+        "m": 1000.0,
+        "in": 25.4,
+        "ft": 304.8,
+    }[units]
+
+
+def _scale_geometry_params(params: dict[str, Any], scale_to_mm: float) -> dict[str, Any]:
+    """Convert only typed geometry fields; plugin parameters keep their declared schema units."""
+    if scale_to_mm == 1.0:
+        return params
+    scaled = dict(params)
+    for key in _GEOMETRY_LENGTH_KEYS:
+        value = scaled.get(key)
+        if _is_real_number(value):
+            scaled[key] = float(value) * scale_to_mm
+    points = scaled.get("points")
+    if isinstance(points, list):
+        scaled["points"] = [
+            [float(point[0]) * scale_to_mm, float(point[1]) * scale_to_mm]
+            for point in points
+        ]
+    return scaled
+
+
 def _normalise_create_primitive(
     raw: dict[str, Any],
     *,
     label: str,
     default_class_name: str = "",
     name_prefix: str = "",
+    scale_to_mm: float = 1.0,
 ) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError(f"{label} must be an object")
@@ -3268,7 +3349,7 @@ def _normalise_create_primitive(
     role = _optional_text(raw, "role", "primitive")
     if role:
         params["role"] = role
-    return params
+    return _scale_geometry_params(params, scale_to_mm)
 
 
 def _native_batch_params(primitives: list[dict[str, Any]]) -> tuple[dict[str, Any], list[str], list[dict[str, Any]]]:
@@ -4187,7 +4268,12 @@ def _normalise_atomic_target(value: Any, *, label: str) -> str:
     return target
 
 
-def _normalise_execute_operations(operations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _normalise_execute_operations(
+    operations: list[dict[str, Any]],
+    *,
+    coordinate_units: CoordinateUnits = "mm",
+) -> list[dict[str, Any]]:
+    scale_to_mm = _coordinate_scale_to_mm(coordinate_units)
     normalised: list[dict[str, Any]] = []
     for index, operation in enumerate(operations, start=1):
         label = f"operations[{index}]"
@@ -4197,9 +4283,18 @@ def _normalise_execute_operations(operations: list[dict[str, Any]]) -> list[dict
         if unknown:
             raise ValueError(f"{label} has unsupported key(s): {', '.join(unknown)}")
         operation_type = str(operation.get("type", "") or "").strip().lower()
-        if operation_type not in {"create", "set_properties", "transform", "duplicate", "delete"}:
+        if operation_type not in {
+            "create",
+            "set_properties",
+            "transform",
+            "reshape",
+            "update_parametric",
+            "duplicate",
+            "delete",
+        }:
             raise ValueError(
-                f"{label}.type must be create, set_properties, transform, duplicate, or delete"
+                f"{label}.type must be create, set_properties, transform, reshape, "
+                "update_parametric, duplicate, or delete"
             )
         params = operation.get("params")
         if not isinstance(params, dict):
@@ -4214,7 +4309,11 @@ def _normalise_execute_operations(operations: list[dict[str, Any]]) -> list[dict
             raise ValueError(f"{label}.operation_id is supported only for create and duplicate")
 
         if operation_type == "create":
-            canonical_params = _normalise_create_primitive(params, label=f"{label}.params")
+            canonical_params = _normalise_create_primitive(
+                params,
+                label=f"{label}.params",
+                scale_to_mm=scale_to_mm,
+            )
         elif operation_type == "set_properties":
             unknown_params = sorted(set(params) - {"edits"})
             if unknown_params:
@@ -4261,6 +4360,56 @@ def _normalise_execute_operations(operations: list[dict[str, Any]]) -> list[dict
                 canonical_params["pivot_y"] = _coerce_number(
                     params, "pivot_y", required=True, label=f"{label}.params"
                 )
+            canonical_params = _scale_geometry_params(canonical_params, scale_to_mm)
+        elif operation_type == "reshape":
+            unknown_params = sorted(
+                set(params) - {"target", "ref", "start_x", "start_y", "end_x", "end_y", "x1", "y1", "x2", "y2"}
+            )
+            if unknown_params:
+                raise ValueError(f"{label}.params has unsupported key(s): {', '.join(unknown_params)}")
+            canonical_params = {
+                "target": _normalise_atomic_target(
+                    params.get("target", params.get("ref")),
+                    label=f"{label}.params.target",
+                ),
+                "start_x": _coerce_number_any(params, ("start_x", "x1"), required=True, label=f"{label}.params"),
+                "start_y": _coerce_number_any(params, ("start_y", "y1"), required=True, label=f"{label}.params"),
+                "end_x": _coerce_number_any(params, ("end_x", "x2"), required=True, label=f"{label}.params"),
+                "end_y": _coerce_number_any(params, ("end_y", "y2"), required=True, label=f"{label}.params"),
+            }
+            if (
+                canonical_params["start_x"] == canonical_params["end_x"]
+                and canonical_params["start_y"] == canonical_params["end_y"]
+            ):
+                raise ValueError(f"{label}.params endpoints must not be identical")
+            canonical_params = _scale_geometry_params(canonical_params, scale_to_mm)
+        elif operation_type == "update_parametric":
+            unknown_params = sorted(
+                set(params) - {"target", "ref", "plugin_name", "descriptor_fingerprint", "parameters"}
+            )
+            if unknown_params:
+                raise ValueError(f"{label}.params has unsupported key(s): {', '.join(unknown_params)}")
+            parametric = _normalise_create_primitive(
+                {
+                    "object_type": "parametric",
+                    "plugin_name": params.get("plugin_name"),
+                    "descriptor_fingerprint": params.get("descriptor_fingerprint"),
+                    "parameters": params.get("parameters", []),
+                },
+                label=f"{label}.params",
+            )
+            canonical_params = {
+                "target": _normalise_atomic_target(
+                    params.get("target", params.get("ref")),
+                    label=f"{label}.params.target",
+                ),
+                "object_type": "parametric",
+                **{
+                    key: value
+                    for key, value in parametric.items()
+                    if key not in {"x1", "y1", "rotation", "require_wall_host", "role"}
+                },
+            }
         elif operation_type == "duplicate":
             unknown_params = sorted(set(params) - {"target", "ref", "dx", "dy"})
             if unknown_params:
@@ -4273,6 +4422,8 @@ def _normalise_execute_operations(operations: list[dict[str, Any]]) -> list[dict
                 "dx": _coerce_number(params, "dx", default=0, label=f"{label}.params"),
                 "dy": _coerce_number(params, "dy", default=0, label=f"{label}.params"),
             }
+            canonical_params["dx"] *= scale_to_mm
+            canonical_params["dy"] *= scale_to_mm
         else:
             unknown_params = sorted(set(params) - {"target", "ref"})
             if unknown_params:
@@ -4384,10 +4535,16 @@ def _compact_operation_receipts(value: Any) -> list[dict[str, Any]]:
             "uuid",
             "handle",
             "verified",
+            "plugin_name",
+            "wall_host_preserved",
+            "parameter_count",
         ):
             field = entry.get(key)
-            if isinstance(field, (str, bool)) and field != "":
+            if isinstance(field, (str, bool, int)) and not isinstance(field, float) and field != "":
                 receipt[key] = field
+        after_endpoints = entry.get("after_endpoints")
+        if isinstance(after_endpoints, list):
+            receipt["after_endpoints"] = after_endpoints
         # Native duplicate receipts carry the newly created object's stable
         # identity in the nested semantic snapshot. Promote only the compact
         # identity fields so callers can safely target the duplicate in a
@@ -4418,11 +4575,13 @@ def _execute_operations_response(
 def vw_execute_operations(
     operations: ExecuteOperationList,
     idempotency_key: IdempotencyKey,
+    coordinate_units: CoordinateUnits = "mm",
 ) -> str:
     """Preferred native write path with internal preflight and compact receipts.
 
     Requires native apply_operations. Create, set-properties, transform,
-    duplicate, and delete operations are forwarded together without fallback.
+    reshape, update-parametric, duplicate, and delete operations are forwarded together without fallback.
+    All typed geometry is normalized from coordinate_units to native millimetres.
     Reuse idempotency_key only for the identical plan.
     """
     trace = _new_request_trace("vw_execute_operations", "execute_operations")
@@ -4431,7 +4590,10 @@ def vw_execute_operations(
             raise ValueError(
                 f"idempotency_key must match {_IDEMPOTENCY_KEY_RE.pattern} and be at most 128 characters"
             )
-        normalised = _normalise_execute_operations(operations)
+        normalised = _normalise_execute_operations(
+            operations,
+            coordinate_units=coordinate_units,
+        )
     except ValueError as exc:
         return _execute_operations_response(
             {
@@ -4517,7 +4679,7 @@ def vw_execute_operations(
                 wire_operations.append(wire_item)
                 continue
 
-            if operation_type in {"transform", "duplicate", "delete"}:
+            if operation_type in {"transform", "reshape", "update_parametric", "duplicate", "delete"}:
                 canonical = dict(operation["params"])
                 if operation_type == "transform":
                     wire_item = {
@@ -4532,6 +4694,20 @@ def vw_execute_operations(
                     if "pivot_x" in canonical:
                         wire_item["pivot_x"] = canonical["pivot_x"]
                         wire_item["pivot_y"] = canonical["pivot_y"]
+                elif operation_type == "reshape":
+                    wire_item = {
+                        "op": "object.reshape",
+                        "target": canonical["target"],
+                        "start_x": canonical["start_x"],
+                        "start_y": canonical["start_y"],
+                        "end_x": canonical["end_x"],
+                        "end_y": canonical["end_y"],
+                    }
+                elif operation_type == "update_parametric":
+                    wire_item = {
+                        "op": "object.update_parametric",
+                        **canonical,
+                    }
                 elif operation_type == "duplicate":
                     wire_item = {
                         "op": "object.duplicate",
@@ -4678,6 +4854,8 @@ def vw_execute_operations(
         "idempotency_key": idempotency_key,
         "idempotency_replay": bool(decoded.get("replayed", False)),
         "idempotency_scope": "native_active_document",
+        "coordinate_units": coordinate_units,
+        "native_coordinate_units": "mm",
         "plan_hash": plan_hash,
         "verification": {
             "ok": self_verified,
@@ -5528,24 +5706,13 @@ def vw_find_objects(criteria: str, limit: ObjectQueryLimit = 100) -> str:
         return _send_tool("vw_find_objects", {"criteria": criteria, "limit": limit})
 
     field, value = parsed
-    if field in {"name", "class"}:
-        raw_status = _send_health("ping")
-        decoded_status = _decode_tool_result(raw_status)
-        status_ok = not _tool_result_failed(raw_status, decoded_status)
-        if status_ok and isinstance(decoded_status, dict) and _evaluate_cad_preflight_status(decoded_status).get("ok") is True:
-            _remember_cad_safe_status(decoded_status)
-        if status_ok and _status_supports_direct_action(decoded_status, "find_objects"):
-            preflight = _evaluate_cad_preflight_status(
-                decoded_status,
-                blocked_action="find_objects",
-                blocked_params={"criteria": criteria, "limit": limit},
-            )
-            if preflight.get("ok") and isinstance(decoded_status, dict):
-                _remember_cad_safe_status(decoded_status)
-                return _send_tool("vw_find_objects", {"criteria": criteria, "limit": limit})
-
     object_type = value if field == "type" else ""
-    raw = _send("get_objects", {"layer": "", "object_type": object_type, "limit": limit}, require_cad_safe=True)
+    lookup_limit = MAX_OBJECT_QUERY_LIMIT if field in {"name", "class"} else limit
+    raw = _send(
+        "get_objects",
+        {"layer": "", "object_type": object_type, "limit": lookup_limit},
+        require_cad_safe=True,
+    )
     objects = _decode_tool_result(raw)
     if _tool_result_failed(raw, objects):
         return json.dumps(
@@ -5590,7 +5757,7 @@ def vw_find_objects(criteria: str, limit: ObjectQueryLimit = 100) -> str:
             "criteria": criteria,
             "fallback_action": "get_objects",
             "matched": len(matches),
-            "truncated": len(objects) >= limit,
+            "truncated": len(objects) >= lookup_limit,
             "objects": matches[:limit],
         },
         indent=2,
@@ -6301,6 +6468,7 @@ def vw_read(
         return _grouped_error("vw_read", action, "validation_error", str(exc), trace)
 
     requested = min(MAX_OBJECT_QUERY_LIMIT, offset + limit + 1)
+    parsed_query = _parse_simple_find_criteria(criteria or "ALL") if action == "query" else None
     native_action, params = {
         "document": ("get_document_info", {}),
         "layers": ("get_layers", {}),
@@ -6315,15 +6483,44 @@ def vw_read(
                 "example_limit": 0,
             },
         ),
-        "query": ("find_objects", {"criteria": criteria or "ALL", "limit": requested}),
+        "query": (
+            "get_objects" if parsed_query is not None else "find_objects",
+            (
+                {
+                    "layer": layer,
+                    "object_type": (
+                        object_type
+                        or (parsed_query[1] if parsed_query is not None and parsed_query[0] == "type" else "")
+                    ),
+                    "limit": (
+                        MAX_OBJECT_QUERY_LIMIT
+                        if parsed_query is not None and parsed_query[0] in {"name", "class"}
+                        else requested
+                    ),
+                }
+                if parsed_query is not None
+                else {"criteria": criteria or "ALL", "limit": requested}
+            ),
+        ),
         "selection": ("selection", {"action": "get", "limit": requested}),
     }[action]
-    if action == "query":
+    if action == "query" and parsed_query is None:
         params["layer"] = layer
         params["object_type"] = object_type
     data, status, error = _grouped_native_call("vw_read", action, native_action, params, trace)
     if error is not None:
         return error
+    if action == "query" and parsed_query is not None and isinstance(data, list):
+        query_field, query_value = parsed_query
+        if query_field == "name":
+            data = [item for item in data if isinstance(item, dict) and str(item.get("name") or "") == query_value]
+        elif query_field == "class":
+            data = [
+                item
+                for item in data
+                if isinstance(item, dict)
+                and str(item.get("class") or item.get("class_name") or "") == query_value
+            ]
     page: Optional[dict[str, Any]] = None
     if action in {"layers", "query", "selection"}:
         data, page = _grouped_page_data(data, limit=limit, offset=offset, fields=projection)
@@ -6424,9 +6621,13 @@ def vw_catalog(
 
 
 @_tool("vw_apply")
-def vw_apply(operations: ExecuteOperationList, idempotency_key: IdempotencyKey) -> str:
-    """Apply one canonical atomic native mutation plan; never decomposes or falls back."""
-    raw = vw_execute_operations(operations, idempotency_key)
+def vw_apply(
+    operations: ExecuteOperationList,
+    idempotency_key: IdempotencyKey,
+    coordinate_units: CoordinateUnits = "mm",
+) -> str:
+    """Apply one canonical atomic native mutation plan in explicit coordinate units."""
+    raw = vw_execute_operations(operations, idempotency_key, coordinate_units)
     decoded = _decode_tool_result(raw)
     if not isinstance(decoded, dict):
         return json.dumps(
@@ -6507,13 +6708,24 @@ def vw_view(
     file_path: str = "",
     options: Optional[dict[str, Any]] = None,
 ) -> str:
-    """Get/set the active view or capture it through advertised native actions."""
+    """Get/set/fit the active view or capture it through advertised native actions."""
     trace = _new_request_trace("vw_view", action)
     try:
         params = {"file_path": file_path, **_grouped_options(options)}
+        if action == "fit":
+            target = str(params.pop("target", "objects") or "objects").strip().lower()
+            if target != "objects":
+                raise ValueError("vw_view fit currently supports target='objects' only")
+            params["fit_to_objects"] = True
+            params.setdefault("clear_selection", True)
     except ValueError as exc:
         return _grouped_error("vw_view", action, "validation_error", str(exc), trace)
-    native_action = {"get": "get_view", "set": "set_view", "capture": "capture_view"}[action]
+    native_action = {
+        "get": "get_view",
+        "set": "set_view",
+        "fit": "set_view",
+        "capture": "capture_view",
+    }[action]
     data, status, error = _grouped_native_call("vw_view", action, native_action, params, trace)
     if error is not None:
         return error
@@ -6544,7 +6756,6 @@ def vw_document(
                 "info": "get_document_info",
                 "save": "save_document",
                 "open": "open_document",
-                "new": "new_document",
             }[action]
     except (KeyError, ValueError) as exc:
         return _grouped_error("vw_document", action, "validation_error", str(exc), trace)

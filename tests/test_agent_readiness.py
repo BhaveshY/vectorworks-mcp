@@ -143,7 +143,7 @@ class AgentReadinessTests(unittest.TestCase):
         self.assertEqual(requirements, expected_dependencies)
 
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "0.5.0"', pyproject)
+        self.assertIn('version = "0.6.0"', pyproject)
         for dependency in expected_dependencies:
             self.assertIn(f'"{dependency}"', pyproject)
 

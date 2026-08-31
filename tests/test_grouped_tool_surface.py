@@ -30,7 +30,7 @@ class GroupedToolSurfaceTests(unittest.TestCase):
 
         schemas = {
             name: asyncio.run(server.mcp.get_tool(name)).parameters
-            for name in ("vw_status", "vw_read", "vw_catalog", "vw_io", "vw_view", "vw_document")
+            for name in ("vw_status", "vw_read", "vw_catalog", "vw_apply", "vw_io", "vw_view", "vw_document")
         }
         self.assertEqual(schemas["vw_status"]["properties"]["action"]["enum"], ["health", "context"])
         self.assertEqual(
@@ -45,10 +45,11 @@ class GroupedToolSurfaceTests(unittest.TestCase):
         )
         self.assertEqual(schemas["vw_io"]["properties"]["action"]["enum"], ["import", "export", "capture"])
         self.assertNotIn("idempotency_key", schemas["vw_io"]["properties"])
-        self.assertEqual(schemas["vw_view"]["properties"]["action"]["enum"], ["get", "set", "capture"])
+        self.assertEqual(schemas["vw_view"]["properties"]["action"]["enum"], ["get", "set", "fit", "capture"])
+        self.assertEqual(schemas["vw_apply"]["properties"]["coordinate_units"]["enum"], ["mm", "cm", "m", "in", "ft"])
         self.assertEqual(
             schemas["vw_document"]["properties"]["action"]["enum"],
-            ["info", "save", "export", "open", "new"],
+            ["info", "save", "export", "open"],
         )
         self.assertNotIn("idempotency_key", schemas["vw_document"]["properties"])
 
@@ -123,17 +124,16 @@ class GroupedToolSurfaceTests(unittest.TestCase):
         def query_handler(request):
             if request["action"] == "ping":
                 return _response(request, status)
-            self.assertEqual(request["action"], "find_objects")
+            self.assertEqual(request["action"], "get_objects")
             self.assertEqual(
                 request["params"],
                 {
-                    "criteria": "T=SPACE",
                     "layer": "Level 1",
                     "object_type": "space",
                     "limit": 11,
                 },
             )
-            return _response(request, {"objects": []})
+            return _response(request, [])
 
         with FakeListener(query_handler, max_requests=2) as listener:
             _configure_server(listener.port)
@@ -281,7 +281,7 @@ class GroupedToolSurfaceTests(unittest.TestCase):
         with patch.object(server, "vw_execute_operations", return_value=native_result) as execute:
             result = json.loads(server.vw_apply(operations, "plan-1"))
 
-        execute.assert_called_once_with(operations, "plan-1")
+        execute.assert_called_once_with(operations, "plan-1", "mm")
         self.assertTrue(result["atomic"])
         self.assertEqual(result["tool"], "vw_apply")
         self.assertEqual(result["delegated_tool"], "vw_execute_operations")
@@ -690,6 +690,102 @@ class GroupedToolSurfaceTests(unittest.TestCase):
             result = json.loads(server.vw_execute_operations(operations, "mutations-wire-1"))
 
         self.assertTrue(result["ok"])
+
+    def test_production_edits_normalize_units_and_keep_parametric_values_typed(self):
+        status = _native_phase_four_status()
+
+        def handler(request):
+            if request["action"] == "ping":
+                return _response(request, status)
+            self.assertEqual(request["action"], "apply_operations")
+            wire = [
+                json.loads(request["params"][f"operation_{index}_json"])
+                for index in range(1, request["params"]["operation_count"] + 1)
+            ]
+            self.assertEqual(
+                wire,
+                [
+                    {
+                        "op": "object.reshape",
+                        "target": "uuid:wall-1",
+                        "start_x": 0.0,
+                        "start_y": 0.0,
+                        "end_x": 5000.0,
+                        "end_y": 0.0,
+                    },
+                    {
+                        "op": "object.update_parametric",
+                        "target": "uuid:door-1",
+                        "object_type": "parametric",
+                        "plugin_name": "Door",
+                        "descriptor_fingerprint": "door-schema-v1",
+                        "parameter_count": 1,
+                        "parameter_1_name": "Operation",
+                        "parameter_1_type": "integer",
+                        "parameter_1_integer": 2,
+                    },
+                ],
+            )
+            return _response(request, {"transaction": {"committed": True, "operations": wire}})
+
+        operations = [
+            {
+                "type": "reshape",
+                "params": {
+                    "target": "uuid:wall-1",
+                    "start_x": 0,
+                    "start_y": 0,
+                    "end_x": 5,
+                    "end_y": 0,
+                },
+            },
+            {
+                "type": "update_parametric",
+                "params": {
+                    "target": "uuid:door-1",
+                    "plugin_name": "Door",
+                    "descriptor_fingerprint": "door-schema-v1",
+                    "parameters": [{"id": "Operation", "type": "integer", "value": 2}],
+                },
+            },
+        ]
+        with FakeListener(handler, max_requests=2) as listener:
+            _configure_server(listener.port)
+            result = json.loads(
+                server.vw_execute_operations(
+                    operations,
+                    "production-edits-1",
+                    coordinate_units="m",
+                )
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["coordinate_units"], "m")
+        self.assertEqual(result["native_coordinate_units"], "mm")
+
+    def test_view_fit_is_one_native_set_view_call(self):
+        status = _native_phase_four_status()
+        status["implemented_actions"] = sorted(set(status["implemented_actions"]) | {"set_view"})
+
+        def handler(request):
+            if request["action"] == "ping":
+                return _response(request, status)
+            self.assertEqual(request["action"], "set_view")
+            self.assertEqual(
+                request["params"],
+                {"file_path": "", "fit_to_objects": True, "clear_selection": True},
+            )
+            return _response(
+                request,
+                {"fit_to_objects_applied": True, "selection_cleared": True},
+            )
+
+        with FakeListener(handler, max_requests=2) as listener:
+            _configure_server(listener.port)
+            result = json.loads(server.vw_view("fit"))
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["data"]["fit_to_objects_applied"])
 
 
 if __name__ == "__main__":

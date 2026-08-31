@@ -18,8 +18,8 @@ The profile has nine top-level tools. No capability adds another MCP tool.
 | `vw_apply` | atomic plan | Canonical atomic document mutation entry. |
 | `vw_execute_operations` | atomic plan | The same write core and native transaction as `vw_apply`. |
 | `vw_io` | `import`, `export`, `capture` | Advertised native file and capture actions. |
-| `vw_view` | `get`, `set`, `capture` | Advertised native view actions. |
-| `vw_document` | `info`, `save`, `export`, `open`, `new` | Advertised document lifecycle actions. |
+| `vw_view` | `get`, `set`, `fit`, `capture` | Advertised native view actions; fit clears selection by default and fits all objects. |
+| `vw_document` | `info`, `save`, `export`, `open` | Advertised document lifecycle actions. |
 | `vw_tool_safety` | none | Exact action safety, effects, and retry policy. |
 
 The server publishes this top-level safety metadata for the production tools:
@@ -81,7 +81,8 @@ bridge is restarted or upgraded.
 ```
 
 Supported operation families are `create`, `set_properties`, `transform`,
-`duplicate`, and `delete`. The grouped write uses one native
+`reshape`, `update_parametric`, `duplicate`, and `delete`. Geometry is supplied
+with explicit `coordinate_units` and normalized to native millimetres. The grouped write uses one native
 `apply_operations` transaction. Native apply prevalidates the whole plan, runs one
 undo transaction, registers each created object with undo, and returns compact
 semantic receipts. The host never retries through another action.
@@ -134,10 +135,10 @@ metadata.
 | `vw_apply`, `vw_execute_operations` | Atomic document write | Reuse the same key only for the identical plan after state inspection. |
 | `vw_io.import` | Document write | `never_after_send` |
 | `vw_io.export`, `vw_io.capture` | File write | `never_after_send` |
-| `vw_view.set` | View-state write | `never_after_send` |
+| `vw_view.set`, `vw_view.fit` | View-state write | `never_after_send` |
 | `vw_view.capture` | File write | `never_after_send` |
 | `vw_document.save`, `vw_document.export` | File write | `never_after_send` |
-| `vw_document.open`, `vw_document.new` | Destructive document lifecycle | `never_after_send` |
+| `vw_document.open` | Destructive document lifecycle | `never_after_send` |
 
 `vw_io` and `vw_document` do not accept `idempotency_key`. The native bridge
 does not provide a durable replay ledger for those actions.

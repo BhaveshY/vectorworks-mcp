@@ -1526,7 +1526,7 @@ class ServerProtocolTests(unittest.TestCase):
             if request["action"] == "ping":
                 return {"id": request["id"], "success": True, "result": _native_phase_one_status()}
             if request["action"] == "get_objects":
-                self.assertEqual(request["params"], {"layer": "", "object_type": "", "limit": 10})
+                self.assertEqual(request["params"], {"layer": "", "object_type": "", "limit": 1000})
                 return {
                     "id": request["id"],
                     "success": True,
@@ -1547,16 +1547,19 @@ class ServerProtocolTests(unittest.TestCase):
         self.assertEqual(result["objects"][0]["handle"], "h1")
         self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_objects"])
 
-    def test_find_objects_uses_native_criteria_for_exact_name_when_advertised(self):
+    def test_find_objects_avoids_broken_native_criteria_for_exact_name_when_advertised(self):
         def handler(request):
             if request["action"] == "ping":
                 return {"id": request["id"], "success": True, "result": _native_phase_three_status()}
-            if request["action"] == "find_objects":
-                self.assertEqual(request["params"], {"criteria": "((N='Target'))", "limit": 10})
+            if request["action"] == "get_objects":
+                self.assertEqual(request["params"], {"layer": "", "object_type": "", "limit": 1000})
                 return {
                     "id": request["id"],
                     "success": True,
-                    "result": [{"handle": "h-2501", "type": "rect", "name": "Target"}],
+                    "result": [
+                        {"handle": "h-2501", "type": "rect", "name": "Target"},
+                        {"handle": "h-2502", "type": "line", "name": "Other"},
+                    ],
                 }
             self.fail(f"Unexpected action: {request['action']}")
 
@@ -1564,8 +1567,9 @@ class ServerProtocolTests(unittest.TestCase):
             _configure_server(listener.port)
             result = json.loads(server.vw_find_objects("((N='Target'))", limit=10))
 
-        self.assertEqual(result[0]["handle"], "h-2501")
-        self.assertEqual([request["action"] for request in listener.requests], ["ping", "find_objects"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["objects"][0]["handle"], "h-2501")
+        self.assertEqual([request["action"] for request in listener.requests], ["ping", "get_objects"])
 
     def test_lookup_objects_returns_compact_refs_from_get_objects(self):
         def handler(request):

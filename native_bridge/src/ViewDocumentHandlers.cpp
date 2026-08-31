@@ -161,8 +161,11 @@ ViewState GetView() {
 
 ViewState SetView(const SetViewRequest& request) {
 #if VECTORWORKS_MCP_VIEW_DOCUMENT_HAS_SDK
-    if (!request.setStandardView && !request.setProjection && !request.setRenderMode) {
-        throw Error(ErrorCode::InvalidRequest, "set_view requires standard_view, projection, or render_mode");
+    if (!request.setStandardView && !request.setProjection && !request.setRenderMode &&
+        !request.fitToObjects && !request.clearSelection) {
+        throw Error(
+            ErrorCode::InvalidRequest,
+            "set_view requires standard_view, projection, render_mode, fit_to_objects, or clear_selection");
     }
     if (request.setStandardView && !ValidStandardView(request.standardView)) {
         throw Error(ErrorCode::InvalidRequest, "standard_view is not a supported Vectorworks standard view value");
@@ -189,7 +192,26 @@ ViewState SetView(const SetViewRequest& request) {
     if (request.setRenderMode) {
         gSDK->SetRenderMode(layer, request.renderMode, true, false);
     }
-    const ViewState actual = ReadView();
+    if (request.fitToObjects) {
+        if (request.clearSelection) {
+            gSDK->SelectAll();
+        }
+        // The SDK documents the short return type but does not define it as a
+        // Boolean result (and its own mock returns zero). Dispatch is the
+        // authoritative operation; visual capture provides framing proof.
+        gSDK->DoMenuName(TXString("Fit to Objects"), 0);
+        if (request.clearSelection) {
+            gSDK->DeselectAll();
+        }
+    } else if (request.clearSelection) {
+        gSDK->DeselectAll();
+    }
+    if (request.fitToObjects || request.clearSelection) {
+        gSDK->DrawScreen();
+    }
+    ViewState actual = ReadView();
+    actual.fitToObjectsApplied = request.fitToObjects;
+    actual.selectionCleared = request.clearSelection;
     if ((request.setStandardView && actual.standardView != request.standardView) ||
         (request.setProjection && actual.projection != request.projection) ||
         (request.setRenderMode && actual.renderMode != request.renderMode)) {

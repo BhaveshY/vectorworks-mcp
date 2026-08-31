@@ -201,10 +201,10 @@ class NativeAuthoritativeCapabilitiesContractTests(unittest.TestCase):
             source,
             r"setRenderMode\s*&&\s*!gSDK->SetRenderMode",
         )
-        self.assertRegex(
-            source,
-            r"gSDK->SetRenderMode\([^;]+;\s*}\s*const ViewState actual = ReadView\(\)",
-        )
+        self.assertIn("gSDK->SetRenderMode(layer, request.renderMode, true, false);", source)
+        self.assertIn("ViewState actual = ReadView();", source)
+        self.assertIn('gSDK->DoMenuName(TXString("Fit to Objects"), 0);', source)
+        self.assertNotRegex(source, r"if\s*\([^)]*DoMenuName")
 
     def test_dwg_import_returns_before_after_mutation_receipt(self):
         header = self.source("NativeIOHandlers.hpp")

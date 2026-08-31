@@ -47,6 +47,8 @@ struct ViewState {
     short standardView = 0;
     short projection = 0;
     short renderMode = 0;
+    bool fitToObjectsApplied = false;
+    bool selectionCleared = false;
 };
 
 struct SetViewRequest {
@@ -56,6 +58,8 @@ struct SetViewRequest {
     short projection = 0;
     bool setRenderMode = false;
     short renderMode = 0;
+    bool fitToObjects = false;
+    bool clearSelection = false;
 };
 
 struct DocumentResult {

@@ -58,7 +58,7 @@ class McpStdioContractTests(unittest.TestCase):
                 async with stdio_client(params, errlog=errlog) as (read, write):
                     async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=15)) as session:
                         initialized = await session.initialize()
-                        self.assertEqual(initialized.serverInfo.version, "0.5.0")
+                        self.assertEqual(initialized.serverInfo.version, "0.6.0")
                         tools = await session.list_tools()
                         self.assertEqual({tool.name for tool in tools.tools}, set(__import__("server").FAST_NATIVE_TOOL_NAMES))
 
@@ -87,7 +87,7 @@ class McpStdioContractTests(unittest.TestCase):
                 async with stdio_client(params, errlog=errlog) as (read, write):
                     async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=5)) as session:
                         initialized = await session.initialize()
-                        self.assertEqual(initialized.serverInfo.version, "0.5.0")
+                        self.assertEqual(initialized.serverInfo.version, "0.6.0")
                         self.assertIn("fast-native phase-4", initialized.instructions[:512])
                         self.assertIn("capability revision 4 or newer", initialized.instructions[:512])
                         self.assertIn("one atomic vw_apply or vw_execute_operations", initialized.instructions[:512])
@@ -150,7 +150,7 @@ class McpStdioContractTests(unittest.TestCase):
                         async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=5)) as session:
                             initialized = await session.initialize()
                             self.assertEqual(initialized.serverInfo.name, "Vectorworks 2024/2025")
-                            self.assertEqual(initialized.serverInfo.version, "0.5.0")
+                            self.assertEqual(initialized.serverInfo.version, "0.6.0")
                             self.assertIn("fast-native phase-4", initialized.instructions[:512])
 
                             tools = await session.list_tools()

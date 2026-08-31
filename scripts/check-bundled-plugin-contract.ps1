@@ -97,7 +97,7 @@ if ($LASTEXITCODE -ne 0) {
 
 $CodexManifest = Get-Content -Raw -LiteralPath (Join-Path $BundledPlugin ".codex-plugin\plugin.json") | ConvertFrom-Json
 if ($CodexManifest.name -ne "vectorworks" -or
-    $CodexManifest.version -ne "0.5.0" -or
+    $CodexManifest.version -ne "0.6.0" -or
     $CodexManifest.skills -ne "./skills/" -or
     $CodexManifest.mcpServers -ne "./.mcp.json" -or
     $CodexManifest.interface.displayName -ne "Vectorworks MCP") {
@@ -105,7 +105,7 @@ if ($CodexManifest.name -ne "vectorworks" -or
 }
 $ClaudeManifest = Get-Content -Raw -LiteralPath (Join-Path $BundledPlugin ".claude-plugin\plugin.json") | ConvertFrom-Json
 if ($ClaudeManifest.name -ne "vectorworks" -or
-    $ClaudeManifest.version -ne "0.5.0" -or
+    $ClaudeManifest.version -ne "0.6.0" -or
     $ClaudeManifest.mcpServers -ne "./.claude-plugin/mcp.json") {
     throw "Bundled Claude Code plugin manifest is not a valid Vectorworks plugin manifest."
 }

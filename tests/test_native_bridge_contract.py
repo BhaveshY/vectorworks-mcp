@@ -615,15 +615,17 @@ class NativeBridgeContractTests(unittest.TestCase):
         self.assertIn('requestedType == "linear_dimension"', matches_block)
         self.assertIn('requestedType = "dimension"', matches_block)
 
-    def test_native_space_filter_and_readback_are_semantic(self):
+    def test_native_architectural_parametric_filters_and_readback_are_semantic(self):
         source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
-        filter_block = source[source.index("bool IsSpaceObject"):source.index("bool IsUserVisibleObjectType")]
+        filter_block = source[source.index("std::string ParametricPluginName"):source.index("bool IsUserVisibleObjectType")]
         object_json = source[source.index("std::string ObjectJson"):source.index("std::string ObjectListJson")]
 
-        self.assertIn('parametric.GetParametricName()) == "Space"', filter_block)
-        self.assertIn('requestedType == "space"', filter_block)
-        self.assertIn("return IsSpaceObject(object)", filter_block)
-        self.assertIn(r'\"native_type\":\"parametric\",\"plugin_name\":\"Space\"', object_json)
+        self.assertIn("parametric.GetParametricName()", filter_block)
+        self.assertIn('pluginName == "space" || pluginName == "door" || pluginName == "window"', filter_block)
+        self.assertIn('requestedType == "space" || requestedType == "door" || requestedType == "window"', filter_block)
+        self.assertIn("ToLower(ParametricPluginName(object)) == requestedType", filter_block)
+        self.assertIn(r'\"plugin_name\"', object_json)
+        self.assertIn(r'\"native_type\"', object_json)
         self.assertIn('GetParamString(TXString("11_Room ID"))', object_json)
         self.assertIn('GetParamReal(TXString("11_Net Height"))', object_json)
         self.assertIn("support->NetArea(object, netArea)", object_json)
@@ -792,7 +794,13 @@ class NativeBridgeContractTests(unittest.TestCase):
         parser = source[source.index("std::vector<ApplyOperation> ParseApplyOperations"):]
         transaction = source[source.index("std::string HandleApplyOperations"):]
 
-        for operation in ("object.transform", "object.duplicate", "object.delete"):
+        for operation in (
+            "object.transform",
+            "object.reshape",
+            "object.update_parametric",
+            "object.duplicate",
+            "object.delete",
+        ):
             self.assertIn(operation, parser)
             self.assertIn(operation, transaction)
         self.assertIn("target must be an explicit uuid:, name:, or handle: object reference", source)
@@ -804,6 +812,9 @@ class NativeBridgeContractTests(unittest.TestCase):
         self.assertIn("gSDK->MoveObject(object, operation.deltaX, operation.deltaY)", transaction)
         self.assertIn("gSDK->RotateObjectN(rotatedObject, pivot, operation.rotationDegrees)", transaction)
         self.assertIn("gSDK->ScaleObjectN(object, pivot, operation.scaleX, operation.scaleY)", transaction)
+        self.assertIn("gSDK->SetEndPoints(object, requestedStart, requestedEnd)", transaction)
+        self.assertIn("UpdateVerifiedParametricObject(", transaction)
+        self.assertIn("object.update_parametric changed the exact wall host", transaction)
         self.assertIn("gSDK->DuplicateObject(object)", transaction)
         self.assertIn("gSDK->InsertObjectAfter(duplicate, object)", transaction)
         self.assertIn("gSDK->DeleteObject(object, true)", transaction)
@@ -829,6 +840,16 @@ class NativeBridgeContractTests(unittest.TestCase):
             transaction[:transaction.index("if (operation.kind == ApplyOperationKind::SetProperty)")],
         )
         self.assertNotIn("CollectSelectedObjects", transaction)
+
+    def test_native_view_fit_and_save_as_stable_idempotency_are_explicit(self):
+        bridge = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
+        view = (ROOT / "native_bridge" / "src" / "ViewDocumentHandlers.cpp").read_text(encoding="utf-8")
+
+        self.assertIn('return "layer:" + TxToUtf8(layerUuid)', bridge)
+        self.assertIn('gSDK->DoMenuName(TXString("Fit to Objects"), 0)', view)
+        self.assertIn("gSDK->SelectAll()", view)
+        self.assertIn("gSDK->DeselectAll()", view)
+        self.assertIn("fit_to_objects_applied", bridge)
 
     def test_native_writable_layer_requires_an_existing_design_layer(self):
         source = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
@@ -1121,9 +1142,11 @@ class NativeBridgeContractTests(unittest.TestCase):
 
     def test_handler_matrix_matches_listener_and_server_wire_actions(self):
         listener_handlers = _listener_handlers()
-        server_actions = _server_actions()
+        # Grouped view variants resolve their wire actions at dispatch time, so
+        # they do not have one static TOOL_SAFETY wire_action.
+        server_actions = _server_actions() | {"get_view", "set_view"}
         matrix_rows = _matrix_rows()
-        native_only_actions = {"apply_operations"}
+        native_only_actions = {"apply_operations", "get_view", "set_view"}
 
         self.assertEqual(server_actions - native_only_actions, set(listener_handlers))
         self.assertTrue(native_only_actions <= server_actions)

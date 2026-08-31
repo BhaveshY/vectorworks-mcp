@@ -23,8 +23,8 @@ The fast-native profile exposes only these tools:
 - `vw_execute_operations` as the same atomic engine under its established
   name. It is not a fallback path.
 - `vw_io` for advertised native import, export, and capture actions.
-- `vw_view` for advertised native get, set, and capture actions.
-- `vw_document` for advertised native info, save, export, open, and new actions.
+- `vw_view` for advertised native get, set, fit, and capture actions.
+- `vw_document` for advertised native info, save, export, and open actions.
 - `vw_tool_safety` for exact grouped action safety and retry metadata.
 
 Do not switch to compatibility tools, a Python listener, mouse automation,
@@ -61,7 +61,8 @@ to an earlier result as `$<operation_id>`. Existing objects require an explicit
 `uuid:`, `name:`, or `handle:` reference.
 
 Supported operation types are `create`, `set_properties`, `transform`,
-`duplicate`, and `delete`.
+`reshape`, `update_parametric`, `duplicate`, and `delete`. Always state
+`coordinate_units`; the connector normalizes typed geometry to millimetres.
 
 Use true native object types only. A Space request includes a closed boundary,
 height, name, and room ID. Slab and roof requests include their real footprint

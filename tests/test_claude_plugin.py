@@ -91,11 +91,11 @@ class ClaudePluginTests(unittest.TestCase):
         root_marketplace = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
 
         self.assertEqual(claude_manifest["name"], "vectorworks")
-        self.assertEqual(claude_manifest["version"], "0.5.0")
+        self.assertEqual(claude_manifest["version"], "0.6.0")
         self.assertEqual(claude_manifest["mcpServers"], "./.claude-plugin/mcp.json")
         self.assertIn("vectorworks_repo", claude_manifest["userConfig"])
         self.assertEqual(codex_manifest["name"], "vectorworks")
-        self.assertEqual(codex_manifest["version"], "0.5.0")
+        self.assertEqual(codex_manifest["version"], "0.6.0")
         self.assertEqual(codex_manifest["skills"], "./skills/")
         self.assertEqual(codex_manifest["mcpServers"], "./.mcp.json")
         self.assertEqual(codex_manifest["interface"]["displayName"], "Vectorworks MCP")

@@ -29,7 +29,9 @@ Legend:
 | `manage_classes` | `handle_manage_classes` | mixed/destructive | main/plugin event context | 2 | Lists, creates, and deletes a temporary class; delete has separate destructive confirmation |
 | `find_objects` | `handle_find_objects` | read | main/plugin event context | 3 | Criteria search returns known test object |
 | `drawing_summary` | `handle_drawing_summary` | read | main/plugin event context | 3 | Returns compact counts by type/layer/class plus bounded examples without dumping every object |
-| `apply_operations` | no Python fallback | idempotent write | main/plugin event context | 4 | Uses one `NativeTransaction` for create, property, transform, duplicate, and delete operations. Supports local, handle, UUID, and exact-name refs. Verifies semantic receipts, exact cleanup, undo commit, and idempotency-key reuse. |
+| `apply_operations` | no Python fallback | idempotent write | main/plugin event context | 4 | Uses one `NativeTransaction` for create, property, transform, wall/line endpoint reshape, schema-verified parametric update, duplicate, and delete operations. Supports local, handle, UUID, and exact-name refs. Verifies semantic receipts, exact cleanup, undo commit, and idempotency-key reuse across first save/Save As by stable layer identity. |
+| `get_view` | native view state | read | main/plugin event context | 4 | Reads the active layer view state. |
+| `set_view` | native view state | view write | main/plugin event context | 4 | Sets view state and supports deselect plus native Fit to Objects for reliable unattended captures. |
 | `worksheet` | `handle_worksheet` | mixed/write | main/plugin event context | 3 | Lists worksheets and reads/writes a temporary cell |
 | `symbol` | `handle_symbol` | mixed/write | main/plugin event context | 3 | Lists symbols and inserts a known symbol in a test document |
 | `export` | `handle_export` | write-file | compatibility only | deferred | Disabled. Production uses the native non-modal `export_image`, `export_pdf`, `export_vectorworks_document`, or `export_dwg` action. |

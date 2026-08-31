@@ -1044,22 +1044,30 @@ std::string ObjectTypeName(short type) {
     }
 }
 
-bool IsSpaceObject(MCObjectHandle object) {
+std::string ParametricPluginName(MCObjectHandle object) {
     if (!object || gSDK->GetObjectTypeN(object) != kParametricNode) {
-        return false;
+        return "";
     }
     try {
         VWFC::VWObjects::VWParametricObj parametric(object);
-        return TxToUtf8(parametric.GetParametricName()) == "Space";
+        return TxToUtf8(parametric.GetParametricName());
     } catch (...) {
-        return false;
+        return "";
     }
 }
 
+bool IsSpaceObject(MCObjectHandle object) {
+    return ParametricPluginName(object) == "Space";
+}
+
 std::string SemanticObjectTypeName(MCObjectHandle object) {
-    return IsSpaceObject(object)
-        ? "space"
-        : ObjectTypeName(gSDK->GetObjectTypeN(object));
+    if (gSDK->GetObjectTypeN(object) == kParametricNode) {
+        const std::string pluginName = ToLower(ParametricPluginName(object));
+        if (pluginName == "space" || pluginName == "door" || pluginName == "window") {
+            return pluginName;
+        }
+    }
+    return ObjectTypeName(gSDK->GetObjectTypeN(object));
 }
 
 bool MatchesObjectType(MCObjectHandle object, std::string requestedType) {
@@ -1072,8 +1080,8 @@ bool MatchesObjectType(MCObjectHandle object, std::string requestedType) {
     } else if (requestedType == "linear_dimension") {
         requestedType = "dimension";
     }
-    if (requestedType == "space") {
-        return IsSpaceObject(object);
+    if (requestedType == "space" || requestedType == "door" || requestedType == "window") {
+        return ToLower(ParametricPluginName(object)) == requestedType;
     }
     return ObjectTypeName(gSDK->GetObjectTypeN(object)) == requestedType;
 }
@@ -1115,7 +1123,9 @@ std::string RgbStringFromColorRef(ColorRef colorRef) {
 
 std::string ObjectJson(MCObjectHandle object) {
     const short type = gSDK->GetObjectTypeN(object);
-    const bool isSpace = IsSpaceObject(object);
+    const std::string semanticType = SemanticObjectTypeName(object);
+    const bool isSpace = semanticType == "space";
+    const std::string pluginName = type == kParametricNode ? ParametricPluginName(object) : "";
     TXString name;
     gSDK->GetObjectName(object, name);
 
@@ -1127,11 +1137,16 @@ std::string ObjectJson(MCObjectHandle object) {
         json += JsonString(uuid);
     }
     json += ",\"type\":";
-    json += JsonString(isSpace ? "space" : ObjectTypeName(type));
+    json += JsonString(semanticType);
     json += ",\"type_id\":";
     json += std::to_string(static_cast<int>(type));
-    if (isSpace) {
-        json += ",\"native_type\":\"parametric\",\"plugin_name\":\"Space\"";
+    if (!pluginName.empty()) {
+        json += ",\"plugin_name\":";
+        json += JsonString(pluginName);
+    }
+    if (semanticType != ObjectTypeName(type)) {
+        json += ",\"native_type\":";
+        json += JsonString(ObjectTypeName(type));
     }
     json += ",\"name\":";
     json += JsonString(TxToUtf8(name));
@@ -1998,6 +2013,14 @@ NativeIO::OutputTarget ParseOutputTarget(const Params& params) {
 
 std::string HandleNativeIO(const std::string& action, const Params& params) {
     if (action == "export_image" || action == "capture_view") {
+        if (action == "capture_view" &&
+            (GetBoolParam(params, "fit_to_objects", false) ||
+             GetBoolParam(params, "clear_selection", false))) {
+            ViewDocument::SetViewRequest viewRequest;
+            viewRequest.fitToObjects = GetBoolParam(params, "fit_to_objects", false);
+            viewRequest.clearSelection = GetBoolParam(params, "clear_selection", false);
+            ViewDocument::SetView(viewRequest);
+        }
         NativeIO::ImageExportRequest request;
         request.output = ParseOutputTarget(params);
         request.updateViewports = GetBoolParam(params, "update_viewports", true);
@@ -2200,7 +2223,9 @@ std::string HandleWorksheet(const Params& params) {
 std::string ViewStateJson(const ViewDocument::ViewState& state) {
     return "{\"standard_view\":" + std::to_string(state.standardView) +
         ",\"projection\":" + std::to_string(state.projection) +
-        ",\"render_mode\":" + std::to_string(state.renderMode) + "}";
+        ",\"render_mode\":" + std::to_string(state.renderMode) +
+        ",\"fit_to_objects_applied\":" + (state.fitToObjectsApplied ? "true" : "false") +
+        ",\"selection_cleared\":" + (state.selectionCleared ? "true" : "false") + "}";
 }
 
 std::string HandleView(const std::string& action, const Params& params) {
@@ -2212,6 +2237,8 @@ std::string HandleView(const std::string& action, const Params& params) {
     request.projection = static_cast<short>(GetBoundedIntParam(params, "projection", 0, 0, 6));
     request.setRenderMode = params.find("render_mode") != params.end();
     request.renderMode = static_cast<short>(GetBoundedIntParam(params, "render_mode", 0, 0, 15));
+    request.fitToObjects = GetBoolParam(params, "fit_to_objects", false);
+    request.clearSelection = GetBoolParam(params, "clear_selection", false);
     return ViewStateJson(ViewDocument::SetView(request));
 }
 
@@ -3369,6 +3396,8 @@ enum class ApplyOperationKind {
     Create,
     SetProperty,
     Transform,
+    Reshape,
+    UpdateParametric,
     Duplicate,
     Delete,
 };
@@ -3388,6 +3417,10 @@ struct ApplyOperation {
     bool hasPivot = false;
     double pivotX = 0.0;
     double pivotY = 0.0;
+    double startX = 0.0;
+    double startY = 0.0;
+    double endX = 0.0;
+    double endY = 0.0;
     std::string confirmation;
 };
 
@@ -3433,6 +3466,16 @@ void ValidateMutationTarget(const ApplyOperation& operation, const std::string& 
 }
 
 std::string ActiveDocumentIdentity() {
+    MCObjectHandle layer = gSDK ? gSDK->GetActiveLayer() : nullptr;
+    if (!layer && gSDK) {
+        layer = gSDK->GetCurrentLayer();
+    }
+    if (layer) {
+        TXString layerUuid;
+        if (gSDK->GetObjectUuid(layer, layerUuid) && !layerUuid.IsEmpty()) {
+            return "layer:" + TxToUtf8(layerUuid);
+        }
+    }
     std::string identity;
     VectorWorks::Filing::IFileIdentifierPtr activeFile(VectorWorks::Filing::IID_FileIdentifier);
     bool saved = false;
@@ -3648,6 +3691,49 @@ std::vector<ApplyOperation> ParseApplyOperations(const Params& params) {
             operations.push_back(std::move(operation));
             continue;
         }
+        if (op == "object.reshape") {
+            ApplyOperation operation;
+            operation.kind = ApplyOperationKind::Reshape;
+            operation.target = GetStringParam(operationParams, "target");
+            if (!operation.target.empty() && operation.target.front() == '$') {
+                const std::string localRef = operation.target.substr(1);
+                if (declaredLocalRefs.find(localRef) == declaredLocalRefs.end()) {
+                    throw std::invalid_argument(label + ".target references an unknown local_ref: " + localRef);
+                }
+            } else {
+                ValidateMutationTarget(operation, label);
+            }
+            operation.startX = GetFiniteNumberParam(operationParams, "start_x", 0.0);
+            operation.startY = GetFiniteNumberParam(operationParams, "start_y", 0.0);
+            operation.endX = GetFiniteNumberParam(operationParams, "end_x", 0.0);
+            operation.endY = GetFiniteNumberParam(operationParams, "end_y", 0.0);
+            if (operation.startX == operation.endX && operation.startY == operation.endY) {
+                throw std::invalid_argument(label + " reshape endpoints must not be identical");
+            }
+            operations.push_back(std::move(operation));
+            continue;
+        }
+        if (op == "object.update_parametric") {
+            ApplyOperation operation;
+            operation.kind = ApplyOperationKind::UpdateParametric;
+            operation.target = GetStringParam(operationParams, "target");
+            if (!operation.target.empty() && operation.target.front() == '$') {
+                const std::string localRef = operation.target.substr(1);
+                if (declaredLocalRefs.find(localRef) == declaredLocalRefs.end()) {
+                    throw std::invalid_argument(label + ".target references an unknown local_ref: " + localRef);
+                }
+            } else {
+                ValidateMutationTarget(operation, label);
+            }
+            operation.primitive = ParsePrimitiveSpec(operationParams, label);
+            if (operation.primitive.objectType != "parametric" ||
+                operation.primitive.parametricValues.empty()) {
+                throw std::invalid_argument(
+                    label + " object.update_parametric requires object_type=parametric and at least one parameter");
+            }
+            operations.push_back(std::move(operation));
+            continue;
+        }
         if (op == "object.duplicate") {
             ApplyOperation operation;
             operation.kind = ApplyOperationKind::Duplicate;
@@ -3702,7 +3788,8 @@ std::vector<ApplyOperation> ParseApplyOperations(const Params& params) {
             continue;
         }
         throw std::invalid_argument(
-            label + ".op must be create, set_property, object.transform, object.duplicate, or object.delete");
+            label + ".op must be create, set_property, object.transform, object.reshape, "
+            "object.update_parametric, object.duplicate, or object.delete");
     }
     return operations;
 }
@@ -3781,6 +3868,8 @@ PreparedApplyOperationTargets PrepareApplyOperationTargets(
         if (operation.kind == ApplyOperationKind::Create ||
             ((operation.kind == ApplyOperationKind::SetProperty ||
               operation.kind == ApplyOperationKind::Transform ||
+              operation.kind == ApplyOperationKind::Reshape ||
+              operation.kind == ApplyOperationKind::UpdateParametric ||
               operation.kind == ApplyOperationKind::Duplicate ||
               operation.kind == ApplyOperationKind::Delete) &&
              !operation.target.empty() && operation.target.front() == '$')) {
@@ -3974,6 +4063,67 @@ std::string HandleApplyOperations(const Params& params) {
                     ",\"scale_x\":" + JsonNumber(operation.scaleX) +
                     ",\"scale_y\":" + JsonNumber(operation.scaleY) +
                     ",\"pivot\":[" + JsonNumber(pivot.x) + "," + JsonNumber(pivot.y) + "]}" +
+                    ",\"before\":" + before + ",\"after\":" + ObjectJson(object) + "}";
+                operationResults.push_back(std::move(result));
+                continue;
+            }
+            if (operation.kind == ApplyOperationKind::Reshape) {
+                const short semanticTypeBefore = gSDK->GetObjectTypeN(object);
+                if (semanticTypeBefore != kWallNode && semanticTypeBefore != kLineNode) {
+                    throw std::invalid_argument(
+                        "object.reshape currently supports native wall and line targets only");
+                }
+                WorldPt priorStart;
+                WorldPt priorEnd;
+                gSDK->GetEndPoints(object, priorStart, priorEnd);
+                const WorldPt requestedStart(operation.startX, operation.startY);
+                const WorldPt requestedEnd(operation.endX, operation.endY);
+                gSDK->SetEndPoints(object, requestedStart, requestedEnd);
+                gSDK->ResetObject(object);
+                WorldPt actualStart;
+                WorldPt actualEnd;
+                gSDK->GetEndPoints(object, actualStart, actualEnd);
+                if (gSDK->GetObjectTypeN(object) != semanticTypeBefore ||
+                    !WorldCoordsAreNearlyEqual(actualStart.x, requestedStart.x) ||
+                    !WorldCoordsAreNearlyEqual(actualStart.y, requestedStart.y) ||
+                    !WorldCoordsAreNearlyEqual(actualEnd.x, requestedEnd.x) ||
+                    !WorldCoordsAreNearlyEqual(actualEnd.y, requestedEnd.y)) {
+                    throw std::runtime_error("object.reshape endpoint readback mismatch");
+                }
+                dirtyHandles.insert(object);
+                std::string result = "{\"index\":" + std::to_string(index + 1u) +
+                    ",\"op\":\"object.reshape\",\"target\":" + JsonString(operation.target) +
+                    ",\"before_endpoints\":[[" + JsonNumber(priorStart.x) + "," + JsonNumber(priorStart.y) +
+                    "],[" + JsonNumber(priorEnd.x) + "," + JsonNumber(priorEnd.y) + "]]" +
+                    ",\"after_endpoints\":[[" + JsonNumber(actualStart.x) + "," + JsonNumber(actualStart.y) +
+                    "],[" + JsonNumber(actualEnd.x) + "," + JsonNumber(actualEnd.y) + "]]}";
+                operationResults.push_back(std::move(result));
+                continue;
+            }
+            if (operation.kind == ApplyOperationKind::UpdateParametric) {
+                if (gSDK->GetObjectTypeN(object) != kParametricNode) {
+                    throw std::invalid_argument(
+                        "object.update_parametric target is not a native parametric object");
+                }
+                MCObjectHandle parentBefore = gSDK->ParentObject(object);
+                const bool hostedByWall = parentBefore && gSDK->GetObjectTypeN(parentBefore) == kWallNode;
+                const std::string before = ObjectJson(object);
+                UpdateVerifiedParametricObject(
+                    object,
+                    operation.primitive.pluginName,
+                    operation.primitive.descriptorFingerprint,
+                    operation.primitive.parametricValues);
+                if (hostedByWall && !IsObjectHostedByWall(object, parentBefore)) {
+                    throw std::runtime_error(
+                        "object.update_parametric changed the exact wall host");
+                }
+                dirtyHandles.insert(object);
+                std::string result = "{\"index\":" + std::to_string(index + 1u) +
+                    ",\"op\":\"object.update_parametric\",\"target\":" + JsonString(operation.target) +
+                    ",\"plugin_name\":" + JsonString(operation.primitive.pluginName) +
+                    ",\"parameter_count\":" +
+                    std::to_string(operation.primitive.parametricValues.size()) +
+                    ",\"wall_host_preserved\":" + (hostedByWall ? "true" : "false") +
                     ",\"before\":" + before + ",\"after\":" + ObjectJson(object) + "}";
                 operationResults.push_back(std::move(result));
                 continue;
