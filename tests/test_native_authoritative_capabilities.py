@@ -45,6 +45,7 @@ class NativeAuthoritativeCapabilitiesContractTests(unittest.TestCase):
         self.assertIn("GetPluginType", definition)
         self.assertIn("DescribeWithParams2Provider", definition)
         self.assertIn("DescribeWithParamsProvider", definition)
+        self.assertLess(definition.index("DescribeWithParams2Provider"), definition.index("GetPluginType"))
         self.assertNotIn("GetNamedObject", definition)
         self.assertNotIn("CreateCustomObject", definition)
         self.assertIn('case BuiltInParametricKind::Door: return "Door"', source)

@@ -374,12 +374,6 @@ ParametricDescriptor DescribeParametricDefinition(const std::string& universalPl
         throw std::runtime_error("Vectorworks SDK is unavailable");
     }
     const TXString pluginName(universalPluginName.c_str());
-    EVSPluginType pluginType = kVSPluginMenu;
-    if (!gSDK->GetPluginType(pluginName, pluginType) || pluginType != kVSPluginObject) {
-        throw std::invalid_argument(
-            "installed parametric object plugin was not found by universal name: " +
-            universalPluginName);
-    }
     ParametricDescriptor descriptor;
     descriptor.universalPluginName = universalPluginName;
     TXString localizedPluginName;
@@ -389,14 +383,25 @@ ParametricDescriptor DescribeParametricDefinition(const std::string& universalPl
     } else {
         descriptor.localizedPluginName = universalPluginName;
     }
-    if (!DescribeWithParams2Provider(descriptor) &&
-        !DescribeWithParamsProvider(descriptor)) {
-        throw std::runtime_error(
-            "installed parametric plugin does not expose an SDK parameter schema provider: " +
+    if (DescribeWithParams2Provider(descriptor) ||
+        DescribeWithParamsProvider(descriptor)) {
+        descriptor.descriptorFingerprint = Fingerprint(descriptor);
+        return descriptor;
+    }
+
+    // Bundled Vectorworks extension objects (notably Door and Window in 2024)
+    // can expose their parameter provider even when GetPluginType reports a
+    // false negative. The provider is therefore authoritative; this registry
+    // check only improves the error when no provider exists.
+    EVSPluginType pluginType = kVSPluginMenu;
+    if (!gSDK->GetPluginType(pluginName, pluginType) || pluginType != kVSPluginObject) {
+        throw std::invalid_argument(
+            "installed parametric object plugin was not found by universal name: " +
             universalPluginName);
     }
-    descriptor.descriptorFingerprint = Fingerprint(descriptor);
-    return descriptor;
+    throw std::runtime_error(
+        "installed parametric plugin does not expose an SDK parameter schema provider: " +
+        universalPluginName);
 }
 
 const char* BuiltInParametricUniversalName(BuiltInParametricKind kind) noexcept {
