@@ -9,7 +9,7 @@
 namespace VectorworksMCP {
 namespace {
 
-constexpr std::array<ActionSpec, 31> kActionRegistry = {{
+constexpr std::array<ActionSpec, 35> kActionRegistry = {{
     {"ping", ExecutionContext::TransportThread, 0u, false, false},
     {"stop", ExecutionContext::TransportThread, 0u, false, false},
     {"capabilities", ExecutionContext::TransportThread, 0u, false, false},
@@ -29,6 +29,9 @@ constexpr std::array<ActionSpec, 31> kActionRegistry = {{
     {"open_document", ExecutionContext::VectorworksMainPluginContext, 4u, true, true},
     {"get_document_info", ExecutionContext::VectorworksMainPluginContext, 1u, false, false},
     {"get_layers", ExecutionContext::VectorworksMainPluginContext, 1u, false, false},
+    {"get_sheet_layers", ExecutionContext::VectorworksMainPluginContext, 4u, false, false},
+    {"get_viewports", ExecutionContext::VectorworksMainPluginContext, 4u, false, false},
+    {"get_viewport_annotations", ExecutionContext::VectorworksMainPluginContext, 4u, false, false},
     {"get_objects", ExecutionContext::VectorworksMainPluginContext, 1u, false, false},
     {"selection", ExecutionContext::VectorworksMainPluginContext, 1u, true, true},
     {"create_object", ExecutionContext::VectorworksMainPluginContext, 1u, true, false},
@@ -41,6 +44,7 @@ constexpr std::array<ActionSpec, 31> kActionRegistry = {{
     {"find_objects", ExecutionContext::VectorworksMainPluginContext, 3u, false, false},
     {"drawing_summary", ExecutionContext::VectorworksMainPluginContext, 3u, false, false},
     {"apply_operations", ExecutionContext::VectorworksMainPluginContext, 4u, true, false},
+    {"apply_documentation_operations", ExecutionContext::VectorworksMainPluginContext, 4u, true, true},
 }};
 
 constexpr std::array<ObjectKindSpec, 20> kObjectKindRegistry = {{

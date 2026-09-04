@@ -54,6 +54,9 @@ EXPECTED_NATIVE_ACTIONS = {
     "open_document",
     "get_document_info",
     "get_layers",
+    "get_sheet_layers",
+    "get_viewports",
+    "get_viewport_annotations",
     "get_objects",
     "selection",
     "create_object",
@@ -66,6 +69,7 @@ EXPECTED_NATIVE_ACTIONS = {
     "find_objects",
     "drawing_summary",
     "apply_operations",
+    "apply_documentation_operations",
 }
 EXPECTED_CREATE_TYPES = {
     "arc",
@@ -307,7 +311,7 @@ async def run_acceptance(
                 required_bridge = {
                     "native_bridge": True,
                     "native_phase": 4,
-                    "capability_revision": 4,
+                    "capability_revision": 5,
                     "cad_api_safe": True,
                     "transport_only": False,
                     "main_context_pump_ready": True,

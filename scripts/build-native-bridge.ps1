@@ -123,6 +123,8 @@ $RequiredScaffoldFiles = @(
     "ResourceWorksheetHandlers.cpp",
     "ViewDocumentHandlers.hpp",
     "ViewDocumentHandlers.cpp",
+    "DocumentationHandlers.hpp",
+    "DocumentationHandlers.cpp",
     "BridgeDispatcher.hpp",
     "CadRequestQueue.hpp",
     "VectorworksMCPBridge.cpp"

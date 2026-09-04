@@ -1,6 +1,6 @@
 {
   "name": "vectorworks-mcp",
-  "contractVersion": 16,
+  "contractVersion": 17,
   "requiredFeatures": [
     "stable-loader",
     "loader-clipboard-copy",
@@ -23,7 +23,10 @@
     "structured-mcp-results",
     "codex-plugin-package",
     "local-auth-token-required",
-    "client-neutral-project-mcp"
+    "client-neutral-project-mcp",
+    "native-documentation-lifecycle",
+    "native-document-target-binding",
+    "review-all-sheets"
   ],
   "description": "Companion connector contract marker used by the standalone Claude Code plugin before accepting this checkout."
 }

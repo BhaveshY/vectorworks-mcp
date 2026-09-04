@@ -162,10 +162,10 @@ $Resolver = Get-Content -Raw -LiteralPath (Join-Path $BundledPlugin "scripts\res
 if ($Resolver -notmatch "InstallIfMissing" -or $Resolver -notmatch "RequireContract" -or $Resolver -notmatch "\.vectorworks-mcp-contract\.json") {
     throw "Bundled resolver must support auto-clone and current connector contract validation."
 }
-if ($Resolver -notmatch 'MinimumContractVersion\s*=\s*16') {
-    throw "Bundled resolver must reject connector contracts older than version 16."
+if ($Resolver -notmatch 'MinimumContractVersion\s*=\s*17') {
+    throw "Bundled resolver must reject connector contracts older than version 17."
 }
-foreach ($Feature in @("native-phase4-apply-operations", "fast-native-tool-profile", "structured-mcp-results", "codex-plugin-package")) {
+foreach ($Feature in @("native-phase4-apply-operations", "fast-native-tool-profile", "structured-mcp-results", "codex-plugin-package", "native-documentation-lifecycle", "native-document-target-binding", "review-all-sheets")) {
     if ($Resolver -notmatch [regex]::Escape($Feature)) {
         throw "Bundled resolver must require connector feature '$Feature'."
     }

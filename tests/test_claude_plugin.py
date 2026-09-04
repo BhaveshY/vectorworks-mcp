@@ -383,16 +383,19 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("copy-vectorworks-loader.ps1", bootstrap)
         self.assertIn("SkipClipboard", bootstrap)
         self.assertIn("[int]$MinimumContractVersion", resolver)
-        self.assertIn("$MinimumContractVersion = 16", resolver)
+        self.assertIn("$MinimumContractVersion = 17", resolver)
         self.assertIn("requiredFeatures", resolver)
         for feature in (
             "native-phase4-apply-operations",
             "fast-native-tool-profile",
             "structured-mcp-results",
             "codex-plugin-package",
+            "native-documentation-lifecycle",
+            "native-document-target-binding",
+            "review-all-sheets",
         ):
             self.assertIn(feature, resolver)
-        self.assertIn("contractVersion >= 16", contract)
+        self.assertIn("contractVersion >= 17", contract)
         self.assertIn("native-bridge-scaffold-copy", contract)
         self.assertIn("native-doctor-next-command", contract)
         self.assertIn("native-doctor-command-spec", contract)
@@ -408,6 +411,9 @@ class ClaudePluginTests(unittest.TestCase):
         self.assertIn("native-phase2-manage-classes", contract)
         self.assertIn("local-auth-token-required", contract)
         self.assertIn("client-neutral-project-mcp", contract)
+        self.assertIn("native-documentation-lifecycle", contract)
+        self.assertIn("native-document-target-binding", contract)
+        self.assertIn("review-all-sheets", contract)
         self.assertIn("wire-native-project", contract)
         self.assertIn("nextCommandReason", contract)
         self.assertIn("nextCommandSpec", contract)

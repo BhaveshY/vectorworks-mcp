@@ -35,7 +35,10 @@ class GroupedToolSurfaceTests(unittest.TestCase):
         self.assertEqual(schemas["vw_status"]["properties"]["action"]["enum"], ["health", "context"])
         self.assertEqual(
             schemas["vw_read"]["properties"]["action"]["enum"],
-            ["document", "layers", "summary", "query", "selection", "plan_quality"],
+            [
+                "document", "layers", "summary", "query", "selection",
+                "sheet_layers", "viewports", "viewport_annotations", "plan_quality",
+            ],
         )
         self.assertEqual(schemas["vw_read"]["properties"]["limit"]["maximum"], 200)
         self.assertIn("cursor", schemas["vw_catalog"]["properties"])

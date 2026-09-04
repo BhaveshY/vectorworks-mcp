@@ -16,8 +16,11 @@ Legend:
 |--------|----------------|--------|---------|--------------|------------|
 | `ping` | transport status | read | transport-only is allowed | 0 | Phase-0 scaffold returns `native_bridge: true`, `cad_api_safe: false`, `transport_only: true`, version, and handler count; production phase-1 returns `cad_api_safe: true` |
 | `stop` | `handle_stop` | write | transport plus plugin unload/stop path | 0 | Releases port `9877` |
-| `get_document_info` | `handle_get_document_info` | read | main/plugin event context | 1 | Returns filename, path, layer count, object count |
-| `get_layers` | `handle_get_layers` | read | main/plugin event context | 1 | Lists layers repeatedly without freezing Vectorworks |
+| `get_document_info` | `handle_get_document_info` | read | main/plugin event context | 1/4 | Returns filename, saved path, layer/object counts, stable document fingerprint, active-document generation, bridge session ID, dirty state, and active layer identity. |
+| `get_layers` | `handle_get_layers` | read | main/plugin event context | 1/4 | Lists layer name, UUID, kind, and visibility repeatedly without freezing Vectorworks. |
+| `get_sheet_layers` | no Python fallback | read | main/plugin event context | 4, revision 5 | Bound/paged native sheet-layer metadata and exact viewport counts. |
+| `get_viewports` | no Python fallback | read | main/plugin event context | 4, revision 5 | Bound/paged viewports on one exact sheet UUID, including scale, crop, view/render settings, placement, and complete source layer/class visibility. |
+| `get_viewport_annotations` | no Python fallback | read | main/plugin event context | 4, revision 5 | Bound/paged native annotation-group children for one exact sheet/viewport UUID pair. |
 | `get_objects` | `handle_get_objects` | read | main/plugin event context | 1 | Lists objects with layer/type filters |
 | `selection` | `handle_selection` | mixed/destructive | main/plugin event context | 1 | `get` and `clear` work; `delete` requires explicit destructive test |
 | `create_object` | `handle_create_object` | write | main/plugin event context | 1/4 | Creates phase-1 primitives plus phase-4 open/closed polygons; returns UUID, bounds, and polygon vertex/closure metadata |
@@ -30,6 +33,7 @@ Legend:
 | `find_objects` | `handle_find_objects` | read | main/plugin event context | 3 | Criteria search returns known test object |
 | `drawing_summary` | `handle_drawing_summary` | read | main/plugin event context | 3 | Returns compact counts by type/layer/class plus bounded examples without dumping every object |
 | `apply_operations` | no Python fallback | idempotent write | main/plugin event context | 4 | Uses one `NativeTransaction` for create, property, transform, wall/line endpoint reshape, schema-verified parametric update, duplicate, and delete operations. Supports local, handle, UUID, and exact-name refs. Verifies semantic receipts, exact cleanup, undo commit, and idempotency-key reuse across first save/Save As by stable layer identity. |
+| `apply_documentation_operations` | no Python fallback | idempotent/destructive write | main/plugin event context | 4, revision 5 | One bound native transaction for typed create/update/delete of sheet layers, viewports, and viewport annotations. Requires the exact saved path, document fingerprint, active-document generation, bridge session ID, and dirty state; validates parent-child ownership and semantic readback; restores the starting active layer. |
 | `get_view` | native view state | read | main/plugin event context | 4 | Reads the active layer view state. |
 | `set_view` | native view state | view write | main/plugin event context | 4 | Sets view state and supports deselect plus native Fit to Objects for reliable unattended captures. |
 | `worksheet` | `handle_worksheet` | mixed/write | main/plugin event context | 3 | Lists worksheets and reads/writes a temporary cell |

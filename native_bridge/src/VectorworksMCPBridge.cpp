@@ -10,6 +10,7 @@
 #if defined(SDK_VERSION)
 #include "Interfaces/VectorWorks/Extension/ISpaceObjectSupport.h"
 #include "BimObjectHandlers.hpp"
+#include "DocumentationHandlers.hpp"
 #include "NativeObjectFactory.hpp"
 #include "NativeTransaction.hpp"
 #include "ParametricObjectAdapter.hpp"
@@ -898,6 +899,8 @@ Protocol::ResponseEnvelope HandlePingOnTransportThread(const Protocol::RequestEn
     payload += ",\"capability_revision\":" + std::to_string(kCapabilityRevision);
     payload += ",\"capability_fingerprint\":";
     payload += JsonString(CapabilityFingerprint(true));
+    payload += ",\"bridge_session_id\":";
+    payload += JsonString(Documentation::BridgeSessionId());
     payload += ",\"implemented_actions\":";
     payload += ImplementedActionsJson(true);
     payload += ",\"create_object_types\":";
@@ -1305,6 +1308,7 @@ std::string HandleGetDocumentInfo() {
         }
     }
 
+    const Documentation::DocumentBinding binding = Documentation::ReadDocumentBinding(*gSDK);
     std::string json = "{\"filename\":";
     json += JsonString(filename);
     json += ",\"filepath\":";
@@ -1320,6 +1324,20 @@ std::string HandleGetDocumentInfo() {
     json += std::to_string(layerNames.size());
     json += ",\"total_objects\":";
     json += std::to_string(totalObjects);
+    json += ",\"dirty\":";
+    json += binding.dirty ? "true" : "false";
+    json += ",\"document_fingerprint\":";
+    json += JsonString(binding.documentFingerprint);
+    json += ",\"document_generation\":";
+    json += std::to_string(binding.documentGeneration);
+    json += ",\"bridge_session_id\":";
+    json += JsonString(binding.bridgeSessionId);
+    json += ",\"active_layer_uuid\":";
+    json += JsonString(binding.activeLayerUuid);
+    json += ",\"active_layer_name\":";
+    json += JsonString(binding.activeLayerName);
+    json += ",\"binding\":";
+    json += Documentation::DocumentBindingJson(binding);
     json += "}";
     return json;
 }
@@ -1335,12 +1353,66 @@ std::string HandleGetLayers() {
         gSDK->GetObjectName(layers[index], name);
         json += "{\"name\":";
         json += JsonString(TxToUtf8(name));
+        json += ",\"uuid\":";
+        json += JsonString(ObjectUuidString(layers[index]));
+        Sint16 layerType = kLayerDesign;
+        TVariableBlock layerTypeBlock(layerType);
+        if (!gSDK->GetObjectVariable(layers[index], ovLayerType, layerTypeBlock) ||
+            !layerTypeBlock.GetSint16(layerType)) {
+            throw std::runtime_error("Vectorworks did not return the layer kind");
+        }
+        json += ",\"kind\":";
+        json += JsonString(layerType == kLayerSheet ? "sheet" : "design");
         json += ",\"visible\":";
         json += gSDK->IsVisible(layers[index]) ? "true" : "false";
         json += "}";
     }
     json += "]";
     return json;
+}
+
+Documentation::ExpectedTargetBinding ParseDocumentationTargetBinding(const Params& params) {
+    Documentation::ExpectedTargetBinding expected;
+    expected.filePath = GetStringParam(params, "expected_file_path");
+    expected.documentFingerprint = GetStringParam(params, "expected_document_fingerprint");
+    expected.documentGeneration = static_cast<std::uint64_t>(GetRequiredBoundedIntParam(
+        params, "expected_document_generation", 1, std::numeric_limits<int>::max()));
+    expected.bridgeSessionId = GetStringParam(params, "expected_bridge_session_id");
+    expected.activeLayerUuid = GetStringParam(params, "expected_active_layer_uuid");
+    expected.activeLayerName = GetStringParam(params, "expected_active_layer_name");
+    const auto dirty = params.find("expected_dirty");
+    if (dirty != params.end()) {
+        expected.dirty = GetBoolParam(params, "expected_dirty", false);
+        expected.hasDirty = true;
+    }
+    return expected;
+}
+
+std::string HandleGetSheetLayers(const Params& params) {
+    return Documentation::ReadSheetLayers(
+        *gSDK,
+        ParseDocumentationTargetBinding(params),
+        static_cast<std::size_t>(GetBoundedIntParam(params, "offset", 0, 0, 1000000)),
+        static_cast<std::size_t>(GetBoundedIntParam(params, "limit", 100, 1, 500)));
+}
+
+std::string HandleGetViewports(const Params& params) {
+    return Documentation::ReadViewports(
+        *gSDK,
+        ParseDocumentationTargetBinding(params),
+        GetStringParam(params, "sheet_layer_uuid"),
+        static_cast<std::size_t>(GetBoundedIntParam(params, "offset", 0, 0, 1000000)),
+        static_cast<std::size_t>(GetBoundedIntParam(params, "limit", 100, 1, 500)));
+}
+
+std::string HandleGetViewportAnnotations(const Params& params) {
+    return Documentation::ReadViewportAnnotations(
+        *gSDK,
+        ParseDocumentationTargetBinding(params),
+        GetStringParam(params, "sheet_layer_uuid"),
+        GetStringParam(params, "viewport_uuid"),
+        static_cast<std::size_t>(GetBoundedIntParam(params, "offset", 0, 0, 1000000)),
+        static_cast<std::size_t>(GetBoundedIntParam(params, "limit", 100, 1, 500)));
 }
 
 MCObjectHandle FindLayerByName(const std::string& layerName) {
@@ -3794,6 +3866,323 @@ std::vector<ApplyOperation> ParseApplyOperations(const Params& params) {
     return operations;
 }
 
+short ParseDocumentationVisibility(
+    const Params& params,
+    const std::string& key,
+    short defaultValue = 0) {
+    const int value = GetBoundedIntParam(params, key, defaultValue, -1, 2);
+    if (value == 1) {
+        throw std::invalid_argument(key + " must be -1 (hidden), 0 (normal), or 2 (grayed)");
+    }
+    return static_cast<short>(value);
+}
+
+void ValidateDocumentationReference(
+    const std::string& reference,
+    const std::unordered_set<std::string>& localRefs,
+    const std::string& label,
+    bool allowLocal = true) {
+    if (reference.rfind("uuid:", 0u) == 0u && reference.size() > 5u) {
+        return;
+    }
+    if (allowLocal && reference.rfind("$", 0u) == 0u && reference.size() > 1u &&
+        localRefs.find(reference.substr(1u)) != localRefs.end()) {
+        return;
+    }
+    throw std::invalid_argument(
+        label + (allowLocal
+            ? " must be an exact uuid: reference or a previously declared $operation_id"
+            : " must be an exact uuid: reference"));
+}
+
+std::vector<Documentation::VisibilityEntry> ParseDocumentationVisibilityEntries(
+    const Params& params,
+    const std::string& prefix,
+    const std::string& identitySuffix,
+    int count) {
+    std::vector<Documentation::VisibilityEntry> entries;
+    entries.reserve(static_cast<std::size_t>(count));
+    std::unordered_set<std::string> identities;
+    for (int index = 1; index <= count; ++index) {
+        const std::string item = prefix + "_" + std::to_string(index);
+        const std::string identity = GetStringParam(params, item + identitySuffix);
+        if (identity.empty()) {
+            throw std::invalid_argument(item + identitySuffix + " is required");
+        }
+        if (!identities.insert(identity).second) {
+            throw std::invalid_argument(prefix + " contains a duplicate identity: " + identity);
+        }
+        entries.push_back({
+            identity,
+            ParseDocumentationVisibility(params, item + "_visibility", 0),
+        });
+    }
+    return entries;
+}
+
+std::vector<WorldPt> ParseDocumentationPoints(
+    const Params& params,
+    const std::string& prefix,
+    int count) {
+    std::vector<WorldPt> points;
+    points.reserve(static_cast<std::size_t>(count));
+    for (int index = 1; index <= count; ++index) {
+        const std::string item = prefix + "_" + std::to_string(index);
+        points.emplace_back(
+            GetFiniteNumberParam(params, item + "_x", 0.0),
+            GetFiniteNumberParam(params, item + "_y", 0.0));
+    }
+    return points;
+}
+
+std::vector<Documentation::Operation> ParseDocumentationOperations(const Params& params) {
+    const int operationCount = GetRequiredBoundedIntParam(
+        params,
+        "operation_count",
+        1,
+        static_cast<int>(kMaxApplyOperations));
+    std::vector<Documentation::Operation> operations;
+    operations.reserve(static_cast<std::size_t>(operationCount));
+    std::unordered_set<std::string> localRefs;
+
+    for (int index = 1; index <= operationCount; ++index) {
+        const std::string key = "operation_" + std::to_string(index) + "_json";
+        const std::string operationJson = GetStringParam(params, key);
+        if (operationJson.empty()) {
+            throw std::invalid_argument(key + " is required");
+        }
+        const Params item = ParseParams(operationJson);
+        const std::string op = ToLower(GetStringParam(item, "op"));
+        const std::string label = "operation_" + std::to_string(index);
+        Documentation::Operation operation;
+
+        const auto parseCreateLocalRef = [&] {
+            operation.localRef = GetStringParam(item, "local_ref");
+            if (operation.localRef.empty() || operation.localRef.size() > kMaxApplyReferenceChars ||
+                !localRefs.insert(operation.localRef).second) {
+                throw std::invalid_argument(label + ".local_ref must be unique, non-empty, and at most 128 characters");
+            }
+        };
+        const auto parseSheetFields = [&](bool creating) {
+            operation.hasName = creating || HasParam(item, "name");
+            operation.name = GetStringParam(item, "name");
+            operation.hasTitle = creating || HasParam(item, "title");
+            operation.title = GetStringParam(item, "title");
+            operation.hasDescription = HasParam(item, "description");
+            operation.description = GetStringParam(item, "description");
+            operation.hasDpi = HasParam(item, "dpi");
+            operation.dpi = static_cast<short>(GetBoundedIntParam(item, "dpi", 72, 1, 32767));
+            operation.hasSheetWidthMm = HasParam(item, "sheet_width_mm");
+            operation.sheetWidthMm = GetFiniteNumberParam(item, "sheet_width_mm", 0.0);
+            operation.hasSheetHeightMm = HasParam(item, "sheet_height_mm");
+            operation.sheetHeightMm = GetFiniteNumberParam(item, "sheet_height_mm", 0.0);
+            operation.hasVisibility = HasParam(item, "visibility");
+            operation.visibility = ParseDocumentationVisibility(item, "visibility", 0);
+            if (creating && (operation.name.empty() || operation.title.empty())) {
+                throw std::invalid_argument(label + " sheet layer create requires non-empty name and title");
+            }
+            if ((operation.hasSheetWidthMm && operation.sheetWidthMm <= 0.0) ||
+                (operation.hasSheetHeightMm && operation.sheetHeightMm <= 0.0)) {
+                throw std::invalid_argument(label + " sheet dimensions must be greater than zero millimetres");
+            }
+        };
+        const auto parseViewportFields = [&](bool creating) {
+            operation.hasName = creating || HasParam(item, "name");
+            operation.name = GetStringParam(item, "name");
+            operation.hasScale = creating || HasParam(item, "scale");
+            operation.scale = GetFiniteNumberParam(item, "scale", 1.0);
+            if (operation.hasScale && operation.scale <= 0.0) {
+                throw std::invalid_argument(label + ".scale must be greater than zero");
+            }
+            const bool hasX = HasParam(item, "x");
+            const bool hasY = HasParam(item, "y");
+            if (hasX != hasY || (creating && !hasX)) {
+                throw std::invalid_argument(label + ".x and .y must be supplied together");
+            }
+            operation.hasPlacement = hasX;
+            operation.x = GetFiniteNumberParam(item, "x", 0.0);
+            operation.y = GetFiniteNumberParam(item, "y", 0.0);
+            operation.hasProjectionType = creating || HasParam(item, "projection_type");
+            operation.projectionType = static_cast<short>(GetBoundedIntParam(
+                item, "projection_type", 0, std::numeric_limits<short>::min(), std::numeric_limits<short>::max()));
+            operation.hasViewType = creating || HasParam(item, "view_type");
+            operation.viewType = static_cast<short>(GetBoundedIntParam(
+                item, "view_type", 0, std::numeric_limits<short>::min(), std::numeric_limits<short>::max()));
+            operation.hasRenderType = creating || HasParam(item, "render_type");
+            operation.renderType = static_cast<short>(GetBoundedIntParam(
+                item, "render_type", 0, std::numeric_limits<short>::min(), std::numeric_limits<short>::max()));
+            operation.hasForegroundRenderType = creating || HasParam(item, "foreground_render_type");
+            operation.foregroundRenderType = static_cast<short>(GetBoundedIntParam(
+                item, "foreground_render_type", 0, std::numeric_limits<short>::min(), std::numeric_limits<short>::max()));
+
+            operation.hasSourceLayers = HasParam(item, "source_layer_count");
+            const int layerCount = GetBoundedIntParam(item, "source_layer_count", 0, 0, 500);
+            if (creating && layerCount == 0) {
+                throw std::invalid_argument(label + " viewport create requires at least one source layer");
+            }
+            operation.sourceLayers = ParseDocumentationVisibilityEntries(
+                item, "source_layer", "_ref", layerCount);
+            operation.replaceSourceLayers = GetBoolParam(item, "replace_source_layers", creating);
+
+            operation.hasSourceClasses = HasParam(item, "source_class_count");
+            const int classCount = GetBoundedIntParam(item, "source_class_count", 0, 0, 500);
+            if (creating && classCount == 0) {
+                throw std::invalid_argument(label + " viewport create requires at least one source class");
+            }
+            operation.sourceClasses = ParseDocumentationVisibilityEntries(
+                item, "source_class", "_name", classCount);
+            operation.replaceSourceClasses = GetBoolParam(item, "replace_source_classes", creating);
+
+            operation.clearCrop = GetBoolParam(item, "clear_crop", false);
+            const int cropCount = GetBoundedIntParam(item, "crop_point_count", 0, 0, 1000);
+            operation.hasCrop = cropCount > 0;
+            operation.cropPoints = ParseDocumentationPoints(item, "crop_point", cropCount);
+            if (operation.hasCrop && cropCount < 3) {
+                throw std::invalid_argument(label + " viewport crop requires at least three points");
+            }
+            if (operation.clearCrop && operation.hasCrop) {
+                throw std::invalid_argument(label + " cannot clear and replace a viewport crop together");
+            }
+        };
+
+        if (op == "sheet_layer.create") {
+            operation.kind = Documentation::OperationKind::CreateSheetLayer;
+            parseCreateLocalRef();
+            parseSheetFields(true);
+        } else if (op == "sheet_layer.update") {
+            operation.kind = Documentation::OperationKind::UpdateSheetLayer;
+            operation.targetRef = GetStringParam(item, "target");
+            ValidateDocumentationReference(operation.targetRef, localRefs, label + ".target", false);
+            parseSheetFields(false);
+            if (!operation.hasName && !operation.hasTitle && !operation.hasDescription &&
+                !operation.hasDpi && !operation.hasSheetWidthMm &&
+                !operation.hasSheetHeightMm && !operation.hasVisibility) {
+                throw std::invalid_argument(label + " sheet layer update has no changes");
+            }
+        } else if (op == "sheet_layer.delete") {
+            operation.kind = Documentation::OperationKind::DeleteSheetLayer;
+            operation.targetRef = GetStringParam(item, "target");
+            ValidateDocumentationReference(operation.targetRef, localRefs, label + ".target", false);
+            operation.confirmation = GetStringParam(item, "confirm");
+        } else if (op == "viewport.create") {
+            operation.kind = Documentation::OperationKind::CreateViewport;
+            parseCreateLocalRef();
+            operation.sheetLayerRef = GetStringParam(item, "sheet_layer_ref");
+            ValidateDocumentationReference(operation.sheetLayerRef, localRefs, label + ".sheet_layer_ref");
+            parseViewportFields(true);
+        } else if (op == "viewport.update") {
+            operation.kind = Documentation::OperationKind::UpdateViewport;
+            operation.targetRef = GetStringParam(item, "target");
+            operation.sheetLayerRef = GetStringParam(item, "sheet_layer_ref");
+            ValidateDocumentationReference(operation.targetRef, localRefs, label + ".target", false);
+            ValidateDocumentationReference(operation.sheetLayerRef, localRefs, label + ".sheet_layer_ref");
+            parseViewportFields(false);
+            if (!operation.hasName && !operation.hasScale && !operation.hasPlacement &&
+                !operation.hasProjectionType && !operation.hasViewType && !operation.hasRenderType &&
+                !operation.hasForegroundRenderType && !operation.hasSourceLayers &&
+                !operation.hasSourceClasses && !operation.hasCrop && !operation.clearCrop) {
+                throw std::invalid_argument(label + " viewport update has no changes");
+            }
+        } else if (op == "viewport.delete") {
+            operation.kind = Documentation::OperationKind::DeleteViewport;
+            operation.targetRef = GetStringParam(item, "target");
+            operation.sheetLayerRef = GetStringParam(item, "sheet_layer_ref");
+            ValidateDocumentationReference(operation.targetRef, localRefs, label + ".target", false);
+            ValidateDocumentationReference(operation.sheetLayerRef, localRefs, label + ".sheet_layer_ref");
+            operation.confirmation = GetStringParam(item, "confirm");
+        } else if (op == "viewport_annotation.create") {
+            operation.kind = Documentation::OperationKind::CreateViewportAnnotation;
+            parseCreateLocalRef();
+            operation.sheetLayerRef = GetStringParam(item, "sheet_layer_ref");
+            operation.viewportRef = GetStringParam(item, "viewport_ref");
+            ValidateDocumentationReference(operation.sheetLayerRef, localRefs, label + ".sheet_layer_ref");
+            ValidateDocumentationReference(operation.viewportRef, localRefs, label + ".viewport_ref");
+            operation.annotationKind = ToLower(GetStringParam(item, "annotation_kind"));
+            operation.hasName = HasParam(item, "name");
+            operation.name = GetStringParam(item, "name");
+            operation.hasClassName = true;
+            operation.className = GetStringParam(item, "class_name");
+            operation.hasText = operation.annotationKind == "text";
+            operation.text = GetStringParam(item, "text");
+            operation.x1 = GetFiniteNumberParam(item, "x1", 0.0);
+            operation.y1 = GetFiniteNumberParam(item, "y1", 0.0);
+            operation.x2 = GetFiniteNumberParam(item, "x2", 0.0);
+            operation.y2 = GetFiniteNumberParam(item, "y2", 0.0);
+            operation.offset = GetFiniteNumberParam(item, "offset", 0.0);
+            operation.textOffset = GetFiniteNumberParam(item, "text_offset", 0.0);
+            operation.dimensionType = static_cast<short>(GetBoundedIntParam(
+                item, "dimension_type", 0, std::numeric_limits<short>::min(), std::numeric_limits<short>::max()));
+            operation.markerStyle = static_cast<short>(GetBoundedIntParam(item, "marker_style", 0, 0, 32767));
+            operation.markerSize = static_cast<short>(GetBoundedIntParam(item, "marker_size", 0, 0, 32767));
+            operation.markerAngle = static_cast<short>(GetBoundedIntParam(item, "marker_angle", 0, -360, 360));
+            const int pointCount = GetBoundedIntParam(item, "point_count", 0, 0, 1000);
+            operation.points = ParseDocumentationPoints(item, "point", pointCount);
+            if (operation.className.empty() ||
+                (operation.annotationKind != "text" && operation.annotationKind != "dimension" &&
+                 operation.annotationKind != "marker" && operation.annotationKind != "redline")) {
+                throw std::invalid_argument(label + " annotation create requires class_name and a supported annotation_kind");
+            }
+            if (operation.annotationKind == "text" && operation.text.empty()) {
+                throw std::invalid_argument(label + " text annotation requires non-empty text");
+            }
+            if ((operation.annotationKind == "dimension" || operation.annotationKind == "marker") &&
+                operation.x1 == operation.x2 && operation.y1 == operation.y2) {
+                throw std::invalid_argument(label + " annotation endpoints must not be identical");
+            }
+            if (operation.annotationKind == "redline" && pointCount < 3) {
+                throw std::invalid_argument(label + " redline annotation requires at least three points");
+            }
+        } else if (op == "viewport_annotation.update") {
+            operation.kind = Documentation::OperationKind::UpdateViewportAnnotation;
+            operation.targetRef = GetStringParam(item, "target");
+            operation.sheetLayerRef = GetStringParam(item, "sheet_layer_ref");
+            operation.viewportRef = GetStringParam(item, "viewport_ref");
+            ValidateDocumentationReference(operation.targetRef, localRefs, label + ".target", false);
+            ValidateDocumentationReference(operation.sheetLayerRef, localRefs, label + ".sheet_layer_ref");
+            ValidateDocumentationReference(operation.viewportRef, localRefs, label + ".viewport_ref");
+            operation.hasName = HasParam(item, "name");
+            operation.name = GetStringParam(item, "name");
+            operation.hasClassName = HasParam(item, "class_name");
+            operation.className = GetStringParam(item, "class_name");
+            operation.hasText = HasParam(item, "text");
+            operation.text = GetStringParam(item, "text");
+            const bool hasDx = HasParam(item, "delta_x");
+            const bool hasDy = HasParam(item, "delta_y");
+            if (hasDx != hasDy) {
+                throw std::invalid_argument(label + ".delta_x and .delta_y must be supplied together");
+            }
+            operation.hasDelta = hasDx;
+            operation.deltaX = GetFiniteNumberParam(item, "delta_x", 0.0);
+            operation.deltaY = GetFiniteNumberParam(item, "delta_y", 0.0);
+            if (!operation.hasName && !operation.hasClassName && !operation.hasText && !operation.hasDelta) {
+                throw std::invalid_argument(label + " annotation update has no changes");
+            }
+        } else if (op == "viewport_annotation.delete") {
+            operation.kind = Documentation::OperationKind::DeleteViewportAnnotation;
+            operation.targetRef = GetStringParam(item, "target");
+            operation.sheetLayerRef = GetStringParam(item, "sheet_layer_ref");
+            operation.viewportRef = GetStringParam(item, "viewport_ref");
+            ValidateDocumentationReference(operation.targetRef, localRefs, label + ".target", false);
+            ValidateDocumentationReference(operation.sheetLayerRef, localRefs, label + ".sheet_layer_ref");
+            ValidateDocumentationReference(operation.viewportRef, localRefs, label + ".viewport_ref");
+            operation.confirmation = GetStringParam(item, "confirm");
+        } else {
+            throw std::invalid_argument(label + ".op is not a supported documentation operation");
+        }
+        operations.push_back(std::move(operation));
+    }
+    return operations;
+}
+
+std::string HandleApplyDocumentationOperations(const Params& params) {
+    return Documentation::ApplyOperations(
+        *gSDK,
+        ParseDocumentationTargetBinding(params),
+        ParseDocumentationOperations(params),
+        GetStringParam(params, "idempotency_key"),
+        GetStringParam(params, "plan_hash"));
+}
+
 MCObjectHandle ResolveApplyOperationTarget(
     const std::string& target,
     const std::unordered_map<std::string, MCObjectHandle>& localObjects) {
@@ -4349,7 +4738,15 @@ Protocol::ResponseEnvelope DispatchCadRequestOnVectorworksMainContext(const Prot
         if (request.action == "export_image" || request.action == "capture_view" ||
             request.action == "export_pdf" || request.action == "export_vectorworks_document" ||
             request.action == "import_dwg" || request.action == "export_dwg") {
-            return {request.id, true, HandleNativeIO(request.action, params), ""};
+            const bool hasTargetBinding = params.find("expected_document_fingerprint") != params.end();
+            if (hasTargetBinding) {
+                Documentation::ValidateTargetBinding(*gSDK, ParseDocumentationTargetBinding(params));
+            }
+            const std::string result = HandleNativeIO(request.action, params);
+            if (hasTargetBinding) {
+                Documentation::ValidateTargetBinding(*gSDK, ParseDocumentationTargetBinding(params));
+            }
+            return {request.id, true, result, ""};
         }
         if (request.action == "resources") {
             return {request.id, true, HandleResources(params), ""};
@@ -4369,6 +4766,15 @@ Protocol::ResponseEnvelope DispatchCadRequestOnVectorworksMainContext(const Prot
         if (request.action == "get_layers") {
             return {request.id, true, HandleGetLayers(), ""};
         }
+        if (request.action == "get_sheet_layers") {
+            return {request.id, true, HandleGetSheetLayers(params), ""};
+        }
+        if (request.action == "get_viewports") {
+            return {request.id, true, HandleGetViewports(params), ""};
+        }
+        if (request.action == "get_viewport_annotations") {
+            return {request.id, true, HandleGetViewportAnnotations(params), ""};
+        }
         if (request.action == "get_objects") {
             return {request.id, true, HandleGetObjects(params), ""};
         }
@@ -4377,6 +4783,9 @@ Protocol::ResponseEnvelope DispatchCadRequestOnVectorworksMainContext(const Prot
         }
         if (request.action == "apply_operations") {
             return {request.id, true, HandleApplyOperations(params), ""};
+        }
+        if (request.action == "apply_documentation_operations") {
+            return {request.id, true, HandleApplyDocumentationOperations(params), ""};
         }
         if (request.action == "find_objects") {
             return {request.id, true, HandleFindObjects(params), ""};

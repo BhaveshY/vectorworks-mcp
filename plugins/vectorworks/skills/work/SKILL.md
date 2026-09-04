@@ -16,7 +16,8 @@ restart error. Never infer support from the native phase.
 The fast-native profile exposes only these tools:
 
 - `vw_status` for health and compact document context.
-- `vw_read` for document, layer, summary, object query, and selection reads.
+- `vw_read` for document, layer, summary, object query, selection, and revision-5
+  bound sheet/viewport/viewport-annotation reads.
 - `vw_catalog` for capabilities, classes, symbols, parametric schemas,
   worksheets, and resources.
 - `vw_apply` for one atomic mutation plan.
@@ -79,6 +80,15 @@ or unhosted plug-in objects.
 Reuse an `idempotency_key` only for the identical atomic plan. `vw_apply` and
 `vw_execute_operations` share one implementation and one native
 `apply_operations` transaction. Neither tool decomposes the plan.
+
+For a documentation plan, require capability revision 5 and the exact
+`data.binding` returned by `vw_read(action="document")`. Use only the typed
+sheet-layer, viewport, and viewport-annotation lifecycle operations documented
+in `DOCUMENTATION_WORKFLOW.md`. These plans route to one native
+`apply_documentation_operations` transaction, may not mix with general object
+operations, and require exact UUID parents plus family-specific delete
+confirmations. A saved-path, fingerprint, document-generation, bridge-session,
+or dirty-state mismatch is a hard stop.
 
 ## Handle files and document lifecycle safely
 

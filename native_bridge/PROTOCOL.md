@@ -80,6 +80,9 @@ The native bridge should initially implement these handlers first:
 - `stop`
 - `get_document_info`
 - `get_layers`
+- `get_sheet_layers`
+- `get_viewports`
+- `get_viewport_annotations`
 - `get_objects`
 - `selection`
 - `create_object`
@@ -90,6 +93,7 @@ The native bridge should initially implement these handlers first:
 - `set_property`
 - `manage_classes`
 - `apply_operations`
+- `apply_documentation_operations`
 
 Phase 1 is the minimum stable baseline. Phase 2 adds true wall objects, text
 annotations, linear dimensions, verified property edits, native class
@@ -139,6 +143,10 @@ responses must satisfy these minimum shapes:
   `filepath` when present, `layers` as a list of strings, non-negative integer
   `layer_count` matching `layers.length`, and non-negative integer
   `total_objects`.
+- `get_document_info` revision 5 also returns `binding`: an exact saved file
+  path, document fingerprint, active-document generation, bridge session ID,
+  dirty state, and active layer UUID/name. Documentation calls fail closed if
+  the expected binding differs when the request reaches the SDK main context.
 - `get_layers`: list of objects. Each layer must have a non-empty string
   `name`; `visible`, when present, must be boolean.
 - `get_objects`: list of objects. Each object must have a non-empty string
@@ -168,6 +176,17 @@ responses must satisfy these minimum shapes:
   `committed`, `verified`, operation receipts, created/changed object snapshots,
   replay status, and native timing. Reusing an idempotency key with a different
   payload or active document must fail instead of replaying.
+- `get_sheet_layers`, `get_viewports`, and `get_viewport_annotations` are
+  revision-5 paged reads. Viewport and annotation reads require exact parent
+  UUIDs. Every request carries the target binding and every response repeats
+  the observed binding alongside `items` and a `next_cursor` page record.
+- `apply_documentation_operations` is the revision-5 documentation
+  transaction. Its `sheet_layer.*`, `viewport.*`, and
+  `viewport_annotation.*` operations may not be mixed with general object
+  operations. Creates have unique local references; existing targets use
+  exact UUIDs; deletes require family-specific confirmation strings. The
+  transaction validates sheet/viewport/annotation ownership, returns semantic
+  receipts, and restores the initial active layer before commit.
 - `create_wall`: object with `type: "wall"` and `handle`; accepts start/end
   coordinates, `height`, `thickness`, optional `class_name`, `name`, and optional
   existing `style_name`.

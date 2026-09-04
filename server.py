@@ -456,7 +456,17 @@ SelectionAction = (
 )
 AgentContextProfile = Literal["brief", "production", "full"]
 GroupedStatusAction = Literal["health", "context"]
-GroupedReadAction = Literal["document", "layers", "summary", "query", "selection", "plan_quality"]
+GroupedReadAction = Literal[
+    "document",
+    "layers",
+    "summary",
+    "query",
+    "selection",
+    "sheet_layers",
+    "viewports",
+    "viewport_annotations",
+    "plan_quality",
+]
 GroupedCatalogAction = Literal[
     "capabilities",
     "classes",
@@ -536,8 +546,10 @@ ExecuteOperationList = Annotated[
         min_length=1,
         max_length=250,
         description=(
-            "One atomic plan: create, set_properties, transform, reshape, update_parametric, "
-            "duplicate, or delete. Geometry is normalized to millimetres before dispatch. "
+            "One atomic plan: the general object operations create, set_properties, transform, reshape, "
+            "update_parametric, duplicate, and delete; or the documentation operations create/update/delete "
+            "for sheet layers, viewports, and viewport annotations. General and documentation operations may "
+            "not be mixed. Geometry is normalized to millimetres before dispatch. "
             "Targets are explicit uuid:/name:/handle: refs or $operation_id refs."
         ),
         json_schema_extra={
@@ -556,6 +568,15 @@ ExecuteOperationList = Annotated[
                             "update_parametric",
                             "duplicate",
                             "delete",
+                            "create_sheet_layer",
+                            "update_sheet_layer",
+                            "delete_sheet_layer",
+                            "create_viewport",
+                            "update_viewport",
+                            "delete_viewport",
+                            "create_viewport_annotation",
+                            "update_viewport_annotation",
+                            "delete_viewport_annotation",
                         ],
                     },
                     "operation_id": {"type": "string", "minLength": 1, "maxLength": 128},
@@ -736,8 +757,8 @@ TOOL_SAFETY: dict[str, dict[str, Any]] = {
     },
     "vw_execute_operations": {
         "category": "document-write",
-        "wire_action": "apply_operations",
-        "composes_actions": ["apply_operations"],
+        "wire_action": None,
+        "composes_actions": ["apply_operations", "apply_documentation_operations"],
         "readOnlyHint": False,
         "destructiveHint": True,
         "idempotentHint": True,
@@ -1193,7 +1214,17 @@ _GROUPED_VARIANT_SAFETY: dict[str, dict[str, dict[str, Any]]] = {
             "retryPolicy": "safe",
             "unknownCommitState": "not_applicable",
         }
-        for action in ("document", "layers", "summary", "query", "selection", "plan_quality")
+        for action in (
+            "document",
+            "layers",
+            "summary",
+            "query",
+            "selection",
+            "sheet_layers",
+            "viewports",
+            "viewport_annotations",
+            "plan_quality",
+        )
     },
     "vw_catalog": {
         action: {
@@ -4268,11 +4299,386 @@ def _normalise_atomic_target(value: Any, *, label: str) -> str:
     return target
 
 
+_DOCUMENTATION_OPERATION_TYPES = frozenset(
+    {
+        "create_sheet_layer",
+        "update_sheet_layer",
+        "delete_sheet_layer",
+        "create_viewport",
+        "update_viewport",
+        "delete_viewport",
+        "create_viewport_annotation",
+        "update_viewport_annotation",
+        "delete_viewport_annotation",
+    }
+)
+_DOCUMENTATION_CREATE_TYPES = frozenset(
+    {"create_sheet_layer", "create_viewport", "create_viewport_annotation"}
+)
+_DOCUMENTATION_WIRE_OPS = {
+    "create_sheet_layer": "sheet_layer.create",
+    "update_sheet_layer": "sheet_layer.update",
+    "delete_sheet_layer": "sheet_layer.delete",
+    "create_viewport": "viewport.create",
+    "update_viewport": "viewport.update",
+    "delete_viewport": "viewport.delete",
+    "create_viewport_annotation": "viewport_annotation.create",
+    "update_viewport_annotation": "viewport_annotation.update",
+    "delete_viewport_annotation": "viewport_annotation.delete",
+}
+
+
+def _normalise_documentation_ref(value: Any, *, label: str, allow_local: bool = True) -> str:
+    ref = str(value or "").strip()
+    valid = ref.startswith("uuid:") or (allow_local and ref.startswith("$") and len(ref) > 1)
+    if not valid or ref == "uuid:" or len(ref) > 512:
+        suffix = " or $operation_id" if allow_local else ""
+        raise ValueError(f"{label} must be an exact uuid: reference{suffix}")
+    return ref
+
+
+def _normalise_target_binding(value: Any, *, require_dirty: bool) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("target_binding must be an object")
+    allowed = {
+        "file_path",
+        "document_fingerprint",
+        "document_generation",
+        "bridge_session_id",
+        "dirty",
+        "active_layer_uuid",
+        "active_layer_name",
+    }
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ValueError(f"target_binding has unsupported key(s): {', '.join(unknown)}")
+    result: dict[str, Any] = {}
+    for key in (
+        "file_path",
+        "document_fingerprint",
+        "bridge_session_id",
+        "active_layer_uuid",
+        "active_layer_name",
+    ):
+        item = value.get(key)
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"target_binding.{key} must be a non-empty string")
+        result[key] = item.strip()
+    generation = value.get("document_generation")
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+        raise ValueError("target_binding.document_generation must be a positive integer")
+    result["document_generation"] = generation
+    if "dirty" in value:
+        if not isinstance(value["dirty"], bool):
+            raise ValueError("target_binding.dirty must be a boolean")
+        result["dirty"] = value["dirty"]
+    elif require_dirty:
+        raise ValueError("target_binding.dirty is required for documentation writes")
+    return result
+
+
+def _target_binding_wire_params(binding: dict[str, Any]) -> dict[str, Any]:
+    params = {
+        "expected_file_path": binding["file_path"],
+        "expected_document_fingerprint": binding["document_fingerprint"],
+        "expected_document_generation": binding["document_generation"],
+        "expected_bridge_session_id": binding["bridge_session_id"],
+        "expected_active_layer_uuid": binding["active_layer_uuid"],
+        "expected_active_layer_name": binding["active_layer_name"],
+    }
+    if "dirty" in binding:
+        params["expected_dirty"] = binding["dirty"]
+        params["expected_dirty_is_set"] = True
+    return params
+
+
+def _normalise_documentation_visibility(value: Any, *, label: str) -> int:
+    named = {"hidden": -1, "normal": 0, "visible": 0, "grayed": 2, "greyed": 2}
+    if isinstance(value, str):
+        key = value.strip().lower()
+        if key in named:
+            return named[key]
+    if isinstance(value, int) and not isinstance(value, bool) and value in {-1, 0, 2}:
+        return value
+    raise ValueError(f"{label} must be hidden, normal, grayed, -1, 0, or 2")
+
+
+def _require_documentation_text(params: dict[str, Any], key: str, *, label: str) -> str:
+    value = params.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label}.{key} must be a non-empty string")
+    if len(value) > 1024:
+        raise ValueError(f"{label}.{key} is limited to 1024 characters")
+    return value.strip()
+
+
+def _optional_documentation_int(
+    params: dict[str, Any], key: str, *, label: str, minimum: int = -32768, maximum: int = 32767
+) -> int:
+    value = params.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum or value > maximum:
+        raise ValueError(f"{label}.{key} must be an integer between {minimum} and {maximum}")
+    return value
+
+
+def _normalise_visibility_entries(
+    value: Any, *, label: str, reference_key: str, allow_local: bool
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value or len(value) > 500:
+        raise ValueError(f"{label} must contain 1 to 500 entries")
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(value, start=1):
+        item_label = f"{label}[{index}]"
+        if not isinstance(entry, dict) or set(entry) != {reference_key, "visibility"}:
+            raise ValueError(f"{item_label} must contain only {reference_key} and visibility")
+        raw_ref = entry.get(reference_key)
+        if reference_key == "ref":
+            ref = _normalise_documentation_ref(raw_ref, label=f"{item_label}.ref", allow_local=allow_local)
+        else:
+            ref = _require_documentation_text(entry, reference_key, label=item_label)
+        if ref in seen:
+            raise ValueError(f"{label} contains duplicate reference {ref!r}")
+        seen.add(ref)
+        result.append({reference_key: ref, "visibility": _normalise_documentation_visibility(
+            entry.get("visibility"), label=f"{item_label}.visibility"
+        )})
+    return result
+
+
+def _normalise_documentation_points(value: Any, *, label: str, scale_to_mm: float) -> list[list[float]]:
+    if not isinstance(value, list) or len(value) > 1000:
+        raise ValueError(f"{label} must be a list with at most 1000 points")
+    result: list[list[float]] = []
+    for index, point in enumerate(value, start=1):
+        if not isinstance(point, (list, tuple)) or len(point) != 2 or not all(_is_real_number(v) for v in point):
+            raise ValueError(f"{label}[{index}] must contain exactly two finite numbers")
+        result.append([float(point[0]) * scale_to_mm, float(point[1]) * scale_to_mm])
+    return result
+
+
+def _normalise_documentation_operation(
+    operation_type: str,
+    params: dict[str, Any],
+    *,
+    label: str,
+    scale_to_mm: float,
+) -> dict[str, Any]:
+    item_label = f"{label}.params"
+    if operation_type.endswith("sheet_layer"):
+        allowed = {"name", "title", "description", "dpi", "sheet_width", "sheet_height", "visibility"}
+        if operation_type.startswith("delete"):
+            allowed = {"target", "confirm"}
+        elif operation_type.startswith("update"):
+            allowed |= {"target"}
+        unknown = sorted(set(params) - allowed)
+        if unknown:
+            raise ValueError(f"{item_label} has unsupported key(s): {', '.join(unknown)}")
+        if operation_type == "delete_sheet_layer":
+            target = _normalise_documentation_ref(params.get("target"), label=f"{item_label}.target", allow_local=False)
+            if params.get("confirm") != "DELETE_SHEET_LAYER_AND_CONTENTS":
+                raise ValueError(f"{item_label}.confirm must equal DELETE_SHEET_LAYER_AND_CONTENTS")
+            return {"target": target, "confirm": params["confirm"]}
+        result: dict[str, Any] = {}
+        for key in ("name", "title"):
+            if operation_type.startswith("create") or key in params:
+                result[key] = _require_documentation_text(params, key, label=item_label)
+        if "description" in params:
+            if not isinstance(params["description"], str) or len(params["description"]) > 4096:
+                raise ValueError(f"{item_label}.description must be text limited to 4096 characters")
+            result["description"] = params["description"]
+        if "dpi" in params:
+            result["dpi"] = _optional_documentation_int(params, "dpi", label=item_label, minimum=1)
+        for public_key, wire_key in (("sheet_width", "sheet_width_mm"), ("sheet_height", "sheet_height_mm")):
+            if public_key in params:
+                result[wire_key] = _coerce_positive_number(params, public_key, label=item_label) * scale_to_mm
+        if "visibility" in params:
+            result["visibility"] = _normalise_documentation_visibility(params["visibility"], label=f"{item_label}.visibility")
+        if operation_type == "update_sheet_layer":
+            result["target"] = _normalise_documentation_ref(
+                params.get("target"), label=f"{item_label}.target", allow_local=False
+            )
+            if len(result) == 1:
+                raise ValueError(f"{item_label} must contain at least one sheet layer change")
+        return result
+
+    if operation_type.endswith("viewport") and "annotation" not in operation_type:
+        delete_keys = {"target", "sheet_layer_ref", "confirm"}
+        change_keys = {
+            "sheet_layer_ref", "name", "scale", "x", "y", "projection_type", "view_type",
+            "render_type", "foreground_render_type", "source_layers", "source_classes",
+            "replace_source_layers", "replace_source_classes", "crop_points", "clear_crop",
+        }
+        allowed = delete_keys if operation_type.startswith("delete") else change_keys | ({"target"} if operation_type.startswith("update") else set())
+        unknown = sorted(set(params) - allowed)
+        if unknown:
+            raise ValueError(f"{item_label} has unsupported key(s): {', '.join(unknown)}")
+        result = {
+            "sheet_layer_ref": _normalise_documentation_ref(
+                params.get("sheet_layer_ref"), label=f"{item_label}.sheet_layer_ref",
+                allow_local=operation_type == "create_viewport",
+            )
+        }
+        if operation_type.startswith(("update", "delete")):
+            result["target"] = _normalise_documentation_ref(
+                params.get("target"), label=f"{item_label}.target", allow_local=False
+            )
+        if operation_type == "delete_viewport":
+            if params.get("confirm") != "DELETE_VIEWPORT_AND_ANNOTATIONS":
+                raise ValueError(f"{item_label}.confirm must equal DELETE_VIEWPORT_AND_ANNOTATIONS")
+            result["confirm"] = params["confirm"]
+            return result
+        creating = operation_type == "create_viewport"
+        if creating or "name" in params:
+            result["name"] = _require_documentation_text(params, "name", label=item_label)
+        if creating or "scale" in params:
+            result["scale"] = _coerce_positive_number(params, "scale", label=item_label)
+        has_x, has_y = "x" in params, "y" in params
+        if has_x != has_y or (creating and not has_x):
+            raise ValueError(f"{item_label}.x and y must be supplied together")
+        if has_x:
+            result["x"] = _coerce_number(params, "x", required=True, label=item_label) * scale_to_mm
+            result["y"] = _coerce_number(params, "y", required=True, label=item_label) * scale_to_mm
+        for key in ("projection_type", "view_type", "render_type", "foreground_render_type"):
+            if creating or key in params:
+                result[key] = _optional_documentation_int(params, key, label=item_label)
+        for public_key, reference_key in (("source_layers", "ref"), ("source_classes", "name")):
+            if creating or public_key in params:
+                entries = _normalise_visibility_entries(
+                    params.get(public_key), label=f"{item_label}.{public_key}",
+                    reference_key=reference_key, allow_local=False,
+                )
+                result[public_key] = entries
+        for key in ("replace_source_layers", "replace_source_classes", "clear_crop"):
+            if key in params:
+                result[key] = _coerce_bool(params, key, label=item_label)
+        if "crop_points" in params:
+            points = _normalise_documentation_points(
+                params["crop_points"], label=f"{item_label}.crop_points", scale_to_mm=scale_to_mm
+            )
+            if len(points) < 3:
+                raise ValueError(f"{item_label}.crop_points must contain at least three points")
+            result["crop_points"] = points
+        if result.get("clear_crop") and "crop_points" in result:
+            raise ValueError(f"{item_label} cannot clear and replace a viewport crop together")
+        if not creating and set(result) == {"sheet_layer_ref", "target"}:
+            raise ValueError(f"{item_label} must contain at least one viewport change")
+        return result
+
+    delete_keys = {"target", "sheet_layer_ref", "viewport_ref", "confirm"}
+    update_keys = {"target", "sheet_layer_ref", "viewport_ref", "name", "class_name", "text", "dx", "dy"}
+    create_keys = {
+        "sheet_layer_ref", "viewport_ref", "annotation_kind", "class_name", "name", "text", "x1", "y1",
+        "x2", "y2", "offset", "text_offset", "dimension_type", "marker_style", "marker_size",
+        "marker_angle", "points",
+    }
+    allowed = delete_keys if operation_type.startswith("delete") else update_keys if operation_type.startswith("update") else create_keys
+    unknown = sorted(set(params) - allowed)
+    if unknown:
+        raise ValueError(f"{item_label} has unsupported key(s): {', '.join(unknown)}")
+    result = {
+        "sheet_layer_ref": _normalise_documentation_ref(
+            params.get("sheet_layer_ref"), label=f"{item_label}.sheet_layer_ref",
+            allow_local=operation_type == "create_viewport_annotation",
+        ),
+        "viewport_ref": _normalise_documentation_ref(
+            params.get("viewport_ref"), label=f"{item_label}.viewport_ref",
+            allow_local=operation_type == "create_viewport_annotation",
+        ),
+    }
+    if operation_type.startswith(("update", "delete")):
+        result["target"] = _normalise_documentation_ref(
+            params.get("target"), label=f"{item_label}.target", allow_local=False
+        )
+    if operation_type == "delete_viewport_annotation":
+        if params.get("confirm") != "DELETE_VIEWPORT_ANNOTATION":
+            raise ValueError(f"{item_label}.confirm must equal DELETE_VIEWPORT_ANNOTATION")
+        result["confirm"] = params["confirm"]
+        return result
+    if operation_type == "update_viewport_annotation":
+        for key in ("name", "class_name", "text"):
+            if key in params:
+                if not isinstance(params[key], str) or len(params[key]) > 4096:
+                    raise ValueError(f"{item_label}.{key} must be text limited to 4096 characters")
+                result[key] = params[key]
+        has_dx, has_dy = "dx" in params, "dy" in params
+        if has_dx != has_dy:
+            raise ValueError(f"{item_label}.dx and dy must be supplied together")
+        if has_dx:
+            result["delta_x"] = _coerce_number(params, "dx", required=True, label=item_label) * scale_to_mm
+            result["delta_y"] = _coerce_number(params, "dy", required=True, label=item_label) * scale_to_mm
+        if set(result) == {"sheet_layer_ref", "viewport_ref", "target"}:
+            raise ValueError(f"{item_label} must contain at least one annotation change")
+        return result
+
+    annotation_kind = str(params.get("annotation_kind", "") or "").strip().lower()
+    if annotation_kind not in {"text", "dimension", "marker", "redline"}:
+        raise ValueError(f"{item_label}.annotation_kind must be text, dimension, marker, or redline")
+    result["annotation_kind"] = annotation_kind
+    result["class_name"] = _require_documentation_text(params, "class_name", label=item_label)
+    if "name" in params:
+        result["name"] = _require_documentation_text(params, "name", label=item_label)
+    if annotation_kind == "text":
+        result["text"] = _require_documentation_text(params, "text", label=item_label)
+    if annotation_kind in {"text", "dimension", "marker"}:
+        required_coordinates = ("x1", "y1") if annotation_kind == "text" else ("x1", "y1", "x2", "y2")
+        for key in required_coordinates:
+            result[key] = _coerce_number(params, key, required=True, label=item_label) * scale_to_mm
+    if annotation_kind in {"dimension", "marker"} and result["x1"] == result["x2"] and result["y1"] == result["y2"]:
+        raise ValueError(f"{item_label} annotation endpoints must not be identical")
+    for key in ("offset", "text_offset"):
+        if key in params:
+            result[key] = _coerce_number(params, key, required=True, label=item_label) * scale_to_mm
+    for key in ("dimension_type", "marker_style", "marker_size", "marker_angle"):
+        if key in params:
+            minimum, maximum = (0, 32767) if key in {"marker_style", "marker_size"} else ((-360, 360) if key == "marker_angle" else (-32768, 32767))
+            result[key] = _optional_documentation_int(params, key, label=item_label, minimum=minimum, maximum=maximum)
+    if annotation_kind == "redline":
+        points = _normalise_documentation_points(
+            params.get("points"), label=f"{item_label}.points", scale_to_mm=scale_to_mm
+        )
+        if len(points) < 3:
+            raise ValueError(f"{item_label}.points must contain at least three points")
+        result["points"] = points
+    return result
+
+
+def _documentation_wire_operation(operation: dict[str, Any]) -> dict[str, Any]:
+    params = dict(operation["params"])
+    wire = {"op": _DOCUMENTATION_WIRE_OPS[operation["type"]], **params}
+    operation_id = str(operation.get("operation_id", "") or "")
+    if operation_id:
+        wire["local_ref"] = operation_id
+    for public_key, prefix, reference_key in (
+        ("source_layers", "source_layer", "ref"),
+        ("source_classes", "source_class", "name"),
+    ):
+        if public_key not in wire:
+            continue
+        entries = wire.pop(public_key)
+        wire[f"{prefix}_count"] = len(entries)
+        for index, entry in enumerate(entries, start=1):
+            suffix = "ref" if reference_key == "ref" else "name"
+            wire[f"{prefix}_{index}_{suffix}"] = entry[reference_key]
+            wire[f"{prefix}_{index}_visibility"] = entry["visibility"]
+    for public_key, prefix in (("crop_points", "crop_point"), ("points", "point")):
+        if public_key not in wire:
+            continue
+        points = wire.pop(public_key)
+        wire[f"{prefix}_count"] = len(points)
+        for index, point in enumerate(points, start=1):
+            wire[f"{prefix}_{index}_x"] = point[0]
+            wire[f"{prefix}_{index}_y"] = point[1]
+    return wire
+
+
 def _normalise_execute_operations(
     operations: list[dict[str, Any]],
     *,
     coordinate_units: CoordinateUnits = "mm",
 ) -> list[dict[str, Any]]:
+    if not isinstance(operations, list) or not 1 <= len(operations) <= 250:
+        raise ValueError("operations must contain 1 to 250 typed operations")
     scale_to_mm = _coordinate_scale_to_mm(coordinate_units)
     normalised: list[dict[str, Any]] = []
     for index, operation in enumerate(operations, start=1):
@@ -4283,7 +4689,7 @@ def _normalise_execute_operations(
         if unknown:
             raise ValueError(f"{label} has unsupported key(s): {', '.join(unknown)}")
         operation_type = str(operation.get("type", "") or "").strip().lower()
-        if operation_type not in {
+        general_operation_types = {
             "create",
             "set_properties",
             "transform",
@@ -4291,10 +4697,11 @@ def _normalise_execute_operations(
             "update_parametric",
             "duplicate",
             "delete",
-        }:
+        }
+        if operation_type not in general_operation_types | _DOCUMENTATION_OPERATION_TYPES:
             raise ValueError(
                 f"{label}.type must be create, set_properties, transform, reshape, "
-                "update_parametric, duplicate, or delete"
+                "update_parametric, duplicate, delete, or a typed sheet layer/viewport/annotation lifecycle operation"
             )
         params = operation.get("params")
         if not isinstance(params, dict):
@@ -4305,8 +4712,23 @@ def _normalise_execute_operations(
                 f"{label}.operation_id must match {_IDEMPOTENCY_KEY_RE.pattern} and be at most 128 characters"
             )
 
-        if operation_id and operation_type not in {"create", "duplicate"}:
-            raise ValueError(f"{label}.operation_id is supported only for create and duplicate")
+        if operation_id and operation_type not in {"create", "duplicate"} | _DOCUMENTATION_CREATE_TYPES:
+            raise ValueError(f"{label}.operation_id is supported only for create and duplicate operations")
+
+        if operation_type in _DOCUMENTATION_OPERATION_TYPES:
+            if operation_type in _DOCUMENTATION_CREATE_TYPES and not operation_id:
+                raise ValueError(f"{label}.operation_id is required for documentation create operations")
+            canonical_params = _normalise_documentation_operation(
+                operation_type,
+                params,
+                label=label,
+                scale_to_mm=scale_to_mm,
+            )
+            item = {"type": operation_type, "params": canonical_params}
+            if operation_id:
+                item["operation_id"] = operation_id
+            normalised.append(item)
+            continue
 
         if operation_type == "create":
             canonical_params = _normalise_create_primitive(
@@ -4441,6 +4863,32 @@ def _normalise_execute_operations(
         if operation_id:
             item["operation_id"] = operation_id
         normalised.append(item)
+    families = {
+        "documentation" if item["type"] in _DOCUMENTATION_OPERATION_TYPES else "general"
+        for item in normalised
+    }
+    if len(families) != 1:
+        raise ValueError("general and documentation operations may not be mixed in one atomic plan")
+    if families == {"documentation"}:
+        local_types: dict[str, str] = {}
+        expected_parent_type = {
+            "sheet_layer_ref": "create_sheet_layer",
+            "viewport_ref": "create_viewport",
+        }
+        for index, item in enumerate(normalised, start=1):
+            for key, required_type in expected_parent_type.items():
+                reference = item["params"].get(key)
+                if isinstance(reference, str) and reference.startswith("$"):
+                    local_id = reference[1:]
+                    if local_types.get(local_id) != required_type:
+                        raise ValueError(
+                            f"operations[{index}].params.{key} must reference a prior {required_type} operation_id"
+                        )
+            operation_id = str(item.get("operation_id", "") or "")
+            if operation_id:
+                if operation_id in local_types:
+                    raise ValueError(f"operations[{index}].operation_id is duplicated: {operation_id}")
+                local_types[operation_id] = item["type"]
     return normalised
 
 
@@ -4576,11 +5024,13 @@ def vw_execute_operations(
     operations: ExecuteOperationList,
     idempotency_key: IdempotencyKey,
     coordinate_units: CoordinateUnits = "mm",
+    target_binding: Optional[dict[str, Any]] = None,
 ) -> str:
     """Preferred native write path with internal preflight and compact receipts.
 
-    Requires native apply_operations. Create, set-properties, transform,
-    reshape, update-parametric, duplicate, and delete operations are forwarded together without fallback.
+    Requires native apply_operations for general objects or apply_documentation_operations for
+    sheet layers, viewports, and viewport annotations. Documentation writes require the exact
+    saved-file, document-generation, bridge-session, and dirty-state target binding.
     All typed geometry is normalized from coordinate_units to native millimetres.
     Reuse idempotency_key only for the identical plan.
     """
@@ -4594,6 +5044,13 @@ def vw_execute_operations(
             operations,
             coordinate_units=coordinate_units,
         )
+        documentation_plan = normalised[0]["type"] in _DOCUMENTATION_OPERATION_TYPES
+        if documentation_plan:
+            binding = _normalise_target_binding(target_binding, require_dirty=True)
+        elif target_binding is not None:
+            raise ValueError("target_binding is accepted only for documentation operation plans")
+        else:
+            binding = None
     except ValueError as exc:
         return _execute_operations_response(
             {
@@ -4601,12 +5058,19 @@ def vw_execute_operations(
                 "tool": "vw_execute_operations",
                 "error": str(exc),
                 "idempotency_key": idempotency_key,
+                "writes_started": False,
+                "commit_state": "not_started",
+                "retryable": True,
+                "retry_policy": "safe_after_correction",
             },
             trace,
             "validation_error",
         )
 
-    plan_hash = _operation_plan_hash(normalised)
+    plan_hash_payload = normalised
+    if binding is not None:
+        plan_hash_payload = [{"target_binding": binding}, *normalised]
+    plan_hash = _operation_plan_hash(plan_hash_payload)
     cache_state = _operation_idempotency_lookup(idempotency_key, plan_hash)
     if cache_state == "conflict":
         return _execute_operations_response(
@@ -4616,6 +5080,10 @@ def vw_execute_operations(
                 "error": "idempotency_key was already used for a different operation plan",
                 "idempotency_key": idempotency_key,
                 "plan_hash": plan_hash,
+                "writes_started": False,
+                "commit_state": "not_started",
+                "retryable": False,
+                "retry_policy": "use_a_new_key_for_a_different_plan",
             },
             trace,
             "idempotency_conflict",
@@ -4629,6 +5097,10 @@ def vw_execute_operations(
                 "error": f"CAD preflight failed: {status_error or 'bridge status unavailable'}",
                 "idempotency_key": idempotency_key,
                 "plan_hash": plan_hash,
+                "writes_started": False,
+                "commit_state": "not_started",
+                "retryable": True,
+                "retry_policy": "after_preflight_repair",
             },
             trace,
             "preflight_error",
@@ -4647,6 +5119,10 @@ def vw_execute_operations(
                 "unsupported_object_types": unsupported_types,
                 "idempotency_key": idempotency_key,
                 "plan_hash": plan_hash,
+                "writes_started": False,
+                "commit_state": "not_started",
+                "retryable": False,
+                "retry_policy": "after_bridge_upgrade_or_plan_change",
             },
             trace,
             "unsupported",
@@ -4659,12 +5135,35 @@ def vw_execute_operations(
                 "error": "vw_execute_operations requires the native SDK bridge",
                 "idempotency_key": idempotency_key,
                 "plan_hash": plan_hash,
+                "writes_started": False,
+                "commit_state": "not_started",
+                "retryable": False,
+                "retry_policy": "after_bridge_upgrade",
             },
             trace,
             "unsupported",
         )
 
-    if "apply_operations" in implemented_actions:
+    required_native_action = "apply_documentation_operations" if documentation_plan else "apply_operations"
+    if documentation_plan and required_native_action in implemented_actions:
+        execution_path = required_native_action
+        trace["action"] = execution_path
+        wire_operations = [_documentation_wire_operation(operation) for operation in normalised]
+        wire_params = {
+            "operation_count": len(wire_operations),
+            "idempotency_key": idempotency_key,
+            "plan_hash": plan_hash,
+            **_target_binding_wire_params(binding),
+        }
+        for index, wire_operation in enumerate(wire_operations, start=1):
+            wire_params[f"operation_{index}_json"] = json.dumps(
+                wire_operation,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        raw = _send(required_native_action, wire_params, require_cad_safe=True, trace=trace)
+    elif not documentation_plan and "apply_operations" in implemented_actions:
         execution_path = "apply_operations"
         trace["action"] = execution_path
         wire_operations: list[dict[str, Any]] = []
@@ -4740,6 +5239,10 @@ def vw_execute_operations(
                             ),
                             "idempotency_key": idempotency_key,
                             "plan_hash": plan_hash,
+                            "writes_started": False,
+                            "commit_state": "not_started",
+                            "retryable": False,
+                            "retry_policy": "after_plan_change",
                         },
                         trace,
                         "validation_error",
@@ -4776,18 +5279,23 @@ def vw_execute_operations(
                 separators=(",", ":"),
                 sort_keys=True,
             )
-        raw = _send("apply_operations", wire_params, require_cad_safe=True, trace=trace)
+        raw = _send(required_native_action, wire_params, require_cad_safe=True, trace=trace)
     else:
         return _execute_operations_response(
             {
                 "ok": False,
                 "tool": "vw_execute_operations",
                 "error": (
-                    "native bridge does not advertise required phase-4 action: apply_operations; "
+                    f"native bridge does not advertise required phase-4 action: {required_native_action}; "
                     "upgrade/restart the native bridge instead of using a compatibility fallback"
                 ),
+                "required_native_action": required_native_action,
                 "idempotency_key": idempotency_key,
                 "plan_hash": plan_hash,
+                "writes_started": False,
+                "commit_state": "not_started",
+                "retryable": False,
+                "retry_policy": "after_bridge_upgrade",
             },
             trace,
             "unsupported",
@@ -4796,17 +5304,24 @@ def vw_execute_operations(
     decoded = _decode_tool_result(raw)
     if _tool_result_failed(raw, decoded) or not isinstance(decoded, dict):
         error = decoded.get("error") if isinstance(decoded, dict) else str(decoded)
+        raw_error = str(error or "native operation request failed")
+        request_not_sent = raw_error.startswith("Request was not sent")
         return _execute_operations_response(
             {
                 "ok": False,
                 "tool": "vw_execute_operations",
-                "error": str(error or "native operation request failed"),
+                "error": raw_error,
                 "execution_path": execution_path,
                 "idempotency_key": idempotency_key,
                 "plan_hash": plan_hash,
+                "writes_started": False if request_not_sent else None,
+                "commit_state": "not_started" if request_not_sent else "unknown",
+                "retryable": request_not_sent,
+                "retry_policy": "safe" if request_not_sent else "never_after_send",
+                "manual_reconciliation_required": not request_not_sent,
             },
             trace,
-            "error",
+            "request_not_sent" if request_not_sent else "unknown_commit_state",
         )
 
     if isinstance(decoded.get("timing"), dict):
@@ -4846,6 +5361,7 @@ def vw_execute_operations(
         "ok": committed and native_wire_count == expected_wire_count,
         "tool": "vw_execute_operations",
         "execution_path": execution_path,
+        "required_native_action": required_native_action,
         "atomic": True,
         "operation_count": len(normalised),
         "wire_operation_count": expected_wire_count,
@@ -4857,6 +5373,10 @@ def vw_execute_operations(
         "coordinate_units": coordinate_units,
         "native_coordinate_units": "mm",
         "plan_hash": plan_hash,
+        "writes_started": True,
+        "commit_state": "committed" if committed else "rolled_back_or_rejected",
+        "retryable": False,
+        "retry_policy": "never_after_send",
         "verification": {
             "ok": self_verified,
             "method": "native_atomic_receipt",
@@ -4865,6 +5385,10 @@ def vw_execute_operations(
             "drawing_scan_performed": False,
         },
     }
+    if binding is not None:
+        core["target_binding"] = binding
+        if isinstance(decoded.get("binding"), dict):
+            core["result_binding"] = _normalise_target_binding(decoded["binding"], require_dirty=False)
     if core["ok"]:
         _remember_operation_result(idempotency_key, plan_hash)
     return _execute_operations_response(core, trace, "ok" if core["ok"] else "error")
@@ -6091,9 +6615,30 @@ def _grouped_bridge_summary(status: Any) -> dict[str, Any]:
             "main_context_pump_ready",
             "capability_revision",
             "capability_fingerprint",
+            "bridge_session_id",
         )
         if key in status
     }
+
+
+def _documentation_read_uuid(value: Any, *, label: str) -> str:
+    ref = _normalise_documentation_ref(value, label=label, allow_local=False)
+    return ref[5:]
+
+
+def _binding_from_document_info(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("native get_document_info did not return an object")
+    candidate = value.get("binding")
+    if not isinstance(candidate, dict):
+        candidate = {
+            "file_path": value.get("file_path"),
+            "document_fingerprint": value.get("document_fingerprint"),
+            "document_generation": value.get("document_generation"),
+            "bridge_session_id": value.get("bridge_session_id"),
+            "dirty": value.get("dirty"),
+        }
+    return _normalise_target_binding(candidate, require_dirty=False)
 
 
 def _grouped_finish(
@@ -6139,6 +6684,7 @@ def _grouped_error(
         "validation_error",
         "preflight_failed",
         "request_not_sent",
+        "target_changed",
     }:
         writes_started = False
         commit_state = commit_state or "not_started"
@@ -6407,8 +6953,11 @@ def vw_read(
     cursor: GroupedCursor = "",
     fields: Optional[ObjectFieldList] = None,
     plan: Optional[dict[str, Any]] = None,
+    sheet_layer_uuid: str = "",
+    viewport_uuid: str = "",
+    target_binding: Optional[dict[str, Any]] = None,
 ) -> str:
-    """Read native data or run a zero-dispatch architectural plan-quality analysis."""
+    """Read native data, including bound sheet/viewport lifecycles, or analyze a plan."""
     trace = _new_request_trace("vw_read", action)
     if action == "plan_quality":
         if plan is None:
@@ -6466,6 +7015,98 @@ def vw_read(
         projection = list(fields or [])
     except ValueError as exc:
         return _grouped_error("vw_read", action, "validation_error", str(exc), trace)
+
+    documentation_actions = {
+        "sheet_layers": "get_sheet_layers",
+        "viewports": "get_viewports",
+        "viewport_annotations": "get_viewport_annotations",
+    }
+    if action in documentation_actions:
+        try:
+            sheet_uuid = ""
+            viewport_id = ""
+            if action in {"viewports", "viewport_annotations"}:
+                sheet_uuid = _documentation_read_uuid(
+                    sheet_layer_uuid, label="sheet_layer_uuid"
+                )
+            if action == "viewport_annotations":
+                viewport_id = _documentation_read_uuid(
+                    viewport_uuid, label="viewport_uuid"
+                )
+            if target_binding is None:
+                document_info, _, info_error = _grouped_native_call(
+                    "vw_read", action, "get_document_info", {}, trace
+                )
+                if info_error is not None:
+                    return info_error
+                binding = _binding_from_document_info(document_info)
+            else:
+                binding = _normalise_target_binding(target_binding, require_dirty=False)
+        except ValueError as exc:
+            return _grouped_error(
+                "vw_read", action, "validation_error", str(exc), trace
+            )
+        params = {
+            "offset": offset,
+            "limit": limit,
+            **_target_binding_wire_params(binding),
+        }
+        if sheet_uuid:
+            params["sheet_layer_uuid"] = sheet_uuid
+        if viewport_id:
+            params["viewport_uuid"] = viewport_id
+        data, status, error = _grouped_native_call(
+            "vw_read", action, documentation_actions[action], params, trace
+        )
+        if error is not None:
+            return error
+        if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+            return _grouped_error(
+                "vw_read",
+                action,
+                "native_action_failed",
+                "The documentation read returned an invalid paged payload.",
+                trace,
+                status=status,
+                required_action=documentation_actions[action],
+            )
+        try:
+            returned_binding = _normalise_target_binding(data.get("binding"), require_dirty=False)
+        except ValueError as exc:
+            return _grouped_error(
+                "vw_read", action, "native_action_failed",
+                f"The documentation read returned an invalid target binding: {exc}",
+                trace, status=status, required_action=documentation_actions[action],
+            )
+        if any(returned_binding.get(key) != value for key, value in binding.items()):
+            return _grouped_error(
+                "vw_read",
+                action,
+                "target_changed",
+                "The active Vectorworks document or bridge session changed during the read.",
+                trace,
+                status=status,
+                required_action=documentation_actions[action],
+                detail={"expected": binding, "actual": returned_binding},
+            )
+        if projection:
+            data = dict(data)
+            data["items"] = [_grouped_project_record(item, projection) for item in data["items"]]
+        return _grouped_finish(
+            "vw_read",
+            action,
+            {"ok": True, "bridge": _grouped_bridge_summary(status), "data": data},
+            trace,
+            "ok",
+        )
+    if target_binding is not None or sheet_layer_uuid or viewport_uuid:
+        return _grouped_error(
+            "vw_read",
+            action,
+            "validation_error",
+            "target_binding, sheet_layer_uuid, and viewport_uuid are accepted only for documentation reads",
+            trace,
+        )
 
     requested = min(MAX_OBJECT_QUERY_LIMIT, offset + limit + 1)
     parsed_query = _parse_simple_find_criteria(criteria or "ALL") if action == "query" else None
@@ -6625,9 +7266,14 @@ def vw_apply(
     operations: ExecuteOperationList,
     idempotency_key: IdempotencyKey,
     coordinate_units: CoordinateUnits = "mm",
+    target_binding: Optional[dict[str, Any]] = None,
 ) -> str:
     """Apply one canonical atomic native mutation plan in explicit coordinate units."""
-    raw = vw_execute_operations(operations, idempotency_key, coordinate_units)
+    raw = (
+        vw_execute_operations(operations, idempotency_key, coordinate_units)
+        if target_binding is None
+        else vw_execute_operations(operations, idempotency_key, coordinate_units, target_binding)
+    )
     decoded = _decode_tool_result(raw)
     if not isinstance(decoded, dict):
         return json.dumps(
@@ -6656,6 +7302,10 @@ def vw_apply(
             code = "validation_error"
         elif execution_outcome == "preflight_error":
             code = "preflight_failed"
+        elif execution_outcome == "unknown_commit_state":
+            code = "unknown_commit_state"
+        elif execution_outcome == "request_not_sent":
+            code = "request_not_sent"
         elif "does not advertise required phase-4 action" in error_text or "requires the native SDK bridge" in error_text:
             code = "capability_unavailable"
         elif "preflight failed" in error_text.lower():
@@ -6667,8 +7317,11 @@ def vw_apply(
         payload["error"] = {
             "code": code,
             "message": error_text,
-            "required_native_action": "apply_operations",
-            "writes_started": False if code in {"capability_unavailable", "preflight_failed", "validation_error"} else None,
+            "required_native_action": payload.get("required_native_action", "apply_operations"),
+            "writes_started": payload.get("writes_started"),
+            "commit_state": payload.get("commit_state"),
+            "retryable": payload.get("retryable", False),
+            "retry_policy": payload.get("retry_policy", "never_after_send"),
         }
     payload["delegated_tool"] = "vw_execute_operations"
     payload["tool"] = "vw_apply"
@@ -6682,12 +7335,22 @@ def vw_io(
     file_path: NonEmptyPath,
     format: GroupedIOFormat = "auto",
     options: Optional[dict[str, Any]] = None,
+    target_binding: Optional[dict[str, Any]] = None,
 ) -> str:
-    """Run an advertised native import, export, or capture without automatic retry."""
+    """Run an advertised native import, export, or capture without automatic retry.
+
+    Documentation evidence exports/captures can bind the active saved document
+    with target_binding. Bound import is intentionally unsupported.
+    """
     trace = _new_request_trace("vw_io", action)
     try:
         native_action = _grouped_io_native_action(action, format, file_path)
         params = {"file_path": file_path, "format": format, **_grouped_options(options)}
+        if target_binding is not None:
+            if action == "import":
+                raise ValueError("target_binding is supported only for export and capture")
+            binding = _normalise_target_binding(target_binding, require_dirty=True)
+            params.update(_target_binding_wire_params(binding))
     except (KeyError, ValueError) as exc:
         return _grouped_error("vw_io", action, "validation_error", str(exc), trace)
     data, status, error = _grouped_native_call("vw_io", action, native_action, params, trace)

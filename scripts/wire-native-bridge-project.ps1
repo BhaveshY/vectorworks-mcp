@@ -32,6 +32,7 @@ $CompileFiles = @(
     "NativeIOHandlers.cpp",
     "ResourceWorksheetHandlers.cpp",
     "ViewDocumentHandlers.cpp",
+    "DocumentationHandlers.cpp",
     "VectorworksMCPBridge.cpp"
 )
 $HeaderFiles = @(
@@ -46,6 +47,7 @@ $HeaderFiles = @(
     "NativeIOHandlers.hpp",
     "ResourceWorksheetHandlers.hpp",
     "ViewDocumentHandlers.hpp",
+    "DocumentationHandlers.hpp",
     "BridgeDispatcher.hpp",
     "CadRequestQueue.hpp",
     "NativeTransport.hpp"

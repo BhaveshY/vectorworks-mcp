@@ -16,7 +16,7 @@ class NativeAuthoritativeCapabilitiesContractTests(unittest.TestCase):
         source = self.source("CapabilityRegistry.cpp")
         domain = self.source("NativeDomain.hpp")
 
-        self.assertIn("kCapabilityRevision = 4u", header)
+        self.assertIn("kCapabilityRevision = 5u", header)
         self.assertIn("CapabilityFingerprint(bool cadHandlersImplemented)", header)
         self.assertIn("capability_fingerprint", source)
         self.assertIn("14695981039346656037ull", source)

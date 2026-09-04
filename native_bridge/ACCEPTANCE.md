@@ -79,6 +79,47 @@ Record:
 - Visual Studio version/toolset.
 - Any failing handler names and exact errors.
 
+## Revision-5 Documentation Acceptance
+
+Run only in a saved disposable document after the candidate SDK bridge is
+built, installed, and restarted. The live record must prove:
+
+1. `ping` and `capabilities` agree on revision 5, fingerprint, and the three
+   documentation reads plus `apply_documentation_operations`.
+2. One bound transaction creates a dedicated sheet, a real viewport with
+   explicit source layer/class visibility, crop/scale/render/placement, and
+   text/dimension/marker/redline annotation objects.
+3. Bound reads return the exact sheet/viewport/annotation UUID hierarchy and
+   semantic values; a second bound transaction updates them in place; delete
+   operations reject missing confirmation and succeed with the exact tokens.
+4. The starting active layer/view are restored. A deliberate target-file,
+   generation, session, or dirty-state mismatch is rejected before mutation.
+5. Vectorworks Undo reverses the transaction in one event. Save/restart readback
+   proves persistence. PDF export contains the fixture sheet. The PNG proves a
+   bound native active-view capture; it is not evidence that the fixture sheet
+   was active because the grouped view API does not switch layers by UUID.
+6. `scripts/review-all-sheets.py` completes over the fixture, leaves
+   `state_unchanged: true`, and resumes from a checkpoint only for the same
+   target binding.
+
+The opt-in lifecycle fixture is:
+
+```powershell
+py -3 .\scripts\run-native-documentation-acceptance.py `
+  --source-document C:\Temp\documentation-disposable.vwx `
+  --output-dir C:\Temp\documentation-evidence `
+  --allow-write-fixture `
+  --disposable-document-confirmation DISPOSABLE_DOCUMENT
+```
+
+It leaves the dedicated fixture sheet for restart/visual inspection unless
+`--cleanup` is supplied. Undo and restart remain explicit human lifecycle gates;
+the connector does not expose arbitrary commands to automate them.
+
+Record the Vectorworks build, bridge commit, `.vlb` SHA-256, output paths and
+hashes, commands, timings, and exact failures. Automated no-Vectorworks checks
+do not satisfy this gate.
+
 ## Latest Validation Record
 
 Recorded on 2026-06-23 against Vectorworks Architect 2024 on Windows.

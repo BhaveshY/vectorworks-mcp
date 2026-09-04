@@ -43,10 +43,12 @@ $RequiredScripts = @(
     "scripts\smoke-native-bridge.ps1",
     "scripts\start-vectorworks-native-smoke.ps1",
     "scripts\copy-native-bridge-scaffold.ps1",
-    "scripts\test-native-bridge-scaffold.ps1"
+    "scripts\test-native-bridge-scaffold.ps1",
+    "scripts\review-all-sheets.py",
+    "scripts\run-native-documentation-acceptance.py"
 )
 
-$RequiredFeatures = @("stable-loader", "loader-clipboard-copy", "native-bridge-scaffold", "native-bridge-scaffold-copy", "native-doctor-next-command", "native-doctor-command-spec", "native-bridge-project-wire", "native-doctor-next-runner", "native-runner-spec-validation", "native-sdk-archive-reuse", "native-vectorworks-auto-smoke", "native-phase0-transport", "native-phase1-cad-handlers", "native-phase2-cad-handlers", "native-phase2-set-property", "native-phase2-manage-classes", "native-phase4-apply-operations", "fast-native-tool-profile", "structured-mcp-results", "codex-plugin-package", "local-auth-token-required", "client-neutral-project-mcp")
+$RequiredFeatures = @("stable-loader", "loader-clipboard-copy", "native-bridge-scaffold", "native-bridge-scaffold-copy", "native-doctor-next-command", "native-doctor-command-spec", "native-bridge-project-wire", "native-doctor-next-runner", "native-runner-spec-validation", "native-sdk-archive-reuse", "native-vectorworks-auto-smoke", "native-phase0-transport", "native-phase1-cad-handlers", "native-phase2-cad-handlers", "native-phase2-set-property", "native-phase2-manage-classes", "native-phase4-apply-operations", "fast-native-tool-profile", "structured-mcp-results", "codex-plugin-package", "local-auth-token-required", "client-neutral-project-mcp", "native-documentation-lifecycle", "native-document-target-binding", "review-all-sheets")
 
 $ContractMarker = Join-Path $RepoRoot ".vectorworks-mcp-contract.json"
 if (-not (Test-Path -LiteralPath $ContractMarker)) {
@@ -60,10 +62,10 @@ try {
 try {
     $ContractVersion = [int]$Contract.contractVersion
 } catch {
-    throw "Companion repo contract marker is incompatible. Expected numeric contractVersion >= 16."
+    throw "Companion repo contract marker is incompatible. Expected numeric contractVersion >= 17."
 }
-if ($Contract.name -ne "vectorworks-mcp" -or $ContractVersion -lt 16) {
-    throw "Companion repo contract marker is incompatible. Expected vectorworks-mcp contractVersion >= 16."
+if ($Contract.name -ne "vectorworks-mcp" -or $ContractVersion -lt 17) {
+    throw "Companion repo contract marker is incompatible. Expected vectorworks-mcp contractVersion >= 17."
 }
 $ContractFeatures = @($Contract.requiredFeatures | ForEach-Object { [string]$_ })
 foreach ($RequiredFeature in $RequiredFeatures) {

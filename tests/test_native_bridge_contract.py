@@ -718,7 +718,7 @@ class NativeBridgeContractTests(unittest.TestCase):
         for action in expected_actions:
             self.assertIn('{"' + action + '", ExecutionContext::', registry_source)
         self.assertTrue(expected_actions <= registry_actions)
-        self.assertIn("constexpr std::uint32_t kCapabilityRevision = 4u", registry_header)
+        self.assertIn("constexpr std::uint32_t kCapabilityRevision = 5u", registry_header)
         self.assertIn("struct ActionSpec", domain_header)
         self.assertIn("CapabilitiesResultJson", bridge_source)
         self.assertIn('request.action == "capabilities"', bridge_source)
@@ -1142,11 +1142,19 @@ class NativeBridgeContractTests(unittest.TestCase):
 
     def test_handler_matrix_matches_listener_and_server_wire_actions(self):
         listener_handlers = _listener_handlers()
-        # Grouped view variants resolve their wire actions at dispatch time, so
-        # they do not have one static TOOL_SAFETY wire_action.
-        server_actions = _server_actions() | {"get_view", "set_view"}
+        # Grouped view and documentation variants resolve their wire actions at
+        # dispatch time, so they do not have one static TOOL_SAFETY wire_action.
+        native_only_actions = {
+            "apply_operations",
+            "apply_documentation_operations",
+            "get_sheet_layers",
+            "get_viewports",
+            "get_viewport_annotations",
+            "get_view",
+            "set_view",
+        }
+        server_actions = _server_actions() | native_only_actions
         matrix_rows = _matrix_rows()
-        native_only_actions = {"apply_operations", "get_view", "set_view"}
 
         self.assertEqual(server_actions - native_only_actions, set(listener_handlers))
         self.assertTrue(native_only_actions <= server_actions)

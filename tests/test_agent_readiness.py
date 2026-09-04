@@ -175,7 +175,7 @@ class AgentReadinessTests(unittest.TestCase):
         companion_check = (
             ROOT / "plugins/vectorworks/scripts/check-companion-contract.ps1"
         ).read_text(encoding="utf-8")
-        self.assertIn("contractVersion >= 16", companion_check)
+        self.assertIn("contractVersion >= 17", companion_check)
         for feature in (
             "native-phase4-apply-operations",
             "fast-native-tool-profile",
@@ -234,7 +234,7 @@ class AgentReadinessTests(unittest.TestCase):
         marker = json.loads((ROOT / ".vectorworks-mcp-contract.json").read_text(encoding="utf-8"))
 
         self.assertEqual(marker["name"], "vectorworks-mcp")
-        self.assertEqual(marker["contractVersion"], 16)
+        self.assertEqual(marker["contractVersion"], 17)
         for feature in (
             "stable-loader",
             "loader-clipboard-copy",
@@ -258,6 +258,9 @@ class AgentReadinessTests(unittest.TestCase):
             "codex-plugin-package",
             "local-auth-token-required",
             "client-neutral-project-mcp",
+            "native-documentation-lifecycle",
+            "native-document-target-binding",
+            "review-all-sheets",
         ):
             self.assertIn(feature, marker["requiredFeatures"])
 
@@ -892,7 +895,7 @@ exit 0
             self.assertIn("runpy.run_path", loader_text)
             _assert_path_in_text(self, launcher_path, loader_text)
             self.assertIn("VW_MCP_LOADER_METADATA", loader_text)
-            self.assertIn('"contractVersion": 16', loader_text)
+            self.assertIn('"contractVersion": 17', loader_text)
             self.assertIn('"native-bridge-scaffold-copy"', loader_text)
             self.assertIn('"native-doctor-next-command"', loader_text)
             self.assertIn('"native-doctor-command-spec"', loader_text)
@@ -912,6 +915,9 @@ exit 0
             self.assertIn('"codex-plugin-package"', loader_text)
             self.assertIn('"local-auth-token-required"', loader_text)
             self.assertIn('"client-neutral-project-mcp"', loader_text)
+            self.assertIn('"native-documentation-lifecycle"', loader_text)
+            self.assertIn('"native-document-target-binding"', loader_text)
+            self.assertIn('"review-all-sheets"', loader_text)
 
     def test_register_script_writes_claude_config_with_token_file_only(self):
         powershell = shutil.which("powershell.exe") or shutil.which("powershell") or shutil.which("pwsh")
@@ -1092,7 +1098,7 @@ exit 0
             (src / "CapabilityRegistry.hpp").read_text(encoding="utf-8")
             + (src / "CapabilityRegistry.cpp").read_text(encoding="utf-8")
         )
-        self.assertIn("kCapabilityRevision = 4u", capability_registry)
+        self.assertIn("kCapabilityRevision = 5u", capability_registry)
         self.assertIn("CapabilityFingerprint", capability_registry)
         self.assertIn('"apply_operations"', capability_registry)
 

@@ -9,6 +9,13 @@ For fresh Windows PC onboarding, follow `AGENT_INSTALL.md` first.
 - `native_bridge/` is the required production Vectorworks SDK bridge source. Phase 4 is the default fast-write runtime: it adds true polygon/polyline creation and idempotent atomic `apply_operations` transactions on top of phase-1 reads/primitives, phase-2 walls/text/dimensions/property/class handlers, and phase-3 compact queries. It must be built, installed into Vectorworks, and smoke-tested before normal non-modal use.
 - `vw_capabilities` reports current bridge/native support and should be used when choosing between native-safe helpers and broader legacy tools.
 - `vw_drawing_summary` is the preferred read-only production snapshot after preflight and before/after non-trivial edits; upgraded native bridges return compact counts/bounds/examples without dumping every object.
+- Capability revision 5 adds bound/paged `vw_read` actions for sheet layers,
+  viewports, and viewport annotations, plus typed lifecycle operations inside
+  `vw_apply`/`vw_execute_operations`. Documentation writes require the exact
+  saved-file/fingerprint/generation/bridge-session/dirty binding and route only
+  to one native `apply_documentation_operations` transaction. See
+  `DOCUMENTATION_WORKFLOW.md`; do not mix these operations with general object
+  operations or use a Python/GUI fallback.
 - `vw_batch_create_objects`, `vw_plan_schematic_floor_plan`, `vw_create_schematic_floor_plan`, `vw_create_schematic_room`, `vw_create_schematic_door`, and `vw_create_schematic_window` are drafting helpers. `atomic=true` requires the native bridge and creates all objects in one native undo event; phase 2 supports true walls, text, linear dimensions, verified property edits, native class management, and mixed batches. Schematic helpers still create 2D drafting geometry, not BIM doors/windows/spaces.
 - `native_bridge/HANDLER_MATRIX.md` is the handler-by-handler implementation map for the native SDK bridge.
 - `native_bridge/mock/mock_bridge.py` is a no-SDK contract harness for host/native protocol compatibility.

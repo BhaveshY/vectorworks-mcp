@@ -68,6 +68,15 @@ capability revision 4 and an exact manifest fingerprint. Missing support is an
 upgrade or restart failure. The host never switches to a decomposed batch,
 Python listener, modal dialog, primitive substitute, or extrusion substitute.
 
+Capability revision 5 adds native, typed create/read/update/delete lifecycles
+for sheet layers, viewports, and viewport annotations through the same nine
+top-level tools. Documentation writes require an exact saved-document,
+document-generation, bridge-session, and dirty-state binding and commit as one
+`apply_documentation_operations` transaction. The checkpointed read-only
+review runner can inspect every sheet without changing the active sheet or view.
+See [DOCUMENTATION_WORKFLOW.md](DOCUMENTATION_WORKFLOW.md) for schemas, safe
+review, evidence provenance, parallel-process limits, and live acceptance.
+
 `fast-native` is mandatory for normal agent work and is also the default when
 `VW_MCP_TOOL_PROFILE` is absent. It exposes only the compact native production
 surface. `compat` is a manual administrator-only diagnostic profile, not an

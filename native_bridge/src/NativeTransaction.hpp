@@ -20,6 +20,9 @@ enum class ObjectFamily {
     Roof,
     Door,
     Window,
+    SheetLayer,
+    Viewport,
+    ViewportAnnotation,
 };
 
 enum class ArtifactRole {

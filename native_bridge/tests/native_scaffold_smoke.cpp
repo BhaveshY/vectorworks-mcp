@@ -234,8 +234,8 @@ void TestProtocol() {
 }
 
 void TestDispatcherMetadata() {
-    Require(RegisteredActionCount() == 31u, "native action registry count drifted");
-    Require(ImplementedActionCount(true) == 31u, "SDK action count drifted");
+    Require(RegisteredActionCount() == 35u, "native action registry count drifted");
+    Require(ImplementedActionCount(true) == 35u, "SDK action count drifted");
     Require(ImplementedActionCount(false) == 3u, "scaffold action count drifted");
     const auto* ping = FindActionSpec("ping");
     Require(ping != nullptr, "ping action spec missing");
@@ -252,11 +252,22 @@ void TestDispatcherMetadata() {
     Require(RequiresCadMainContext("apply_operations"), "apply_operations should require CAD main context");
     Require(apply->mayWriteDocument, "apply_operations should be classified as a write");
     Require(!apply->destructive, "apply_operations should not be classified as destructive");
+    const auto* documentationApply = FindActionSpec("apply_documentation_operations");
+    Require(documentationApply != nullptr, "apply_documentation_operations action spec missing");
+    Require(RequiresCadMainContext("get_sheet_layers"), "sheet reads should require CAD main context");
+    Require(RequiresCadMainContext("get_viewports"), "viewport reads should require CAD main context");
+    Require(RequiresCadMainContext("get_viewport_annotations"), "annotation reads should require CAD main context");
+    Require(documentationApply->mayWriteDocument, "documentation apply should be classified as a write");
+    Require(documentationApply->destructive, "documentation apply must expose destructive variants");
     Require(FindActionSpec("missing") == nullptr, "missing action should not have a spec");
 
     const std::string sdkActions = ImplementedActionsJson(true);
     RequireContains(sdkActions, R"("apply_operations")", "SDK actions should preserve apply_operations");
     RequireContains(sdkActions, R"("capabilities")", "SDK actions should advertise capabilities");
+    RequireContains(sdkActions, R"("get_sheet_layers")", "SDK actions should advertise sheet reads");
+    RequireContains(sdkActions, R"("get_viewports")", "SDK actions should advertise viewport reads");
+    RequireContains(sdkActions, R"("get_viewport_annotations")", "SDK actions should advertise annotation reads");
+    RequireContains(sdkActions, R"("apply_documentation_operations")", "SDK actions should advertise documentation writes");
     const std::string scaffoldActions = ImplementedActionsJson(false);
     RequireContains(scaffoldActions, R"("ping")", "scaffold actions should advertise ping");
     RequireContains(scaffoldActions, R"("stop")", "scaffold actions should advertise stop");
@@ -264,7 +275,7 @@ void TestDispatcherMetadata() {
     Require(scaffoldActions.find("get_layers") == std::string::npos, "scaffold actions should not advertise CAD handlers");
 
     const std::string capabilityJson = CapabilitiesResultJson(true);
-    RequireContains(capabilityJson, R"("capability_revision":4)", "capability revision drifted");
+    RequireContains(capabilityJson, R"("capability_revision":5)", "capability revision drifted");
     RequireContains(capabilityJson, R"("capability_fingerprint":)", "capability fingerprint missing");
     RequireContains(capabilityJson, R"("descriptors":[)", "capability descriptors missing");
     RequireContains(capabilityJson, R"("execution_context":"vectorworks_main_plugin_context")", "CAD execution context missing");
@@ -336,7 +347,7 @@ void TestPhaseZeroDispatch() {
 
     const auto capabilities = DispatchFromSocketWorker(RequestEnvelope{"caps-1", "capabilities", "{}"});
     Require(capabilities.success, "phase-0 capabilities should succeed");
-    RequireContains(capabilities.resultJson, R"("capability_revision":4)", "phase-0 capabilities revision drifted");
+    RequireContains(capabilities.resultJson, R"("capability_revision":5)", "phase-0 capabilities revision drifted");
     RequireContains(capabilities.resultJson, R"("may_write_document":false)", "phase-0 capabilities should expose safety metadata");
 
     const auto cad = DispatchFromSocketWorker(RequestEnvelope{"c1", "get_layers", "{}"});

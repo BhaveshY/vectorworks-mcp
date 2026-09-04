@@ -145,7 +145,7 @@ async def main() -> None:
                 required_bridge = {
                     "native_bridge": True,
                     "native_phase": 4,
-                    "capability_revision": 4,
+                    "capability_revision": 5,
                     "cad_api_safe": True,
                     "transport_only": False,
                     "main_context_pump_ready": True,

@@ -8,7 +8,7 @@
 
 namespace VectorworksMCP {
 
-constexpr std::uint32_t kCapabilityRevision = 4u;
+constexpr std::uint32_t kCapabilityRevision = 5u;
 
 const ActionSpec* FindActionSpec(std::string_view action);
 bool RequiresCadMainContext(std::string_view action);

@@ -13,7 +13,7 @@ The profile has nine top-level tools. No capability adds another MCP tool.
 | Tool | Actions | Purpose |
 |------|---------|---------|
 | `vw_status` | `health`, `context` | Bridge health or compact document context. |
-| `vw_read` | `document`, `layers`, `summary`, `query`, `selection` | Read-only document data with field projection and paging. |
+| `vw_read` | `document`, `layers`, `summary`, `query`, `selection`, `sheet_layers`, `viewports`, `viewport_annotations` | Read-only document data with field projection and paging; documentation reads require revision 5 and exact target binding. |
 | `vw_catalog` | `capabilities`, `classes`, `symbols`, `parametric_schemas`, `worksheets`, `resources` | Manifest and parameter discovery. |
 | `vw_apply` | atomic plan | Canonical atomic document mutation entry. |
 | `vw_execute_operations` | atomic plan | The same write core and native transaction as `vw_apply`. |
@@ -29,7 +29,7 @@ The server publishes this top-level safety metadata for the production tools:
 | `vw_apply` | `grouped-atomic-write` | `` | `false` | `true` | `true` | `true` | `true` |
 | `vw_catalog` | `grouped-catalog` | `` | `true` | `false` | `true` | `true` | `true` |
 | `vw_document` | `grouped-native-document` | `` | `false` | `true` | `false` | `true` | `true` |
-| `vw_execute_operations` | `document-write` | `apply_operations` | `false` | `true` | `true` | `true` | `true` |
+| `vw_execute_operations` | `document-write` | `` | `false` | `true` | `true` | `true` | `true` |
 | `vw_io` | `grouped-native-io` | `` | `false` | `false` | `false` | `true` | `true` |
 | `vw_read` | `grouped-read` | `` | `true` | `false` | `true` | `true` | `true` |
 | `vw_status` | `grouped-status` | `` | `true` | `false` | `true` | `true` | `true` |
@@ -91,6 +91,16 @@ Create only object types present in the manifest. The production bridge can
 advertise primitives, walls, text, dimensions, true slabs, true roofs, true
 Spaces, hosted doors and windows, symbols, and generic parametric objects.
 Availability comes from the loaded binary, not this list.
+
+Revision-5 documentation plans use `create_sheet_layer`, `update_sheet_layer`,
+`delete_sheet_layer`, `create_viewport`, `update_viewport`, `delete_viewport`,
+`create_viewport_annotation`, `update_viewport_annotation`, and
+`delete_viewport_annotation`. They require the exact saved-file,
+document-fingerprint, active-document-generation, bridge-session, and dirty
+binding from `vw_read(action="document")`. They route as one native
+`apply_documentation_operations` transaction and cannot mix with general
+operations. See `DOCUMENTATION_WORKFLOW.md` for field schemas, paging, review,
+and confirmation tokens.
 
 Dedicated hosted openings use this normalized wire shape inside the atomic
 plan:
