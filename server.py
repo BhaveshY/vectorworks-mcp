@@ -4342,6 +4342,7 @@ def _normalise_target_binding(value: Any, *, require_dirty: bool) -> dict[str, A
         raise ValueError("target_binding must be an object")
     allowed = {
         "file_path",
+        "file_name",
         "document_fingerprint",
         "document_generation",
         "bridge_session_id",
@@ -4364,6 +4365,11 @@ def _normalise_target_binding(value: Any, *, require_dirty: bool) -> dict[str, A
         if not isinstance(item, str) or not item.strip():
             raise ValueError(f"target_binding.{key} must be a non-empty string")
         result[key] = item.strip()
+    if "file_name" in value:
+        file_name = value["file_name"]
+        if not isinstance(file_name, str) or not file_name.strip():
+            raise ValueError("target_binding.file_name must be a non-empty string")
+        result["file_name"] = file_name.strip()
     generation = value.get("document_generation")
     if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
         raise ValueError("target_binding.document_generation must be a positive integer")
@@ -6636,8 +6642,13 @@ def _binding_from_document_info(value: Any) -> dict[str, Any]:
             "document_fingerprint": value.get("document_fingerprint"),
             "document_generation": value.get("document_generation"),
             "bridge_session_id": value.get("bridge_session_id"),
-            "dirty": value.get("dirty"),
+            "active_layer_uuid": value.get("active_layer_uuid"),
+            "active_layer_name": value.get("active_layer_name"),
         }
+        if "file_name" in value:
+            candidate["file_name"] = value["file_name"]
+        if "dirty" in value:
+            candidate["dirty"] = value["dirty"]
     return _normalise_target_binding(candidate, require_dirty=False)
 
 

@@ -1125,6 +1125,9 @@ std::string ApplyOperations(
     if (idempotencyKey.empty() || planFingerprint.empty()) {
         throw std::invalid_argument("documentation writes require idempotency_key and plan_hash");
     }
+    if (!expected.hasDirty) {
+        throw std::invalid_argument("documentation writes require expected_dirty");
+    }
     const DocumentBinding initialBinding = ReadDocumentBinding(sdk);
     for (const CachedReceipt& cached : gCachedReceipts) {
         if (cached.documentFingerprint == initialBinding.documentFingerprint &&
@@ -1389,6 +1392,9 @@ std::string ApplyOperations(
         }
 
         activeLayerRestorer.RestoreAndVerify();
+        ExpectedTargetBinding finalExpected = expected;
+        finalExpected.hasDirty = false;
+        ValidateTargetBinding(sdk, finalExpected);
         const Transactions::TransactionReceipt transactionReceipt = transaction.Commit();
         const DocumentBinding finalBinding = ReadDocumentBinding(sdk);
         std::string json = "{\"transaction\":{\"committed\":" +

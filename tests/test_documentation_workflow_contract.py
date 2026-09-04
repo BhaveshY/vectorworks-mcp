@@ -12,6 +12,7 @@ from tests.test_server_protocol import FakeListener, _configure_server, _native_
 ROOT = Path(__file__).resolve().parents[1]
 BINDING = {
     "file_path": r"C:\models\Documentation Fixture.vwx",
+    "file_name": "Documentation Fixture.vwx",
     "document_fingerprint": "fnv1a64:fixture-document",
     "document_generation": 7,
     "bridge_session_id": "native-session-123",
@@ -74,6 +75,10 @@ class DocumentationWorkflowContractTests(unittest.TestCase):
         self.assertEqual(
             [request["action"] for request in listener.requests],
             ["ping", "get_document_info", "get_sheet_layers"],
+        )
+        self.assertEqual(
+            server._normalise_target_binding(BINDING, require_dirty=True),
+            BINDING,
         )
 
     def test_viewport_annotation_reads_require_exact_parent_uuids(self):
@@ -291,6 +296,17 @@ class DocumentationWorkflowContractTests(unittest.TestCase):
         self.assertIn('GetStringParam(params, "expected_active_layer_uuid")', bridge)
         self.assertIn('GetStringParam(params, "expected_active_layer_name")', bridge)
         self.assertIn("actual.activeLayerUuid != expected.activeLayerUuid", source)
+        apply_start = source.index("std::string ApplyOperations(")
+        dirty_guard = source.index("if (!expected.hasDirty)", apply_start)
+        binding_read = source.index("const DocumentBinding initialBinding", apply_start)
+        transaction_start = source.index("Transactions::NativeTransaction transaction", apply_start)
+        self.assertLess(dirty_guard, binding_read)
+        self.assertLess(dirty_guard, transaction_start)
+        restore = source.index("activeLayerRestorer.RestoreAndVerify()", apply_start)
+        final_validation = source.index("ValidateTargetBinding(sdk, finalExpected)", restore)
+        commit = source.index("transaction.Commit()", apply_start)
+        self.assertLess(restore, final_validation)
+        self.assertLess(final_validation, commit)
 
     def test_review_runner_is_read_only_checkpointed_and_source_bound(self):
         script = (ROOT / "scripts" / "review-all-sheets.py").read_text(encoding="utf-8")
