@@ -68,7 +68,13 @@ capability revision 4 and an exact manifest fingerprint. Missing support is an
 upgrade or restart failure. The host never switches to a decomposed batch,
 Python listener, modal dialog, primitive substitute, or extrusion substitute.
 
-Capability revision 5 adds native, typed create/read/update/delete lifecycles
+**0.7.0 stability gate:** documentation writes are unavailable. Live testing
+found inconsistent annotation Undo/Redo and transient save failures after the
+experimental documentation workflow. Core phase-4 drawing operations remain
+enabled. Sheet, viewport, and annotation reads remain available. See
+[the stabilization record](STABILIZATION-2026-09-08.md) for evidence and recovery.
+
+Capability revision 5 contains native, typed create/read/update/delete lifecycles
 for sheet layers, viewports, and viewport annotations through the same nine
 top-level tools. Documentation writes require an exact saved-document,
 document-generation, bridge-session, and dirty-state binding and commit as one

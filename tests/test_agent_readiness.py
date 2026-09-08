@@ -136,14 +136,14 @@ class AgentReadinessTests(unittest.TestCase):
     def test_release_metadata_pins_tested_mcp_stack(self):
         requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
         expected_dependencies = [
-            "fastmcp==3.4.7",
-            "mcp==1.29.0",
-            "pydantic==2.13.4",
+            "fastmcp==4.0.3",
+            "mcp==2.2.0",
+            "pydantic==2.13.5",
         ]
         self.assertEqual(requirements, expected_dependencies)
 
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "0.6.0"', pyproject)
+        self.assertIn('version = "0.7.0"', pyproject)
         for dependency in expected_dependencies:
             self.assertIn(f'"{dependency}"', pyproject)
 
@@ -1651,7 +1651,7 @@ extern "C" Sint32 GS_EXTERNAL_ENTRY plugin_module_main(Sint32 action, void* modu
             self.assertEqual(runner_report["status"], "completed")
             self.assertFalse(runner_report["failed"])
             self.assertEqual(runner_report["steps"][0]["exitCode"], 0)
-            self.assertIn("fixture stderr", runner_report["steps"][0]["output"])
+            self.assertIn("fixture stderr", " ".join(runner_report["steps"][0]["output"].split()))
             self.assertIn("native command", runner_report["steps"][0]["output"])
             self.assertIn("fixture stdout from native command", runner_report["steps"][0]["output"])
         finally:

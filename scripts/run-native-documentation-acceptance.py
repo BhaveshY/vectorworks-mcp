@@ -15,8 +15,8 @@ import json
 import os
 import sys
 import time
+import traceback
 import uuid
-from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -119,13 +119,13 @@ async def run(args: argparse.Namespace, source: Path, output: Path, token: Path)
     params = StdioServerParameters(command=sys.executable, args=[str(ROOT / "server.py")], cwd=ROOT, env=env)
     with open(os.devnull, "w", encoding="utf-8") as errlog:
         async with stdio_client(params, errlog=errlog) as (read, write):
-            async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=args.timeout_seconds)) as session:
+            async with ClientSession(read, write, read_timeout_seconds=args.timeout_seconds) as session:
                 await session.initialize()
 
                 async def call(tool: str, arguments: dict[str, Any], *, expect_ok: bool = True) -> dict[str, Any]:
                     result = await session.call_tool(tool, arguments)
-                    payload = result.structuredContent or {}
-                    ok = isinstance(payload, dict) and not result.isError and payload.get("ok") is not False
+                    payload = result.structured_content or {}
+                    ok = isinstance(payload, dict) and not result.is_error and payload.get("ok") is not False
                     if ok != expect_ok:
                         raise RuntimeError(f"unexpected {tool} result: {json.dumps(payload, ensure_ascii=False)[:4000]}")
                     return payload
@@ -168,7 +168,7 @@ async def run(args: argparse.Namespace, source: Path, output: Path, token: Path)
                     }},
                     {"type": "create_viewport", "operation_id": "viewport", "params": {
                         "sheet_layer_ref": "$sheet", "name": f"{prefix}-PLAN", "scale": 50,
-                        "x": 210, "y": 148.5, "projection_type": 0, "view_type": 0,
+                        "x": 210, "y": 148.5, "projection_type": 0, "view_type": 7,
                         "render_type": 0, "foreground_render_type": 0,
                         "source_layers": [{"ref": f"uuid:{design['uuid']}", "visibility": "normal"}],
                         "source_classes": [{"name": class_name, "visibility": "normal"}],
@@ -274,6 +274,9 @@ async def run(args: argparse.Namespace, source: Path, output: Path, token: Path)
                     "capture_scope": "active view; inspect PDF for the fixture sheet",
                 }
                 final_view = (await call("vw_view", {"action": "get"})).get("data")
+                initial_view = {key: value for key, value in initial_view.items() if key != "timing"}
+                final_view = {key: value for key, value in final_view.items() if key != "timing"}
+                report["view_readback"] = {"before": initial_view, "after": final_view}
                 report["live_gates"].update({
                     "create_read_update_delete": True,
                     "view_state_restored": final_view == initial_view,
@@ -311,6 +314,7 @@ def main() -> int:
         print(json.dumps({"ok": True, "report": report["report_path"], "live_gates": report["live_gates"]}, separators=(",", ":"), sort_keys=True))
         return 0
     except Exception as exc:
+        traceback.print_exc()
         print(json.dumps({"ok": False, "error": str(exc)}, separators=(",", ":"), sort_keys=True), file=sys.stderr)
         return 1
 

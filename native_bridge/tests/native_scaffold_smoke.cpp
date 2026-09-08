@@ -11,6 +11,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #ifdef _WIN32
@@ -235,7 +236,7 @@ void TestProtocol() {
 
 void TestDispatcherMetadata() {
     Require(RegisteredActionCount() == 35u, "native action registry count drifted");
-    Require(ImplementedActionCount(true) == 35u, "SDK action count drifted");
+    Require(ImplementedActionCount(true) == 34u, "SDK action count drifted");
     Require(ImplementedActionCount(false) == 3u, "scaffold action count drifted");
     const auto* ping = FindActionSpec("ping");
     Require(ping != nullptr, "ping action spec missing");
@@ -267,7 +268,8 @@ void TestDispatcherMetadata() {
     RequireContains(sdkActions, R"("get_sheet_layers")", "SDK actions should advertise sheet reads");
     RequireContains(sdkActions, R"("get_viewports")", "SDK actions should advertise viewport reads");
     RequireContains(sdkActions, R"("get_viewport_annotations")", "SDK actions should advertise annotation reads");
-    RequireContains(sdkActions, R"("apply_documentation_operations")", "SDK actions should advertise documentation writes");
+    Require(sdkActions.find("apply_documentation_operations") == std::string::npos,
+            "unverified documentation writes must stay unavailable");
     const std::string scaffoldActions = ImplementedActionsJson(false);
     RequireContains(scaffoldActions, R"("ping")", "scaffold actions should advertise ping");
     RequireContains(scaffoldActions, R"("stop")", "scaffold actions should advertise stop");
@@ -462,11 +464,37 @@ void TestNativeTransportRoundTrip() {
     RequireContains(unauthorizedPing, R"("success":false)", "unauthorized ping should fail");
     RequireContains(unauthorizedPing, "authentication failed", "unauthorized ping should describe auth failure");
 
+    const bool stopRequestedBeforeRejectedRequest = StopRequested();
+    for (const std::string auth : {std::string(""), std::string(",\"auth_token\":\"wrong\"")}) {
+        SendClientFrame(unauthorizedClient.Get(), "{\"id\":\"rejected-stop\",\"action\":\"stop\",\"params\":{}" + auth + "}");
+        const auto rejectedStop = ReadClientFrame(unauthorizedClient.Get());
+        RequireContains(rejectedStop, R"("success":false)", "unauthorized stop must be rejected");
+        RequireContains(rejectedStop, "authentication failed", "stop must check authentication");
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        Require(authed.IsRunning(), "rejected stop must not shut down the transport");
+        Require(StopRequested() == stopRequestedBeforeRejectedRequest, "rejected stop must not cancel CAD work");
+    }
+
     auto authorizedClient = ConnectToNativeTransport(authed.Port());
     SendClientFrame(authorizedClient.Get(), R"({"id":"tcp-auth","action":"ping","auth_token":"secret","params":{}})");
     const auto authorizedPing = ReadClientFrame(authorizedClient.Get());
     RequireContains(authorizedPing, R"("id":"tcp-auth")", "authorized ping response id drifted");
     RequireContains(authorizedPing, R"("success":true)", "authorized ping should succeed");
+
+#ifdef _WIN32
+    DWORD initialHandles = 0;
+    Require(GetProcessHandleCount(GetCurrentProcess(), &initialHandles) != 0, "read initial handle count");
+    for (int index = 0; index < 128; ++index) {
+        auto probe = ConnectToNativeTransport(authed.Port());
+        SendClientFrame(probe.Get(), R"({"id":"churn","action":"ping","auth_token":"secret","params":{}})");
+        RequireContains(ReadClientFrame(probe.Get()), R"("success":true)", "connection churn ping");
+        probe.Close();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    DWORD finalHandles = 0;
+    Require(GetProcessHandleCount(GetCurrentProcess(), &finalHandles) != 0, "read final handle count");
+    Require(finalHandles <= initialHandles + 8, "completed connections must not retain thread handles");
+#endif
 
     SendClientFrame(authorizedClient.Get(), R"({"id":"tcp-auth-stop","action":"stop","auth_token":"secret","params":{}})");
     const auto authorizedStop = ReadClientFrame(authorizedClient.Get());

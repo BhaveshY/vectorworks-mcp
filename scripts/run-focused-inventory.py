@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-from datetime import timedelta
 from pathlib import Path
 
 import anyio
@@ -36,7 +35,7 @@ async def main() -> None:
     with open(os.devnull, "w", encoding="utf-8") as errlog:
         async with stdio_client(params, errlog=errlog) as (read, write):
             async with ClientSession(
-                read, write, read_timeout_seconds=timedelta(seconds=60)
+                read, write, read_timeout_seconds=60
             ) as session:
                 await session.initialize()
                 result: dict[str, object] = {}
@@ -67,7 +66,7 @@ async def main() -> None:
                     ),
                 ):
                     response = await session.call_tool(tool, args)
-                    result[label] = response.structuredContent or {}
+                    result[label] = response.structured_content or {}
                 print(json.dumps(result, indent=2, ensure_ascii=False))
 
 

@@ -3,8 +3,8 @@
 Historical note: this is an archived install log from an early setup attempt,
 not the current setup guide. Prefer `README.md`, `AGENTS.md`, and
 `scripts\doctor-vectorworks-mcp.ps1` for current agent instructions.
-The current 0.6.0 release pins `fastmcp==3.4.7`, `mcp==1.29.0`, and
-`pydantic==2.13.4`; historical versions and tool counts below are not current
+The current 0.7.0 release pins `fastmcp==4.0.3`, `mcp==2.2.0`, and
+`pydantic==2.13.5`; historical versions and tool counts below are not current
 setup requirements.
 
 Archived warning: do not follow the old checklist below for listener startup.

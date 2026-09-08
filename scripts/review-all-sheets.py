@@ -12,7 +12,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -190,13 +190,13 @@ async def run(args: argparse.Namespace, output: Path, checkpoint_path: Path, tok
     }
     with open(os.devnull, "w", encoding="utf-8") as errlog:
         async with stdio_client(params, errlog=errlog) as (read, write):
-            async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=args.timeout_seconds)) as session:
+            async with ClientSession(read, write, read_timeout_seconds=args.timeout_seconds) as session:
                 await session.initialize()
 
                 async def call(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
                     result = await session.call_tool(tool, arguments)
-                    payload = result.structuredContent or {}
-                    if result.isError or not isinstance(payload, dict) or payload.get("ok") is False:
+                    payload = result.structured_content or {}
+                    if result.is_error or not isinstance(payload, dict) or payload.get("ok") is False:
                         raise RuntimeError(f"{tool} failed: {json.dumps(payload, ensure_ascii=False)[:4000]}")
                     return payload
 

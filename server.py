@@ -70,7 +70,7 @@ DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024
 DEFAULT_PREFLIGHT_CACHE_MS = 5_000
 MAX_PREFLIGHT_CACHE_MS = 5_000
 DEFAULT_AUTH_TOKEN_FILENAME = "auth-token"
-CONNECTOR_VERSION = "0.6.0"
+CONNECTOR_VERSION = "0.7.0"
 MIN_FAST_NATIVE_CAPABILITY_REVISION = 4
 MCP_SERVER_INSTRUCTIONS = (
     "Use the fast-native phase-4 bridge with capability revision 4 or newer. "
@@ -4547,7 +4547,9 @@ def _normalise_documentation_operation(
             result["y"] = _coerce_number(params, "y", required=True, label=item_label) * scale_to_mm
         for key in ("projection_type", "view_type", "render_type", "foreground_render_type"):
             if creating or key in params:
-                result[key] = _optional_documentation_int(params, key, label=item_label)
+                result[key] = 7 if key == "view_type" and key not in params else _optional_documentation_int(params, key, label=item_label)
+                if key == "view_type" and not 3 <= result[key] <= 16:
+                    raise ValueError(f"{item_label}.view_type must be a standard view from 3 through 16; custom orientation is not supported")
         for public_key, reference_key in (("source_layers", "ref"), ("source_classes", "name")):
             if creating or public_key in params:
                 entries = _normalise_visibility_entries(
@@ -6235,6 +6237,16 @@ def vw_find_objects(criteria: str, limit: ObjectQueryLimit = 100) -> str:
     if parsed is None:
         return _send_tool("vw_find_objects", {"criteria": criteria, "limit": limit})
 
+    if parsed[0] in {"name", "class"}:
+        blocked = _cad_preflight_block("get_objects")
+        if blocked is not None:
+            return blocked
+        status = _cached_cad_safe_status() or {}
+        if "find_objects" in status.get("implemented_actions", []):
+            key = "N" if parsed[0] == "name" else "C"
+            value = parsed[1].replace("'", "''")
+            return _send_tool("vw_find_objects", {"criteria": f"(({key}='{value}'))", "limit": limit})
+
     field, value = parsed
     object_type = value if field == "type" else ""
     lookup_limit = MAX_OBJECT_QUERY_LIMIT if field in {"name", "class"} else limit
@@ -7121,6 +7133,11 @@ def vw_read(
 
     requested = min(MAX_OBJECT_QUERY_LIMIT, offset + limit + 1)
     parsed_query = _parse_simple_find_criteria(criteria or "ALL") if action == "query" else None
+    if parsed_query is not None and parsed_query[0] in {"name", "class"}:
+        key = "N" if parsed_query[0] == "name" else "C"
+        value = parsed_query[1].replace("'", "''")
+        criteria = f"(({key}='{value}'))"
+        parsed_query = None
     native_action, params = {
         "document": ("get_document_info", {}),
         "layers": ("get_layers", {}),

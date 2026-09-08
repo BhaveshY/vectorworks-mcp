@@ -845,7 +845,11 @@ class NativeBridgeContractTests(unittest.TestCase):
         bridge = (ROOT / "native_bridge" / "src" / "VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
         view = (ROOT / "native_bridge" / "src" / "ViewDocumentHandlers.cpp").read_text(encoding="utf-8")
 
-        self.assertIn('return "layer:" + TxToUtf8(layerUuid)', bridge)
+        identity = bridge.split("std::string ActiveDocumentIdentity() {", 1)[1].split("std::uint64_t ApplyOperationsFingerprint", 1)[0]
+        self.assertIn("GetDrawingHeader()", identity)
+        self.assertIn("BridgeSessionId()", identity)
+        self.assertNotIn("GetCurrentLayer", identity)
+        self.assertNotIn("filePath", identity)
         self.assertIn('gSDK->DoMenuName(TXString("Fit to Objects"), 0)', view)
         self.assertIn("gSDK->SelectAll()", view)
         self.assertIn("gSDK->DeselectAll()", view)

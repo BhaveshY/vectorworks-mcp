@@ -1,5 +1,12 @@
 # Vectorworks Documentation Workflow
 
+**0.7.0 release gate: writes unavailable.** The native capability manifest marks
+`apply_documentation_operations` unavailable and direct dispatch rejects it
+before mutation. Annotation Undo/Redo did not pass the disposable live test.
+Reads remain available. This document describes the retained experimental
+implementation, not an enabled daily-work feature. See
+[STABILIZATION-2026-09-08.md](STABILIZATION-2026-09-08.md).
+
 This workflow adds native sheet-layer, viewport, and viewport-annotation
 lifecycle support without adding top-level MCP tools. It requires the non-modal
 SDK bridge at capability revision 5 and does not use the Python listener,

@@ -326,7 +326,7 @@ std::string LayerJson(VectorWorks::ISDK& sdk, MCObjectHandle layer) {
         json += ",\"sheet\":{\"title\":" +
             JsonString(SheetTitleFromExpandedName(name, expanded));
         json += ",\"expanded_name\":" + JsonString(expanded);
-        json += ",\"description\":" + JsonString(GetStringVariable(sdk, layer, ovLayerDescription));
+        json += ",\"description\":" + JsonString(sdk.GetDescriptionText(layer).GetStdString());
         json += ",\"dpi\":" + std::to_string(GetShortVariable(sdk, layer, ovLayerDPI));
         const double widthInches = GetDoubleVariable(sdk, layer, ovLayerSheetWidth);
         const double heightInches = GetDoubleVariable(sdk, layer, ovLayerSheetHeight);
@@ -544,15 +544,16 @@ void RequireUniqueLayerName(VectorWorks::ISDK& sdk, const std::string& name, MCO
 void ApplySheetLayerFields(VectorWorks::ISDK& sdk, MCObjectHandle layer, const Operation& operation) {
     if (operation.hasName) {
         RequireUniqueLayerName(sdk, operation.name, layer);
-        if (!sdk.SetLayerName(layer, TXString(operation.name.c_str()), true)) {
+        if (ObjectName(sdk, layer) != operation.name &&
+            !sdk.SetLayerName(layer, TXString(operation.name.c_str()), true)) {
             throw std::runtime_error("Vectorworks rejected the sheet layer name");
         }
     }
     if (operation.hasTitle && !sdk.SetSheetLayerTitle(layer, TXString(operation.title.c_str()))) {
         throw std::runtime_error("Vectorworks rejected the sheet layer title");
     }
-    if (operation.hasDescription) {
-        SetStringVariable(sdk, layer, ovLayerDescription, operation.description);
+    if (operation.hasDescription && !sdk.SetDescriptionText(layer, TXString(operation.description.c_str()))) {
+        throw std::runtime_error("Vectorworks rejected the sheet layer description");
     }
     if (operation.hasDpi) {
         SetShortVariable(sdk, layer, ovLayerDPI, operation.dpi);
@@ -579,11 +580,12 @@ void VerifySheetLayerFields(VectorWorks::ISDK& sdk, MCObjectHandle layer, const 
         const std::string name = ObjectName(sdk, layer);
         const std::string expanded = GetStringVariable(sdk, layer, ovLayerExpandedSheetName);
         if (SheetTitleFromExpandedName(name, expanded) != operation.title) {
-            throw std::runtime_error("sheet layer title readback mismatch");
+            throw std::runtime_error("sheet layer title readback mismatch: name=" + name +
+                ", expanded=" + expanded + ", expected=" + operation.title);
         }
     }
     if (operation.hasDescription &&
-        GetStringVariable(sdk, layer, ovLayerDescription) != operation.description) {
+        sdk.GetDescriptionText(layer).GetStdString() != operation.description) {
         throw std::runtime_error("sheet layer description readback mismatch");
     }
     if (operation.hasDpi && GetShortVariable(sdk, layer, ovLayerDPI) != operation.dpi) {

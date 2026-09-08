@@ -8,6 +8,12 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $ServerPath = Join-Path $RepoRoot "server.py"
 $RequirementsPath = Join-Path $RepoRoot "requirements.txt"
+$LockedRequirementsPath = Join-Path $RepoRoot "requirements.lock"
+$RequirementsOptions = @()
+if (Test-Path -LiteralPath $LockedRequirementsPath -PathType Leaf) {
+    $RequirementsPath = $LockedRequirementsPath
+    $RequirementsOptions = @("--require-hashes")
+}
 $RepoVenvDir = Join-Path $RepoRoot ".venv"
 
 $StateDir = if ($env:LOCALAPPDATA) {
@@ -262,10 +268,10 @@ function Ensure-Requirements {
 
     if (($ExistingHash.Trim() -ne $RequirementsHash) -or (-not (Test-FastMcpImport))) {
         Write-BootstrapLog "Installing requirements from $RequirementsPath"
-        Invoke-Logged { & $VenvPython -m pip install -r $RequirementsPath }
+        Invoke-Logged { & $VenvPython -m pip install @RequirementsOptions -r $RequirementsPath }
         if (-not (Test-FastMcpImport)) {
             Write-BootstrapLog "fastmcp import still failed after normal install; force-reinstalling requirements from $RequirementsPath"
-            Invoke-Logged { & $VenvPython -m pip install --upgrade --force-reinstall -r $RequirementsPath }
+            Invoke-Logged { & $VenvPython -m pip install --upgrade --force-reinstall @RequirementsOptions -r $RequirementsPath }
         }
         if (-not (Test-FastMcpImport)) {
             throw "fastmcp import failed after requirements installation. See $LogPath"

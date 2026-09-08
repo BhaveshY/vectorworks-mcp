@@ -130,7 +130,7 @@ class DocumentationWorkflowContractTests(unittest.TestCase):
                 "operation_id": "viewport",
                 "params": {
                     "sheet_layer_ref": "$sheet", "name": "Floor Plan", "scale": 50,
-                    "x": 0.2, "y": 0.15, "projection_type": 0, "view_type": 0,
+                    "x": 0.2, "y": 0.15, "projection_type": 0, "view_type": 7,
                     "render_type": 0, "foreground_render_type": 0,
                     "source_layers": [{"ref": "uuid:design-layer-1", "visibility": "normal"}],
                     "source_classes": [{"name": "None", "visibility": "normal"}],
@@ -206,7 +206,7 @@ class DocumentationWorkflowContractTests(unittest.TestCase):
             "operation_id": "viewport",
             "params": {
                 "sheet_layer_ref": "$sheet", "name": "Plan", "scale": 50, "x": 1, "y": 1,
-                "projection_type": 0, "view_type": 0, "render_type": 0, "foreground_render_type": 0,
+                "projection_type": 0, "view_type": 7, "render_type": 0, "foreground_render_type": 0,
                 "source_layers": [{"ref": "uuid:design-1", "visibility": "normal"}],
                 "source_classes": [{"name": "None", "visibility": "normal"}],
             },

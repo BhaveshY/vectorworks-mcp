@@ -118,6 +118,24 @@ class GroupedToolSurfaceTests(unittest.TestCase):
         self.assertEqual(unavailable["error"]["required_native_action"], "export_pdf")
         self.assertEqual([request["action"] for request in listener.requests], ["ping"])
 
+    def test_grouped_named_and_class_queries_filter_natively_before_pagination(self):
+        status = _native_phase_four_status()
+        for criteria in ("((N='Hosted Door'))", "((C='Rare Class'))"):
+            with self.subTest(criteria=criteria):
+                def handler(request):
+                    if request["action"] == "ping":
+                        return _response(request, status)
+                    self.assertEqual(request["action"], "find_objects")
+                    self.assertEqual(request["params"], {
+                        "criteria": criteria, "layer": "Level 1", "object_type": "door", "limit": 2,
+                    })
+                    return _response(request, [{"uuid": "hosted-opening", "type": "parametric", "plugin_name": "Door"}])
+                with FakeListener(handler, max_requests=2) as listener:
+                    _configure_server(listener.port)
+                    result = json.loads(server.vw_read("query", criteria=criteria, layer="Level 1", object_type="door", limit=1))
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["data"][0]["uuid"], "hosted-opening")
+
     def test_grouped_query_and_parametric_schema_forward_exact_filters(self):
         status = _native_phase_four_status()
         status["implemented_actions"] = sorted(

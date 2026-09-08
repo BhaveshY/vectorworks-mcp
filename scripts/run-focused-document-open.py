@@ -7,7 +7,6 @@ import json
 import os
 import sys
 import time
-from datetime import timedelta
 from pathlib import Path
 
 import anyio
@@ -66,7 +65,7 @@ async def main() -> None:
             async with ClientSession(
                 read,
                 write,
-                read_timeout_seconds=timedelta(seconds=args.timeout_seconds),
+                read_timeout_seconds=args.timeout_seconds,
             ) as session:
                 await session.initialize()
                 started = time.perf_counter()
@@ -82,18 +81,18 @@ async def main() -> None:
                 report["elapsed_ms"] = round(
                     (time.perf_counter() - started) * 1000.0, 3
                 )
-                payload = result.structuredContent or {}
+                payload = result.structured_content or {}
                 report["open"] = payload
-                if result.isError or payload.get("ok") is False:
+                if result.is_error or payload.get("ok") is False:
                     exit_code = 2
                 else:
                     readback = await session.call_tool("vw_document", {"action": "info"})
-                    readback_payload = readback.structuredContent or {}
+                    readback_payload = readback.structured_content or {}
                     report["readback"] = readback_payload
                     data = readback_payload.get("data") or {}
                     active = Path(str(data.get("filepath", ""))).resolve()
                     report["exact_path_match"] = active == target
-                    if readback.isError or not report["exact_path_match"]:
+                    if readback.is_error or not report["exact_path_match"]:
                         exit_code = 3
     print(json.dumps(report, indent=2, ensure_ascii=False))
     if exit_code:

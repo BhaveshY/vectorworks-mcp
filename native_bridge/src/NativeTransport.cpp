@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <exception>
 #include <mutex>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -295,7 +296,7 @@ public:
             listenerThread_.join();
         }
 
-        std::vector<std::thread> clients;
+        std::vector<ClientWorker> clients;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             clients.swap(clientThreads_);
@@ -304,8 +305,8 @@ public:
             clientSockets_.clear();
         }
         for (auto& client : clients) {
-            if (client.joinable()) {
-                client.join();
+            if (client.thread.joinable()) {
+                client.thread.join();
             }
         }
     }
@@ -324,8 +325,27 @@ public:
     }
 
 private:
+    struct ClientWorker {
+        std::shared_ptr<std::atomic_bool> completed;
+        std::thread thread;
+    };
+
+    void ReapCompletedClients() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto worker = clientThreads_.begin();
+        while (worker != clientThreads_.end()) {
+            if (worker->completed->load()) {
+                worker->thread.join();
+                worker = clientThreads_.erase(worker);
+            } else {
+                ++worker;
+            }
+        }
+    }
+
     void AcceptLoop() {
         while (!stopRequested_.load()) {
+            ReapCompletedClients();
             const auto listener = listenSocket_.load();
             if (listener == kInvalidSocket) {
                 break;
@@ -347,8 +367,29 @@ private:
                 continue;
             }
             SetSocketTimeouts(client, clientIdleSeconds_);
-            clientSockets_.push_back(client);
-            clientThreads_.emplace_back([this, client] { HandleClient(client); });
+            bool socketRegistered = false;
+            bool workerRegistered = false;
+            try {
+                auto completed = std::make_shared<std::atomic_bool>(false);
+                clientSockets_.push_back(client);
+                socketRegistered = true;
+                clientThreads_.push_back({completed, std::thread{}});
+                workerRegistered = true;
+                clientThreads_.back().thread = std::thread([this, client, completed] {
+                    try {
+                        HandleClient(client);
+                    } catch (...) {
+                        RemoveClient(client);
+                        SetLastError("native transport client failed unexpectedly");
+                    }
+                    completed->store(true);
+                });
+            } catch (...) {
+                if (workerRegistered) { clientThreads_.pop_back(); }
+                if (socketRegistered) { clientSockets_.pop_back(); }
+                CloseSocket(client);
+                lastError_ = "native transport could not start a client worker";
+            }
         }
 
         std::lock_guard<std::mutex> lock(mutex_);
@@ -370,7 +411,7 @@ private:
                     frameWasRead = true;
                     const auto request = Protocol::ParseRequestEnvelope(payload);
                     auto response = dispatcher_(request);
-                    shouldStop = request.action == "stop";
+                    shouldStop = request.action == "stop" && response.success;
                     if (!WriteFrame(client, Protocol::SerializeResponseEnvelope(response))) {
                         break;
                     }
@@ -421,7 +462,7 @@ private:
     ResponseSentCallback responseSentCallback_;
     std::atomic<SocketHandle> listenSocket_{kInvalidSocket};
     std::vector<SocketHandle> clientSockets_;
-    std::vector<std::thread> clientThreads_;
+    std::vector<ClientWorker> clientThreads_;
     std::thread listenerThread_;
     std::atomic_bool stopRequested_{true};
     std::atomic_bool running_{false};

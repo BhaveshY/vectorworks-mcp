@@ -6,7 +6,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -95,7 +95,7 @@ async def main() -> None:
 
     with open(os.devnull, "w", encoding="utf-8") as errlog:
         async with stdio_client(params, errlog=errlog) as (read, write):
-            async with ClientSession(read, write, read_timeout_seconds=timedelta(seconds=120)) as session:
+            async with ClientSession(read, write, read_timeout_seconds=120) as session:
                 await session.initialize()
                 listed = await session.list_tools()
                 tool_names = {tool.name for tool in listed.tools}
@@ -106,8 +106,8 @@ async def main() -> None:
                     started = time.perf_counter()
                     result = await session.call_tool(tool, arguments)
                     report["timings_ms"][label] = round((time.perf_counter() - started) * 1000.0, 3)
-                    payload = result.structuredContent or {}
-                    if result.isError or not isinstance(payload, dict) or payload.get("ok") is False:
+                    payload = result.structured_content or {}
+                    if result.is_error or not isinstance(payload, dict) or payload.get("ok") is False:
                         raise RuntimeError(f"{label} failed: {json.dumps(payload, ensure_ascii=False)[:5000]}")
                     return payload
 

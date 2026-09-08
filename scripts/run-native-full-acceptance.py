@@ -13,7 +13,6 @@ import os
 import sys
 import time
 import uuid
-from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -256,7 +255,7 @@ async def run_acceptance(
             async with ClientSession(
                 read,
                 write,
-                read_timeout_seconds=timedelta(seconds=args.timeout_seconds),
+                read_timeout_seconds=args.timeout_seconds,
             ) as session:
                 initialized = await session.initialize()
                 listed = await session.list_tools()
@@ -264,8 +263,8 @@ async def run_acceptance(
                 if set(tool_names) != EXPECTED_TOOLS:
                     raise RuntimeError(f"unexpected MCP tool surface: {tool_names}")
                 report["server"] = {
-                    "name": initialized.serverInfo.name,
-                    "version": initialized.serverInfo.version,
+                    "name": initialized.server_info.name,
+                    "version": initialized.server_info.version,
                     "tools": tool_names,
                 }
 
@@ -282,10 +281,10 @@ async def run_acceptance(
                     report["timings_ms"][key] = round(
                         (time.perf_counter() - started) * 1000.0, 3
                     )
-                    payload = result.structuredContent or {}
+                    payload = result.structured_content or {}
                     ok = (
                         isinstance(payload, dict)
-                        and not result.isError
+                        and not result.is_error
                         and payload.get("ok") is not False
                     )
                     if expect_ok and not ok:
@@ -1013,7 +1012,7 @@ async def run_acceptance(
                         await query_named(object_name, label=f"verify_type_{object_type}"),
                         f"hosted {object_type}",
                     )
-                    if created.get("type") != "parametric":
+                    if created.get("native_type", created.get("type")) != "parametric" or created.get("plugin_name") != object_type.title():
                         raise RuntimeError(f"hosted {object_type} is not a parametric node")
                     individual_type_results[object_type] = payload
                     individual_type_objects[object_type] = created
@@ -1270,7 +1269,7 @@ async def run_acceptance(
                         label=f"verify_{logical_type}",
                     )
                     verified_item = require_exactly_one(item, f"{logical_type} {name}")
-                    if verified_item.get("type") != native_type:
+                    if verified_item.get("native_type", verified_item.get("type")) != native_type:
                         raise RuntimeError(
                             f"{logical_type} {name} read back as {verified_item.get('type')!r}, "
                             f"expected native type {native_type!r}"
@@ -1444,7 +1443,7 @@ async def run_acceptance(
                             "advertised": sorted(EXPECTED_CREATE_TYPES),
                             "executed": sorted(individual_type_results),
                             "native_types": {
-                                object_type: item.get("type")
+                                object_type: item.get("native_type", item.get("type"))
                                 for object_type, item in sorted(individual_type_objects.items())
                             },
                             "symbol_definition": symbol_definition_name,

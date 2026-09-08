@@ -1636,6 +1636,8 @@ std::vector<MCObjectHandle> CollectObjectsByCriteria(const std::string& criteria
     return objects;
 }
 
+std::optional<std::string> ExactNameFromCriteria(const std::string& criteria);
+
 std::string HandleFindObjects(const Params& params) {
     const std::string criteria = TrimCopy(GetStringParam(params, "criteria", "ALL"));
     const std::string layer = TrimCopy(GetStringParam(params, "layer"));
@@ -1660,17 +1662,24 @@ std::string HandleFindObjects(const Params& params) {
     }
     std::vector<MCObjectHandle> filtered;
     filtered.reserve(static_cast<std::size_t>(limit));
-    for (MCObjectHandle object : CollectObjectsByCriteria(criteria, 1000)) {
+    const auto collect = [&](MCObjectHandle object) {
+        if (!object || !IsUserVisibleObjectType(gSDK->GetObjectTypeN(object)) ||
+            static_cast<int>(filtered.size()) >= limit) {
+            return;
+        }
         if (!layer.empty() && LayerNameForObject(object) != layer) {
-            continue;
+            return;
         }
         if (!objectType.empty() && !MatchesObjectType(object, objectType)) {
-            continue;
+            return;
         }
         filtered.push_back(object);
-        if (static_cast<int>(filtered.size()) >= limit) {
-            break;
-        }
+    };
+    const auto exactName = ExactNameFromCriteria(criteria);
+    if (exactName) {
+        collect(gSDK->GetNamedObject(TXString(exactName->c_str())));
+    } else {
+        gSDK->ForEachObjectInCriteria(TXString(criteria.c_str()), collect);
     }
     return ObjectListJson(filtered);
 }
@@ -3538,30 +3547,16 @@ void ValidateMutationTarget(const ApplyOperation& operation, const std::string& 
 }
 
 std::string ActiveDocumentIdentity() {
-    MCObjectHandle layer = gSDK ? gSDK->GetActiveLayer() : nullptr;
-    if (!layer && gSDK) {
-        layer = gSDK->GetCurrentLayer();
+    if (!gSDK || !gSDK->GetDrawingHeader()) {
+        throw std::runtime_error("an active document is required for operation replay identity");
     }
-    if (layer) {
-        TXString layerUuid;
-        if (gSDK->GetObjectUuid(layer, layerUuid) && !layerUuid.IsEmpty()) {
-            return "layer:" + TxToUtf8(layerUuid);
-        }
-    }
-    std::string identity;
-    VectorWorks::Filing::IFileIdentifierPtr activeFile(VectorWorks::Filing::IID_FileIdentifier);
-    bool saved = false;
-    if (activeFile && gSDK->GetActiveDocument(&activeFile, saved)) {
-        TXString path;
-        TXString name;
-        activeFile->GetFileFullPath(path);
-        activeFile->GetFileName(name);
-        identity = TxToUtf8(path);
-        if (identity.empty()) {
-            identity = TxToUtf8(name);
-        }
-    }
-    return identity;
+    const auto header = gSDK->GetDrawingHeader();
+    TXString headerUuid;
+    gSDK->GetObjectUuid(header, headerUuid);
+    std::ostringstream identity;
+    identity << Documentation::BridgeSessionId() << ":" << TxToUtf8(headerUuid)
+             << ":" << reinterpret_cast<std::uintptr_t>(header);
+    return identity.str();
 }
 
 std::uint64_t ApplyOperationsFingerprint(const Params& params) {
@@ -4007,7 +4002,7 @@ std::vector<Documentation::Operation> ParseDocumentationOperations(const Params&
                 item, "projection_type", 0, std::numeric_limits<short>::min(), std::numeric_limits<short>::max()));
             operation.hasViewType = creating || HasParam(item, "view_type");
             operation.viewType = static_cast<short>(GetBoundedIntParam(
-                item, "view_type", 0, std::numeric_limits<short>::min(), std::numeric_limits<short>::max()));
+                item, "view_type", standardViewTop, standardViewFront, standardViewBottomLeftRearIso));
             operation.hasRenderType = creating || HasParam(item, "render_type");
             operation.renderType = static_cast<short>(GetBoundedIntParam(
                 item, "render_type", 0, std::numeric_limits<short>::min(), std::numeric_limits<short>::max()));
@@ -4175,6 +4170,9 @@ std::vector<Documentation::Operation> ParseDocumentationOperations(const Params&
 }
 
 std::string HandleApplyDocumentationOperations(const Params& params) {
+    if (!kDocumentationWritesEnabled) {
+        throw std::runtime_error("documentation writes are unavailable pending native Undo/Redo acceptance; no writes started");
+    }
     return Documentation::ApplyOperations(
         *gSDK,
         ParseDocumentationTargetBinding(params),

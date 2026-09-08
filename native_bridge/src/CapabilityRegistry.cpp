@@ -71,6 +71,7 @@ constexpr std::array<ObjectKindSpec, 20> kObjectKindRegistry = {{
 }};
 
 bool IsImplemented(const ActionSpec& spec, bool cadHandlersImplemented) {
+    if (spec.action == "apply_documentation_operations" && !kDocumentationWritesEnabled) return false;
     return spec.nativePhase == 0u || cadHandlersImplemented;
 }
 
