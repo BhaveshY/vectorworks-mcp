@@ -21,7 +21,7 @@ Legend:
 | `get_sheet_layers` | no Python fallback | read | main/plugin event context | 4, revision 5 | Bound/paged native sheet-layer metadata and exact viewport counts. |
 | `get_viewports` | no Python fallback | read | main/plugin event context | 4, revision 5 | Bound/paged viewports on one exact sheet UUID, including scale, crop, view/render settings, placement, and complete source layer/class visibility. |
 | `get_viewport_annotations` | no Python fallback | read | main/plugin event context | 4, revision 5 | Bound/paged native annotation-group children for one exact sheet/viewport UUID pair. |
-| `get_objects` | `handle_get_objects` | read | main/plugin event context | 1 | Lists objects with layer/type filters |
+| `get_objects` | `handle_get_objects` | read | main/plugin event context | 1 | Lists objects with layer/type filters; native text objects include live UTF-8 `text` content, including empty strings and line breaks. `object_read_features` advertises `text_content`. |
 | `selection` | `handle_selection` | mixed/destructive | main/plugin event context | 1 | `get` and `clear` work; `delete` requires explicit destructive test |
 | `create_object` | `handle_create_object` | write | main/plugin event context | 1/4 | Creates phase-1 primitives plus phase-4 open/closed polygons; returns UUID, bounds, and polygon vertex/closure metadata |
 | `batch_create_objects` | `handle_batch_create_objects` | write | main/plugin event context | 1/4 | Atomically creates mixed supported objects, including phase-4 polygons, in one undo event |

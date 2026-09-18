@@ -24,6 +24,7 @@ PHASE_ONE_REQUIRED_ACTIONS = {
     "batch_create_objects",
 }
 PHASE_TWO_REQUIRED_ACTIONS = PHASE_ONE_REQUIRED_ACTIONS | {
+    "apply_operations",
     "create_wall",
     "create_text",
     "create_linear_dimension",
@@ -675,7 +676,11 @@ def _run_phase_two_write_fixture(sock: socket.socket, report: dict[str, Any]) ->
 
     for action, expected_type, params in fixtures:
         name = str(params["name"])
-        response = _record_call(sock, report, action, "phase2-fixture", params=params)
+        create_params = dict(params)
+        if action == "create_linear_dimension":
+            # Native dimensions cannot be named; cleanup uses their exact UUID.
+            create_params.pop("name")
+        response = _record_call(sock, report, action, "phase2-fixture", params=create_params)
         if response is None:
             report["failures"].append("skipped {0} cleanup because creation did not succeed".format(action))
             continue
@@ -694,6 +699,25 @@ def _run_phase_two_write_fixture(sock: socket.socket, report: dict[str, Any]) ->
         fixture_present = False
         if objects_response is not None:
             fixture_present = _validate_fixture_present(report, objects_response.get("result"), name, handle, object_type=None)
+
+        if action == "create_linear_dimension":
+            objects = objects_response.get("result") if objects_response else None
+            matches = [item for item in objects
+                       if isinstance(item, dict) and item.get("handle") == handle] if isinstance(objects, list) else []
+            if not fixture_present or len(matches) != 1 or not _is_non_empty_string(matches[0].get("uuid")):
+                report["failures"].append("dimension UUID was not proven; refusing cleanup")
+                continue
+            uuid = matches[0]["uuid"]
+            deleted = _record_call(sock, report, "apply_operations", "dimension-fixture-delete",
+                                  params={"operation_count": 1, "idempotency_key": name + "-cleanup",
+                                          "operation_1_json": json.dumps({"op": "object.delete", "target": "uuid:" + uuid,
+                                                                           "confirm": "DELETE_OBJECT"})})
+            cleanup = _record_call(sock, report, "get_objects", "dimension-fixture-cleanup", params={"limit": 500})
+            if cleanup is not None:
+                _validate_fixture_absent(report, cleanup.get("result"), name, handle, object_type=None)
+            if deleted is None:
+                report["failures"].append("dimension cleanup transaction failed")
+            continue
 
         selection_cleared = _record_call(sock, report, "selection", "{0}-clear".format(action), params={"action": "clear"}) is not None
         selection_select_sent = _record_call(

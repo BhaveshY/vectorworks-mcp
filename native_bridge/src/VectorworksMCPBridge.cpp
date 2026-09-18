@@ -905,6 +905,8 @@ Protocol::ResponseEnvelope HandlePingOnTransportThread(const Protocol::RequestEn
     payload += ImplementedActionsJson(true);
     payload += ",\"create_object_types\":";
     payload += CreateObjectTypesJson(true);
+    payload += ",\"object_read_features\":";
+    payload += ObjectReadFeaturesJson(true);
     payload += ",\"cad_handlers_implemented\":true";
     payload += ",\"main_context_pump\":";
     payload += JsonString(MainContextPumpName());
@@ -928,6 +930,8 @@ Protocol::ResponseEnvelope HandlePingOnTransportThread(const Protocol::RequestEn
     payload += JsonString(CapabilityFingerprint(false));
     payload += ",\"create_object_types\":";
     payload += CreateObjectTypesJson(false);
+    payload += ",\"object_read_features\":";
+    payload += ObjectReadFeaturesJson(false);
     payload += R"(,"cad_handlers_implemented":false})";
     return {
         request.id,
@@ -1153,6 +1157,11 @@ std::string ObjectJson(MCObjectHandle object) {
     }
     json += ",\"name\":";
     json += JsonString(TxToUtf8(name));
+
+    if (type == kTextNode) {
+        json += ",\"text\":";
+        json += JsonString(TxToUtf8(gSDK->GetTextChars(object)));
+    }
 
     if (isSpace) {
         VWFC::VWObjects::VWParametricObj parametric(object);
