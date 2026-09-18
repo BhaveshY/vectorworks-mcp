@@ -209,6 +209,10 @@ std::string ObjectKindDescriptorsJson(bool cadHandlersImplemented) {
     return json;
 }
 
+std::string ObjectReadFeaturesJson(bool cadHandlersImplemented) {
+    return cadHandlersImplemented ? R"(["text_content"])" : "[]";
+}
+
 std::string CapabilityFingerprint(bool cadHandlersImplemented) {
     std::string canonical = std::to_string(kCapabilityRevision);
     canonical.push_back('|');
@@ -221,6 +225,8 @@ std::string CapabilityFingerprint(bool cadHandlersImplemented) {
     canonical += CreateObjectTypesJson(cadHandlersImplemented);
     canonical.push_back('|');
     canonical += ObjectKindDescriptorsJson(cadHandlersImplemented);
+    canonical.push_back('|');
+    canonical += ObjectReadFeaturesJson(cadHandlersImplemented);
 
     constexpr std::uint64_t kOffset = 14695981039346656037ull;
     constexpr std::uint64_t kPrime = 1099511628211ull;
@@ -249,6 +255,8 @@ std::string CapabilitiesResultJson(bool cadHandlersImplemented) {
     json += CreateObjectTypesJson(cadHandlersImplemented);
     json += ",\"object_kind_descriptors\":";
     json += ObjectKindDescriptorsJson(cadHandlersImplemented);
+    json += ",\"object_read_features\":";
+    json += ObjectReadFeaturesJson(cadHandlersImplemented);
     json.push_back('}');
     return json;
 }

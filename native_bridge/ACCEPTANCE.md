@@ -13,6 +13,26 @@ what is installed or missing.
 
 ## Vectorworks 2024 Smoke Test
 
+### Text readback gate
+
+After installing the candidate bridge, require `object_read_features` to
+contain `text_content`. In a disposable drawing, create native text with
+German umlauts, non-Latin characters, quotes, tabs, and multiple lines. Read
+with `vw_read(action="query", object_type="text", fields=["uuid", "text"])`
+and compare the returned strings with the actual text. Repeat through a
+selection read and a named-object query. Use a page size smaller than the
+fixture set and follow every cursor to verify complete pagination.
+
+Edit one text object manually, then read it again by the same identity and
+verify the changed content. Where Vectorworks permits an empty text object,
+require `text: ""`. Compare selected non-text geometry and require no `text`
+field. Confirm the read leaves the active view, selection, and dirty state
+unchanged. Capture the candidate artifact hash and native manifest fingerprint
+with the evidence. A passing SDK build and host protocol tests do not replace
+this live gate.
+
+### General native smoke
+
 1. Start Vectorworks 2024.
 2. Plan or install the compiled bridge artifact with the native doctor:
 

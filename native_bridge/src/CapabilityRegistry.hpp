@@ -19,6 +19,7 @@ std::string ImplementedActionsJson(bool cadHandlersImplemented);
 std::string CapabilityDescriptorsJson(bool cadHandlersImplemented);
 std::string CreateObjectTypesJson(bool cadHandlersImplemented);
 std::string ObjectKindDescriptorsJson(bool cadHandlersImplemented);
+std::string ObjectReadFeaturesJson(bool cadHandlersImplemented);
 std::string CapabilityFingerprint(bool cadHandlersImplemented);
 std::string CapabilitiesResultJson(bool cadHandlersImplemented);
 
