@@ -266,6 +266,20 @@ class NativeBridgeContractTests(unittest.TestCase):
 
     def test_native_smoke_harness_accepts_phase_two_write_fixture(self):
         with MockNativeBridge() as bridge:
+            bridge.status["implemented_actions"].append("apply_operations")
+
+            def delete_dimension(request):
+                operation = json.loads(request["params"]["operation_1_json"])
+                self.assertEqual(operation["op"], "object.delete")
+                self.assertEqual(operation["confirm"], "DELETE_OBJECT")
+                uuid = operation["target"].removeprefix("uuid:")
+                matches = [obj for obj in bridge.objects if obj.get("uuid") == uuid]
+                self.assertEqual(len(matches), 1)
+                self.assertEqual(matches[0]["type"], "linear_dimension")
+                bridge.objects.remove(matches[0])
+                return {"success": True, "result": {"committed": True, "verified": True}}
+
+            bridge.response_overrides["apply_operations"] = delete_dimension
             report = run_smoke(
                 port=bridge.port,
                 ping_count=1,
@@ -548,7 +562,7 @@ class NativeBridgeContractTests(unittest.TestCase):
             if action == "get_objects" and str(iteration).endswith("-present"):
                 return {
                     "success": True,
-                    "result": [{"handle": state["handle"], "type": "wall", "name": state["fixture_name"]}],
+                    "result": [{"handle": state["handle"], "uuid": "phase2-uuid", "type": "wall", "name": state["fixture_name"]}],
                 }
             if action == "selection" and str(iteration).endswith("-get"):
                 return {
@@ -577,7 +591,12 @@ class NativeBridgeContractTests(unittest.TestCase):
             for action, iteration, params in calls
             if action == "selection" and str(iteration).endswith("-delete")
         ]
-        self.assertEqual(len(phase_two_deletes), 4)
+        self.assertEqual(len(phase_two_deletes), 3)
+        dimension_deletes = [params for action, _, params in calls if action == "apply_operations"]
+        self.assertEqual(len(dimension_deletes), 1)
+        self.assertEqual(json.loads(dimension_deletes[0]["operation_1_json"]), {
+            "op": "object.delete", "target": "uuid:phase2-uuid", "confirm": "DELETE_OBJECT",
+        })
         self.assertTrue(all(params.get("confirm") == "DELETE_EXACT_NAME" for params in phase_two_deletes))
         self.assertTrue(all(str(params.get("criteria", "")).startswith("((N='VW_MCP_NATIVE_PHASE2_SMOKE_") for params in phase_two_deletes))
         self.assertIn(
