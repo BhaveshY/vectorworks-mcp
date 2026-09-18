@@ -1168,6 +1168,8 @@ class NativeBridgeContractTests(unittest.TestCase):
         # Grouped view and documentation variants resolve their wire actions at
         # dispatch time, so they do not have one static TOOL_SAFETY wire_action.
         native_only_actions = {
+            "query_objects",
+            "transaction_status",
             "apply_operations",
             "apply_documentation_operations",
             "get_sheet_layers",

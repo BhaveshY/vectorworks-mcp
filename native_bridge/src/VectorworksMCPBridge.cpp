@@ -34,6 +34,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -1128,98 +1129,134 @@ std::string RgbStringFromColorRef(ColorRef colorRef) {
         std::to_string(static_cast<unsigned int>(rgb.blue));
 }
 
-std::string ObjectJson(MCObjectHandle object) {
+std::string ObjectJson(MCObjectHandle object, const std::set<std::string>* fields = nullptr) {
+    const auto wants = [&](const char* key) { return !fields || fields->count(key) != 0u; };
     const short type = gSDK->GetObjectTypeN(object);
-    const std::string semanticType = SemanticObjectTypeName(object);
+    const bool needsSemantic = wants("type") || wants("native_type") || wants("room_id") ||
+    wants("height") || wants("net_area") || wants("gross_area");
+    const std::string semanticType = needsSemantic ? SemanticObjectTypeName(object) : "";
     const bool isSpace = semanticType == "space";
-    const std::string pluginName = type == kParametricNode ? ParametricPluginName(object) : "";
+    const std::string pluginName = wants("plugin_name") && type == kParametricNode ? ParametricPluginName(object) : "";
     TXString name;
-    gSDK->GetObjectName(object, name);
+    if (wants("name")) gSDK->GetObjectName(object, name);
 
-    std::string json = "{\"handle\":";
-    json += JsonString(HandleId(object));
-    const auto uuid = ObjectUuidString(object);
+    std::string json = "{";
+    if (wants("handle")) json += "\"handle\":" + JsonString(HandleId(object));
+    const auto uuid = wants("uuid") ? ObjectUuidString(object) : "";
     if (!uuid.empty()) {
         json += ",\"uuid\":";
         json += JsonString(uuid);
     }
-    json += ",\"type\":";
-    json += JsonString(semanticType);
-    json += ",\"type_id\":";
-    json += std::to_string(static_cast<int>(type));
+    if (wants("type")) {
+        json += ",\"type\":";
+        json += JsonString(semanticType);
+    }
+    if (wants("type_id")) {
+        json += ",\"type_id\":";
+        json += std::to_string(static_cast<int>(type));
+    }
     if (!pluginName.empty()) {
         json += ",\"plugin_name\":";
         json += JsonString(pluginName);
     }
-    if (semanticType != ObjectTypeName(type)) {
+    if (wants("native_type") && semanticType != ObjectTypeName(type)) {
         json += ",\"native_type\":";
         json += JsonString(ObjectTypeName(type));
     }
-    json += ",\"name\":";
-    json += JsonString(TxToUtf8(name));
+    if (wants("name")) {
+        json += ",\"name\":";
+        json += JsonString(TxToUtf8(name));
+    }
 
-    if (type == kTextNode) {
+    if (type == kTextNode && wants("text")) {
         json += ",\"text\":";
         json += JsonString(TxToUtf8(gSDK->GetTextChars(object)));
     }
 
     if (isSpace) {
         VWFC::VWObjects::VWParametricObj parametric(object);
-        json += ",\"room_id\":";
-        json += JsonString(TxToUtf8(parametric.GetParamString(TXString("11_Room ID"))));
-        json += ",\"height\":";
-        json += JsonNumber(parametric.GetParamReal(TXString("11_Net Height")));
-        VCOMPtr<VectorWorks::Extension::ISpaceObjectSupport> support(
+        if (wants("room_id")) {
+            json += ",\"room_id\":";
+            json += JsonString(TxToUtf8(parametric.GetParamString(TXString("11_Room ID"))));
+        }
+        if (wants("height")) {
+            json += ",\"height\":";
+            json += JsonNumber(parametric.GetParamReal(TXString("11_Net Height")));
+        }
+        if (wants("net_area") || wants("gross_area")) {
+            VCOMPtr<VectorWorks::Extension::ISpaceObjectSupport> support(
             VectorWorks::Extension::IID_VCOMSpace);
-        WorldCoord netArea = 0.0;
-        WorldCoord grossArea = 0.0;
-        if (support && support->NetArea(object, netArea) && support->GrossArea(object, grossArea)) {
-            json += ",\"net_area\":";
-            json += JsonNumber(static_cast<double>(netArea));
-            json += ",\"gross_area\":";
-            json += JsonNumber(static_cast<double>(grossArea));
+            WorldCoord netArea = 0.0;
+            WorldCoord grossArea = 0.0;
+            if (support && support->NetArea(object, netArea) && support->GrossArea(object, grossArea)) {
+                if (wants("net_area")) {
+                    json += ",\"net_area\":";
+                    json += JsonNumber(static_cast<double>(netArea));
+                }
+                if (wants("gross_area")) {
+                    json += ",\"gross_area\":";
+                    json += JsonNumber(static_cast<double>(grossArea));
+                }
+            }
         }
     }
 
-    const auto layerName = LayerNameForObject(object);
+    const auto layerName = wants("layer") ? LayerNameForObject(object) : "";
     if (!layerName.empty()) {
         json += ",\"layer\":";
         json += JsonString(layerName);
     }
-    const auto className = ClassNameForObject(object);
+    const auto className = wants("class") || wants("class_name") ? ClassNameForObject(object) : "";
     if (!className.empty()) {
-        json += ",\"class\":";
-        json += JsonString(className);
-        json += ",\"class_name\":";
-        json += JsonString(className);
+        if (wants("class")) {
+            json += ",\"class\":";
+            json += JsonString(className);
+        }
+        if (wants("class_name")) {
+            json += ",\"class_name\":";
+            json += JsonString(className);
+        }
     }
 
     ObjectColorType colors = {};
-    if (gSDK->GetColor(object, colors)) {
-        json += ",\"fillColor\":";
-        json += JsonString(RgbStringFromColorRef(colors.fillFore));
-        json += ",\"penColor\":";
-        json += JsonString(RgbStringFromColorRef(colors.penFore));
+    if ((wants("fillColor") || wants("penColor")) && gSDK->GetColor(object, colors)) {
+        if (wants("fillColor")) {
+            json += ",\"fillColor\":";
+            json += JsonString(RgbStringFromColorRef(colors.fillFore));
+        }
+        if (wants("penColor")) {
+            json += ",\"penColor\":";
+            json += JsonString(RgbStringFromColorRef(colors.penFore));
+        }
     }
-    json += ",\"lineWeight\":";
-    json += std::to_string(static_cast<int>(gSDK->GetLineWeight(object)));
-    json += ",\"fillPattern\":";
-    json += std::to_string(static_cast<int>(gSDK->GetFillPat(object)));
-    json += ",\"opacity\":";
-    json += std::to_string(static_cast<int>(gSDK->GetOpacity(object)));
+    if (wants("lineWeight")) {
+        json += ",\"lineWeight\":";
+        json += std::to_string(static_cast<int>(gSDK->GetLineWeight(object)));
+    }
+    if (wants("fillPattern")) {
+        json += ",\"fillPattern\":";
+        json += std::to_string(static_cast<int>(gSDK->GetFillPat(object)));
+    }
+    if (wants("opacity")) {
+        json += ",\"opacity\":";
+        json += std::to_string(static_cast<int>(gSDK->GetOpacity(object)));
+    }
 
-    WorldRect bounds;
-    gSDK->GetObjectBounds(object, bounds);
-    json += ",\"bounds\":{\"top_left\":[";
-    json += JsonNumber(bounds.Left());
-    json += ",";
-    json += JsonNumber(bounds.Top());
-    json += "],\"bottom_right\":[";
-    json += JsonNumber(bounds.Right());
-    json += ",";
-    json += JsonNumber(bounds.Bottom());
-    json += "]}";
+    if (wants("bounds")) {
+        WorldRect bounds;
+        gSDK->GetObjectBounds(object, bounds);
+        json += ",\"bounds\":{\"top_left\":[";
+        json += JsonNumber(bounds.Left());
+        json += ",";
+        json += JsonNumber(bounds.Top());
+        json += "],\"bottom_right\":[";
+        json += JsonNumber(bounds.Right());
+        json += ",";
+        json += JsonNumber(bounds.Bottom());
+        json += "]}";
+    }
     json += "}";
+    if (json.size() > 1u && json[1] == ',') json.erase(1u, 1u);
     return json;
 }
 
@@ -1723,6 +1760,65 @@ std::vector<MCObjectHandle> CollectObjectsByExactNameCriteria(const std::string&
         objects.push_back(object);
     }
     return objects;
+}
+
+std::string HandleQueryObjects(const Params& params) {
+    const int limit = GetBoundedIntParam(params, "limit", 100, 1, 1000);
+    const int offset = GetBoundedIntParam(params, "offset", 0, 0, 1000000000);
+    const std::string mode = GetStringParam(params, "mode", "objects");
+    const std::string layerName = GetStringParam(params, "layer");
+    const std::string objectType = GetStringParam(params, "object_type");
+    if (mode != "objects" && mode != "criteria" && mode != "selection")
+        throw std::invalid_argument("query mode must be objects, criteria, or selection");
+    MCObjectHandle layer = layerName.empty() ? nullptr : FindLayerByName(layerName);
+    if (!layerName.empty() && !layer) throw std::invalid_argument("layer filter was not found");
+    std::set<std::string> fields;
+    const int fieldCount = GetBoundedIntParam(params, "field_count", 0, 0, 100);
+    for (int index = 1; index <= fieldCount; ++index)
+        fields.insert(GetStringParam(params, "field_" + std::to_string(index)));
+    if (params.find("expected_document_fingerprint") != params.end())
+        Documentation::ValidateTargetBinding(*gSDK, ParseDocumentationTargetBinding(params));
+    const auto binding = Documentation::ReadDocumentBinding(*gSDK);
+    std::vector<MCObjectHandle> page;
+    page.reserve(static_cast<std::size_t>(limit));
+    int matched = 0;
+    bool hasMore = false;
+    std::unordered_set<MCObjectHandle> seen;
+    const auto collect = [&](MCObjectHandle object) {
+        if (hasMore || !object || !IsUserVisibleObjectType(gSDK->GetObjectTypeN(object))) return;
+        if (!objectType.empty() && !MatchesObjectType(object, objectType)) return;
+        if (!layerName.empty() && LayerNameForObject(object) != layerName) return;
+        if (!seen.insert(object).second) return;
+        if (matched++ < offset) return;
+        if (page.size() == static_cast<std::size_t>(limit)) { hasMore = true; return; }
+        page.push_back(object);
+    };
+    if (mode == "criteria") {
+        const auto criteria = GetStringParam(params, "criteria", "ALL");
+        const auto name = ExactNameFromCriteria(criteria);
+        if (name) collect(gSDK->GetNamedObject(TXString(name->c_str())));
+        else gSDK->ForEachObjectInCriteria(TXString(criteria.c_str()), collect);
+    } else if (mode == "selection") {
+        gSDK->ForEachObjectN(allObjects + descendIntoAll + descendIntoViewports + descendIntoAuxLists,
+            [&](MCObjectHandle object) { if (object && gSDK->IsSelected(object)) collect(object); });
+    } else {
+        const auto layers = layer ? std::vector<MCObjectHandle>{layer} : CollectLayerHandles();
+        for (MCObjectHandle currentLayer : layers) {
+            for (MCObjectHandle object = gSDK->FirstMemberObj(currentLayer);
+                 object && !hasMore && gSDK->GetObjectTypeN(object) != kTermNode;
+                 object = gSDK->NextObject(object)) collect(object);
+            if (hasMore) break;
+        }
+    }
+    std::string json = "{\"items\":[";
+    for (std::size_t index = 0; index < page.size(); ++index) {
+        if (index) json += ",";
+        json += ObjectJson(page[index], fields.empty() ? nullptr : &fields);
+    }
+    json += "],\"has_more\":" + std::string(hasMore ? "true" : "false");
+    json += ",\"offset\":" + std::to_string(offset);
+    json += ",\"binding\":" + Documentation::DocumentBindingJson(binding) + "}";
+    return json;
 }
 
 std::string HandleSelection(const Params& params) {
@@ -4307,8 +4403,15 @@ std::string HandleApplyOperations(const Params& params) {
             idempotencyKey,
             ActiveDocumentIdentity(),
             operationsFingerprint)) {
+        if (params.find("expected_document_fingerprint") != params.end()) {
+            auto expected = ParseDocumentationTargetBinding(params);
+            expected.hasDirty = false;
+            Documentation::ValidateTargetBinding(*gSDK, expected);
+        }
         return WrapApplyOperationsResult(*cached, idempotencyKey, true);
     }
+    if (params.find("expected_document_fingerprint") != params.end())
+        Documentation::ValidateTargetBinding(*gSDK, ParseDocumentationTargetBinding(params));
     PreparedApplyOperationTargets preparedTargets = PrepareApplyOperationTargets(operations);
 
     std::unordered_map<std::string, MCObjectHandle> localObjects;
@@ -4736,6 +4839,26 @@ Protocol::ResponseEnvelope DispatchCadRequestOnVectorworksMainContext(const Prot
 #if VECTORWORKS_MCP_HAS_SDK
     try {
         const Params params = ParseParams(request.paramsJson);
+        if (request.action == "query_objects") {
+            return {request.id, true, HandleQueryObjects(params), ""};
+        }
+        if (request.action == "transaction_status") {
+            if (params.find("expected_document_fingerprint") != params.end()) {
+                auto expected = ParseDocumentationTargetBinding(params);
+                expected.hasDirty = false;
+                Documentation::ValidateTargetBinding(*gSDK, expected);
+            }
+            const auto key = GetStringParam(params, "idempotency_key");
+            if (key.empty() || key.size() > kMaxApplyReferenceChars)
+                throw std::invalid_argument("idempotency_key is required and must be at most 128 characters");
+            const auto identity = ActiveDocumentIdentity();
+            for (const auto& entry : gApplyOperationsCache) {
+                if (entry.idempotencyKey == key && entry.documentIdentity == identity)
+                    return {request.id, true, "{\"state\":\"committed\",\"recorded_result\":" +
+                        entry.transactionJson + ",\"current_objects_verified\":false}", ""};
+            }
+            return {request.id, true, R"({"state":"unknown","retry_safe":false,"reason":"No retained receipt for this key in the active document and bridge session."})", ""};
+        }
         if (request.action == "get_document_info") {
             return {request.id, true, HandleGetDocumentInfo(), ""};
         }

@@ -43,6 +43,26 @@ Use `vw_read` when the plan depends on existing state. Supply `layer` and
 `object_type` with `action="query"` when either filter matters. Request only the
 fields needed for the next decision.
 
+On bridges advertising `paged_object_reads`, query and selection reads return
+top-level `binding` and serialize only the requested page and fields. Follow
+every `page.next_cursor`; a short first page is not a document count. Offset
+pages are live reads, not a frozen snapshot: avoid concurrent drawing edits
+while collecting a complete result. Omit `fields` to retain full object data.
+
+For edits based on an existing document, pass the exact read `binding` (or
+`data.binding` from a document read) as `target_binding` to `vw_apply`. General
+plans require `bound_apply_operations` for this check. Refresh the binding
+after changes; do not strip it to bypass a mismatch.
+
+After a lost general-write response, use `vw_status(action="transaction",
+idempotency_key="<original key>", target_binding=<original binding>)`.
+`committed` returns a historical receipt, not current object verification;
+Undo or later edits may have changed the objects. The cache retains at most
+128 general transactions in the running bridge. `unknown` means the receipt
+is unavailable, including after restart or eviction. Never interpret it as
+failure or automatically repeat the write. Documentation transactions use
+their existing separate recovery contract.
+
 To read text content, use `vw_read(action="query", object_type="text",
 fields=["uuid", "name", "layer", "text"])` or a selection read with `text`
 in `fields`. Follow every `page.next_cursor`. The installed bridge must
