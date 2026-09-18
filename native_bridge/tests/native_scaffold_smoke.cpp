@@ -280,7 +280,7 @@ void TestDispatcherMetadata() {
     RequireContains(capabilityJson, R"("capability_revision":5)", "capability revision drifted");
     RequireContains(capabilityJson, R"("capability_fingerprint":)", "capability fingerprint missing");
     RequireContains(capabilityJson, R"("object_read_features":["text_content"])", "text read capability missing");
-    Require(ObjectReadFeaturesJson(false) == "[]", "transport-only builds must not advertise text reads");
+    Require(VectorworksMCP::ObjectReadFeaturesJson(false) == "[]", "transport-only builds must not advertise text reads");
     RequireContains(CapabilitiesResultJson(false), R"("object_read_features":[])", "phase-0 read capability drifted");
     RequireContains(capabilityJson, R"("descriptors":[)", "capability descriptors missing");
     RequireContains(capabilityJson, R"("execution_context":"vectorworks_main_plugin_context")", "CAD execution context missing");
