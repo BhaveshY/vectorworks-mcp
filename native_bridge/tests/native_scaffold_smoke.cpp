@@ -235,8 +235,8 @@ void TestProtocol() {
 }
 
 void TestDispatcherMetadata() {
-    Require(RegisteredActionCount() == 35u, "native action registry count drifted");
-    Require(ImplementedActionCount(true) == 34u, "SDK action count drifted");
+    Require(RegisteredActionCount() == 37u, "native action registry count drifted");
+    Require(ImplementedActionCount(true) == 36u, "SDK action count drifted");
     Require(ImplementedActionCount(false) == 3u, "scaffold action count drifted");
     const auto* ping = FindActionSpec("ping");
     Require(ping != nullptr, "ping action spec missing");
@@ -248,6 +248,12 @@ void TestDispatcherMetadata() {
     Require(!capabilities->destructive, "capabilities should not be destructive");
     Require(capabilities->nativePhase == 0u, "capabilities should be available in the scaffold");
     Require(RequiresCadMainContext("get_layers"), "get_layers should require CAD main context");
+    for (const auto* action : {"query_objects", "transaction_status"}) {
+        const auto* spec = FindActionSpec(action);
+        Require(spec != nullptr, "native read action missing");
+        Require(RequiresCadMainContext(action), "native read must use CAD main context");
+        Require(!spec->mayWriteDocument && !spec->destructive, "native read must not mutate");
+    }
     const auto* apply = FindActionSpec("apply_operations");
     Require(apply != nullptr, "apply_operations action spec missing");
     Require(RequiresCadMainContext("apply_operations"), "apply_operations should require CAD main context");
@@ -279,7 +285,7 @@ void TestDispatcherMetadata() {
     const std::string capabilityJson = CapabilitiesResultJson(true);
     RequireContains(capabilityJson, R"("capability_revision":5)", "capability revision drifted");
     RequireContains(capabilityJson, R"("capability_fingerprint":)", "capability fingerprint missing");
-    RequireContains(capabilityJson, R"("object_read_features":["text_content"])", "text read capability missing");
+    RequireContains(capabilityJson, R"("object_read_features":["text_content","paged_object_reads","bound_apply_operations"])", "object capability features missing");
     Require(VectorworksMCP::ObjectReadFeaturesJson(false) == "[]", "transport-only builds must not advertise text reads");
     RequireContains(CapabilitiesResultJson(false), R"("object_read_features":[])", "phase-0 read capability drifted");
     RequireContains(capabilityJson, R"("descriptors":[)", "capability descriptors missing");

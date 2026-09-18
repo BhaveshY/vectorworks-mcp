@@ -9,7 +9,9 @@
 namespace VectorworksMCP {
 namespace {
 
-constexpr std::array<ActionSpec, 35> kActionRegistry = {{
+constexpr std::array<ActionSpec, 37> kActionRegistry = {{
+    {"query_objects", ExecutionContext::VectorworksMainPluginContext, 4u, false, false},
+    {"transaction_status", ExecutionContext::VectorworksMainPluginContext, 4u, false, false},
     {"ping", ExecutionContext::TransportThread, 0u, false, false},
     {"stop", ExecutionContext::TransportThread, 0u, false, false},
     {"capabilities", ExecutionContext::TransportThread, 0u, false, false},
@@ -210,7 +212,7 @@ std::string ObjectKindDescriptorsJson(bool cadHandlersImplemented) {
 }
 
 std::string ObjectReadFeaturesJson(bool cadHandlersImplemented) {
-    return cadHandlersImplemented ? R"(["text_content"])" : "[]";
+    return cadHandlersImplemented ? R"(["text_content","paged_object_reads","bound_apply_operations"])" : "[]";
 }
 
 std::string CapabilityFingerprint(bool cadHandlersImplemented) {

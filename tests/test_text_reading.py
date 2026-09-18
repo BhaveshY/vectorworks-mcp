@@ -147,8 +147,8 @@ class TextReadingTests(unittest.TestCase):
 
     def test_native_serializer_reads_live_text_only_for_text_nodes(self):
         source = (Path(__file__).resolve().parents[1] / "native_bridge/src/VectorworksMCPBridge.cpp").read_text(encoding="utf-8")
-        serializer = source.split("std::string ObjectJson(MCObjectHandle object) {", 1)[1].split("std::string ObjectListJson", 1)[0]
-        self.assertIn("if (type == kTextNode)", serializer)
+        serializer = source.split("std::string ObjectJson(MCObjectHandle object,", 1)[1].split("std::string ObjectListJson", 1)[0]
+        self.assertIn('if (type == kTextNode && wants("text"))', serializer)
         self.assertIn("JsonString(TxToUtf8(gSDK->GetTextChars(object)))", serializer)
 
 

@@ -32,7 +32,7 @@ class GroupedToolSurfaceTests(unittest.TestCase):
             name: asyncio.run(server.mcp.get_tool(name)).parameters
             for name in ("vw_status", "vw_read", "vw_catalog", "vw_apply", "vw_io", "vw_view", "vw_document")
         }
-        self.assertEqual(schemas["vw_status"]["properties"]["action"]["enum"], ["health", "context"])
+        self.assertEqual(schemas["vw_status"]["properties"]["action"]["enum"], ["health", "context", "transaction"])
         self.assertEqual(
             schemas["vw_read"]["properties"]["action"]["enum"],
             [

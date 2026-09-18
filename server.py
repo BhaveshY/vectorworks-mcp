@@ -455,7 +455,7 @@ SelectionAction = (
     else FastNativeSelectionAction
 )
 AgentContextProfile = Literal["brief", "production", "full"]
-GroupedStatusAction = Literal["health", "context"]
+GroupedStatusAction = Literal["health", "context", "transaction"]
 GroupedReadAction = Literal[
     "document",
     "layers",
@@ -1438,6 +1438,8 @@ for _tool_name, _safety in TOOL_SAFETY.items():
 
 
 def _operation_safety(action: str, params: Optional[dict[str, Any]] = None) -> Optional[dict[str, Any]]:
+    if action in {"query_objects", "transaction_status"}:
+        return {"readOnlyHint": True, "idempotentHint": True, "destructiveHint": False, "requires_cad_preflight": True}
     safety = _ACTION_SAFETY.get(action)
     if not safety:
         return None
@@ -4337,7 +4339,7 @@ def _normalise_documentation_ref(value: Any, *, label: str, allow_local: bool = 
     return ref
 
 
-def _normalise_target_binding(value: Any, *, require_dirty: bool) -> dict[str, Any]:
+def _normalise_target_binding(value: Any, *, require_dirty: bool, allow_unsaved: bool = False) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("target_binding must be an object")
     allowed = {
@@ -4362,6 +4364,9 @@ def _normalise_target_binding(value: Any, *, require_dirty: bool) -> dict[str, A
         "active_layer_name",
     ):
         item = value.get(key)
+        if allow_unsaved and key == "file_path" and item == "":
+            result[key] = ""
+            continue
         if not isinstance(item, str) or not item.strip():
             raise ValueError(f"target_binding.{key} must be a non-empty string")
         result[key] = item.strip()
@@ -5056,7 +5061,7 @@ def vw_execute_operations(
         if documentation_plan:
             binding = _normalise_target_binding(target_binding, require_dirty=True)
         elif target_binding is not None:
-            raise ValueError("target_binding is accepted only for documentation operation plans")
+            binding = _normalise_target_binding(target_binding, require_dirty=True)
         else:
             binding = None
     except ValueError as exc:
@@ -5115,6 +5120,12 @@ def vw_execute_operations(
         )
 
     implemented_actions = set(status.get("implemented_actions") or [])
+    if binding is not None and not documentation_plan and "bound_apply_operations" not in status.get("object_read_features", []):
+        return _execute_operations_response({
+            "ok": False, "tool": "vw_execute_operations", "error": "Native bound_apply_operations capability is required; no fallback attempted",
+            "writes_started": False, "commit_state": "not_started", "retryable": False,
+            "retry_policy": "after_bridge_upgrade", "idempotency_key": idempotency_key,
+        }, trace, "unsupported")
     primitives = [dict(operation["params"]) for operation in normalised if operation["type"] == "create"]
     requested_types = {str(primitive.get("object_type", "")) for primitive in primitives}
     unsupported_types = sorted(requested_types - _native_create_object_types(status))
@@ -5280,6 +5291,8 @@ def vw_execute_operations(
                 "validation_error",
             )
         wire_params = {"operation_count": len(wire_operations), "idempotency_key": idempotency_key}
+        if binding is not None:
+            wire_params.update(_target_binding_wire_params(binding))
         for index, wire_operation in enumerate(wire_operations, start=1):
             wire_params[f"operation_{index}_json"] = json.dumps(
                 wire_operation,
@@ -6942,9 +6955,37 @@ def vw_status(
     action: GroupedStatusAction = "context",
     limit: GroupedPageLimit = 100,
     include_examples: bool = False,
+    idempotency_key: str = "",
+    target_binding: Optional[dict[str, Any]] = None,
 ) -> str:
-    """Native health or a compact phase-4 drawing context."""
+    """Native health, drawing context, or retained general transaction receipt.
+
+    transaction requires idempotency_key. Unknown means no retained receipt, not
+    proof that a write did not happen: do not retry it automatically. Committed is
+    historical; subsequent edits or undo require fresh object verification.
+    """
     trace = _new_request_trace("vw_status", action)
+    if action == "transaction":
+        try:
+            if not _IDEMPOTENCY_KEY_RE.fullmatch(idempotency_key):
+                raise ValueError("A valid idempotency_key is required")
+            params = {"idempotency_key": idempotency_key}
+            if target_binding is not None:
+                params.update(_target_binding_wire_params(_normalise_target_binding(target_binding, require_dirty=False)))
+        except ValueError as exc:
+            return _grouped_error("vw_status", action, "validation_error", str(exc), trace)
+        data, status, error = _grouped_native_call("vw_status", action, "transaction_status", params, trace)
+        if error is not None:
+            return error
+        if not isinstance(data, dict) or data.get("state") not in {"committed", "unknown"}:
+            return _grouped_error("vw_status", action, "native_action_failed", "Invalid transaction status payload", trace, status=status)
+        if data["state"] == "unknown":
+            data["retry_safe"] = False
+        elif not isinstance(data.get("recorded_result"), dict):
+            return _grouped_error("vw_status", action, "native_action_failed", "Committed status omitted its receipt", trace, status=status)
+        return _grouped_finish("vw_status", action, {"ok": True, "bridge": _grouped_bridge_summary(status), "data": data}, trace, "ok")
+    if idempotency_key or target_binding is not None:
+        return _grouped_error("vw_status", action, "validation_error", "Transaction parameters require action='transaction'", trace)
     if action == "health":
         status, error = _grouped_preflight("vw_status", action, "", trace)
         if error is not None:
@@ -7141,12 +7182,12 @@ def vw_read(
             trace,
             "ok",
         )
-    if target_binding is not None or sheet_layer_uuid or viewport_uuid:
+    if sheet_layer_uuid or viewport_uuid or (target_binding is not None and action not in {"query", "selection"}):
         return _grouped_error(
             "vw_read",
             action,
             "validation_error",
-            "target_binding, sheet_layer_uuid, and viewport_uuid are accepted only for documentation reads",
+            "sheet_layer_uuid and viewport_uuid require documentation reads; target_binding requires a query, selection, or documentation read",
             trace,
         )
 
@@ -7157,6 +7198,46 @@ def vw_read(
         value = parsed_query[1].replace("'", "''")
         criteria = f"(({key}='{value}'))"
         parsed_query = None
+    if action in {"query", "selection"}:
+        status, error = _grouped_preflight("vw_read", action, "", trace)
+        if error is not None:
+            return error
+        if "paged_object_reads" in status.get("object_read_features", []):
+            try:
+                binding_params = _target_binding_wire_params(_normalise_target_binding(target_binding, require_dirty=False)) if target_binding is not None else {}
+                if offset > 1000000000:
+                    raise ValueError("cursor offset exceeds native query range")
+            except ValueError as exc:
+                return _grouped_error("vw_read", action, "validation_error", str(exc), trace)
+            native_fields = list(dict.fromkeys(projection))
+            if "text" in native_fields and "type" not in native_fields:
+                native_fields.append("type")
+            params = {"mode": "selection" if action == "selection" else ("objects" if parsed_query is not None else "criteria"),
+                      "offset": offset, "limit": limit, "layer": layer,
+                      "object_type": object_type or (parsed_query[1] if parsed_query is not None and parsed_query[0] == "type" else ""),
+                      "criteria": criteria or "ALL", "field_count": len(native_fields), **binding_params}
+            params.update({f"field_{index}": field for index, field in enumerate(native_fields, 1)})
+            data, status, error = _grouped_native_call("vw_read", action, "query_objects", params, trace,
+                                                     required_read_feature="text_content" if "text" in projection else "paged_object_reads")
+            if error is not None:
+                return error
+            items = data.get("items") if isinstance(data, dict) else None
+            if (not isinstance(items, list) or len(items) > limit or data.get("offset") != offset
+                or not isinstance(data.get("has_more"), bool) or (data["has_more"] and len(items) != limit)
+                or any(not isinstance(item, dict) or ("text" in projection and item.get("type") == "text" and not isinstance(item.get("text"), str)) for item in items)):
+                return _grouped_error("vw_read", action, "native_action_failed", "Invalid native page or text payload", trace, status=status)
+            try:
+                returned_binding = _normalise_target_binding(data.get("binding"), require_dirty=False, allow_unsaved=True)
+                if target_binding is not None and any(returned_binding.get(key) != value for key, value in _normalise_target_binding(target_binding, require_dirty=False).items()):
+                    return _grouped_error("vw_read", action, "target_changed", "Native query returned a different target binding", trace, status=status)
+            except ValueError as exc:
+                return _grouped_error("vw_read", action, "native_action_failed", str(exc), trace, status=status)
+            return _grouped_finish("vw_read", action, {"ok": True, "bridge": _grouped_bridge_summary(status),
+                "data": [_grouped_project_record(item, projection) if projection else item for item in items],
+                "binding": returned_binding, "page": {"cursor": cursor, "limit": limit, "returned": len(items),
+                "next_cursor": str(offset + len(items)) if data["has_more"] else None}}, trace, "ok")
+        if target_binding is not None or offset + limit >= MAX_OBJECT_QUERY_LIMIT:
+            return _grouped_error("vw_read", action, "capability_unavailable", "Native paged_object_reads is required for bound reads or reads reaching the legacy cap; no fallback attempted", trace, status=status)
     native_action, params = {
         "document": ("get_document_info", {}),
         "layers": ("get_layers", {}),
