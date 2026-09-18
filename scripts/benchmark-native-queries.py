@@ -40,7 +40,8 @@ def run(offset, limit, samples):
             timings["native_page"].append(new_ms)
         sizes = {"legacy_prefix": old_bytes, "native_page": new_bytes}
     after, _, _ = request("get_document_info", {})
-    if before != after:
+    if ({key: value for key, value in before.items() if key != "timing"}
+            != {key: value for key, value in after.items() if key != "timing"}):
         raise RuntimeError("Document state changed during benchmark")
     return {"offset": offset, "limit": limit, "samples": samples,
             "scope": "native TCP request, JSON decode, and CAD preflight; warm connection",
