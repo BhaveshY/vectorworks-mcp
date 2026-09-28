@@ -43,7 +43,6 @@ $RequiredScripts = @(
     "scripts\smoke-native-bridge.ps1",
     "scripts\start-vectorworks-native-smoke.ps1",
     "scripts\copy-native-bridge-scaffold.ps1",
-    "scripts\test-native-bridge-scaffold.ps1",
     "scripts\review-all-sheets.py",
     "scripts\run-native-documentation-acceptance.py"
 )

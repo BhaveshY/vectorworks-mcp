@@ -56,9 +56,9 @@ The local protocol is authenticated by default. The native bridge reads
 `%USERPROFILE%\.vectorworks-mcp\auth-token`; unauthenticated frames are rejected
 unless `VW_MCP_INSECURE_NO_AUTH=1` is explicitly set for diagnostics.
 
-Use `HANDLER_MATRIX.md` as the native implementation roadmap. Use
-`mock/mock_bridge.py` as the no-SDK protocol harness when changing host
-preflight or server behavior.
+Use `HANDLER_MATRIX.md` as the native implementation roadmap. Validate host
+preflight or server changes end-to-end against a loaded bridge with
+`scripts\smoke-native-bridge.ps1 -Json` and `scripts\run-native-full-acceptance.py`.
 
 ## Build Prerequisites
 

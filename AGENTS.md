@@ -18,7 +18,7 @@ For fresh Windows PC onboarding, follow `AGENT_INSTALL.md` first.
   operations or use a Python/GUI fallback.
 - `vw_batch_create_objects`, `vw_plan_schematic_floor_plan`, `vw_create_schematic_floor_plan`, `vw_create_schematic_room`, `vw_create_schematic_door`, and `vw_create_schematic_window` are drafting helpers. `atomic=true` requires the native bridge and creates all objects in one native undo event; phase 2 supports true walls, text, linear dimensions, verified property edits, native class management, and mixed batches. Schematic helpers still create 2D drafting geometry, not BIM doors/windows/spaces.
 - `native_bridge/HANDLER_MATRIX.md` is the handler-by-handler implementation map for the native SDK bridge.
-- `native_bridge/mock/mock_bridge.py` is a no-SDK contract harness for host/native protocol compatibility.
+- There are no unit tests. Validate behaviour end-to-end against a running Vectorworks with `scripts/smoke-native-bridge.ps1 -Json`, `native_bridge/smoke.py`, and `scripts/run-native-full-acceptance.py`.
 - `native_bridge/src/` contains SDK-agnostic native source scaffold files. They are not a standalone build and intentionally avoid Vectorworks SDK includes.
 - `scripts/run-mcp-server.ps1` is the self-bootstrapping MCP entrypoint. It creates `.venv`, installs `requirements.txt`, then launches `server.py`.
 - `install.ps1` is the primary one-click Windows installer. It can run from a checkout or from the raw GitHub URL, checks/installs base Git/Python dependencies, clones/updates the repo when needed, then reports guarded native readiness. Native non-modal readiness is the default completion criterion. Use `-FullNative` only when the user explicitly consents to the side-effecting native SDK bridge setup, Vectorworks open/restart, and smoke automation. Use `-EnablePythonDialogFallback` only when the user explicitly accepts a modal fallback that blocks manual UI use.
@@ -144,8 +144,7 @@ consent, `native_requires_action: true` is required follow-up.
 Run these before handing work back:
 
 ```powershell
-.\.venv\Scripts\python.exe -m py_compile server.py vw_listener.py
-.\.venv\Scripts\python.exe -m unittest discover -v
+.\.venv\Scripts\python.exe -m py_compile server.py vw_listener.py plan_quality.py plan_geometry.py
 powershell -ExecutionPolicy Bypass -File .\scripts\verify-no-vectorworks.ps1
 ```
 

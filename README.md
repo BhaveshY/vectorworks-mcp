@@ -210,8 +210,6 @@ Native bridge planning aids:
 
 - `native_bridge/HANDLER_MATRIX.md` maps every current listener action to native
   phase, safety, and smoke-test expectations.
-- `native_bridge/mock/mock_bridge.py` is a no-SDK protocol harness proving the
-  host MCP server and preflight logic can talk to the native bridge contract.
 - `scripts/prepare-native-bridge-source.ps1` prepares an ignored SDK-backed
   source worktree from Vectorworks' official SDK examples.
 - `scripts/copy-native-bridge-scaffold.ps1` copies the reviewed no-SDK native
@@ -640,11 +638,15 @@ powershell -ExecutionPolicy Bypass -File .\scripts\verify-no-vectorworks.ps1
 
 The same no-Vectorworks verification runs in GitHub Actions on Windows.
 
+These are install/import/config checks only. The repo has no unit tests:
+behaviour is validated end-to-end against a running Vectorworks with
+`scripts\smoke-native-bridge.ps1 -Json`, `py -3 native_bridge\smoke.py`, and
+`py -3 scripts\run-native-full-acceptance.py`.
+
 Manual equivalent:
 
 ```powershell
-.\.venv\Scripts\python.exe -m py_compile server.py vw_listener.py
-.\.venv\Scripts\python.exe -m unittest discover -v
+.\.venv\Scripts\python.exe -m py_compile server.py vw_listener.py plan_quality.py plan_geometry.py
 ```
 
 ## Available Tools

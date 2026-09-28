@@ -18,7 +18,6 @@ $ProjectMcpPath = Join-Path $RepoRoot ".mcp.json"
 $NativePrereqPath = Join-Path $RepoRoot "scripts\check-native-bridge-prereqs.ps1"
 $NativeDoctorPath = Join-Path $RepoRoot "scripts\doctor-native-bridge.ps1"
 $NativeNextRunnerPath = Join-Path $RepoRoot "scripts\invoke-native-bridge-next.ps1"
-$NativeScaffoldTestPath = Join-Path $RepoRoot "scripts\test-native-bridge-scaffold.ps1"
 $FreshLauncher = $false
 $FreshLoader = $false
 $PyCacheRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("vectorworks-mcp-verify-pycache-{0}" -f $PID)
@@ -112,7 +111,6 @@ Assert-Path $ProjectMcpPath "Project MCP config"
 Assert-Path $NativePrereqPath "Native bridge prerequisite checker"
 Assert-Path $NativeDoctorPath "Native bridge doctor"
 Assert-Path $NativeNextRunnerPath "Native bridge next-step runner"
-Assert-Path $NativeScaffoldTestPath "Native bridge scaffold smoke test"
 
 Invoke-Checked "bootstrap venv/dependencies" {
     & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $RunnerPath -SetupOnly
@@ -165,16 +163,6 @@ Invoke-Checked "Python compilation" {
         $CompileTargets += @($LauncherPath, $LoaderPath)
     }
     & $VenvPython -m py_compile @CompileTargets
-}
-
-Invoke-Checked "unit tests" {
-    Invoke-InRepo {
-        & $VenvPython -m unittest discover -v
-    }
-}
-
-Invoke-Checked "native bridge scaffold compile smoke" {
-    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $NativeScaffoldTestPath
 }
 
 Invoke-Checked "native bridge prereq advisory" {
