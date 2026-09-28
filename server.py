@@ -28,6 +28,7 @@ Environment variables, all optional:
 """
 
 import atexit
+import base64
 import functools
 import hashlib
 import ipaddress
@@ -40,6 +41,7 @@ import select
 import socket
 import struct
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -1491,17 +1493,61 @@ def _annotations_for(tool_name: str) -> dict[str, bool]:
     return {key: bool(safety[key]) for key in _ANNOTATION_KEYS}
 
 
+_INLINE_IMAGE_MAX_BYTES = 3 * 1024 * 1024
+_INLINE_IMAGE_MIME_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
+
+
+def _inline_capture_image(decoded: Any) -> tuple[Optional[Any], Optional[str]]:
+    """Load a successful capture file as MCP image content so the model can see it.
+
+    Returns (image_content, note). The file path stays in the JSON result either way.
+    """
+    if not isinstance(decoded, dict) or decoded.get("ok") is not True or decoded.get("action") != "capture":
+        return None, None
+    data = decoded.get("data")
+    path_text = data.get("path") if isinstance(data, dict) else None
+    if not isinstance(path_text, str) or not path_text:
+        return None, None
+    path = Path(path_text)
+    mime_type = _INLINE_IMAGE_MIME_TYPES.get(path.suffix.lower())
+    if mime_type is None:
+        return None, "inline preview is only attached for .png/.jpg captures"
+    try:
+        size = path.stat().st_size
+        if size > _INLINE_IMAGE_MAX_BYTES:
+            return None, "capture is {0} bytes; inline preview is limited to {1} bytes".format(
+                size, _INLINE_IMAGE_MAX_BYTES
+            )
+        payload = path.read_bytes()
+    except OSError as exc:
+        return None, f"capture file could not be read for inline preview: {exc}"
+    try:
+        from mcp.types import ImageContent
+    except Exception:
+        return None, None
+    return ImageContent(type="image", data=base64.b64encode(payload).decode("ascii"), mime_type=mime_type), None
+
+
 def _tool(tool_name: str):
     def register(func):
         @functools.wraps(func)
         def mcp_adapter(*args, **kwargs):
             raw = func(*args, **kwargs)
             decoded = _decode_tool_result(raw)
-            structured = decoded if isinstance(decoded, dict) else {"result": decoded}
             if ToolResult is None:
                 return raw
+            image, note = _inline_capture_image(decoded)
+            if note and isinstance(decoded, dict):
+                decoded["inline_image"] = note
+                raw = json.dumps(decoded, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+            structured = decoded if isinstance(decoded, dict) else {"result": decoded}
+            content: Any = raw
+            if image is not None:
+                from mcp.types import TextContent
+
+                content = [TextContent(type="text", text=raw), image]
             return ToolResult(
-                content=raw,
+                content=content,
                 structured_content=structured,
                 is_error=_tool_result_failed(raw, decoded),
             )
@@ -7263,6 +7309,29 @@ def _grouped_options(options: Optional[dict[str, Any]]) -> dict[str, Any]:
     return normalised
 
 
+def _default_capture_path() -> str:
+    directory = Path(tempfile.gettempdir()) / "vectorworks-mcp" / "captures"
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    return str(directory / f"capture-{stamp}-{uuid.uuid4().hex[:6]}.png")
+
+
+def _validate_output_path(file_path: str, options: dict[str, Any]) -> None:
+    """Fail fast on output paths the native bridge would reject after a round trip."""
+    if not file_path:
+        raise ValueError("file_path is required: pass an absolute output path such as C:\\Temp\\plan.pdf")
+    path = Path(file_path)
+    if not path.is_absolute():
+        raise ValueError(f"file_path must be an absolute path on the Vectorworks machine, got {file_path!r}")
+    if not path.parent.is_dir():
+        raise ValueError(f"the output folder does not exist: {str(path.parent)!r}; create it or choose another folder")
+    if path.exists() and not options.get("replace"):
+        raise ValueError(
+            f"{str(path)!r} already exists. Choose a new file name, or pass "
+            "options={'replace': true, 'replace_confirmation': 'REPLACE_EXISTING_FILE'} to overwrite it"
+        )
+
+
 def _grouped_io_native_action(action: str, format_name: str, file_path: str = "") -> str:
     canonical_format = str(format_name or "auto").lower()
     if canonical_format == "auto":
@@ -7845,6 +7914,8 @@ def vw_io(
     try:
         native_action = _grouped_io_native_action(action, format, file_path)
         params = {"file_path": file_path, "format": format, **_grouped_options(options)}
+        if action in {"export", "capture"}:
+            _validate_output_path(file_path, params)
         if target_binding is not None:
             if action == "import":
                 raise ValueError("target_binding is supported only for export and capture")
@@ -7873,7 +7944,11 @@ def vw_view(
     """Get/set/fit the active view or capture it through advertised native actions."""
     trace = _new_request_trace("vw_view", action)
     try:
+        if action == "capture" and not file_path:
+            file_path = _default_capture_path()
         params = {"file_path": file_path, **_grouped_options(options)}
+        if action == "capture":
+            _validate_output_path(file_path, params)
         if action == "fit":
             target = str(params.pop("target", "objects") or "objects").strip().lower()
             if target != "objects":
@@ -7913,6 +7988,7 @@ def vw_document(
         params = {"file_path": file_path, "format": format, **_grouped_options(options)}
         if action == "export":
             native_action = _grouped_io_native_action("export", format, file_path)
+            _validate_output_path(file_path, params)
         else:
             native_action = {
                 "info": "get_document_info",
