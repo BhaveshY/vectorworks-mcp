@@ -3216,6 +3216,18 @@ _GEOMETRY_LENGTH_KEYS = {
 }
 
 
+_GEOMETRY_INPUT_ALIASES = {
+    "x1": ("x1", "x"),
+    "y1": ("y1", "y"),
+    "start_x": ("start_x", "x1"),
+    "start_y": ("start_y", "y1"),
+    "end_x": ("end_x", "x2"),
+    "end_y": ("end_y", "y2"),
+    "elevation": ("elevation", "bearing_height"),
+    "offset": ("offset", "dimension_offset"),
+}
+
+
 def _coordinate_scale_to_mm(units: CoordinateUnits) -> float:
     return {
         "mm": 1.0,
@@ -3542,7 +3554,15 @@ def _normalise_create_primitive(
     role = _optional_text(raw, "role", "primitive")
     if role:
         params["role"] = role
-    return _scale_geometry_params(params, scale_to_mm)
+    scaled = _scale_geometry_params(params, scale_to_mm)
+    if scale_to_mm != 1.0:
+        # Built-in defaults (wall height 3000, slab thickness 200, ...) are
+        # native millimetres. Only caller-supplied lengths are in
+        # coordinate_units; without this a metre plan got 3000 m walls.
+        for key in _GEOMETRY_LENGTH_KEYS:
+            if key in params and not any(name in raw for name in _GEOMETRY_INPUT_ALIASES.get(key, (key,))):
+                scaled[key] = params[key]
+    return scaled
 
 
 def _native_batch_params(primitives: list[dict[str, Any]]) -> tuple[dict[str, Any], list[str], list[dict[str, Any]]]:
