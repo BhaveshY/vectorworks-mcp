@@ -219,10 +219,11 @@ End-to-end tests require the user to open Vectorworks. Do not claim full end-to-
 - The compiled native SDK bridge is installed, enabled, and loaded.
 - The MCP client has been restarted or reloaded after registration/trust changes.
 - `vectorworks` is trusted and loaded in the MCP client; Claude Code users can confirm this with `/mcp`.
-- First tool call is `vw_ping`; require `dispatch_mode=native_sdk`,
+- First tool call is `vw_status(action="health")` (the default `fast-native`
+  profile has no `vw_ping`); it requires `dispatch_mode=native_sdk`,
   `cad_api_safe=true`, `transport_only=false`, and
-  `main_context_pump_ready=true`.
-- Before real CAD work, prefer `vw_preflight_for_cad` when available. If it blocks, do not call CAD handlers.
+  `main_context_pump_ready=true`. If it returns an error, follow
+  `error.next_step` and do not call CAD tools.
 
 Explicit fallback handoff is different: only after
 `-EnablePythonDialogFallback` or `--allow-python-fallback`, copy/paste

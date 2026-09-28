@@ -57,7 +57,8 @@ repo-relative path. If Codex runs MCP servers from outside the checkout root,
 configure the same server with an absolute
 `-File C:\path\to\vectorworks-mcp\scripts\run-mcp-server.ps1`.
 
-Before normal CAD work, call `vw_preflight_for_cad` or `vw_ping` and require
+Before normal CAD work, call `vw_status(action="health")` (fast-native has no
+`vw_ping`/`vw_preflight_for_cad`) and require
 `dispatch_mode=native_sdk`, `native_phase >= 4`, `cad_api_safe=true`,
 `transport_only=false`, `main_context_pump_ready=true`, the `fast-native`
 profile, and an implemented `apply_operations` action. Accept

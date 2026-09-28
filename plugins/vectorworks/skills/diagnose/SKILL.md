@@ -41,7 +41,7 @@ Follow `nextCommandSpec` and safety fields. `missingAllowFlags`,
   class, or batch work.
 - `sdkArchiveCandidates` exists: reuse the downloaded SDK ZIP with
   `--sdk-archive-path` / `-SdkArchivePath`; do not download another copy.
-- `vw_ping` or raw ping reports `cad_api_safe: false` or
+- `vw_status(action="health")` or raw ping reports `cad_api_safe: false` or
   `transport_only: true`: do not call CAD handlers.
 - Python listener timeout while Vectorworks owns the port: troubleshoot this
   path only when the user explicitly enabled `-EnablePythonDialogFallback` or

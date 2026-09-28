@@ -15,7 +15,8 @@ restart error. Never infer support from the native phase.
 
 The fast-native profile exposes only these tools:
 
-- `vw_status` for health and compact document context.
+- `vw_status` for health, whole-drawing counts (`context`), and lost-write
+  receipts (`transaction`).
 - `vw_read` for document, layer, summary, object query, selection, and revision-5
   bound sheet/viewport/viewport-annotation reads.
 - `vw_catalog` for capabilities, classes, symbols, parametric schemas,
@@ -24,7 +25,8 @@ The fast-native profile exposes only these tools:
 - `vw_execute_operations` as the same atomic engine under its established
   name. It is not a fallback path.
 - `vw_io` for advertised native import, export, and capture actions.
-- `vw_view` for advertised native get, set, fit, and capture actions.
+- `vw_view` for advertised native get, set, fit, and capture actions. Capture
+  returns the image inline; `file_path` is optional.
 - `vw_document` for advertised native info, save, export, and open actions.
 - `vw_tool_safety` for exact grouped action safety and retry metadata.
 
@@ -36,8 +38,14 @@ capability failure.
 
 For a fully specified create or edit, call `vw_apply` immediately with one
 complete plan and a unique `idempotency_key`. The write core performs its own
-native preflight. Use `vw_status(action="context")` first when the operation
-depends on the active document or when the manifest identity is not known.
+native preflight, so do not call `vw_status(action="health")` first. Use
+`vw_status(action="context")` once when the operation depends on the active
+document. The `vw_apply` tool description lists every operation type and the
+create fields per object type.
+
+For "how many" questions use `vw_status(action="context")` or
+`vw_read(action="summary", object_type=..., layer=...)`; both count the whole
+drawing. Do not page through `query` results to count.
 
 Use `vw_read` when the plan depends on existing state. Supply `layer` and
 `object_type` with `action="query"` when either filter matters. Request only the
@@ -94,6 +102,8 @@ to an earlier result as `$<operation_id>`. Existing objects require an explicit
 Supported operation types are `create`, `set_properties`, `transform`,
 `reshape`, `update_parametric`, `duplicate`, and `delete`. Always state
 `coordinate_units`; the connector normalizes typed geometry to millimetres.
+Omitted optional lengths use millimetre defaults (wall height 3000, wall and
+slab thickness 200) whatever the `coordinate_units`.
 
 Use true native object types only. A Space request includes a closed boundary,
 height, name, and room ID. Slab and roof requests include their real footprint
@@ -111,14 +121,30 @@ Reuse an `idempotency_key` only for the identical atomic plan. `vw_apply` and
 `vw_execute_operations` share one implementation and one native
 `apply_operations` transaction. Neither tool decomposes the plan.
 
-For a documentation plan, require capability revision 5 and the exact
-`data.binding` returned by `vw_read(action="document")`. Use only the typed
-sheet-layer, viewport, and viewport-annotation lifecycle operations documented
-in `DOCUMENTATION_WORKFLOW.md`. These plans route to one native
-`apply_documentation_operations` transaction, may not mix with general object
-operations, and require exact UUID parents plus family-specific delete
-confirmations. A saved-path, fingerprint, document-generation, bridge-session,
-or dirty-state mismatch is a hard stop.
+Documentation writes (creating or changing sheet layers, viewports, and
+viewport annotations) are disabled in connector 0.7.0. A documentation plan
+returns `capability_unavailable` without touching the drawing. That is
+expected. Do not restart or upgrade the bridge, and do not emulate these
+objects with other geometry. Tell the user to make the sheet or viewport change
+manually. Documentation reads (`sheet_layers`, `viewports`,
+`viewport_annotations`) still work.
+
+## React to errors in one step
+
+Every failure carries `error.code` and `error.next_step`. Follow `next_step`.
+Do not retry the same call in a loop.
+
+- `bridge_unreachable`, `vectorworks_busy`, `auth_failed`, `preflight_failed`:
+  the user must act (start Vectorworks, close a dialog, rerun the installer,
+  upgrade the bridge). Stop and tell them. After they confirm, call
+  `vw_status(action="health")` once.
+- `capability_unavailable`: this bridge cannot do it. Report it. Do not
+  substitute other tools or object types.
+- `validation_error`: nothing was sent. Fix the named argument and call again.
+- `native_rejected` (from `vw_apply`): Vectorworks refused the plan and rolled
+  it back, so the document is unchanged. Fix the operation named in the message
+  and resend with a new `idempotency_key`.
+- `unknown_commit_state`: never resend. Use the transaction check below.
 
 ## Handle files and document lifecycle safely
 

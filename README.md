@@ -96,9 +96,8 @@ that return handles/UUIDs, exact created counts, atomic status, or verified
 readback.
 
 Fetch context only when the requested edit depends on the current document.
-Prefer a focused `vw_lookup_objects`, `vw_get_document_info`, or
-`vw_drawing_summary(include_examples=false)` call; use
-`vw_agent_context(profile="production")` for broad multi-step planning.
+Prefer a focused `vw_read` call (`document`, `summary`, or a filtered `query`)
+or one `vw_status(action="context")` call for broad planning.
 
 Use `vw_apply` for one atomic native plan. `vw_execute_operations` is a strict
 alias to the same write engine. Both accept create, property, transform,
@@ -544,12 +543,12 @@ The plugin adds namespaced skills:
 - `/vectorworks:setup` bootstraps dependencies and plans required native
   readiness; it generates the Python launcher/loader only after explicit
   fallback consent.
-- `/vectorworks:ping` checks the raw listener and then `vw_ping` when MCP tools are loaded.
+- `/vectorworks:ping` checks the bridge with `vw_status(action="health")`, or the raw `vectorworksctl ping` when MCP tools are not loaded.
 - `/vectorworks:diagnose` checks repo resolution, launcher agent-session mode, Claude availability, and listener reachability.
 - `/vectorworks:work` guides CAD/BIM operations with the `vw_*` MCP tools.
 
-The plugin also declares the `vectorworks` MCP server, so `vw_ping` and the
-other `vw_*` tools become available when the plugin is enabled.
+The plugin also declares the `vectorworks` MCP server, so the nine fast-native
+`vw_*` tools become available when the plugin is enabled.
 
 ## Manual Administrator Python Dialog Diagnostics
 
@@ -617,16 +616,20 @@ server is trusted and loaded. In Claude Code, `/mcp` should list
 `vectorworks`; in Codex or another MCP client, use that client's server status
 view or make the first tool call.
 
-With Vectorworks open and the listener running, try:
+With Vectorworks open and the native bridge loaded, try:
 
 ```text
-Use vw_ping.
-Use vw_get_document_info.
-Create a 500x300 rectangle at position 0,0.
+Call vw_status with action=health.
+Call vw_read with action=document.
+Create a 500x300 mm rectangle at 0,0.
+Capture the view.
 ```
 
-If `vw_ping` fails, the MCP client may have started the host server correctly,
-but the Vectorworks listener is not reachable on `127.0.0.1:9877`.
+If `vw_status(action="health")` returns `error.code="bridge_unreachable"`, the
+MCP client started the host server correctly but nothing answers on
+`127.0.0.1:9877`: Vectorworks is not running or the native bridge plug-in is not
+loaded. `vectorworks_busy` means that Vectorworks is open but its main thread is
+blocked (dialog, long render/export).
 
 ## No-Vectorworks Verification
 

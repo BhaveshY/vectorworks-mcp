@@ -12,13 +12,13 @@ The profile has nine top-level tools. No capability adds another MCP tool.
 
 | Tool | Actions | Purpose |
 |------|---------|---------|
-| `vw_status` | `health`, `context` | Bridge health or compact document context. |
-| `vw_read` | `document`, `layers`, `summary`, `query`, `selection`, `sheet_layers`, `viewports`, `viewport_annotations` | Read-only document data with field projection and paging; documentation reads require revision 5 and exact target binding. |
+| `vw_status` | `health`, `context`, `transaction` | Bridge health, whole-drawing counts, or the retained receipt of an earlier write. |
+| `vw_read` | `document`, `layers`, `summary`, `query`, `selection`, `sheet_layers`, `viewports`, `viewport_annotations`, `plan_quality` | Read-only document data with field projection and paging; documentation reads require revision 5 and exact target binding; `plan_quality` is host-only analysis. |
 | `vw_catalog` | `capabilities`, `classes`, `symbols`, `parametric_schemas`, `worksheets`, `resources` | Manifest and parameter discovery. |
 | `vw_apply` | atomic plan | Canonical atomic document mutation entry. |
 | `vw_execute_operations` | atomic plan | The same write core and native transaction as `vw_apply`. |
 | `vw_io` | `import`, `export`, `capture` | Advertised native file and capture actions. |
-| `vw_view` | `get`, `set`, `fit`, `capture` | Advertised native view actions; fit clears selection by default and fits all objects. |
+| `vw_view` | `get`, `set`, `fit`, `capture` | Advertised native view actions; fit clears selection by default and fits all objects; capture returns the image inline and defaults `file_path` to `%TEMP%\vectorworks-mcp\captures`. |
 | `vw_document` | `info`, `save`, `export`, `open` | Advertised document lifecycle actions. |
 | `vw_tool_safety` | none | Exact action safety, effects, and retry policy. |
 
@@ -40,6 +40,9 @@ The compatibility profile and the modal Python listener are administrator
 diagnostics. They are not fallback paths.
 
 ## Reads
+
+`vw_status(action="context")` and `vw_read(action="summary")` count every
+object in the drawing (native scan limit 100000); `limit` bounds only examples.
 
 `vw_read(action="query")` forwards `criteria`, `layer`, `object_type`, and the
 bounded native limit. Use all three filters when they narrow the result. The
@@ -82,7 +85,9 @@ bridge is restarted or upgraded.
 
 Supported operation families are `create`, `set_properties`, `transform`,
 `reshape`, `update_parametric`, `duplicate`, and `delete`. Geometry is supplied
-with explicit `coordinate_units` and normalized to native millimetres. The grouped write uses one native
+with explicit `coordinate_units` and normalized to native millimetres.
+Built-in defaults for omitted lengths are native millimetres and are not
+scaled. The grouped write uses one native
 `apply_operations` transaction. Native apply prevalidates the whole plan, runs one
 undo transaction, registers each created object with undo, and returns compact
 semantic receipts. The host never retries through another action.
@@ -92,7 +97,10 @@ advertise primitives, walls, text, dimensions, true slabs, true roofs, true
 Spaces, hosted doors and windows, symbols, and generic parametric objects.
 Availability comes from the loaded binary, not this list.
 
-Revision-5 documentation plans use `create_sheet_layer`, `update_sheet_layer`,
+Documentation writes are disabled in connector 0.7.0: a documentation plan
+returns `capability_unavailable` with `writes_started=false`, and the bridge
+does not advertise `apply_documentation_operations`. The rest of this paragraph
+describes the gated contract. Revision-5 documentation plans use `create_sheet_layer`, `update_sheet_layer`,
 `delete_sheet_layer`, `create_viewport`, `update_viewport`, `delete_viewport`,
 `create_viewport_annotation`, `update_viewport_annotation`, and
 `delete_viewport_annotation`. They require the exact saved-file,
@@ -153,11 +161,23 @@ metadata.
 `vw_io` and `vw_document` do not accept `idempotency_key`. The native bridge
 does not provide a durable replay ledger for those actions.
 
-Grouped errors distinguish transport state:
+Every grouped error has `error.code`, `error.message` (the native reason when
+there is one), `error.next_step`, `retryable`, `retry_policy`, and
+`writes_started`. Grouped errors distinguish transport state:
 
 - `request_not_sent` means that no native work started. Retry is safe.
+- `bridge_unreachable` means that the TCP connection to the bridge could not
+  be opened, so nothing was sent. Vectorworks or the plug-in is not running.
+- `vectorworks_busy` means that the bridge reports a stalled main thread
+  (`main_context_idle_ms` at or above `VW_MCP_BUSY_THRESHOLD_MS`, default 8000)
+  or a native main-context timeout. A read is not retried automatically. Ask
+  the user to clear the dialog or wait.
+- `auth_failed` means that host and bridge tokens differ.
 - `preflight_failed` means that no native work started. Repair the bridge, then
   retry.
+- `native_rejected` (atomic writes) means that the bridge answered with an
+  explicit failure and rolled back the whole transaction. The document is
+  unchanged. Fix the plan and resend.
 - `capability_unavailable` and `capability_manifest_mismatch` mean that no
   fallback was attempted.
 - `unknown_commit_state` means that Vectorworks accepted a non-retryable action
