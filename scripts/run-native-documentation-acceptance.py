@@ -5,6 +5,10 @@ a dedicated sheet, real viewport, and native annotation children, then reads,
 updates, and partially deletes by exact UUID. Restart persistence and Undo are
 reported as explicit follow-up gates because the connector does not expose a
 command or arbitrary-script escape hatch for either UI lifecycle action.
+
+Connector 0.7.0 disables documentation writes (kDocumentationWritesEnabled is
+false), so this fixture is expected to stop at its first vw_apply with
+capability_unavailable until the gate is lifted.
 """
 
 from __future__ import annotations

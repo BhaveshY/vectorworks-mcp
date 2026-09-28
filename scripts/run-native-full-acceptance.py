@@ -68,7 +68,8 @@ EXPECTED_NATIVE_ACTIONS = {
     "find_objects",
     "drawing_summary",
     "apply_operations",
-    "apply_documentation_operations",
+    # apply_documentation_operations is intentionally not advertised while
+    # kDocumentationWritesEnabled is false (connector 0.7.0 stability gate).
 }
 EXPECTED_CREATE_TYPES = {
     "arc",
@@ -162,6 +163,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9877)
     parser.add_argument("--timeout-seconds", type=float, default=120.0)
+    parser.add_argument(
+        "--idle-reconnect-seconds",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional. Wait this long at the end, then run a create+delete write. Use 610 "
+            "to prove that a write after the bridge's 600 s idle socket close still "
+            "commits instead of reporting unknown_commit_state."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -179,6 +190,8 @@ def validate_args(args: argparse.Namespace) -> tuple[Path, Path, Path]:
         raise ValueError("--port must be between 1 and 65535")
     if args.timeout_seconds <= 0:
         raise ValueError("--timeout-seconds must be positive")
+    if args.idle_reconnect_seconds < 0:
+        raise ValueError("--idle-reconnect-seconds must not be negative")
     output_dir.mkdir(parents=True, exist_ok=True)
     return source, output_dir, token_file
 
@@ -1332,11 +1345,24 @@ async def run_acceptance(
                     {"action": "export", "file_path": str(export_path), "format": "png"},
                     label="native_png_export",
                 )
-                await call(
+                capture_payload = await call(
                     "vw_view",
                     {"action": "capture", "file_path": str(capture_path)},
                     label="native_view_capture",
                 )
+                if "inline_image" in capture_payload:
+                    raise RuntimeError(
+                        f"capture was not returned inline: {capture_payload['inline_image']}"
+                    )
+                default_capture = await session.call_tool("vw_view", {"action": "capture"})
+                default_capture_payload = default_capture.structured_content or {}
+                if default_capture.is_error or default_capture_payload.get("ok") is not True:
+                    raise RuntimeError(
+                        "capture without file_path failed: "
+                        + json.dumps(default_capture_payload, ensure_ascii=False)[:2000]
+                    )
+                if not any(getattr(block, "type", "") == "image" for block in default_capture.content):
+                    raise RuntimeError("capture result did not include MCP image content")
                 await call(
                     "vw_io",
                     {
@@ -1491,6 +1517,50 @@ async def run_acceptance(
                 report["final_counts_by_type"] = (
                     payload_data(accepted_summary) or {}
                 ).get("counts_by_type")
+                if args.idle_reconnect_seconds > 0:
+                    await anyio.sleep(args.idle_reconnect_seconds)
+                    idle_create = await call(
+                        "vw_apply",
+                        {
+                            "operations": [
+                                {
+                                    "type": "create",
+                                    "params": {
+                                        "object_type": "rect",
+                                        "x1": 0,
+                                        "y1": 0,
+                                        "x2": 10,
+                                        "y2": 10,
+                                        "name": f"{prefix}_IDLE",
+                                    },
+                                }
+                            ],
+                            "idempotency_key": f"{prefix}-idle-create",
+                        },
+                        label="write_after_idle",
+                    )
+                    if idle_create.get("commit_state") != "committed":
+                        raise RuntimeError("write after idle socket close did not commit")
+                    await call(
+                        "vw_apply",
+                        {
+                            "operations": [
+                                {
+                                    "type": "delete",
+                                    "params": {
+                                        "target": "uuid:"
+                                        + first_receipt_uuid(idle_create, "idle create")
+                                    },
+                                }
+                            ],
+                            "idempotency_key": f"{prefix}-idle-delete",
+                        },
+                        label="delete_after_idle",
+                    )
+                    report["checks"]["idle_socket_reconnect"] = {
+                        "passed": True,
+                        "idle_seconds": args.idle_reconnect_seconds,
+                    }
                 report["passed"] = True
 
 
