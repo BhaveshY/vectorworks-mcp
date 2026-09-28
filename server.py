@@ -22,6 +22,9 @@ Environment variables, all optional:
                           safe-CAD preflight success cache in ms, default 5000
   VW_MCP_TOOL_PROFILE     fast-native (default) or explicit diagnostic compat
   VW_MCP_TRACE            set to 1 for token-safe request timing JSON on stderr
+  VW_MCP_BUSY_THRESHOLD_MS
+                          fail fast when the bridge reports the Vectorworks main
+                          thread idle-pump age above this, default 8000; 0 disables
 """
 
 import atexit
@@ -33,6 +36,7 @@ import math
 import os
 from pathlib import Path
 import re
+import select
 import socket
 import struct
 import sys
@@ -161,6 +165,15 @@ class RequestTransportError(ConnectionError):
     def __init__(self, action: str, stage: str, original: BaseException):
         self.action = action
         self.stage = stage
+        self.original = original
+        super().__init__(str(original))
+
+
+class BridgeUnreachableError(ConnectionError):
+    """Raised when the TCP connection could not be opened, so no request bytes were sent."""
+
+    def __init__(self, action: str, original: BaseException):
+        self.action = action
         self.original = original
         super().__init__(str(original))
 
@@ -310,6 +323,14 @@ except ConfigError as exc:
     PREFLIGHT_CACHE_MS = DEFAULT_PREFLIGHT_CACHE_MS
 
 PREFLIGHT_CACHE_SECONDS = PREFLIGHT_CACHE_MS / 1000.0
+DEFAULT_BUSY_THRESHOLD_MS = 8_000
+try:
+    # Fail fast when the bridge reports that the Vectorworks main thread has not
+    # serviced its request pump for this long. 0 disables the check.
+    BUSY_THRESHOLD_MS = _parse_int_env("VW_MCP_BUSY_THRESHOLD_MS", DEFAULT_BUSY_THRESHOLD_MS, 0, 600_000)
+except ConfigError as exc:
+    _CONFIG_ERROR = _CONFIG_ERROR or str(exc)
+    BUSY_THRESHOLD_MS = DEFAULT_BUSY_THRESHOLD_MS
 AUTH_TOKEN = _load_auth_token()
 ALLOW_INSECURE_NO_AUTH = _truthy_env("VW_MCP_INSECURE_NO_AUTH")
 ENABLE_RUN_SCRIPT = _truthy_env("VW_MCP_ENABLE_RUN_SCRIPT")
@@ -383,6 +404,13 @@ mcp = (
 # Persistent connection, guarded by a lock so concurrent MCP tool calls do not
 # interleave frames on the same socket.
 _sock: Optional[socket.socket] = None
+_sock_last_used = 0.0
+# The native bridge closes client sockets after 600 s without a request
+# (NativeTransportOptions::clientIdleSeconds). Reconnect well before that so a
+# write is never sent into a half-closed socket, which would otherwise surface
+# as a false "unknown commit state".
+_PERSISTENT_SOCKET_MAX_IDLE_SECONDS = 240.0
+_CONNECT_TIMEOUT_SECONDS = 5.0
 _lock = threading.Lock()
 _cad_safe_cache_lock = threading.Lock()
 _cad_safe_cache: Optional[tuple[float, dict[str, Any]]] = None
@@ -1574,8 +1602,36 @@ def _clear_cad_safe_cache():
 
 
 def _close():
-    global _sock
     _clear_cad_safe_cache()
+    _drop_socket()
+
+
+atexit.register(_close)
+
+
+def _socket_is_stale(sock: socket.socket) -> bool:
+    """Return True when the peer closed/reset the socket or left unread bytes on it."""
+    try:
+        readable, _, errored = select.select([sock], [], [sock], 0)
+    except (OSError, ValueError):
+        return True
+    if errored:
+        return True
+    if not readable:
+        return False
+    try:
+        # Readable while idle means EOF, a reset, or an unsolicited frame; any
+        # of those makes the connection unsafe for the next request.
+        sock.recv(1, socket.MSG_PEEK)
+    except BlockingIOError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _drop_socket() -> None:
+    global _sock
     if _sock is not None:
         try:
             _sock.close()
@@ -1584,17 +1640,21 @@ def _close():
         _sock = None
 
 
-atexit.register(_close)
-
-
-def _connect():
-    global _sock
+def _connect(action: str = ""):
+    global _sock, _sock_last_used
     if _sock is not None:
-        return
-    sock = socket.create_connection((HOST, PORT), timeout=TIMEOUT)
+        idle = time.monotonic() - _sock_last_used
+        if idle <= _PERSISTENT_SOCKET_MAX_IDLE_SECONDS and not _socket_is_stale(_sock):
+            return
+        _drop_socket()
+    try:
+        sock = socket.create_connection((HOST, PORT), timeout=min(TIMEOUT, _CONNECT_TIMEOUT_SECONDS))
+    except OSError as exc:
+        raise BridgeUnreachableError(action, exc) from exc
     sock.settimeout(TIMEOUT)
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     _sock = sock
+    _sock_last_used = time.monotonic()
 
 
 def _recv_exact_from(sock: socket.socket, n: int) -> bytes:
@@ -1747,6 +1807,20 @@ def _action_safe_to_retry(action: str, params: Optional[dict[str, Any]] = None) 
     )
 
 
+def _is_timeout(error: BaseException) -> bool:
+    return isinstance(getattr(error, "original", error), (TimeoutError, socket.timeout))
+
+
+def _busy_timeout_help(action: str) -> str:
+    return (
+        "Timeout error: Vectorworks did not answer '{action}' within {timeout:g} s. Vectorworks is busy or "
+        "blocked: a modal dialog or alert is open, a long render/export/regeneration is running, or the UI "
+        "is frozen. This read was not retried automatically. Ask the user to close any open Vectorworks "
+        "dialog or wait for the running operation, then call vw_status(action='health') once before "
+        "retrying. Do not loop on retries."
+    ).format(action=action, timeout=TIMEOUT)
+
+
 def _unknown_commit_state_help(action: str, error: BaseException) -> str:
     original = getattr(error, "original", error)
     return (
@@ -1755,8 +1829,17 @@ def _unknown_commit_state_help(action: str, error: BaseException) -> str:
         "The request may or may not have completed inside Vectorworks. The MCP "
         "host did not retry it, because retrying could duplicate or compound CAD "
         "changes. Check the Vectorworks document state, then rerun only the exact "
-        "follow-up action you still need."
-    ).format(action=action, err=original)
+        "follow-up action you still need.{busy}"
+    ).format(
+        action=action,
+        err=original,
+        busy=(
+            " The response timed out, which usually means Vectorworks is showing a modal dialog or "
+            "running a long operation; ask the user to clear it before inspecting."
+            if _is_timeout(error)
+            else ""
+        ),
+    )
 
 
 def _request_not_sent_help(action: str, error: BaseException) -> str:
@@ -2093,6 +2176,7 @@ def _request_once(
     params: Optional[dict[str, Any]],
     trace: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
+    global _sock_last_used
     request_id = uuid.uuid4().hex[:8]
     if trace is not None:
         trace.setdefault("request_ids", []).append(request_id)
@@ -2102,8 +2186,11 @@ def _request_once(
         request["auth_token"] = AUTH_TOKEN
     wire_started = time.perf_counter()
     try:
-        _connect()
         payload = _json_bytes(request)
+    except ProtocolError as exc:
+        raise RequestNotSentError(action, exc) from exc
+    _connect(action)
+    try:
         _send_frame(payload)
     except ProtocolError as exc:
         raise RequestNotSentError(action, exc) from exc
@@ -2117,6 +2204,7 @@ def _request_once(
     finally:
         if trace is not None:
             trace["wire_ms"] = float(trace.get("wire_ms", 0.0)) + (time.perf_counter() - wire_started) * 1000.0
+    _sock_last_used = time.monotonic()
     _validate_response_envelope(response, request_id, action)
     if trace is not None and isinstance(response.get("meta"), dict):
         trace["native"] = response["meta"]
@@ -2141,7 +2229,15 @@ def _request_once_health(
 
     wire_started = time.perf_counter()
     try:
-        with socket.create_connection((HOST, PORT), timeout=HEALTH_TIMEOUT) as sock:
+        sock = socket.create_connection((HOST, PORT), timeout=HEALTH_TIMEOUT)
+    except OSError as exc:
+        if trace is not None:
+            trace["health_wire_ms"] = (
+                float(trace.get("health_wire_ms", 0.0)) + (time.perf_counter() - wire_started) * 1000.0
+            )
+        raise BridgeUnreachableError(action, exc) from exc
+    try:
+        with sock:
             sock.settimeout(HEALTH_TIMEOUT)
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             try:
@@ -2180,7 +2276,11 @@ def _send_health(
     except ProtocolError as exc:
         _close()
         return f"Protocol error: {exc}. Restart the Vectorworks listener if this persists."
+    except BridgeUnreachableError as exc:
+        return _connection_help(exc.original)
     except RequestTransportError as exc:
+        if _is_timeout(exc):
+            return _busy_timeout_help(action)
         return _connection_help(exc.original)
     except (ConnectionError, TimeoutError, socket.timeout, OSError) as exc:
         return _connection_help(exc)
@@ -2221,6 +2321,13 @@ def _send(
             except RequestNotSentError as exc:
                 _close()
                 return _request_not_sent_help(action, exc)
+            except BridgeUnreachableError as exc:
+                # The TCP connection could not be opened, so nothing was sent.
+                # One immediate reconnect covers a bridge that just restarted.
+                _close()
+                if attempt == 0:
+                    continue
+                return _connection_help(exc.original)
             except ProtocolError as exc:
                 _close()
                 if not _action_safe_to_retry(action, params):
@@ -2229,13 +2336,19 @@ def _send(
             except RequestTransportError as exc:
                 _close()
                 if exc.action != action:
+                    if _is_timeout(exc):
+                        return _busy_timeout_help(exc.action)
                     if attempt == 0:
                         continue
                     return _connection_help(exc.original)
-                if attempt == 0 and _action_safe_to_retry(action, params):
-                    continue
                 if not _action_safe_to_retry(action, params):
                     return _unknown_commit_state_help(action, exc)
+                if _is_timeout(exc):
+                    # A second identical wait would double the latency and
+                    # usually exceed the MCP client timeout; fail fast instead.
+                    return _busy_timeout_help(action)
+                if attempt == 0:
+                    continue
                 return _connection_help(exc.original)
             except (ConnectionError, TimeoutError, socket.timeout, OSError) as exc:
                 _close()
@@ -2594,6 +2707,7 @@ def _tool_result_failed(raw: str, decoded: Any) -> bool:
             "Connection error:",
             "Protocol error:",
             "Request was not sent",
+            "Timeout error:",
             "Unexpected error",
             "Unknown commit state",
             "VW Error",
@@ -4949,7 +5063,33 @@ def _fast_native_status_error(status: dict[str, Any]) -> Optional[str]:
     ).format("; ".join(errors))
 
 
+def _main_context_busy_error(status: dict[str, Any]) -> Optional[str]:
+    """Detect a Vectorworks main thread that is not servicing the bridge pump.
+
+    Bridges that report ``main_context_idle_ms`` answer ping on the transport
+    thread, so this check costs no main-thread time and avoids queueing a
+    request that would only time out after the native 30 s wait.
+    """
+    if BUSY_THRESHOLD_MS <= 0:
+        return None
+    idle_ms = status.get("main_context_idle_ms")
+    if not isinstance(idle_ms, (int, float)) or isinstance(idle_ms, bool) or idle_ms < BUSY_THRESHOLD_MS:
+        return None
+    return (
+        "vectorworks_busy: the Vectorworks main thread has not serviced the MCP bridge for "
+        "{0:.1f} s (a long render/export/regeneration, a blocking operation, or a frozen UI). "
+        "No request was queued."
+    ).format(float(idle_ms) / 1000.0)
+
+
+def _auth_failure_text(error: str) -> bool:
+    lowered = error.lower()
+    return "authentication failed" in lowered or "vw_mcp_auth_token is required" in lowered
+
+
 def _fast_execution_bridge_status(trace: dict[str, Any]) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    """Return (status, error). Error strings start with a stable code token when known:
+    ``bridge_unreachable:``, ``vectorworks_busy:``, or ``auth_failed:``."""
     cached = _cached_cad_safe_status()
     if cached is not None:
         trace["preflight_cache_hit"] = True
@@ -4960,12 +5100,28 @@ def _fast_execution_bridge_status(trace: dict[str, Any]) -> tuple[Optional[dict[
     started = time.perf_counter()
     try:
         response = _request_once_health("ping", None, trace)
+    except BridgeUnreachableError as exc:
+        return None, (
+            "bridge_unreachable: nothing accepted a connection on {0}:{1} ({2}). Vectorworks is not "
+            "running, or the native MCP bridge plug-in is not installed/loaded."
+        ).format(HOST, PORT, exc.original)
+    except RequestTransportError as exc:
+        if _is_timeout(exc):
+            return None, (
+                "vectorworks_busy: the native bridge on {0}:{1} did not answer ping within {2:g} s."
+            ).format(HOST, PORT, HEALTH_TIMEOUT)
+        return None, "bridge_unreachable: the connection to {0}:{1} failed during ping ({2}).".format(
+            HOST, PORT, exc.original
+        )
     except Exception as exc:
         return None, str(exc)
     finally:
         trace["preflight_ms"] = float(trace.get("preflight_ms", 0.0)) + (time.perf_counter() - started) * 1000.0
     if response.get("success") is not True or not isinstance(response.get("result"), dict):
-        return None, str(response.get("error", "bridge status was not an object"))
+        error_text = str(response.get("error", "bridge status was not an object"))
+        if _auth_failure_text(error_text):
+            return None, "auth_failed: " + error_text
+        return None, error_text
     status = response["result"]
     evaluated = _evaluate_cad_preflight_status(status)
     if not evaluated.get("ok"):
@@ -4973,6 +5129,9 @@ def _fast_execution_bridge_status(trace: dict[str, Any]) -> tuple[Optional[dict[
     fast_error = _fast_native_status_error(status)
     if fast_error:
         return status, fast_error
+    busy_error = _main_context_busy_error(status)
+    if busy_error:
+        return status, busy_error
     _remember_cad_safe_status(status)
     return status, None
 
@@ -5103,11 +5262,15 @@ def vw_execute_operations(
         )
     status, status_error = _fast_execution_bridge_status(trace)
     if status_error or not isinstance(status, dict):
+        error_text = status_error or "bridge status unavailable"
+        preflight_code = _preflight_error_code(error_text)
         return _execute_operations_response(
             {
                 "ok": False,
                 "tool": "vw_execute_operations",
-                "error": f"CAD preflight failed: {status_error or 'bridge status unavailable'}",
+                "error": f"CAD preflight failed: {error_text}",
+                "error_code": preflight_code,
+                "next_step": _ERROR_NEXT_STEPS.get(preflight_code, ""),
                 "idempotency_key": idempotency_key,
                 "plan_hash": plan_hash,
                 "writes_started": False,
@@ -5164,6 +5327,30 @@ def vw_execute_operations(
         )
 
     required_native_action = "apply_documentation_operations" if documentation_plan else "apply_operations"
+    if documentation_plan and required_native_action not in implemented_actions:
+        return _execute_operations_response(
+            {
+                "ok": False,
+                "tool": "vw_execute_operations",
+                "error": (
+                    "Documentation writes (sheet layers, viewports, viewport annotations) are disabled in this "
+                    "connector release pending native Undo/Redo acceptance. This is expected, not a broken install: "
+                    "do not restart or upgrade the bridge and do not emulate them with other objects. Documentation "
+                    "reads (vw_read sheet_layers/viewports/viewport_annotations) still work; ask the user to make "
+                    "the sheet/viewport change manually."
+                ),
+                "error_code": "capability_unavailable",
+                "required_native_action": required_native_action,
+                "idempotency_key": idempotency_key,
+                "plan_hash": plan_hash,
+                "writes_started": False,
+                "commit_state": "not_started",
+                "retryable": False,
+                "retry_policy": "after_bridge_upgrade",
+            },
+            trace,
+            "unsupported",
+        )
     if documentation_plan and required_native_action in implemented_actions:
         execution_path = required_native_action
         trace["action"] = execution_path
@@ -5326,23 +5513,87 @@ def vw_execute_operations(
     if _tool_result_failed(raw, decoded) or not isinstance(decoded, dict):
         error = decoded.get("error") if isinstance(decoded, dict) else str(decoded)
         raw_error = str(error or "native operation request failed")
-        request_not_sent = raw_error.startswith("Request was not sent")
+        failure_code = _classify_failure_text(raw_error)
+        lowered_error = raw_error.lower()
+        if failure_code in {"request_not_sent", "bridge_unreachable", "auth_failed", "configuration_error"}:
+            # Nothing reached the native transaction: either no bytes were sent,
+            # the TCP connection could not be opened, or the bridge rejected the
+            # frame before dispatch.
+            outcome = "request_not_sent"
+            failure = {
+                "writes_started": False,
+                "commit_state": "not_started",
+                "retryable": True,
+                "retry_policy": "safe" if failure_code == "request_not_sent" else "after_preflight_repair",
+                "manual_reconciliation_required": False,
+            }
+        elif (
+            failure_code == "native_action_failed"
+            and raw_error.startswith("VW Error")
+            and not any(
+                marker in lowered_error
+                for marker in ("rollback integrity", "stop requested", "cancelled", "unloading", "stopping")
+            )
+        ):
+            # The bridge answered with an explicit failure. apply_operations
+            # prevalidates the plan and runs in one undo transaction that is
+            # rolled back on any exception, so the document is unchanged.
+            outcome = "native_rejected"
+            failure = {
+                "writes_started": False,
+                "commit_state": "rolled_back",
+                "retryable": True,
+                "retry_policy": "safe_after_correction",
+                "manual_reconciliation_required": False,
+            }
+            raw_error = _native_failure_message(raw_error)
+        else:
+            outcome = "unknown_commit_state"
+            failure = {
+                "writes_started": None,
+                "commit_state": "unknown",
+                "retryable": False,
+                "retry_policy": "never_after_send",
+                "manual_reconciliation_required": True,
+            }
+        busy = raw_error.startswith("Timeout error:") or "timed out" in lowered_error
+        if outcome == "unknown_commit_state":
+            response_code = "unknown_commit_state"
+        elif outcome == "native_rejected":
+            response_code = "native_rejected"
+        else:
+            response_code = failure_code
+        next_step = (
+            "Vectorworks rejected the plan and rolled back the whole atomic transaction; the document is "
+            "unchanged. Fix the operation named in error and resend with a NEW idempotency_key."
+            if outcome == "native_rejected"
+            else _ERROR_NEXT_STEPS.get(response_code, "")
+        )
+        if outcome == "unknown_commit_state":
+            next_step = (
+                "Do not resend. Call vw_status(action='transaction', idempotency_key=<this key>) once: "
+                "'committed' means it was applied; 'unknown' means inspect the affected objects with vw_read."
+                + (
+                    " The response timed out, so Vectorworks was busy; ask the user to close dialogs or wait "
+                    "for the running operation first."
+                    if busy
+                    else ""
+                )
+            )
         return _execute_operations_response(
             {
                 "ok": False,
                 "tool": "vw_execute_operations",
                 "error": raw_error,
+                "error_code": response_code,
+                "next_step": next_step,
                 "execution_path": execution_path,
                 "idempotency_key": idempotency_key,
                 "plan_hash": plan_hash,
-                "writes_started": False if request_not_sent else None,
-                "commit_state": "not_started" if request_not_sent else "unknown",
-                "retryable": request_not_sent,
-                "retry_policy": "safe" if request_not_sent else "never_after_send",
-                "manual_reconciliation_required": not request_not_sent,
+                **failure,
             },
             trace,
-            "request_not_sent" if request_not_sent else "unknown_commit_state",
+            outcome,
         )
 
     if isinstance(decoded.get("timing"), dict):
@@ -6691,6 +6942,73 @@ def _grouped_finish(
     return json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
+_ERROR_NEXT_STEPS = {
+    "bridge_unreachable": (
+        "Vectorworks is not reachable. Ask the user to start Vectorworks 2024/2025 with the MCP native "
+        "bridge plug-in installed and a document open, then call vw_status(action='health') once. Do not "
+        "retry in a loop or switch to other tools. For setup problems use the Vectorworks diagnose skill "
+        "(vectorworksctl doctor)."
+    ),
+    "vectorworks_busy": (
+        "Vectorworks is busy or blocked. Ask the user to close any open dialog/alert or wait for the running "
+        "render/export to finish, then call vw_status(action='health') once before retrying. Do not loop."
+    ),
+    "auth_failed": (
+        "The MCP host and the Vectorworks bridge use different auth tokens. Ask the user to rerun "
+        "install.ps1 (repairs the shared token) and restart Vectorworks. Do not disable authentication."
+    ),
+    "preflight_failed": (
+        "The native bridge is not ready for CAD work. Report detail to the user and run vectorworksctl "
+        "doctor; do not retry until the bridge is upgraded/restarted."
+    ),
+    "capability_unavailable": (
+        "The installed bridge does not support this. Tell the user what is missing; do not emulate it with "
+        "other tools or object types."
+    ),
+    "capability_manifest_mismatch": "Restart Vectorworks so ping and the capability manifest agree, then retry once.",
+    "validation_error": "Nothing was sent. Fix the argument named in message and call again.",
+    "request_not_sent": "Nothing reached Vectorworks. It is safe to retry once.",
+    "target_changed": "The active document changed. Re-read vw_read(action='document') and rebuild the request.",
+    "native_action_failed": (
+        "Vectorworks rejected the request; message has the native reason. Fix the inputs rather than "
+        "repeating the same call."
+    ),
+    "unknown_commit_state": (
+        "Do not repeat the action. Inspect the document or target file with read-only calls, then decide what "
+        "is still needed."
+    ),
+    "protocol_error": "The bridge sent an invalid reply. Ask the user to restart Vectorworks, then check health once.",
+    "configuration_error": "The MCP host configuration is invalid. Ask the user to rerun install.ps1.",
+}
+
+
+def _classify_failure_text(text: str) -> str:
+    """Map a host/native failure string onto a stable grouped error code."""
+    lowered = text.lower()
+    if text.startswith("Request was not sent"):
+        return "request_not_sent"
+    if text.startswith("Configuration error:"):
+        return "configuration_error"
+    if _auth_failure_text(text):
+        return "auth_failed"
+    if text.startswith("Unknown commit state") or "unknown_commit_state" in lowered:
+        return "unknown_commit_state"
+    if text.startswith("Timeout error:") or "timed out waiting for vectorworks main/plugin context" in lowered:
+        return "vectorworks_busy"
+    if text.startswith("Connection error:"):
+        return "bridge_unreachable"
+    if text.startswith("Protocol error:"):
+        return "protocol_error"
+    return "native_action_failed"
+
+
+def _preflight_error_code(error_text: str) -> str:
+    for code in ("bridge_unreachable", "vectorworks_busy", "auth_failed"):
+        if error_text.startswith(code + ":"):
+            return code
+    return "preflight_failed"
+
+
 def _grouped_error(
     tool: str,
     action: str,
@@ -6722,12 +7040,21 @@ def _grouped_error(
         "preflight_failed",
         "request_not_sent",
         "target_changed",
+        "bridge_unreachable",
+        "auth_failed",
+        "configuration_error",
     }:
         writes_started = False
         commit_state = commit_state or "not_started"
-    if code in {"preflight_failed", "capability_manifest_mismatch"}:
+    if code in {"preflight_failed", "capability_manifest_mismatch", "bridge_unreachable", "auth_failed"}:
         retryable = True
         retry_policy = "after_preflight_repair"
+    elif code == "validation_error":
+        retryable = True
+        retry_policy = "safe_after_correction"
+    elif code == "vectorworks_busy":
+        retryable = retry_policy == "safe"
+        retry_policy = "after_user_clears_busy_state" if retryable else retry_policy
     elif code == "request_not_sent":
         retryable = True
         retry_policy = "safe"
@@ -6745,6 +7072,9 @@ def _grouped_error(
     }
     if commit_state:
         error["commit_state"] = commit_state
+    next_step = _ERROR_NEXT_STEPS.get(code)
+    if next_step:
+        error["next_step"] = next_step
     if required_action:
         error["required_native_action"] = required_action
     if detail is not None:
@@ -6770,15 +7100,22 @@ def _grouped_preflight(
 ) -> tuple[Optional[dict[str, Any]], Optional[str]]:
     status, status_error = _fast_execution_bridge_status(trace)
     if status_error or not isinstance(status, dict):
+        error_text = status_error or "bridge status unavailable"
+        code = _preflight_error_code(error_text)
+        message = (
+            error_text.split(":", 1)[1].strip()
+            if code != "preflight_failed"
+            else "The phase-4 native bridge is not ready for this call: " + error_text
+        )
         return status, _grouped_error(
             tool,
             action,
-            "preflight_failed",
-            "The phase-4 native bridge is not ready for this grouped call.",
+            code,
+            message,
             trace,
             status=status,
             required_action=required_native_action,
-            detail=status_error or "bridge status unavailable",
+            detail=error_text,
         )
     implemented = status.get("implemented_actions")
     implemented_actions = set(implemented) if isinstance(implemented, list) else set()
@@ -6823,41 +7160,43 @@ def _grouped_native_call(
     decoded = _decode_tool_result(raw)
     if _tool_result_failed(raw, decoded):
         error_text = decoded if isinstance(decoded, str) else raw
-        if isinstance(error_text, str) and error_text.startswith("Unknown commit state"):
-            return None, status, _grouped_error(
-                tool,
-                action,
-                "unknown_commit_state",
-                "Vectorworks accepted the non-retryable native action, but the host did not receive a reliable result.",
-                trace,
-                status=status,
-                required_action=native_action,
-                detail=decoded,
-                commit_state="unknown",
-            )
-        if isinstance(error_text, str) and error_text.startswith("Request was not sent"):
-            return None, status, _grouped_error(
-                tool,
-                action,
-                "request_not_sent",
-                "The native request did not cross the transport boundary and is safe to retry.",
-                trace,
-                status=status,
-                required_action=native_action,
-                detail=decoded,
-                commit_state="not_started",
-            )
+        code = _classify_failure_text(error_text if isinstance(error_text, str) else str(error_text))
+        messages = {
+            "unknown_commit_state": (
+                "Vectorworks accepted the non-retryable native action, but the host did not receive a reliable result."
+            ),
+            "request_not_sent": "The native request did not cross the transport boundary and is safe to retry.",
+        }
+        message = messages.get(code) or _native_failure_message(error_text)
         return None, status, _grouped_error(
             tool,
             action,
-            "native_action_failed",
-            "The advertised native action failed; no fallback was attempted.",
+            code,
+            message,
             trace,
             status=status,
             required_action=native_action,
             detail=decoded,
+            commit_state="unknown" if code == "unknown_commit_state" else ("not_started" if code == "request_not_sent" else ""),
         )
     return decoded, status, None
+
+
+def _native_failure_message(error_text: Any) -> str:
+    """Surface the real native reason instead of a generic failure sentence."""
+    text = str(error_text or "").strip()
+    match = re.match(r"^VW Error \(([^)]*)\): (.*)$", text, re.DOTALL)
+    if match:
+        text = match.group(2).strip()
+        try:
+            structured = json.loads(text)
+        except (TypeError, ValueError):
+            structured = None
+        if isinstance(structured, dict) and isinstance(structured.get("message"), str):
+            text = structured["message"]
+    if len(text) > 600:
+        text = text[:600] + "..."
+    return text or "The advertised native action failed; no fallback was attempted."
 
 
 def _grouped_page_offset(cursor: str) -> int:
@@ -7445,7 +7784,13 @@ def vw_apply(
         original_error = payload.get("error")
         error_text = str(original_error or "atomic native operation failed")
         execution_outcome = str((payload.get("timing") or {}).get("outcome", ""))
-        if execution_outcome == "unsupported" or payload.get("unsupported_object_types"):
+        explicit_code = payload.pop("error_code", "")
+        next_step = payload.pop("next_step", "")
+        if explicit_code == "native_rejected":
+            code = "native_rejected"
+        elif explicit_code in {"bridge_unreachable", "vectorworks_busy", "auth_failed"} and execution_outcome != "unknown_commit_state":
+            code = explicit_code
+        elif execution_outcome == "unsupported" or payload.get("unsupported_object_types"):
             code = "capability_unavailable"
         elif execution_outcome in {"validation_error", "idempotency_conflict"}:
             code = "validation_error"
@@ -7472,6 +7817,11 @@ def vw_apply(
             "retryable": payload.get("retryable", False),
             "retry_policy": payload.get("retry_policy", "never_after_send"),
         }
+        next_step = next_step or _ERROR_NEXT_STEPS.get(code, "")
+        if next_step:
+            payload["error"]["next_step"] = next_step
+        if payload.get("unsupported_object_types"):
+            payload["error"]["unsupported_object_types"] = payload["unsupported_object_types"]
     payload["delegated_tool"] = "vw_execute_operations"
     payload["tool"] = "vw_apply"
     payload["action"] = "apply"
