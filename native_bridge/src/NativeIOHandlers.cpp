@@ -134,7 +134,7 @@ PreparedOutput PrepareOutput(
         output.replaceConfirmation != kReplaceConfirmation) {
         throw Error(
             ErrorCode::ReplaceConfirmationRequired,
-            "replacing an existing file requires replaceConfirmation='REPLACE_EXISTING_FILE'");
+            "replacing an existing file requires options replace=true and replace_confirmation='REPLACE_EXISTING_FILE'");
     }
     return {target, exists};
 }

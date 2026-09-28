@@ -139,6 +139,11 @@ responses must satisfy these minimum shapes:
   `main_context_pump: "win32_ui_timer"` and
   `main_context_pump_ready: true`; otherwise CAD requests are not considered
   safe even when the handler list is complete.
+  Current SDK builds also report `main_context_idle_ms`, the age of the last
+  main-context pump callback measured on the transport thread. The host treats
+  a value at or above `VW_MCP_BUSY_THRESHOLD_MS` (default 8000) as
+  `vectorworks_busy` and does not queue CAD work. Older builds omit the field;
+  the host then skips the check.
 - `get_document_info`: object with non-empty string `filename`, string
   `filepath` when present, `layers` as a list of strings, non-negative integer
   `layer_count` matching `layers.length`, and non-negative integer

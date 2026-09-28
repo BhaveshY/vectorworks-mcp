@@ -60,6 +60,15 @@ CadRequestQueue gCadQueue;
 NativeTransport gTransport;
 std::atomic_bool gStopRequested{false};
 std::atomic_bool gCadQueuePumpActive{false};
+// Steady-clock milliseconds of the last main-context pump callback. Ping runs
+// on the transport thread and reports its age so the host can fail fast when
+// the Vectorworks main thread is blocked. 0 means "no callback yet".
+std::atomic<std::int64_t> gLastMainContextPumpTickMs{0};
+
+std::int64_t SteadyClockMilliseconds() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 std::mutex gTransportStartMutex;
 std::chrono::steady_clock::time_point gNextTransportStartAttempt{};
 constexpr auto kCadRequestTimeout = std::chrono::seconds(30);
@@ -914,6 +923,12 @@ Protocol::ResponseEnvelope HandlePingOnTransportThread(const Protocol::RequestEn
     payload += ",\"main_context_pump_ready\":";
     payload += ready ? "true" : "false";
     payload += R"(,"dispatch_wakeup":"win32_message","pump_watchdog_ms":50,"pump_budget_ms":8)";
+    const std::int64_t lastPumpTick = gLastMainContextPumpTickMs.load();
+    if (ready && lastPumpTick > 0) {
+        const std::int64_t idleMs = SteadyClockMilliseconds() - lastPumpTick;
+        payload += ",\"main_context_idle_ms\":";
+        payload += std::to_string(idleMs < 0 ? 0 : idleMs);
+    }
     payload += "}";
     return {
         request.id,
@@ -5054,6 +5069,7 @@ void OnPluginUnloadStopTransport() {
 }
 
 void OnVectorworksMainPluginEvent() {
+    gLastMainContextPumpTickMs.store(SteadyClockMilliseconds());
     if (gCadQueuePumpActive.exchange(true)) {
         return;
     }
