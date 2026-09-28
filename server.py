@@ -512,6 +512,10 @@ GroupedDocumentAction = Literal["info", "save", "export", "open"]
 CoordinateUnits = Literal["mm", "cm", "m", "in", "ft"]
 LookupDetail = Literal["brief", "normal", "full"]
 MAX_OBJECT_QUERY_LIMIT = 1000
+# Native drawing_summary maximum. Summaries previously scanned only `limit`
+# (default 100) objects, so per-type/per-layer counts silently undercounted
+# real drawings.
+SUMMARY_SCAN_LIMIT = 100_000
 ObjectQueryLimit = Annotated[int, Field(ge=1, le=MAX_OBJECT_QUERY_LIMIT)]
 GroupedPageLimit = Annotated[int, Field(ge=1, le=200)]
 GroupedCursor = Annotated[str, Field(max_length=10, pattern=r"^(?:0|[1-9][0-9]{0,9})?$")]
@@ -7432,7 +7436,8 @@ def vw_status(
         "drawing_summary",
         {
             "limit": limit,
-            "scan_limit": limit,
+            # Counts must cover the whole drawing; limit only bounds examples.
+            "scan_limit": SUMMARY_SCAN_LIMIT,
             "include_examples": include_examples,
             "example_limit": min(limit, 5) if include_examples else 0,
         },
@@ -7675,7 +7680,7 @@ def vw_read(
                 "layer": layer,
                 "object_type": object_type,
                 "limit": requested,
-                "scan_limit": requested,
+                "scan_limit": SUMMARY_SCAN_LIMIT,
                 "include_examples": False,
                 "example_limit": 0,
             },
