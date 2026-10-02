@@ -4490,7 +4490,8 @@ std::string HandleApplyOperations(const Params& params) {
                     true,
                 });
                 std::string result = "{\"index\":" + std::to_string(index + 1u) +
-                    ",\"op\":\"create\",\"handle\":" + JsonString(HandleId(object));
+                    ",\"op\":\"create\",\"handle\":" + JsonString(HandleId(object)) +
+                    ",\"uuid\":" + JsonString(transaction.Uuid(artifact));
                 if (!operation.localRef.empty()) {
                     result += ",\"local_ref\":";
                     result += JsonString(operation.localRef);

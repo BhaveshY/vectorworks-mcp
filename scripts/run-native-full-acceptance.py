@@ -57,6 +57,7 @@ EXPECTED_NATIVE_ACTIONS = {
     "get_viewports",
     "get_viewport_annotations",
     "get_objects",
+    "query_objects",
     "selection",
     "create_object",
     "batch_create_objects",
@@ -68,6 +69,7 @@ EXPECTED_NATIVE_ACTIONS = {
     "find_objects",
     "drawing_summary",
     "apply_operations",
+    "transaction_status",
     # apply_documentation_operations is intentionally not advertised while
     # kDocumentationWritesEnabled is false (connector 0.7.0 stability gate).
 }
