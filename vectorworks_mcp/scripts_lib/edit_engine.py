@@ -15,7 +15,9 @@ for item in ARGS["ops"]:
     if op == "mirror":
         a, b = item["axis_start"], item["axis_end"]
         for h in handles:
-            new = vs.HMirror(h, bool(item.get("copy")), (a[0], a[1]), (b[0], b[1]))
+            # vs.MirrorN(h, dup: BOOLEAN, p1: POINT, p2: POINT, preserveMatrix: BOOLEAN) -> HANDLE
+            # (there is no vs.HMirror; preserveMatrix keeps symbol/PIO matrices correct)
+            new = vs.MirrorN(h, bool(item.get("copy")), (float(a[0]), float(a[1])), (float(b[0]), float(b[1])), True)
             done.append({"op": op, "uuid": uuid_of(new if (item.get("copy") and not _nil(new)) else h)})
     elif op == "layer":
         target = _layer_handle(item["layer"])
@@ -24,6 +26,7 @@ for item in ARGS["ops"]:
             vs.ResetObject(h)
             done.append({"op": op, "uuid": uuid_of(h), "layer": item["layer"]})
     elif op == "group":
+        # vs.Group() groups the selection on the active layer only.
         vs.DSelectAll()
         for h in handles:
             vs.SetSelect(h)
@@ -44,7 +47,7 @@ for item in ARGS["ops"]:
         rec = item["record"]
         if _nil(vs.GetObject(rec)):
             for field in (item["fields"] or {"Value": ""}):
-                vs.NewField(rec, field, "", 4, 0)
+                vs.NewField(rec, str(field), "", 4, 0)
         for h in handles:
             if item.get("detach"):
                 vs.DelRecord(h, rec)
@@ -52,7 +55,7 @@ for item in ARGS["ops"]:
                 continue
             vs.SetRecord(h, rec)
             for field, value in item["fields"].items():
-                vs.SetRField(h, rec, field, value)
+                vs.SetRField(h, rec, field, "" if value is None else str(value))
             vs.ResetObject(h)
             done.append({"op": op, "uuid": uuid_of(h), "record": rec, "fields": list(item["fields"].keys())})
     else:

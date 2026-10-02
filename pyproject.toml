@@ -28,4 +28,4 @@ py-modules = ["server"]
 include = ["vectorworks_mcp*", "legacy*"]
 
 [tool.setuptools.package-data]
-vectorworks_mcp = ["guide.md", "scripts_lib/*.py"]
+vectorworks_mcp = ["guide.md", "scripts_lib/*.py", "data/*.json"]

@@ -162,7 +162,12 @@ class Model:
 
 
 class FakeVS:
-    """Just enough of the vs.* API for the host snippets (handles = uuids)."""
+    """Just enough of the vs.* API for the host snippets (handles = uuids).
+
+    Only names that exist in the SDK vs.py stub (data/vs_signatures.json) may be
+    called; anything else raises AttributeError like the real module, so a
+    snippet using a made-up function (e.g. vs.HMirror) fails in the mock too.
+    """
 
     def __init__(self, model: Model) -> None:
         self._m = model
@@ -174,6 +179,12 @@ class FakeVS:
         return self._m.doc
 
     def __getattr__(self, name: str):
+        if name.startswith("_"):
+            raise AttributeError(name)
+        from .. import vs_lint
+        if name not in vs_lint._load():
+            raise AttributeError(f"module 'vs' has no attribute '{name}'")
+
         def generic(*args, **kwargs):
             self.calls.append(name)
             return None
@@ -187,7 +198,7 @@ class FakeVS:
             return self._d.objects[h]["type_id"]
         if any(l["uuid"] == h for l in self._d.layers):
             return 31
-        if h in self._d.records or h.startswith("view:") or h.startswith("story:"):
+        if h in self._d.records or h.startswith(("view:", "story:", "pio:")):
             return 47
         return 0
 
@@ -234,7 +245,7 @@ class FakeVS:
     def SetParent(self, h, layer_handle):
         self._d.objects[h]["layer"] = self.GetName(layer_handle)
 
-    def HMirror(self, h, dup, p1, p2):
+    def MirrorN(self, h, dup, p1, p2, preserve_matrix):
         obj = self._d.objects[h]
         if dup:
             new = self._d.add(obj["type"], **{k: v for k, v in obj.items() if k not in {"uuid", "type", "records", "bounds", "type_id"}})
@@ -316,12 +327,16 @@ class FakeVS:
     def ImportResToCurFileN(self, list_id, index, cb):
         return "res"
 
-    def SaveView(self, name):
+    def SaveSheet(self, name, save_view, save_class, save_layer):
         self._d.saved_views.append(name)
 
-    def RestoreSavedView(self, name):
+    def VRestore(self, name):
         if name not in self._d.saved_views:
             raise RuntimeError("no such saved view")
+
+    def VDelete(self, name):
+        if name in self._d.saved_views:
+            self._d.saved_views.remove(name)
 
     def DelObject(self, h):
         if isinstance(h, str) and h.startswith("view:"):
@@ -333,8 +348,8 @@ class FakeVS:
         b = self._d.objects[h].get("bounds") or {"top_left": [0, 0], "bottom_right": [0, 0]}
         return tuple(b["top_left"]), tuple(b["bottom_right"])
 
-    def GetCustomObjectInfo(self, h):
-        return True, self._d.objects[h].get("plugin_name", self._d.objects[h]["type"].title()), None, None
+    def GetParametricRecord(self, h):
+        return "pio:" + self._d.objects[h].get("plugin_name", self._d.objects[h]["type"].title())
 
     def CreateStory(self, name, suffix):
         self._d.stories.append({"name": name, "suffix": suffix, "elevation": 0.0})
@@ -353,7 +368,7 @@ class FakeVS:
         i = ids.index(h)
         return ids[i + 1] if i + 1 < len(ids) else None
 
-    def GetStory(self, h):
+    def GetStoryOfLayer(self, h):
         return ("story:" + self._d.stories[0]["name"]) if self._d.stories else None
 
     def GetStorySuffix(self, st):
@@ -469,7 +484,9 @@ class Handler:
                      "pid": os.getpid(), "port": m.port, "session_id": m.session, "vectorworks_version": "2024",
                      "ui_state": m.ui_state if doc else "no_document", "handler_running_ms": 0, "queue_depth": 0,
                      "active_document": {k: v for k, v in doc.brief().items() if k != "active"} if doc else None,
-                     "open_document_count": len(m.docs)})
+                     "open_document_count": len(m.docs),
+                     "script_enabled": os.environ.get("VW_MCP_ALLOW_SCRIPT") != "0",
+                     "script_engine": "poisoned" if getattr(m, "script_poisoned", False) else "ok"})
         return base
 
     def actions(self) -> set:
@@ -969,6 +986,19 @@ class Handler:
         d = m.doc
         if os.environ.get("VW_MCP_ALLOW_SCRIPT") == "0":
             raise BridgeError("scripting disabled", "script_disabled")
+        restart = {"script_engine": "poisoned", "exception_code": "0xC0000005",
+                   "next_step": "save your work and restart Vectorworks"}
+        if getattr(m, "script_poisoned", False):
+            raise BridgeError("the Vectorworks scripting engine is disabled after an earlier script crash (0xC0000005); "
+                              "save your work and restart Vectorworks", "script_engine_unavailable", False,
+                              "not_started", restart)
+        if "__vw_mcp_mock_crash__" in str(p.get("code", "")):
+            # Emulates the native SEH guard catching an access violation in a vs.* call.
+            m.script_poisoned = True
+            raise BridgeError("the script crashed inside Vectorworks (access violation 0xC0000005 in the Python "
+                              "engine); scripting is disabled for the rest of this Vectorworks session and the "
+                              "document state is unknown; save your work and restart Vectorworks", "script_crashed",
+                              False, "unknown", restart)
         snapshot = copy.deepcopy(m.docs)
         vs = FakeVS(m)
         scope: dict = {"vs": vs}

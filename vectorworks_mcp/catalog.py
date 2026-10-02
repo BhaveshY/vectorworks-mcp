@@ -206,9 +206,10 @@ TOOLS: list[dict] = [
         "description": (
             "Escape hatch: run Python (vs.* API, `vs` pre-imported) or VectorScript inside Vectorworks as ONE undo step; "
             "rolled back on error. Assign `result = ...` to return JSON. Use only when no other tool covers the task. "
-            "Example: vw_script(code=\"h = vs.FSActLayer()\\nresult = vs.GetName(h)\")."),
+            "vs.* calls are checked against the SDK signatures before sending (COLOR = (r, g, b) 0..65535; "
+            "lint=false skips). Example: vw_script(code=\"h = vs.FSActLayer()\\nresult = vs.GetName(h)\")."),
         "input": obj({"code": S, "language": {"type": "string", "enum": ["python", "vectorscript"]}, "undo_label": S,
-                      "background": B, "document": DOC}, ("code",)),
+                      "background": B, "lint": B, "document": DOC}, ("code",)),
         "output": out_schema(result={}, stdout=S, stderr=S, rolled_back=B),
         "annotations": DESTRUCTIVE,
     },

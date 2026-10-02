@@ -428,6 +428,11 @@ std::string PingJson() {
     json += R"(,"dispatch_wakeup":"win32_message","pump_watchdog_ms":50,"pump_budget_ms":8)";
     json += ",\"script_enabled\":";
     json += Scripting::ScriptingAllowed() ? "true" : "false";
+    json += ",\"script_engine\":" + JsonString(Scripting::ScriptEngineState());
+    if (Scripting::ScriptEnginePoisoned()) {
+        json += ",\"script_engine_fault\":" + JsonString(Scripting::ScriptFaultCodeHex());
+        json += ",\"script_engine_faults\":" + std::to_string(Scripting::ScriptFaultCount());
+    }
     json += "}";
     return json;
 }

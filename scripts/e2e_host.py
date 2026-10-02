@@ -539,6 +539,37 @@ def phase_edge(python: str, state_dir: Path) -> None:
         check("layer delete unknown -> not_found", err_code(sc) == "not_found", json.dumps(sc)[:250])
         sc, _ = c.call("vw_read", {"what": "documents"})
         check("documents lists 3", len(sc.get("data", [])) == 3, json.dumps(sc)[:300])
+        # vs.* signature lint (host side, nothing sent)
+        sc, raw = c.call("vw_script", {"code": "vs.SetClFillFore('A', vs.RGBToColorIndex(65535, 0, 0))"})
+        err = sc.get("error") or {}
+        check("vw_script lint: palette index into COLOR -> script_lint_failed with signature",
+              raw.get("isError") and err.get("code") == "script_lint_failed" and err.get("commit_state") == "not_started"
+              and "SetClFillFore(clasName: STRING, color: COLOR)" in err.get("next_step", ""), json.dumps(sc)[:400])
+        sc, _ = c.call("vw_script", {"code": "h = vs.HMirror(None, False, (0, 0), (1, 0))"})
+        check("vw_script lint: unknown vs function", err_code(sc) == "script_lint_failed"
+              and "vs.MirrorN" in json.dumps(sc), json.dumps(sc)[:300])
+        sc, _ = c.call("vw_script", {"code": "x1, y1, x2, y2 = vs.GetBBox(vs.FSActLayer())"})
+        check("vw_script lint: GetBBox unpack count", err_code(sc) == "script_lint_failed", json.dumps(sc)[:300])
+        sc, _ = c.call("vw_script", {"code": "vs.SetClFillFore('A', (65535, 0, 0))\nvs.Rect(0, 0, 10, 10)\nresult = 1"})
+        check("vw_script lint: valid COLOR tuple / expanded POINTs pass", sc.get("ok") and sc.get("result") == 1,
+              json.dumps(sc)[:300])
+        sc, _ = c.call("vw_script", {"code": "vs.NotARealCall()\nresult = 2", "lint": False})
+        check("vw_script lint=false bypasses the lint", err_code(sc) == "script_error" and "NotARealCall" in json.dumps(sc),
+              json.dumps(sc)[:300])
+        # contained native crash -> script_crashed, then the engine is poisoned
+        sc, raw = c.call("vw_script", {"code": "result = '__vw_mcp_mock_crash__'"})
+        err = sc.get("error") or {}
+        check("contained script crash -> script_crashed, commit_state unknown",
+              raw.get("isError") and err.get("code") == "script_crashed" and err.get("commit_state") == "unknown"
+              and "restart Vectorworks" in err.get("next_step", ""), json.dumps(sc)[:400])
+        sc, _ = c.call("vw_script", {"code": "result = 1"})
+        check("poisoned engine -> script_engine_unavailable (fail fast)", err_code(sc) == "script_engine_unavailable"
+              and "restart Vectorworks" in (sc.get("error") or {}).get("next_step", ""), json.dumps(sc)[:300])
+        sc, _ = c.call("vw_status", {})
+        probs = [p for p in sc.get("problems", []) if p.get("code") == "script_engine_unavailable"]
+        check("vw_status surfaces script_engine poisoned with restart next_step",
+              bool(probs) and "save their work and restart Vectorworks" in probs[0].get("next_step", "")
+              and any(r.get("script_engine") == "poisoned" for r in sc.get("instances", [])), json.dumps(sc)[:500])
         c.close()
     finally:
         mock.kill()

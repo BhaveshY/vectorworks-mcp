@@ -51,6 +51,8 @@ def handle(args: dict, ctx, warnings: list) -> dict:
                 row["active_document"] = doc_brief(ad)
             if isinstance(status.get("open_document_count"), int):
                 row["open_documents"] = status["open_document_count"]
+            if status.get("script_engine"):
+                row["script_engine"] = status["script_engine"]
             if status.get("handler_running_ms"):
                 row["busy_ms"] = status["handler_running_ms"]
             idle = status.get("main_context_idle_ms")
@@ -84,6 +86,14 @@ def handle(args: dict, ctx, warnings: list) -> dict:
                                      "creates and edits work; multi-document, capture fitting, scripting, layers/stories "
                                      "management and async jobs need the 1.0 bridge.",
                                      "Ask the user to run: " + INSTALL_COMMAND))
+        if chosen.status.get("script_engine") == "poisoned":
+            problems.append(_problem(
+                "script_engine_unavailable",
+                "A script crashed inside Vectorworks earlier in this session (access violation in a vs.* call); "
+                "Python scripting and script-backed features are disabled until Vectorworks restarts, and the "
+                "document state after the crash is unknown.",
+                "Ask the user to save their work and restart Vectorworks. Native (non-script) tools still work; "
+                "do not call vw_script until then."))
         ui_state = chosen.status.get("ui_state")
         chosen_row = next((r for r in rows if r.get("instance") == chosen.key), {})
         busy = ui_state in {"modal", "tracking", "loading"} or chosen_row.get("ui_state") == "busy"

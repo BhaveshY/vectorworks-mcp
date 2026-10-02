@@ -190,13 +190,19 @@ std::string LayerJson(MCObjectHandle layer, MCObjectHandle active, const std::ma
 
 class UndoScope {
 public:
-    explicit UndoScope(const char* name) {
+    explicit UndoScope(const char* name) : faultsBefore_(Scripting::ScriptFaultCount()) {
         gSDK->SupportUndoAndRemove();
         gSDK->SetUndoMethod(kUndoSwapObjects);
         gSDK->NameUndoEvent(TXString(name));
     }
     ~UndoScope() {
         if (!done_) {
+            if (Scripting::ScriptFaultCount() != faultsBefore_) {
+                // A script inside this scope crashed (contained by the SEH
+                // guard): close the event, never replay it (PROTOCOL.md).
+                Scripting::EndUndoEventAfterFault();
+                return;
+            }
             try {
                 gSDK->UndoAndRemove();
             } catch (...) {
@@ -213,6 +219,7 @@ public:
     UndoScope& operator=(const UndoScope&) = delete;
 
 private:
+    unsigned faultsBefore_ = 0;
     bool done_ = false;
 };
 
@@ -599,7 +606,11 @@ std::string HandleClassesExtension(const Params& params) {
         }
         if (!ok) throw Protocol::BridgeError("invalid_request", key + " must be [r,g,b], \"#rrggbb\" or \"r,g,b\"");
         for (int& channel : rgb) channel = std::clamp(channel, 0, 65535);
-        code += std::string("vs.") + function + "(_c, vs.RGBToColorIndex(" + std::to_string(rgb[0]) + ", " +
+        // vs.SetClFillFore/SetClPenFore(className, color): COLOR is ONE (r, g, b)
+        // tuple with 0..65535 components (SDK vs.py stub). Passing a palette
+        // index from vs.RGBToColorIndex crashed Vectorworks 2024 (access
+        // violation inside the vs call) instead of raising a Python error.
+        code += std::string("vs.") + function + "(_c, (" + std::to_string(rgb[0]) + ", " +
             std::to_string(rgb[1]) + ", " + std::to_string(rgb[2]) + "))\n";
         changed.push_back(key);
     };

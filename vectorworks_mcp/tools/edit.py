@@ -97,7 +97,7 @@ def handle(args: dict, ctx, warnings: list) -> dict:
                         raise VWError("upgrade_required" if not inst.v2 else "unsupported",
                                       "Selecting by uuid needs run_script; select by name or criteria instead.")
                     host.call(target, "run_script", {"language": "python", "transaction": False, "undo_label": "Select",
-                                                     "code": "for u in %r:\n    vs.SetSelect(vs.GetObjectByUuid(u[5:] if u.startswith('uuid:') else u))\nresult = len(%r)" % (uuids, uuids)},
+                                                     "code": "_n = 0\nfor u in %r:\n    _h = vs.GetObjectByUuid(u[5:] if u.startswith('uuid:') else u)\n    if _h:\n        vs.SetSelect(_h)\n        _n += 1\nresult = _n" % (uuids,)},
                               kind="write")
                 if names:
                     criteria = "(" + " | ".join(f"(N='{n.replace(chr(39), chr(39) * 2)}')" for n in names) + ")"

@@ -67,6 +67,7 @@ Step "repair server (stdio, both protocol eras)" { Py @((Join-Path $repo "script
 Step "client registration fixtures" { Py @((Join-Path $repo "scripts\test-register-clients.py")) }
 Step "bundled plugin contract" { & (Join-Path $repo "scripts\check-bundled-plugin-contract.ps1") }
 Step "skill/doc tool names vs live tools/list" { Py @((Join-Path $repo "scripts\check-skill-tool-names.py"), "--live") }
+Step "host vs.* snippets vs SDK stub signatures" { Py @((Join-Path $repo "scripts\lint-vs-snippets.py")) }
 
 if (Test-Path -LiteralPath (Join-Path $repo "scripts\e2e_host.py")) {
     Step "host end-to-end vs mock bridge (scripts\e2e_host.py)" { Py @((Join-Path $repo "scripts\e2e_host.py")) }

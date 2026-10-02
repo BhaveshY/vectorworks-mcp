@@ -17,7 +17,9 @@ for i in range(1, vs.NumRecords(h) + 1):
     recs.append({"record": rname, "fields": fields})
 out["records"] = recs
 if vs.GetTypeN(h) == 86:
-    info = vs.GetCustomObjectInfo(h)
-    if info and info[0]:
-        out["plugin_name"] = info[1]
+    # vs.GetCustomObjectInfo() takes no handle (it describes the running plug-in);
+    # a plug-in object's name is the name of its parametric record.
+    prec = vs.GetParametricRecord(h)
+    if not _nil(prec):
+        out["plugin_name"] = vs.GetName(prec)
 result = out

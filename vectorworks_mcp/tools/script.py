@@ -13,6 +13,15 @@ def handle(args: dict, ctx, warnings: list) -> dict:
     language = C.choice(a.get("language"), "language", ["python", "vectorscript"],
                         {"py": "python", "vs": "vectorscript", "pascal": "vectorscript"}, default="python")
     background = C.boolean(a.get("background", a.get("async", False)), "background")
+    if language == "python" and C.boolean(a.get("lint", True), "lint"):
+        # Imported lazily: the signature table is loaded on the first vw_script
+        # call, never at server start-up.
+        from .. import vs_lint
+        issues = vs_lint.lint(code)
+        if issues:
+            raise VWError("script_lint_failed", "vs.* call check failed: " + vs_lint.summary(issues),
+                          retryable=True, commit_state="not_started", next_step=vs_lint.next_step(issues),
+                          details={"issues": issues})
     host = get_host()
     target = host.session.target(a.get("document"), write=True)
     if not target.inst.supports("run_script"):

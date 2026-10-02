@@ -146,6 +146,8 @@ Every main-thread result that is a JSON object gets an extra member
 | `unsupported` | false | not_started | e.g. `new_document` without a usable template (`details.tried`) |
 | `script_disabled` | false | not_started | `VW_MCP_ALLOW_SCRIPT=0` |
 | `script_failed` | false | unknown | an internal helper script failed (saved views create/delete, layer elevation/opacity, class set) |
+| `script_crashed` | false | unknown | a hardware exception (access violation, …) inside the Python/VectorScript engine was contained by the SEH guard (§6.4.1); the engine is now poisoned; `details {exception_code, script_engine:"poisoned", next_step}` |
+| `script_engine_unavailable` | false | not_started | `run_script` / a Python-backed handler after an earlier `script_crashed` in this process; nothing ran; same `details` |
 | `capture_failed` | false | not_started | `capture_view` export failed for a non-I/O reason (view already restored; `details.restored`) |
 | `confirmation_required`, `already_exists`, `layer_not_empty` | false | not_started | organisation guards |
 | `readback_mismatch` | false | committed | `set_view` readback differs; `details {previous, current}` |
@@ -240,6 +242,7 @@ v2 fields:
 | `client_count` | int | open connections |
 | `main_context_pump_window` | "message_only" | |
 | `script_enabled` | bool | `run_script` allowed |
+| `script_engine` | "ok" \| "poisoned" | "poisoned" after a contained script crash (§6.4.1); then also `script_engine_fault` (hex code of the first fault) and `script_engine_faults` (count) |
 
 ### `capabilities`
 
@@ -605,6 +608,64 @@ Result (a failing script is still `success:true`, with `ok:false`):
 
 On failure additionally `"error":"Traceback …"` and, when rolled back,
 `"rollback_verified":bool`.
+
+#### 6.4.1 Script engine crash containment
+
+Wrong-typed `vs.*` arguments are a crash class, not a Python error: e.g.
+`vs.SetClFillFore(name, vs.RGBToColorIndex(r, g, b))` (an int where the stub
+declares COLOR = `(r, g, b)` 0–65535) raised an access violation inside
+`Vectorworks2024.exe`, called from `python39.dll`, and terminated Vectorworks.
+Two layers address this:
+
+1. **Host lint (prevention).** `vw_script` checks every `vs.<name>` call
+   against `vectorworks_mcp/data/vs_signatures.json` (generated from the SDK
+   `vs.py` stubs by `scripts/gen-vs-signatures.py`) before sending and returns
+   `script_lint_failed` (nothing sent). The host's own snippets are checked by
+   `scripts/lint-vs-snippets.py`; native-generated Python is audited in
+   `native_bridge/VS_CALL_AUDIT.md`.
+2. **Native SEH guard (containment).** Every `IPythonScriptEngine::ExecuteScript`,
+   `IVectorScriptEngine::CompileScript` / `ExecuteScript` call (both
+   `run_script` and `RunInternalPython`, i.e. layer extras, class set, saved
+   view create/delete) runs inside `__try/__except` in a small function with
+   only POD locals (MSVC forbids `__try` next to objects that need unwinding).
+   The filter handles hardware faults only (access violation, stack overflow
+   — `_resetstkoflw()` re-arms the guard page —, in-page error, illegal/
+   privileged instruction, integer/float divide by zero, misalignment, array
+   bounds); C++ exceptions and everything else continue the search unchanged.
+
+After a contained fault the bridge:
+
+- does **not** call back into Python: the interpreter's thread state, frame
+  stack, recursion counter and the GIL acquired by the engine were abandoned
+  mid-call by the unwind; the result file is discarded unread;
+- closes the open undo event with `EndUndoEvent` (itself SEH-guarded) instead
+  of `UndoAndRemove`: replaying the swap list could traverse an object the
+  faulting call left half-modified. Whatever the script changed before the
+  fault stays in the document as one undo step the user may undo manually;
+  no rollback verification, no `DrawScreen`;
+- replies `script_crashed` (`commit_state:"unknown"`) and marks the scripting
+  engine **poisoned** for the rest of the process: later `run_script` calls
+  and Python-backed handlers fail fast with `script_engine_unavailable`
+  (`commit_state:"not_started"`, before any undo event is opened); `ping`
+  reports `script_engine:"poisoned"`; the host adds a `vw_status` problem
+  with next_step "save your work and restart Vectorworks". Native
+  (non-script) actions keep working. `layers list` silently omits
+  elevation/opacity and `capture_view {saved_view, restore:true}` fails
+  while poisoned (both need Python).
+
+Trade-off / residual risk: containment converts a certain crash into a
+degraded but running Vectorworks so the user can save, but the process
+state after the fault is not trustworthy. Frames between the fault and the
+guard were discarded without running destructors (`/EHsc`), so memory,
+locks or critical sections held by Vectorworks or Python at that point may
+leak or stay held — a later Vectorworks operation (or a Python plug-in /
+Marionette network run by the user) can hang or crash. Faults that never
+reach the frame-based handler are not contained: a vectored exception
+handler or crash reporter installed by Vectorworks runs first and may
+terminate the process; heap corruption may surface later outside the guard;
+`__fastfail`/`abort` and Python fatal errors are not exceptions. Recommend
+"Save As" to a new file and a restart, and do not trust drawing data read
+after the fault until then.
 
 ### 6.5 Import / export
 

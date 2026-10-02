@@ -269,6 +269,8 @@ runs VectorScript instead.
 | `timeout_not_started` | Vectorworks never started it; nothing changed | Retry once when idle. |
 | `auth_failed` | host and bridge tokens differ | Ask the user to rerun the installer and restart Vectorworks. |
 | `script_disabled` / `script_error` | scripting off / the script raised (rolled back) | Ask the user / fix the script from `stderr`. |
+| `script_lint_failed` | a `vs.*` call has the wrong name/argument count/type (nothing sent) | Fix it from `error.details.issues` signatures (COLOR = `(r, g, b)` 0..65535, never `vs.RGBToColorIndex`). |
+| `script_crashed` / `script_engine_unavailable` | a script crashed inside Vectorworks; scripting is disabled | Do not retry. Ask the user to save their work and restart Vectorworks. |
 | `unsupported` | the bridge cannot do this | Try `vw_script`; otherwise tell the user. Never fake it with other geometry. |
 | `confirmation_required` | destructive or overwriting action | Ask the user, then repeat with the value in `error.example`. |
 | `job_not_found` | job expired or Vectorworks restarted | Inspect the drawing with `vw_read` instead. |

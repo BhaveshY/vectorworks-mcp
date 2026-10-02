@@ -7,8 +7,11 @@
 #include "Interfaces/VectorWorks/Scripting/IPythonScriptEngine.h"
 #include "Interfaces/VectorWorks/Scripting/IVectorScriptEngine.h"
 
+#include <malloc.h>  // _resetstkoflw
+
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -23,6 +26,128 @@ namespace fs = std::filesystem;
 constexpr std::size_t kMaxResultBytes = 8u * 1024u * 1024u;
 constexpr short kSuppressVectorScriptErrorsVariable = 9876;  // see SDK ImageComparisonTesting.cpp
 std::atomic<std::uint64_t> gScriptCounter{0};
+
+// ---- crash containment --------------------------------------------------------
+// The SEH guards below live in small functions with only POD locals: MSVC
+// forbids __try in a function whose frame holds C++ objects that need
+// unwinding (C2712), and /EHsc does not run destructors for frames unwound by
+// an SEH handler anyway. Only hardware faults are handled; C++ exceptions
+// (0xE06D7363) and everything else continue the search unchanged.
+std::atomic<bool> gEnginePoisoned{false};
+std::atomic<unsigned> gFaultCount{0};
+std::atomic<unsigned long> gFirstFaultCode{0};
+
+int ScriptFaultFilter(unsigned long code) {
+    switch (code) {
+        case EXCEPTION_ACCESS_VIOLATION:
+        case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+        case EXCEPTION_DATATYPE_MISALIGNMENT:
+        case EXCEPTION_FLT_DIVIDE_BY_ZERO:
+        case EXCEPTION_FLT_INVALID_OPERATION:
+        case EXCEPTION_ILLEGAL_INSTRUCTION:
+        case EXCEPTION_IN_PAGE_ERROR:
+        case EXCEPTION_INT_DIVIDE_BY_ZERO:
+        case EXCEPTION_PRIV_INSTRUCTION:
+        case EXCEPTION_STACK_OVERFLOW:
+            return EXCEPTION_EXECUTE_HANDLER;
+        default:
+            return EXCEPTION_CONTINUE_SEARCH;
+    }
+}
+
+// Each guard returns 0, or the exception code of a contained fault.
+unsigned long GuardedPythonExecute(
+    VectorWorks::Scripting::IPythonScriptEngine* engine, const TXString* script,
+    VectorWorks::Scripting::IPythonLogger* logger, VCOMError* error) {
+    __try {
+        *error = engine->ExecuteScript(*script, logger);
+        return 0;
+    } __except (ScriptFaultFilter(GetExceptionCode())) {
+        const unsigned long code = GetExceptionCode();
+        if (code == EXCEPTION_STACK_OVERFLOW) _resetstkoflw();
+        return code ? code : 1u;
+    }
+}
+
+unsigned long GuardedVectorScriptCompile(
+    VectorWorks::Scripting::IVectorScriptEngine* engine, const TXString* script, bool* compiled, Sint32* line,
+    TXString* errorText, VCOMError* error) {
+    __try {
+        *error = engine->CompileScript(*script, false, *compiled, line, errorText);
+        return 0;
+    } __except (ScriptFaultFilter(GetExceptionCode())) {
+        const unsigned long code = GetExceptionCode();
+        if (code == EXCEPTION_STACK_OVERFLOW) _resetstkoflw();
+        return code ? code : 1u;
+    }
+}
+
+unsigned long GuardedVectorScriptExecute(
+    VectorWorks::Scripting::IVectorScriptEngine* engine, const TXString* script, VCOMError* error) {
+    __try {
+        *error = engine->ExecuteScript(*script);
+        return 0;
+    } __except (ScriptFaultFilter(GetExceptionCode())) {
+        const unsigned long code = GetExceptionCode();
+        if (code == EXCEPTION_STACK_OVERFLOW) _resetstkoflw();
+        return code ? code : 1u;
+    }
+}
+
+int GuardedEndUndoEvent() {
+    __try {
+        return gSDK->EndUndoEvent() ? 1 : 0;
+    } __except (ScriptFaultFilter(GetExceptionCode())) {
+        return -1;
+    }
+}
+
+std::string HexCode(unsigned long code) {
+    char buffer[16] = {};
+    std::snprintf(buffer, sizeof(buffer), "0x%08lX", code);
+    return buffer;
+}
+
+const char* FaultName(unsigned long code) {
+    switch (code) {
+        case EXCEPTION_ACCESS_VIOLATION: return "access violation";
+        case EXCEPTION_STACK_OVERFLOW: return "stack overflow";
+        case EXCEPTION_INT_DIVIDE_BY_ZERO: return "integer divide by zero";
+        case EXCEPTION_ILLEGAL_INSTRUCTION: return "illegal instruction";
+        case EXCEPTION_IN_PAGE_ERROR: return "in-page error";
+        default: return "hardware exception";
+    }
+}
+
+constexpr const char* kRestartNextStep = "save your work and restart Vectorworks";
+
+[[noreturn]] void ThrowCrashed(unsigned long code, const char* engineName) {
+    unsigned long expected = 0;
+    gFirstFaultCode.compare_exchange_strong(expected, code);
+    gEnginePoisoned.store(true);
+    ++gFaultCount;
+    throw Protocol::BridgeError(
+        "script_crashed",
+        std::string("the script crashed inside Vectorworks (") + FaultName(code) + " " + HexCode(code) + " in the " +
+            engineName + " engine, typically a vs.* call with wrong-typed arguments). The fault was contained, but "
+            "scripting is disabled for the rest of this Vectorworks session and the document state is unknown; " +
+            kRestartNextStep,
+        false, "unknown",
+        "{\"exception_code\":" + JsonString(HexCode(code)) + ",\"script_engine\":\"poisoned\",\"next_step\":" +
+            JsonString(kRestartNextStep) + "}");
+}
+
+void ThrowIfPoisoned() {
+    if (!gEnginePoisoned.load()) return;
+    const std::string code = HexCode(gFirstFaultCode.load());
+    throw Protocol::BridgeError(
+        "script_engine_unavailable",
+        "the Vectorworks scripting engine is disabled after an earlier script crash (" + code + "); " +
+            kRestartNextStep,
+        false, "not_started",
+        "{\"exception_code\":" + JsonString(code) + ",\"script_engine\":\"poisoned\",\"next_step\":" +
+            JsonString(kRestartNextStep) + "}");
+}
 
 const char* kBase64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -200,6 +325,7 @@ public:
 };
 
 ScriptOutcome ExecutePython(const std::string& code) {
+    ThrowIfPoisoned();
     ScriptOutcome outcome;
     VectorWorks::Scripting::IPythonScriptEnginePtr python(VectorWorks::Scripting::IID_PythonScriptEngine);
     if (!python) {
@@ -215,9 +341,17 @@ ScriptOutcome ExecutePython(const std::string& code) {
 
     PythonLogger logger;
     VCOMError error = kVCOMError_NoError;
+    const TXString scriptText(script.c_str());
+    unsigned long fault = 0;
     {
         ScopedVectorScriptErrorSuppression suppress;
-        error = python->ExecuteScript(TXString(script.c_str()), &logger);
+        fault = GuardedPythonExecute(python.operator->(), &scriptText, &logger, &error);
+    }
+    if (fault) {
+        // Do not touch Python again (interpreter/thread state is unknown after
+        // the fault). The harness never wrote its report; drop any partial file.
+        fs::remove(resultPath, ignored);
+        ThrowCrashed(fault, "Python");
     }
     std::ifstream input(resultPath, std::ios::binary);
     std::string report((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
@@ -270,6 +404,7 @@ ScriptOutcome ExecutePython(const std::string& code) {
 }
 
 ScriptOutcome ExecuteVectorScript(const std::string& code) {
+    ThrowIfPoisoned();
     ScriptOutcome outcome;
     VectorWorks::Scripting::IVectorScriptEnginePtr engine(VectorWorks::Scripting::IID_VectorScriptEngine);
     if (!engine) {
@@ -280,13 +415,19 @@ ScriptOutcome ExecuteVectorScript(const std::string& code) {
     Sint32 line = 0;
     TXString errorText;
     ScopedVectorScriptErrorSuppression suppress;
-    const VCOMError compileError = engine->CompileScript(script, false, compiled, &line, &errorText);
+    VCOMError compileError = kVCOMError_NoError;
+    if (const unsigned long fault = GuardedVectorScriptCompile(engine.operator->(), &script, &compiled, &line, &errorText, &compileError)) {
+        ThrowCrashed(fault, "VectorScript");
+    }
     if (VCOM_FAILED(compileError) || !compiled) {
         outcome.ok = false;
         outcome.error = "VectorScript compile error at line " + std::to_string(line) + ": " + errorText.GetStdString();
         return outcome;
     }
-    const VCOMError runError = engine->ExecuteScript(script);
+    VCOMError runError = kVCOMError_NoError;
+    if (const unsigned long fault = GuardedVectorScriptExecute(engine.operator->(), &script, &runError)) {
+        ThrowCrashed(fault, "VectorScript");
+    }
     outcome.ok = VCOM_SUCCEEDED(runError);
     if (!outcome.ok) {
         outcome.error = "VectorScript execution failed (VCOM error " + std::to_string(runError) + ")";
@@ -298,6 +439,27 @@ ScriptOutcome ExecuteVectorScript(const std::string& code) {
 
 bool ScriptingAllowed() {
     return !FalsyEnvironmentFlag("VW_MCP_ALLOW_SCRIPT");
+}
+
+bool ScriptEnginePoisoned() {
+    return gEnginePoisoned.load();
+}
+
+const char* ScriptEngineState() {
+    return gEnginePoisoned.load() ? "poisoned" : "ok";
+}
+
+unsigned ScriptFaultCount() {
+    return gFaultCount.load();
+}
+
+std::string ScriptFaultCodeHex() {
+    const unsigned long code = gFirstFaultCode.load();
+    return code ? HexCode(code) : std::string();
+}
+
+bool EndUndoEventAfterFault() {
+    return GuardedEndUndoEvent() == 1;
 }
 
 std::string PythonStringLiteral(const std::string& text) {
@@ -340,6 +502,8 @@ std::string HandleRunScript(const Params& params) {
     if (undoLabel.empty()) undoLabel = "Vectorworks MCP script";
     if (undoLabel.size() > 120u) undoLabel.resize(120u);
 
+    // Fail fast before opening an undo event when an earlier script crashed.
+    ThrowIfPoisoned();
     const auto started = std::chrono::steady_clock::now();
     std::string signatureBefore;
     if (transaction) {
@@ -348,11 +512,20 @@ std::string HandleRunScript(const Params& params) {
         gSDK->SetUndoMethod(kUndoSwapObjects);
         gSDK->NameUndoEvent(TXString(undoLabel.c_str()));
     }
+    const unsigned faultsBefore = ScriptFaultCount();
     ScriptOutcome outcome;
     try {
         outcome = isPython ? ExecutePython(code) : ExecuteVectorScript(code);
     } catch (const Protocol::BridgeError&) {
-        if (transaction) gSDK->UndoAndRemove();
+        if (transaction) {
+            if (ScriptFaultCount() != faultsBefore) {
+                // Contained crash: close the event instead of replaying it (see
+                // PROTOCOL.md); no StructureSignature/DrawScreen either.
+                EndUndoEventAfterFault();
+            } else {
+                gSDK->UndoAndRemove();
+            }
+        }
         throw;
     } catch (const std::exception& error) {
         outcome.ok = false;

@@ -398,6 +398,12 @@ The 0.7 server is preserved verbatim as `legacy/server_v07.py`, reachable only w
 - **N, §1.10:** VectorScript runs return `result:null` and no stdout. `rollback_verified` compares layer count + top-level
   object counts (cheap structural check, not a UUID diff). Rollback depends on Vectorworks registering `vs.*` creations
   in the bridge's open undo event — must be live-verified.
+- **H+N, §1.10 crash class:** wrong-typed `vs.*` arguments can crash Vectorworks (live: `SetClFillFore` with a palette
+  index). `vw_script` (Python) lints every `vs.*` call against `vectorworks_mcp/data/vs_signatures.json` before sending
+  (`script_lint_failed`, nothing sent; `lint:false` bypasses); the native bridge contains hardware faults in the
+  script engine with an SEH guard (`script_crashed`, commit_state unknown), then fails scripts fast with
+  `script_engine_unavailable`; `ping.script_engine` / `vw_status` problems report `poisoned` (PROTOCOL.md §6.4.1,
+  `native_bridge/VS_CALL_AUDIT.md`).
 - **N, §1.11:** `group`/`ungroup` and `records` are not native in 1.0 (host `run_script` snippets). `query_objects` gained
   a `uuids`/`uuid` exact-lookup filter (H suggestion) and a `max_bytes` page budget. `apply_operations` resolves
   `wall_uuid:"$<local_ref>"` (H request) for doors/windows/hosted parametric objects in one transaction.
