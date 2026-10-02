@@ -1075,6 +1075,7 @@ def run_smoke(
         return report
 
     stop_acknowledged = False
+    stop_connection_only = False
     phase_one_snapshots: dict[str, Any] = {}
     try:
         with socket.create_connection((host, port), timeout=timeout) as sock:
@@ -1129,12 +1130,20 @@ def run_smoke(
                 _run_phase_two_write_fixture(sock, report)
 
             if stop:
-                stop_acknowledged = _record_call(sock, report, "stop", 1) is not None
+                stop_result = _record_call(sock, report, "stop", 1)
+                stop_acknowledged = stop_result is not None
+                # Wire protocol v2: stop closes only this connection and the
+                # bridge keeps running (no port release to wait for).
+                if isinstance(stop_result, dict) and stop_result.get("bridge_running") is True:
+                    stop_connection_only = True
     except Exception as exc:
         report["failures"].append(str(exc))
 
     if stop:
-        if stop_acknowledged:
+        if stop_acknowledged and stop_connection_only:
+            report["stop_port_released"] = None
+            report["stop_semantics"] = "connection_only"
+        elif stop_acknowledged:
             started = time.perf_counter()
             report["stop_port_released"] = _wait_for_port_closed(host, port, timeout)
             _record_stop_port_release(

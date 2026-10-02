@@ -1,954 +1,509 @@
+<#
+.SYNOPSIS
+  Install, repair or uninstall Vectorworks MCP 1.0 for the current Windows user.
+
+.DESCRIPTION
+  One command, idempotent, works from a git checkout or an extracted release zip:
+
+    powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+
+  1. Runtime   %USERPROFILE%\.vectorworks-mcp\runtime\<version>\ (app\ + venv\), built
+               with python.org Python 3.12 (py -3.12); dependencies installed once with
+               pip --require-hashes from requirements.lock; byte-compiled.
+  2. Launcher  %USERPROFILE%\.vectorworks-mcp\bin\vectorworks-mcp.cmd (plain .cmd ->
+               venv python.exe; repair-mode server when the runtime is missing).
+  3. Token     %USERPROFILE%\.vectorworks-mcp\auth-token (kept if present; private ACL).
+  4. Native    VectorworksMCPBridge.vlb/.vwr -> %APPDATA%\Nemetschek\Vectorworks\<ver>\Plug-ins
+               (prebuilt from a release, or built with -FullNative); old ObjectExample.vlb/.vwr
+               backed up and removed. Never while Vectorworks runs (use -WaitForVectorworksExit).
+  5. Clients   scripts\register-clients.ps1: Codex [mcp_servers.vectorworks] + Claude Code
+               user-scope server, both pointing at the launcher; skills-only plugins.
+  6. Receipt   install-receipt.json (version, hashes, native hash, client changes) and
+               current.txt. -Uninstall is driven by the receipt.
+
+.EXAMPLE
+  .\install.ps1                                   # runtime + clients (+ prebuilt native if Vectorworks is closed)
+.EXAMPLE
+  .\install.ps1 -FullNative -WaitForVectorworksExit
+.EXAMPLE
+  .\install.ps1 -Root C:\temp\vw -Client none -SkipNative -DryRun
+.EXAMPLE
+  .\install.ps1 -Uninstall
+#>
 [CmdletBinding()]
 param(
-    [ValidateSet("HostOnly", "ClaudeCode")]
-    [string]$Client = "HostOnly",
-    [string]$InstallDir = "",
-    [switch]$NoVerify,
-    [switch]$SkipClipboard,
-    [switch]$SkipDependencyInstall,
+    [string]$Root = "",
+    [ValidateSet("all", "codex", "claude-code", "none")]
+    [string]$Client = "all",
+    [string]$CodexHome = "",
+    [string]$ClaudeConfig = "",
+    [string]$PluginsDir = "",
+    [string]$VectorworksVersion = "",
     [switch]$FullNative,
-    [switch]$EnablePythonDialogFallback,
-    [string]$VectorworksVersion = "2024",
-    [ValidateSet("Debug", "Release")]
-    [string]$NativeConfiguration = "Release",
-    [ValidateRange(1, 20)]
-    [int]$NativeMaxSteps = 12,
-    [string]$SdkDir = "",
-    [string]$SdkArchivePath = "",
-    [string]$SdkExamplesDir = "",
-    [string]$WorktreeRoot = "",
-    [string]$NativeInstallDir = "",
-    [switch]$AllowVectorworksSmoke,
-    [switch]$SkipVectorworksAutomation,
-    [switch]$ForceVectorworksRestart,
-    [switch]$Json
+    [switch]$SkipNative,
+    [string]$NativeArtifactDir = "",
+    [switch]$WaitForVectorworksExit,
+    [int]$WaitTimeoutSec = 1800,
+    [string]$Python = "",
+    [string]$WheelsDir = "",
+    [switch]$Offline,
+    [switch]$Force,
+    [switch]$Uninstall,
+    [switch]$Purge,
+    [switch]$SkipDoctor,
+    [Alias("WhatIf")][switch]$DryRun,
+    [switch]$Json,
+    [string]$SourceUrl = "https://github.com/BhaveshY/vectorworks-mcp/archive/refs/heads/main.zip"
 )
 
 $ErrorActionPreference = "Stop"
+$InstallerVersion = "1.0.0"
 
-$RepoUrl = "https://github.com/BhaveshY/vectorworks-mcp.git"
-$RawInstallUrl = "https://raw.githubusercontent.com/BhaveshY/vectorworks-mcp/main/install.ps1"
-$DefaultInstallDir = Join-Path $env:USERPROFILE "repos\vectorworks-mcp"
-$DependencyChecks = [System.Collections.Generic.List[object]]::new()
-$RepoRoot = ""
-$GitExe = ""
-$NativeRequested = -not [bool]$EnablePythonDialogFallback
-
-function Add-PathIfPresent {
-    param([string]$Directory)
-    if ($Directory -and (Test-Path -LiteralPath $Directory -PathType Container)) {
-        $Parts = @($env:PATH -split ";")
-        if ($Directory -notin $Parts) {
-            $env:PATH = "$Directory;$env:PATH"
+# ------------------------------------------------------------- bootstrap
+# Run via `& ([scriptblock]::Create((irm <raw url>/install.ps1)))` there is no
+# source folder: download the release zip and re-run the installer from it.
+$SourceRoot = $PSScriptRoot
+if (-not $SourceRoot -or -not (Test-Path -LiteralPath (Join-Path $SourceRoot "vectorworks_mcp\__init__.py"))) {
+    if ($Uninstall) {
+        $r = if ($Root) { $Root } else { Join-Path $env:USERPROFILE ".vectorworks-mcp" }
+        $cur = Join-Path $r "current.txt"
+        if (Test-Path -LiteralPath $cur) {
+            $app = Join-Path $r ("runtime\" + (Get-Content -LiteralPath $cur -TotalCount 1).Trim() + "\app\install.ps1")
+            if (Test-Path -LiteralPath $app) { & $app @PSBoundParameters; exit $LASTEXITCODE }
         }
+        throw "No installed runtime found under $r to uninstall."
     }
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("vectorworks-mcp-src-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $zip = Join-Path $tmp "src.zip"
+    Write-Host "Downloading Vectorworks MCP source: $SourceUrl"
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Invoke-WebRequest -Uri $SourceUrl -OutFile $zip -UseBasicParsing
+    Expand-Archive -LiteralPath $zip -DestinationPath $tmp -Force
+    $inner = Get-ChildItem -LiteralPath $tmp -Recurse -Filter install.ps1 | Where-Object { Test-Path -LiteralPath (Join-Path $_.DirectoryName "vectorworks_mcp\__init__.py") } | Select-Object -First 1
+    if (-not $inner) { throw "Downloaded archive does not contain a Vectorworks MCP source tree." }
+    & $inner.FullName @PSBoundParameters
+    exit $LASTEXITCODE
 }
 
-function Join-ExistingBasePath {
-    param(
-        [string]$Base,
-        [string]$Child
-    )
-    if (-not $Base) { return "" }
-    return (Join-Path $Base $Child)
+. (Join-Path $SourceRoot "scripts\install-common.ps1")
+if ($Json) { $script:VwQuiet = $true }
+
+if (-not $Root) { $Root = Get-DefaultRoot }
+$Root = Get-FullPath $Root
+$Bin = Join-Path $Root "bin"
+$Launcher = Join-Path $Bin "vectorworks-mcp.cmd"
+$ReceiptPath = Join-Path $Root "install-receipt.json"
+$CurrentPath = Join-Path $Root "current.txt"
+$MarketplaceDir = Join-Path $Root "marketplace"
+$Stamp = (Get-Date).ToString("yyyyMMdd-HHmmss")
+$payload = [ordered]@{ ok = $true; action = $(if ($Uninstall) { "uninstall" } else { "install" }); dry_run = [bool]$DryRun; root = $Root; warnings = @(); steps = [ordered]@{} }
+
+function Add-Warn([string]$m) { $payload.warnings += $m; Write-Step $m "warn" }
+function Plan([string]$m) { if ($DryRun) { Write-Step $m "plan"; return $true } return $false }
+
+Assert-RealFilesystemPath $Root "Install root"
+$package = Test-MsixProcess
+if ($package) {
+    Add-Warn "This PowerShell runs inside the MSIX package '$package' (e.g. the Codex app). AppData writes are virtualised there."
 }
-
-function Add-CommonInstallPaths {
-    Add-PathIfPresent (Join-ExistingBasePath $env:ProgramFiles "Git\cmd")
-    Add-PathIfPresent (Join-ExistingBasePath $env:ProgramFiles "Git\bin")
-    Add-PathIfPresent (Join-ExistingBasePath ${env:ProgramFiles(x86)} "Git\cmd")
-    Add-PathIfPresent $env:WINDIR
-    Add-PathIfPresent (Join-ExistingBasePath $env:LOCALAPPDATA "Programs\Python\Launcher")
-    Add-PathIfPresent (Join-ExistingBasePath $env:LOCALAPPDATA "Programs\Python\Python312")
-    Add-PathIfPresent (Join-ExistingBasePath $env:LOCALAPPDATA "Programs\Python\Python312\Scripts")
+if (-not $DryRun) {
+    New-Item -ItemType Directory -Path $Root -Force | Out-Null
+    Start-VwLog $Root $(if ($Uninstall) { "uninstall" } else { "install" })
 }
+Write-Step "Vectorworks MCP installer $InstallerVersion  (source: $SourceRoot, root: $Root)" "head"
 
-function Resolve-CommandPath {
-    param(
-        [string[]]$Names,
-        [string[]]$FallbackPaths = @()
-    )
-    foreach ($Name in $Names) {
-        $Command = Get-Command $Name -ErrorAction SilentlyContinue
-        if ($Command) {
-            return $Command.Source
-        }
-    }
-    foreach ($Path in $FallbackPaths) {
-        if ($Path -and (Test-Path -LiteralPath $Path -PathType Leaf)) {
-            return (Resolve-Path -LiteralPath $Path).Path
-        }
-    }
-    return ""
-}
+$receipt = $null
+if (Test-Path -LiteralPath $ReceiptPath) { try { $receipt = Get-Content -LiteralPath $ReceiptPath -Raw | ConvertFrom-Json } catch { Add-Warn "install-receipt.json is unreadable; treating as a fresh install" } }
 
-function Join-ProcessArguments {
-    param([string[]]$ArgumentList)
+# ======================================================================
+# Uninstall
+# ======================================================================
+if ($Uninstall) {
+    $regArgs = @{ Client = "all"; Root = $Root; Launcher = $Launcher; Unregister = $true; MarketplaceDir = $MarketplaceDir }
+    if ($CodexHome) { $regArgs.CodexHome = $CodexHome }
+    if ($ClaudeConfig) { $regArgs.ClaudeConfig = $ClaudeConfig }
+    if ($Python) { $regArgs.Python = $Python }
+    if ($DryRun) { $regArgs.DryRun = $true }
+    Write-Step "Unregistering clients" "head"
+    try { & (Join-Path $SourceRoot "scripts\register-clients.ps1") @regArgs } catch { Add-Warn "client unregistration: $($_.Exception.Message)" }
 
-    $Quoted = foreach ($Argument in $ArgumentList) {
-        if ($null -eq $Argument) {
-            '""'
-            continue
-        }
-        if ($Argument -notmatch '[\s"]') {
-            $Argument
-            continue
-        }
-
-        $Builder = [System.Text.StringBuilder]::new()
-        [void]$Builder.Append('"')
-        $Backslashes = 0
-        foreach ($Character in $Argument.ToCharArray()) {
-            if ($Character -eq '\') {
-                $Backslashes += 1
-                continue
-            }
-            if ($Character -eq '"') {
-                if ($Backslashes -gt 0) {
-                    [void]$Builder.Append(('\' * ($Backslashes * 2 + 1)))
-                    $Backslashes = 0
-                } else {
-                    [void]$Builder.Append('\')
+    Write-Step "Native plug-in" "head"
+    if ($receipt -and $receipt.native -and $receipt.native.installed) {
+        foreach ($n in @($receipt.native.installed)) {
+            $dir = [string]$n.plugins_dir
+            if (Get-VectorworksProcesses) { Add-Warn "Vectorworks is running; leaving $dir untouched (rerun -Uninstall after closing it)"; break }
+            $bk = Join-Path $Root "backups\uninstall-$Stamp\$($n.vectorworks_version)"
+            foreach ($p in $n.files.PSObject.Properties) {
+                $f = Join-Path $dir $p.Name
+                if ((Test-Path -LiteralPath $f) -and ((Get-Sha256 $f) -eq $p.Value)) {
+                    if (-not (Plan "would move $f -> $bk")) {
+                        New-Item -ItemType Directory -Path $bk -Force | Out-Null
+                        Move-Item -LiteralPath $f -Destination (Join-Path $bk $p.Name) -Force
+                        Write-Step "removed $f (backup in $bk)" "ok"
+                    }
                 }
-                [void]$Builder.Append('"')
-                continue
             }
-            if ($Backslashes -gt 0) {
-                [void]$Builder.Append(('\' * $Backslashes))
-                $Backslashes = 0
+        }
+    } else { Write-Step "no native plug-in recorded in the receipt" }
+
+    Write-Step "Runtime" "head"
+    $targets = @($Launcher, (Join-Path $Bin "vectorworksctl.cmd"), (Join-Path $Bin "repair_server.py"), $MarketplaceDir, $CurrentPath, $ReceiptPath)
+    $rt = Join-Path $Root "runtime"
+    if (Test-Path -LiteralPath $rt) { $targets += @(Get-ChildItem -LiteralPath $rt -Directory | ForEach-Object { $_.FullName }) }
+    if ($Purge) { $targets += @((Join-Path $Root "auth-token"), (Join-Path $Root "captures"), (Join-Path $Root "instances")) }
+    foreach ($t in $targets) {
+        if (-not (Test-Path -LiteralPath $t)) { continue }
+        if (Plan "would remove $t") { continue }
+        try { Remove-Tree $t; Write-Step "removed $t" "ok" }
+        catch { Add-Warn "could not remove $t (in use by a running MCP client? close Codex/Claude and rerun): $($_.Exception.Message)" }
+    }
+    Write-Step "Kept: auth-token, logs, backups$(if (-not $Purge) { ', captures, instances (use -Purge to remove)' })"
+    if ($Json) { $payload | ConvertTo-Json -Depth 8 }
+    exit 0
+}
+
+# ======================================================================
+# Install
+# ======================================================================
+$version = Get-SourceVersion $SourceRoot
+$payload.version = $version
+Write-Step "Version $version" "head"
+
+# ---------------------------------------------------------------- Python
+$base = Find-BasePython $Python
+if (-not $base) {
+    $payload.ok = $false
+    $msg = "Python 3.11+ from python.org was not found (Codex's bundled Python is never used). Install it with:  winget install --id Python.Python.3.12 -e --scope user   then rerun this installer."
+    Write-Step $msg "fail"
+    if ($Json) { $payload.error = $msg; $payload | ConvertTo-Json -Depth 8 }
+    exit 2
+}
+Write-Step "Python $($base.version): $($base.executable)" "ok"
+$payload.python = $base
+
+# --------------------------------------------------------------- runtime
+$sourceHashes = Get-ManifestHashes $SourceRoot
+$lockHash = Get-Sha256 (Join-Path $SourceRoot "requirements.lock")
+$currentId = $null
+if (Test-Path -LiteralPath $CurrentPath) { $currentId = (Get-Content -LiteralPath $CurrentPath -TotalCount 1).Trim() }
+$reuse = $false
+if (-not $Force -and $receipt -and $currentId -and $receipt.runtime_id -eq $currentId -and $receipt.version -eq $version -and
+    $receipt.requirements_lock_sha256 -eq $lockHash -and (Test-HashMapsEqual $sourceHashes $receipt.app_files) -and
+    (Test-Path -LiteralPath (Join-Path $Root "runtime\$currentId\venv\Scripts\python.exe")) -and
+    $receipt.python.base_executable -eq $base.executable) {
+    $reuse = $true
+}
+
+$runtimeId = $version
+$sameAsSource = [bool]($currentId -and (Test-SamePath $SourceRoot (Join-Path $Root "runtime\$currentId\app")))
+if ($reuse) {
+    $runtimeId = $currentId
+    Write-Step "runtime $runtimeId is already installed and verified - reusing" "ok"
+} elseif ($sameAsSource) {
+    # Repair run from the installed copy (vectorworksctl repair): rebuild the venv in place.
+    $runtimeId = $currentId
+    Write-Step "repairing runtime $runtimeId in place" "info"
+} else {
+    $target = Join-Path $Root "runtime\$runtimeId"
+    if (Test-Path -LiteralPath $target) {
+        if (-not (Plan "would replace existing $target")) {
+            $old = Join-Path $Root "runtime\$runtimeId.old-$Stamp"
+            try { Rename-Item -LiteralPath $target -NewName (Split-Path -Leaf $old) -ErrorAction Stop; Write-Step "moved previous runtime to $old" }
+            catch {
+                $runtimeId = "$version-$Stamp"
+                Write-Step "runtime $version is in use by a running client; installing side by side as $runtimeId" "warn"
             }
-            [void]$Builder.Append($Character)
-        }
-        if ($Backslashes -gt 0) {
-            [void]$Builder.Append(('\' * ($Backslashes * 2)))
-        }
-        [void]$Builder.Append('"')
-        $Builder.ToString()
-    }
-
-    return ($Quoted -join " ")
-}
-
-function Invoke-ProcessCapture {
-    param(
-        [string]$FilePath,
-        [string[]]$ArgumentList,
-        [string]$WorkingDirectory = ""
-    )
-
-    $ProcessInfo = [System.Diagnostics.ProcessStartInfo]::new()
-    $ProcessInfo.FileName = $FilePath
-    $ProcessInfo.Arguments = Join-ProcessArguments -ArgumentList $ArgumentList
-    if ($WorkingDirectory) {
-        $ProcessInfo.WorkingDirectory = $WorkingDirectory
-    }
-    $ProcessInfo.UseShellExecute = $false
-    $ProcessInfo.RedirectStandardOutput = $true
-    $ProcessInfo.RedirectStandardError = $true
-
-    $Process = [System.Diagnostics.Process]::new()
-    $Process.StartInfo = $ProcessInfo
-    [void]$Process.Start()
-    $StdoutTask = $Process.StandardOutput.ReadToEndAsync()
-    $StderrTask = $Process.StandardError.ReadToEndAsync()
-    $Process.WaitForExit()
-    $Stdout = $StdoutTask.Result
-    $Stderr = $StderrTask.Result
-
-    $OutputParts = @()
-    if (-not [string]::IsNullOrEmpty($Stderr)) { $OutputParts += $Stderr.TrimEnd() }
-    if (-not [string]::IsNullOrEmpty($Stdout)) { $OutputParts += $Stdout.TrimEnd() }
-
-    return [pscustomobject]@{
-        exitCode = [int]$Process.ExitCode
-        stdout = [string]$Stdout
-        stderr = [string]$Stderr
-        output = if ($OutputParts.Count -gt 0) { [string]($OutputParts -join [Environment]::NewLine) } else { "" }
-    }
-}
-
-function Invoke-External {
-    param(
-        [string]$FilePath,
-        [string[]]$ArgumentList,
-        [string]$StepName,
-        [switch]$AllowFailure
-    )
-    $Result = Invoke-ProcessCapture -FilePath $FilePath -ArgumentList $ArgumentList
-    if (-not $Json -and $Result.output) {
-        $Result.output -split "\r?\n" | ForEach-Object { Write-Host $_ }
-    }
-    if ($Result.exitCode -ne 0 -and -not $AllowFailure) {
-        throw "$StepName failed with exit code $($Result.exitCode). Output: $($Result.output)"
-    }
-    return [pscustomobject]@{
-        step = $StepName
-        exitCode = $Result.exitCode
-        output = $Result.output
-    }
-}
-
-function Install-WingetPackage {
-    param(
-        [string]$PackageId,
-        [string]$Label,
-        [string[]]$ExtraArguments = @()
-    )
-    $Winget = Resolve-CommandPath -Names @("winget.exe", "winget")
-    if (-not $Winget) {
-        throw "$Label is missing and winget.exe is not available. Install App Installer/winget, then rerun this installer."
-    }
-    $Args = @(
-        "install",
-        "--id", $PackageId,
-        "--exact",
-        "--source", "winget",
-        "--accept-package-agreements",
-        "--accept-source-agreements"
-    ) + @($ExtraArguments)
-    Invoke-External -FilePath $Winget -ArgumentList $Args -StepName "Install $Label with winget" | Out-Null
-    Add-CommonInstallPaths
-}
-
-function Test-PythonReady {
-    $Py = Resolve-CommandPath -Names @("py.exe", "py") -FallbackPaths @(
-        (Join-ExistingBasePath $env:WINDIR "py.exe"),
-        (Join-ExistingBasePath $env:LOCALAPPDATA "Programs\Python\Launcher\py.exe")
-    )
-    if ($Py) {
-        if (Test-PythonCandidate -Path $Py -PrefixArgs @("-3")) { return $true }
-    }
-    $Python = Resolve-CommandPath -Names @("python.exe", "python") -FallbackPaths @(
-        (Join-ExistingBasePath $env:LOCALAPPDATA "Programs\Python\Python312\python.exe")
-    )
-    if ($Python) {
-        if (Test-PythonCandidate -Path $Python) { return $true }
-    }
-    return $false
-}
-
-function Test-PythonCandidate {
-    param(
-        [string]$Path,
-        [string[]]$PrefixArgs = @()
-    )
-
-    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        return $false
-    }
-
-    $OldErrorActionPreference = $ErrorActionPreference
-    try {
-        # Windows app-execution aliases look like real executables to
-        # Get-Command, but invoking the Python Store shim can emit a native
-        # command error. Probe candidates quietly so a broken shim causes the
-        # normal winget install path instead of aborting the installer.
-        $ErrorActionPreference = "Continue"
-        & $Path @PrefixArgs -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" *> $null
-        return ($LASTEXITCODE -eq 0)
-    } catch {
-        return $false
-    } finally {
-        $ErrorActionPreference = $OldErrorActionPreference
-    }
-}
-
-function Add-DependencyCheck {
-    param(
-        [string]$Name,
-        [bool]$Ok,
-        [bool]$Installed,
-        [string]$Detail
-    )
-    $DependencyChecks.Add([pscustomobject]@{
-        name = $Name
-        ok = [bool]$Ok
-        installed = [bool]$Installed
-        detail = $Detail
-    }) | Out-Null
-}
-
-function Ensure-BaseDependencies {
-    Add-CommonInstallPaths
-
-    $GitFallbacks = @(
-        (Join-ExistingBasePath $env:ProgramFiles "Git\cmd\git.exe"),
-        (Join-ExistingBasePath $env:ProgramFiles "Git\bin\git.exe"),
-        (Join-ExistingBasePath ${env:ProgramFiles(x86)} "Git\cmd\git.exe")
-    )
-    $script:GitExe = Resolve-CommandPath -Names @("git.exe", "git") -FallbackPaths $GitFallbacks
-    $GitInstalled = $false
-    if (-not $script:GitExe) {
-        if ($SkipDependencyInstall) {
-            Add-DependencyCheck -Name "Git" -Ok $false -Installed $false -Detail "missing; rerun without -SkipDependencyInstall or install Git.Git with winget"
-            throw "Git is required to clone or update vectorworks-mcp."
-        }
-        Install-WingetPackage -PackageId "Git.Git" -Label "Git"
-        $GitInstalled = $true
-        $script:GitExe = Resolve-CommandPath -Names @("git.exe", "git") -FallbackPaths $GitFallbacks
-    }
-    if (-not $script:GitExe) {
-        throw "Git was installed or requested, but git.exe is still not discoverable in this PowerShell session."
-    }
-    Add-DependencyCheck -Name "Git" -Ok $true -Installed $GitInstalled -Detail $script:GitExe
-
-    $PythonInstalled = $false
-    if (-not (Test-PythonReady)) {
-        if ($SkipDependencyInstall) {
-            Add-DependencyCheck -Name "Python 3.10+" -Ok $false -Installed $false -Detail "missing; rerun without -SkipDependencyInstall or install Python.Python.3.12 with winget"
-            throw "Python 3.10 or newer is required for the MCP server."
-        }
-        Install-WingetPackage -PackageId "Python.Python.3.12" -Label "Python 3.12"
-        $PythonInstalled = $true
-    }
-    if (-not (Test-PythonReady)) {
-        throw "Python was installed or requested, but Python 3.10+ is still not discoverable in this PowerShell session."
-    }
-    Add-DependencyCheck -Name "Python 3.10+" -Ok $true -Installed $PythonInstalled -Detail "Python launcher/interpreter is available"
-}
-
-function Test-ConnectorRepoRoot {
-    param([string]$Path)
-    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Container)) {
-        return $false
-    }
-    $Root = (Resolve-Path -LiteralPath $Path).Path
-    return (
-        (Test-Path -LiteralPath (Join-Path $Root "server.py") -PathType Leaf) -and
-        (Test-Path -LiteralPath (Join-Path $Root ".mcp.json") -PathType Leaf) -and
-        (Test-Path -LiteralPath (Join-Path $Root "scripts\bootstrap-agent.ps1") -PathType Leaf)
-    )
-}
-
-function Get-ContractInfo {
-    param([string]$RepoRoot)
-    $Empty = [ordered]@{
-        contract_version = 0
-        required_features = @()
-    }
-    if (-not $RepoRoot) {
-        return $Empty
-    }
-    $ContractPath = Join-Path $RepoRoot ".vectorworks-mcp-contract.json"
-    if (-not (Test-Path -LiteralPath $ContractPath -PathType Leaf)) {
-        return $Empty
-    }
-    try {
-        $Contract = Get-Content -Raw -LiteralPath $ContractPath | ConvertFrom-Json
-        return [ordered]@{
-            contract_version = [int]$Contract.contractVersion
-            required_features = @($Contract.requiredFeatures | ForEach-Object { [string]$_ })
-        }
-    } catch {
-        return $Empty
-    }
-}
-
-function Invoke-Git {
-    param([string[]]$ArgumentList)
-    if (-not $script:GitExe) {
-        $script:GitExe = Resolve-CommandPath -Names @("git.exe", "git")
-    }
-    if (-not $script:GitExe) {
-        throw "Git was not found on PATH. Rerun without -SkipDependencyInstall or install Git first with: winget install --id Git.Git --exact --source winget"
-    }
-    Invoke-External -FilePath $script:GitExe -ArgumentList $ArgumentList -StepName "git $($ArgumentList -join ' ')" | Out-Null
-}
-
-function Resolve-ConnectorRepoRoot {
-    if ($PSScriptRoot -and (Test-ConnectorRepoRoot $PSScriptRoot)) {
-        return (Resolve-Path -LiteralPath $PSScriptRoot).Path
-    }
-
-    $CurrentDir = (Get-Location).Path
-    if (Test-ConnectorRepoRoot $CurrentDir) {
-        return (Resolve-Path -LiteralPath $CurrentDir).Path
-    }
-
-    $Target = $InstallDir
-    if (-not $Target -and $env:VW_MCP_REPO) {
-        $Target = $env:VW_MCP_REPO
-    }
-    if (-not $Target) {
-        $Target = $DefaultInstallDir
-    }
-    $Target = [System.IO.Path]::GetFullPath($Target)
-
-    if (Test-ConnectorRepoRoot $Target) {
-        if (Test-Path -LiteralPath (Join-Path $Target ".git") -PathType Container) {
-            Invoke-Git @("-C", $Target, "pull", "--ff-only")
-        }
-        return (Resolve-Path -LiteralPath $Target).Path
-    }
-
-    if (Test-Path -LiteralPath $Target) {
-        $HasChildren = @(Get-ChildItem -LiteralPath $Target -Force -ErrorAction SilentlyContinue | Select-Object -First 1).Count -gt 0
-        if ($HasChildren) {
-            throw "InstallDir exists but is not a vectorworks-mcp checkout: $Target"
-        }
-    } else {
-        $Parent = Split-Path -Parent $Target
-        if ($Parent) {
-            New-Item -ItemType Directory -Force -Path $Parent | Out-Null
-        }
-    }
-
-    Invoke-Git @("clone", $RepoUrl, $Target)
-    if (-not (Test-ConnectorRepoRoot $Target)) {
-        throw "Cloned repo did not contain the expected Vectorworks MCP files: $Target"
-    }
-    return (Resolve-Path -LiteralPath $Target).Path
-}
-
-function Invoke-NativeRunnerJson {
-    param(
-        [string]$RepoRoot,
-        [string[]]$Arguments
-    )
-    $RunnerPath = Join-Path $RepoRoot "scripts\invoke-native-bridge-next.ps1"
-    if (-not (Test-Path -LiteralPath $RunnerPath -PathType Leaf)) {
-        throw "Native runner was not found at $RunnerPath"
-    }
-    $Result = Invoke-ProcessCapture -FilePath "powershell.exe" -ArgumentList (@("-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $RunnerPath) + @($Arguments))
-    $Output = if ($Result.stdout.Trim()) { $Result.stdout } else { $Result.output }
-    $Exit = $Result.exitCode
-    try {
-        $Payload = $Output | ConvertFrom-Json
-    } catch {
-        throw "Native runner did not emit valid JSON. Exit=$Exit Output=$($Result.output)"
-    }
-    return [pscustomobject]@{
-        exitCode = $Exit
-        payload = $Payload
-        raw = $Result.output
-    }
-}
-
-function Get-NativeDoctorJson {
-    param([string]$RepoRoot)
-    $DoctorPath = Join-Path $RepoRoot "scripts\doctor-native-bridge.ps1"
-    $Args = @("-VectorworksVersion", $VectorworksVersion, "-Configuration", $NativeConfiguration, "-Json")
-    if ($SdkDir) { $Args += @("-SdkDir", $SdkDir) }
-    if ($SdkArchivePath) { $Args += @("-SdkArchivePath", $SdkArchivePath) }
-    if ($SdkExamplesDir) { $Args += @("-SdkExamplesDir", $SdkExamplesDir) }
-    if ($WorktreeRoot) { $Args += @("-WorktreeRoot", $WorktreeRoot) }
-    if ($NativeInstallDir) { $Args += @("-InstallDir", $NativeInstallDir) }
-    $Result = Invoke-ProcessCapture -FilePath "powershell.exe" -ArgumentList (@("-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $DoctorPath) + @($Args))
-    $Output = if ($Result.stdout.Trim()) { $Result.stdout } else { $Result.output }
-    if ($Result.exitCode -ne 0) {
-        throw "Native doctor failed with exit code $($Result.exitCode). Output: $($Result.output)"
-    }
-    return $Output | ConvertFrom-Json
-}
-
-function Get-LiveNativeBridgeStatus {
-    param([string]$RepoRoot)
-    $DoctorPath = Join-Path $RepoRoot "scripts\doctor-vectorworks-mcp.ps1"
-    if (-not (Test-Path -LiteralPath $DoctorPath -PathType Leaf)) {
-        return [pscustomobject]@{ ready = $false; status = $null; error = "Runtime doctor not found." }
-    }
-    $Result = Invoke-ProcessCapture -FilePath "powershell.exe" -ArgumentList @(
-        "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass",
-        "-File", $DoctorPath,
-        "-Json"
-    )
-    $Output = if ($Result.stdout.Trim()) { $Result.stdout } else { $Result.output }
-    try {
-        $Report = $Output | ConvertFrom-Json
-        $Status = $Report.ping.result
-        $RequiredActions = @(
-            "get_document_info",
-            "get_layers",
-            "get_objects",
-            "selection",
-            "create_object",
-            "batch_create_objects",
-            "create_wall",
-            "create_text",
-            "create_linear_dimension",
-            "set_property",
-            "manage_classes",
-            "apply_operations"
-        )
-        $Implemented = @($Status.implemented_actions | ForEach-Object { [string]$_ })
-        $Missing = @($RequiredActions | Where-Object { $_ -notin $Implemented })
-        $Ready = [bool](
-            $Result.exitCode -eq 0 -and
-            $Status -and
-            $Status.native_bridge -eq $true -and
-            [string]$Status.dispatch_mode -eq "native_sdk" -and
-            [int]$Status.native_phase -ge 4 -and
-            $Status.cad_api_safe -eq $true -and
-            $Status.transport_only -eq $false -and
-            $Status.main_context_pump_ready -eq $true -and
-            $Missing.Count -eq 0
-        )
-        return [pscustomobject]@{
-            ready = $Ready
-            status = $Status
-            missing_actions = @($Missing)
-            error = ""
-        }
-    } catch {
-        return [pscustomobject]@{
-            ready = $false
-            status = $null
-            missing_actions = @()
-            error = $_.Exception.Message
         }
     }
 }
+$RuntimeDir = Join-Path $Root "runtime\$runtimeId"
+$AppDir = Join-Path $RuntimeDir "app"
+$VenvDir = Join-Path $RuntimeDir "venv"
+$VenvPy = Join-Path $VenvDir "Scripts\python.exe"
+$payload.runtime_id = $runtimeId
+$payload.runtime_dir = $RuntimeDir
 
-function Get-LastNativeStep {
-    param([object]$NativeRunnerResult)
-    if ($NativeRunnerResult -and $NativeRunnerResult.steps) {
-        return @($NativeRunnerResult.steps)[-1]
+if (-not $reuse -and $sameAsSource -and -not $Force -and (Test-Path -LiteralPath $VenvPy)) {
+    # In-place repair: keep a venv that still works (it may be in use by a running client).
+    $probe = Invoke-Native -FilePath $VenvPy -Arguments @("-I", "-X", "utf8", "-c", "import vectorworks_mcp, sys; sys.stdout.write(vectorworks_mcp.__version__)") -WorkingDirectory $env:TEMP -TimeoutSec 120
+    if ($probe.ExitCode -eq 0 -and $probe.StdOut.Trim() -eq $version) { $reuse = $true; Write-Step "venv of runtime $runtimeId works - kept" "ok" }
+}
+if (-not $reuse) {
+    if (-not (Plan "would copy runtime files to $AppDir and build $VenvDir")) {
+        if (-not $sameAsSource) {
+            New-Item -ItemType Directory -Path $AppDir -Force | Out-Null
+            $n = Copy-RuntimeTree $SourceRoot $AppDir
+            Write-Step "copied $n files to $AppDir" "ok"
+        }
+        Remove-Tree $VenvDir
+        $r = Invoke-Native -FilePath $base.executable -Arguments @("-I", "-m", "venv", $VenvDir) -TimeoutSec 300
+        if ($r.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $VenvPy)) { throw "venv creation failed: $($r.StdErr)" }
+        Write-Step "created venv ($([math]::Round($r.Ms / 1000, 1)) s)" "ok"
+
+        $pipArgs = @("-I", "-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--require-hashes", "-r", (Join-Path $AppDir "requirements.lock"))
+        $wheels = if ($WheelsDir) { $WheelsDir } elseif (Test-Path -LiteralPath (Join-Path $SourceRoot "wheels")) { Join-Path $SourceRoot "wheels" } else { "" }
+        if ($wheels) { $pipArgs += @("--find-links", $wheels); if ($Offline -or -not $WheelsDir) { $pipArgs += "--no-index" } }
+        elseif ($Offline) { throw "-Offline needs a wheels folder (release zip built with package-release.ps1 -IncludeWheels, or -WheelsDir)." }
+        Write-Step "installing locked dependencies (pip --require-hashes$(if ($wheels) { ", wheels: $wheels" }))..."
+        $r = Invoke-Native -FilePath $VenvPy -Arguments $pipArgs -TimeoutSec 1200
+        if ($r.ExitCode -ne 0) {
+            $tail = (($r.StdErr + "`n" + $r.StdOut).Trim() -split "`n" | Select-Object -Last 8) -join "`n"
+            throw "pip install failed (exit $($r.ExitCode)). Log: $script:VwLogFile`n$tail"
+        }
+        Write-Step "dependencies installed ($([math]::Round($r.Ms / 1000, 1)) s)" "ok"
+
+        $site = Join-Path $VenvDir "Lib\site-packages"
+        Write-Utf8File (Join-Path $site "vectorworks_mcp_app.pth") ($AppDir + "`n")
+        $r = Invoke-Native -FilePath $VenvPy -Arguments @("-I", "-m", "compileall", "-q", "-j", "0", $AppDir) -TimeoutSec 600
+        if ($r.ExitCode -ne 0) { Add-Warn "compileall reported problems (see log)" }
+        $r = Invoke-Native -FilePath $VenvPy -Arguments @("-I", "-X", "utf8", "-c", "import vectorworks_mcp, sys; sys.stdout.write(vectorworks_mcp.__version__)") -WorkingDirectory $env:TEMP -TimeoutSec 120
+        if ($r.ExitCode -ne 0 -or $r.StdOut.Trim() -ne $version) { throw "runtime smoke import failed: $($r.StdErr.Trim()) $($r.StdOut.Trim())" }
+        Write-Step "runtime $runtimeId imports vectorworks_mcp $version" "ok"
+    }
+}
+
+# --------------------------------------------------------------- launcher
+$tplDir = if (Test-Path -LiteralPath (Join-Path $AppDir "bin\vectorworks-mcp.cmd.template")) { Join-Path $AppDir "bin" } else { Join-Path $SourceRoot "bin" }
+# Repair/upgrade command shown by the host in upgrade_required / setup hints.
+$tempRoot = (Get-FullPath ([System.IO.Path]::GetTempPath())).TrimEnd('\') + '\'
+$cmdSource = $SourceRoot
+if ($sameAsSource -and $receipt -and $receipt.source_dir -and (Test-Path -LiteralPath (Join-Path ([string]$receipt.source_dir) "install.ps1"))) { $cmdSource = [string]$receipt.source_dir }
+if ((Get-FullPath $cmdSource).StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -or (Test-SamePath $cmdSource $AppDir)) {
+    $installCommand = "close Vectorworks, then run: `"$Bin\vectorworksctl.cmd`" repair"
+} else {
+    $installCommand = "close Vectorworks, then run: powershell -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $cmdSource 'install.ps1')`" -FullNative -WaitForVectorworksExit"
+}
+$launcherText = (Get-Content -LiteralPath (Join-Path $tplDir "vectorworks-mcp.cmd.template") -Raw).Replace("@@BASE_PYTHON@@", $base.executable).Replace("@@INSTALL_COMMAND@@", $installCommand.Replace('%', '%%'))
+$ctlText = Get-Content -LiteralPath (Join-Path $tplDir "vectorworksctl.cmd.template") -Raw
+if (-not (Plan "would write $Launcher, $Bin\vectorworksctl.cmd, $Bin\repair_server.py")) {
+    $changed = Write-BatchFile $Launcher $launcherText
+    $null = Write-BatchFile (Join-Path $Bin "vectorworksctl.cmd") $ctlText
+    $repairSrc = if (Test-Path -LiteralPath (Join-Path $AppDir "vectorworks_mcp\repair_server.py")) { Join-Path $AppDir "vectorworks_mcp\repair_server.py" } else { Join-Path $SourceRoot "vectorworks_mcp\repair_server.py" }
+    Copy-Item -LiteralPath $repairSrc -Destination (Join-Path $Bin "repair_server.py") -Force
+    Write-Step "launcher $Launcher$(if (-not $changed) { ' (unchanged)' })" "ok"
+}
+
+# ------------------------------------------------------------- auth token
+$tokenPath = Join-Path $Root "auth-token"
+$tokenCreated = $false
+$existingToken = ""
+if (Test-Path -LiteralPath $tokenPath) { $existingToken = [string](Get-Content -LiteralPath $tokenPath -TotalCount 1 -ErrorAction SilentlyContinue) }
+if ($existingToken.Trim().Length -lt 32) {
+    if (-not (Plan "would create $tokenPath (private ACL)")) {
+        $bytes = New-Object byte[] 32
+        [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+        $token = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+        [System.IO.File]::WriteAllText($tokenPath, $token, (New-Object System.Text.ASCIIEncoding))
+        $tokenCreated = $true
+        Write-Step "created auth-token (restart Vectorworks so the bridge reads it)" "ok"
+    }
+} else { Write-Step "auth-token present (kept)" "ok" }
+$existingToken = $null
+if (-not $DryRun -and (Test-Path -LiteralPath $tokenPath)) {
+    try { Set-PrivateFileAcl $tokenPath } catch { Add-Warn "could not restrict the auth-token ACL: $($_.Exception.Message)" }
+}
+if (-not $DryRun) { foreach ($d in @("instances", "logs", "captures", "backups")) { New-Item -ItemType Directory -Path (Join-Path $Root $d) -Force | Out-Null } }
+
+# ------------------------------------------------- skills marketplace copy
+if (-not (Plan "would refresh $MarketplaceDir (skills-only plugin for Codex)")) {
+    $mSrc = if (Test-Path -LiteralPath (Join-Path $AppDir "plugins\vectorworks")) { $AppDir } else { $SourceRoot }
+    Remove-Tree $MarketplaceDir
+    New-Item -ItemType Directory -Path (Join-Path $MarketplaceDir ".agents\plugins") -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $mSrc ".agents\plugins\marketplace.json") -Destination (Join-Path $MarketplaceDir ".agents\plugins\marketplace.json") -Force
+    if (Test-Path -LiteralPath (Join-Path $mSrc ".claude-plugin\marketplace.json")) {
+        New-Item -ItemType Directory -Path (Join-Path $MarketplaceDir ".claude-plugin") -Force | Out-Null
+        Copy-Item -LiteralPath (Join-Path $mSrc ".claude-plugin\marketplace.json") -Destination (Join-Path $MarketplaceDir ".claude-plugin\marketplace.json") -Force
+    }
+    New-Item -ItemType Directory -Path (Join-Path $MarketplaceDir "plugins") -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $mSrc "plugins\vectorworks") -Destination (Join-Path $MarketplaceDir "plugins") -Recurse -Force
+    Write-Step "skills marketplace $MarketplaceDir" "ok"
+}
+
+# --------------------------------------------------------- activate runtime
+if (-not (Plan "would set current.txt -> $runtimeId")) {
+    Write-Utf8File $CurrentPath $runtimeId
+    Write-Step "active runtime: $runtimeId" "ok"
+}
+
+# ----------------------------------------------------------------- native
+$native = [ordered]@{ status = "skipped"; installed = @() }
+function Find-NativeArtifact([string]$ver) {
+    $cands = @()
+    if ($NativeArtifactDir) { $cands += @((Join-Path $NativeArtifactDir $ver), $NativeArtifactDir) }
+    $cands += @((Join-Path $SourceRoot "native\$ver"), (Join-Path $SourceRoot "native"),
+        (Join-Path $SourceRoot "native_bridge\project\out\$ver\Release"))
+    foreach ($c in $cands) {
+        if ((Test-Path -LiteralPath (Join-Path $c "VectorworksMCPBridge.vlb")) -and (Test-Path -LiteralPath (Join-Path $c "VectorworksMCPBridge.vwr"))) { return (Get-FullPath $c) }
     }
     return $null
 }
-
-function Test-NativeStepSucceeded {
-    param(
-        [object]$NativeRunnerResult,
-        [string]$Stage
-    )
-    $LastStep = Get-LastNativeStep $NativeRunnerResult
-    return [bool](
-        $LastStep -and
-        [string]$LastStep.stage -eq $Stage -and
-        [bool]$LastStep.executed -and
-        [int]$LastStep.exitCode -eq 0
-    )
+function Test-VisualStudio {
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    if (-not (Test-Path -LiteralPath $vswhere)) { return $false }
+    $r = Invoke-Native -FilePath $vswhere -Arguments @("-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath") -TimeoutSec 60
+    return [bool]($r.ExitCode -eq 0 -and $r.StdOut.Trim())
 }
 
-function Test-VectorworksInteractionBoundary {
-    param(
-        [object]$NativeRunnerResult,
-        [object]$Doctor
-    )
-    $LastStep = Get-LastNativeStep $NativeRunnerResult
-    $MissingFlags = @($NativeRunnerResult.missingAllowFlags | ForEach-Object { [string]$_ })
-    return (
-        ($LastStep -and [string]$LastStep.stage -eq "smoke-phase-0") -or
-        ([string]$Doctor.nextCommandSpec.stage -eq "smoke-phase-0") -or
-        ($MissingFlags.Count -eq 1 -and $MissingFlags[0] -eq "-AllowVectorworksRestartStep")
-    )
-}
-
-function New-NativeSummary {
-    param(
-        [object]$NativeRunnerResult,
-        [int]$NativeExitCode,
-        [object]$Doctor,
-        [object[]]$Runs,
-        [object]$Phase2SmokeResult = $null
-    )
-    $LastStep = Get-LastNativeStep $NativeRunnerResult
-    $InteractionBoundary = Test-VectorworksInteractionBoundary -NativeRunnerResult $NativeRunnerResult -Doctor $Doctor
-    $VectorworksAutomationAttempted = [bool]($LastStep -and [string]$LastStep.stage -eq "smoke-phase-0" -and [bool]$LastStep.executed)
-    $Phase0SmokeTested = Test-NativeStepSucceeded -NativeRunnerResult $NativeRunnerResult -Stage "smoke-phase-0"
-    $Phase2SmokeAttempted = [bool]$Phase2SmokeResult
-    $Phase2SmokeTested = [bool](
-        $Phase2SmokeResult -and
-        [int]$Phase2SmokeResult.exitCode -eq 0 -and
-        $Phase2SmokeResult.payload -and
-        [bool]$Phase2SmokeResult.payload.ok
-    )
-    $ReleaseConfiguration = [string]$NativeConfiguration -eq "Release"
-    $NativeSmokeReady = [bool]($Phase0SmokeTested -and $Phase2SmokeTested)
-    $NativeProductionReady = [bool]($ReleaseConfiguration -and $NativeSmokeReady)
-    $NativeFatal = [bool]($NativeExitCode -ne 0 -and -not $InteractionBoundary)
-    $Installed = [bool]($Doctor.installedArtifactMatchesCandidate -or $Doctor.installedPath)
-    $Built = [bool]($Doctor.builtArtifact -or $Doctor.builtArtifactCandidate)
-    $MissingAllowFlags = @($NativeRunnerResult.missingAllowFlags | ForEach-Object { [string]$_ })
-    return [ordered]@{
-        requested = $NativeRequested
-        ok = -not $NativeFatal
-        fatal = $NativeFatal
-        status = [string]$NativeRunnerResult.status
-        exit_code = $NativeExitCode
-        missing_allow_flags = @($MissingAllowFlags)
-        current_stage = if ($LastStep) { [string]$LastStep.stage } else { [string]$Doctor.nextCommandSpec.stage }
-        prereqs_ready = [bool]$Doctor.prereqsReady
-        configuration = [string]$NativeConfiguration
-        release_configuration = $ReleaseConfiguration
-        bridge_source_prepared = [bool]$Doctor.sourcePrepared
-        bridge_project_wired = [bool]$Doctor.projectWired
-        bridge_built = $Built
-        bridge_installed = $Installed
-        bridge_smoke_tested = $Phase0SmokeTested -or $Phase2SmokeTested
-        vectorworks_automation_attempted = $VectorworksAutomationAttempted
-        phase0_smoke_tested = $Phase0SmokeTested
-        phase2_smoke_attempted = $Phase2SmokeAttempted
-        phase2_smoke_tested = $Phase2SmokeTested
-        native_smoke_ready = $NativeSmokeReady
-        phase2_production_smoke_passed = $Phase2SmokeTested
-        production_ready = $NativeProductionReady
-        native_production_ready = $NativeProductionReady
-        vectorworks_interaction_required = ($InteractionBoundary -or $Phase0SmokeTested) -and -not $NativeSmokeReady
-        requires_action = (-not $NativeProductionReady)
-        built_artifact = if ($Doctor.builtArtifact) { [string]$Doctor.builtArtifact } else { [string]$Doctor.builtArtifactCandidate }
-        installed_path = [string]$Doctor.installedPath
-        next_command = [string]$Doctor.nextCommand
-        next_reason = [string]$Doctor.nextCommandReason
-        acceptance_next_command = if ($NativeProductionReady) {
-            ""
-        } elseif (-not $ReleaseConfiguration) {
-            "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -FullNative -NativeConfiguration Release -Json"
-        } elseif ($Phase0SmokeTested -and -not $Phase2SmokeTested) {
-            "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\start-vectorworks-native-smoke.ps1 -VectorworksVersion $VectorworksVersion -RestartIfRunning -RunPhase2 -AllowWriteFixture -Json"
-        } else {
-            [string]$Doctor.nextCommand
+$isCheckout = Test-Path -LiteralPath (Join-Path $SourceRoot ".git")
+if ($SkipNative) {
+    Write-Step "Native plug-in: skipped (-SkipNative)" "head"
+} elseif ($isCheckout -and -not $FullNative -and -not $NativeArtifactDir) {
+    # A checkout may hold a stale dev build; only release packages install their prebuilt plug-in by default.
+    Write-Step "Native plug-in: not changed (git checkout - pass -FullNative to build/install VectorworksMCPBridge)" "head"
+    $native.status = "not_requested"
+} else {
+    Write-Step "Native plug-in" "head"
+    $versions = if ($VectorworksVersion) { @($VectorworksVersion) } else { @(Get-InstalledVectorworksVersions) }
+    if ($versions.Count -eq 0) { $versions = @("2024"); if (-not $PluginsDir) { Add-Warn "no Vectorworks user folder found; assuming 2024" } }
+    $native.status = "ok"
+    foreach ($ver in $versions) {
+        $art = Find-NativeArtifact $ver
+        if ($FullNative -and (Test-Path -LiteralPath (Join-Path $SourceRoot "scripts\build-native-bridge.ps1"))) {
+            if (Test-VisualStudio) {
+                if (-not (Plan "would build the native bridge for $ver (scripts\build-native-bridge.ps1)")) {
+                    Write-Step "building native bridge for Vectorworks $ver (Visual Studio found)..."
+                    try {
+                        & (Join-Path $SourceRoot "scripts\build-native-bridge.ps1") -VectorworksVersion $ver -Configuration Release | ForEach-Object { Write-VwLog "build: $_" }
+                    } catch { Add-Warn "native build for $ver failed: $($_.Exception.Message)$(if ($art) { ' - using the existing build' })" }
+                    $art = Find-NativeArtifact $ver
+                }
+            } elseif (-not $art) { Add-Warn "-FullNative: Visual Studio C++ tools not found and no prebuilt VectorworksMCPBridge.vlb for $ver" }
         }
-        next_actions = @($Doctor.nextActions | ForEach-Object { [string]$_ })
-        exact_remaining_action = if (-not $ReleaseConfiguration) {
-            "Debug native builds are not production-ready. Rerun install.ps1 -FullNative -NativeConfiguration Release -Json, then pass phase-0 and phase-2 native smoke."
-        } elseif ($Phase0SmokeTested -and $Phase2SmokeAttempted -and -not $Phase2SmokeTested) {
-            "Phase-0 native transport smoke passed, then automated phase-2 production smoke was attempted but did not pass. Open Vectorworks $VectorworksVersion to a usable document, resolve any startup/license prompts, then rerun native.acceptance_next_command."
-        } elseif ($Phase0SmokeTested -and -not $Phase2SmokeTested) {
-            "Phase-0 native transport smoke passed and stopped the bridge. Run native.acceptance_next_command to restart/open Vectorworks and attempt the phase-2 disposable-document production smoke before claiming native production readiness."
-        } elseif ($InteractionBoundary -and -not $NativeProductionReady -and $VectorworksAutomationAttempted) {
-            "The installer attempted to open/restart Vectorworks $VectorworksVersion and run smoke. Resolve any Vectorworks startup/license/plugin prompts, then rerun the smoke command from native.next_command."
-        } elseif ($InteractionBoundary -and -not $NativeProductionReady) {
-            "Vectorworks automation was skipped or blocked by safety flags. Run native.next_command to let the agent open/restart Vectorworks and run native smoke."
-        } elseif ($NativeFatal) {
-            "Fix the native runner failure in native.runs[-1], then rerun install.ps1 -FullNative."
-        } elseif ($NativeProductionReady) {
-            "Native bridge acceptance smoke passed. Restart/reload the MCP client and use vw_ping."
-        } else {
-            [string]$Doctor.nextActions[0]
+        if (-not $art) {
+            $native.status = "no_artifact"
+            $msg = "no VectorworksMCPBridge.vlb/.vwr for Vectorworks $ver (use a release zip, -NativeArtifactDir, or -FullNative with Visual Studio)"
+            if ($FullNative) { $payload.ok = $false; Write-Step $msg "fail" } else { Write-Step $msg "warn" }
+            continue
         }
-        runs = @($Runs)
-        phase2_smoke = $Phase2SmokeResult
-        doctor = $Doctor
-    }
-}
-
-function Invoke-Phase2NativeSmoke {
-    param([string]$RepoRoot)
-    $StartSmokePath = Join-Path $RepoRoot "scripts\start-vectorworks-native-smoke.ps1"
-    if (-not (Test-Path -LiteralPath $StartSmokePath -PathType Leaf)) {
-        throw "Native Vectorworks launch/smoke helper was not found at $StartSmokePath"
-    }
-    $Args = @(
-        "-VectorworksVersion", $VectorworksVersion,
-        "-RestartIfRunning",
-        "-RunPhase2",
-        "-AllowWriteFixture",
-        "-Json"
-    )
-    $Result = Invoke-ProcessCapture -FilePath "powershell.exe" -ArgumentList (@("-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $StartSmokePath) + @($Args))
-    $Output = if ($Result.stdout.Trim()) { $Result.stdout } else { $Result.output }
-    $Exit = $Result.exitCode
-    $Payload = $null
-    try {
-        $Payload = $Output | ConvertFrom-Json
-    } catch {
-        $Payload = [pscustomobject]@{
-            ok = $false
-            failures = @("Phase-2 smoke helper did not emit valid JSON.")
-            raw = $Result.output
-        }
-    }
-    return [pscustomobject]@{
-        status = "phase2_smoke_attempt"
-        exitCode = $Exit
-        payload = $Payload
-        raw = $Result.output
-    }
-}
-
-function Invoke-FullNativeInstall {
-    param([string]$RepoRoot)
-    $BaseArgs = @(
-        "-VectorworksVersion", $VectorworksVersion,
-        "-Configuration", $NativeConfiguration,
-        "-MaxSteps", "$NativeMaxSteps",
-        "-Json",
-        "-AllowNetwork",
-        "-AllowInstallSoftware",
-        "-AllowDownloadLargeFiles",
-        "-AllowModifyVectorworksUserPlugins",
-        "-AllowRebootRisk"
-    )
-    if (-not $SkipVectorworksAutomation) { $BaseArgs += "-AllowVectorworksRestartStep" }
-    if ($SdkDir) { $BaseArgs += @("-SdkDir", $SdkDir) }
-    if ($SdkArchivePath) { $BaseArgs += @("-SdkArchivePath", $SdkArchivePath) }
-    if ($SdkExamplesDir) { $BaseArgs += @("-SdkExamplesDir", $SdkExamplesDir) }
-    if ($WorktreeRoot) { $BaseArgs += @("-WorktreeRoot", $WorktreeRoot) }
-    if ($NativeInstallDir) { $BaseArgs += @("-InstallDir", $NativeInstallDir) }
-
-    $Runs = [System.Collections.Generic.List[object]]::new()
-    $OldForceRestart = $env:VW_MCP_FORCE_VECTORWORKS_RESTART
-    try {
-        if ($ForceVectorworksRestart) {
-            $env:VW_MCP_FORCE_VECTORWORKS_RESTART = "1"
-        }
-
-        $First = Invoke-NativeRunnerJson -RepoRoot $RepoRoot -Arguments $BaseArgs
-        $Runs.Add($First.payload) | Out-Null
-        $Doctor = Get-NativeDoctorJson -RepoRoot $RepoRoot
-        $FinalPayload = $First.payload
-        $FinalExit = $First.exitCode
-
-        if ([string]$First.payload.status -eq "dry_run_executed" -and $Doctor.builtArtifactCandidate) {
-            $InstallArgs = @($BaseArgs) + @("-BuiltArtifact", [string]$Doctor.builtArtifactCandidate, "-Install")
-            $Second = Invoke-NativeRunnerJson -RepoRoot $RepoRoot -Arguments $InstallArgs
-            $Runs.Add($Second.payload) | Out-Null
-            $Doctor = Get-NativeDoctorJson -RepoRoot $RepoRoot
-            $FinalPayload = $Second.payload
-            $FinalExit = $Second.exitCode
-        }
-
-        $Phase2SmokeResult = $null
-        if (-not $SkipVectorworksAutomation -and (Test-NativeStepSucceeded -NativeRunnerResult $FinalPayload -Stage "smoke-phase-0")) {
-            $Phase2SmokeResult = Invoke-Phase2NativeSmoke -RepoRoot $RepoRoot
-            $Runs.Add($Phase2SmokeResult) | Out-Null
-        }
-
-        return New-NativeSummary -NativeRunnerResult $FinalPayload -NativeExitCode $FinalExit -Doctor $Doctor -Runs @($Runs) -Phase2SmokeResult $Phase2SmokeResult
-    } finally {
-        if ($null -eq $OldForceRestart) {
-            Remove-Item Env:\VW_MCP_FORCE_VECTORWORKS_RESTART -ErrorAction SilentlyContinue
-        } else {
-            $env:VW_MCP_FORCE_VECTORWORKS_RESTART = $OldForceRestart
-        }
-    }
-}
-
-function Invoke-NativeInstallPlan {
-    param([string]$RepoRoot)
-    $PlanArgs = @(
-        "-VectorworksVersion", $VectorworksVersion,
-        "-Configuration", $NativeConfiguration,
-        "-MaxSteps", "1",
-        "-PlanOnly",
-        "-Json"
-    )
-    if ($SdkDir) { $PlanArgs += @("-SdkDir", $SdkDir) }
-    if ($SdkArchivePath) { $PlanArgs += @("-SdkArchivePath", $SdkArchivePath) }
-    if ($SdkExamplesDir) { $PlanArgs += @("-SdkExamplesDir", $SdkExamplesDir) }
-    if ($WorktreeRoot) { $PlanArgs += @("-WorktreeRoot", $WorktreeRoot) }
-    if ($NativeInstallDir) { $PlanArgs += @("-InstallDir", $NativeInstallDir) }
-
-    $Plan = Invoke-NativeRunnerJson -RepoRoot $RepoRoot -Arguments $PlanArgs
-    $Doctor = Get-NativeDoctorJson -RepoRoot $RepoRoot
-    $Summary = New-NativeSummary `
-        -NativeRunnerResult $Plan.payload `
-        -NativeExitCode $Plan.exitCode `
-        -Doctor $Doctor `
-        -Runs @($Plan.payload)
-    $LiveBridge = Get-LiveNativeBridgeStatus -RepoRoot $RepoRoot
-    $Summary["live_bridge_ready"] = [bool]$LiveBridge.ready
-    $Summary["live_bridge_status"] = $LiveBridge.status
-    $Summary["live_bridge_error"] = [string]$LiveBridge.error
-    if ($LiveBridge.ready -and [string]$NativeConfiguration -eq "Release") {
-        $Summary["status"] = "live_native_ready"
-        $Summary["current_stage"] = "ready"
-        $Summary["production_ready"] = $true
-        $Summary["native_production_ready"] = $true
-        $Summary["requires_action"] = $false
-        $Summary["exact_remaining_action"] = "Native bridge is live and production-capable. Trust or reload the MCP client, then call vw_ping."
-    }
-    return $Summary
-}
-
-function New-InstallPayload {
-    param(
-        [bool]$Ok,
-        [string]$RepoRoot,
-        [string]$Message,
-        [object]$Native = $null,
-        [string]$ErrorMessage = ""
-    )
-    $LoaderPath = if ($RepoRoot) { Join-Path $RepoRoot "vw_load_listener_2024.py" } else { "" }
-    $LauncherPath = if ($RepoRoot) { Join-Path $RepoRoot "vw_start_listener_2024.py" } else { "" }
-    $McpConfigPath = if ($RepoRoot) { Join-Path $RepoRoot ".mcp.json" } else { "" }
-    $RunnerPath = if ($RepoRoot) { Join-Path $RepoRoot "scripts\run-mcp-server.ps1" } else { "" }
-    $ContractInfo = Get-ContractInfo -RepoRoot $RepoRoot
-    $NativeReady = if ($Native) { [bool]$Native.native_production_ready } else { $false }
-    $NativeRequiresAction = -not $NativeReady
-    $NativeSummary = if ($Native) {
-        [ordered]@{
-            ready = [bool]$Native.native_production_ready
-            production_ready = [bool]$Native.native_production_ready
-            next_stage = [string]$Native.current_stage
-            next_command = [string]$Native.next_command
-            next_reason = [string]$Native.next_reason
-            acceptance_next_command = [string]$Native.acceptance_next_command
-            missing_allow_flags = @($Native.missing_allow_flags)
-            prereqs_ready = [bool]$Native.prereqs_ready
-            configuration = [string]$Native.configuration
-            release_configuration = [bool]$Native.release_configuration
-            bridge_built = [bool]$Native.bridge_built
-            bridge_installed = [bool]$Native.bridge_installed
-            vectorworks_automation_attempted = [bool]$Native.vectorworks_automation_attempted
-            phase0_smoke_tested = [bool]$Native.phase0_smoke_tested
-            phase2_smoke_attempted = [bool]$Native.phase2_smoke_attempted
-            phase2_smoke_tested = [bool]$Native.phase2_smoke_tested
-            native_smoke_ready = [bool]$Native.native_smoke_ready
-            vectorworks_interaction_required = [bool]$Native.vectorworks_interaction_required
-            live_bridge_ready = [bool]$Native.live_bridge_ready
-            live_bridge_status = $Native.live_bridge_status
-        }
-    } else {
-        $null
-    }
-    return [ordered]@{
-        ok = $Ok
-        setup_complete = $Ok
-        install_complete = $Ok
-        usable_now = $Ok
-        requires_action = [bool]((-not $Ok) -or ($EnablePythonDialogFallback -and -not $NativeReady))
-        production_ready = $NativeReady
-        runtime_mode = if ($NativeReady) {
-            "native"
-        } elseif ($EnablePythonDialogFallback -and $Ok) {
-            "python_dialog_fallback"
-        } else {
-            "native_incomplete"
-        }
-        client = $Client
-        repo_root = $RepoRoot
-        mcp_config_path = $McpConfigPath
-        loader_path = $LoaderPath
-        launcher_path = $LauncherPath
-        runner_path = $RunnerPath
-        contract_version = [int]$ContractInfo.contract_version
-        required_features = @($ContractInfo.required_features)
-        mcp_config = $McpConfigPath
-        vectorworks_loader = $LoaderPath
-        vectorworks_launcher = $LauncherPath
-        dependency_checks = @($DependencyChecks)
-        native_requested = $NativeRequested
-        native_ready = $NativeReady
-        native_requires_action = $NativeRequiresAction
-        python_dialog_fallback_requested = [bool]$EnablePythonDialogFallback
-        python_dialog_fallback_ready = [bool]($EnablePythonDialogFallback -and $Ok)
-        native_summary = $NativeSummary
-        native = $Native
-        user_message = $Message
-        next_action = if ($Native -and $Native.native_production_ready) {
-            "Native bridge acceptance smoke passed. Trust or reload the MCP client, then use vw_ping and production CAD tools."
-        } elseif ($EnablePythonDialogFallback -and $Ok) {
-            "Trust or add the repo .mcp.json, run vw_load_listener_2024.py in Vectorworks, and keep its modal dialog open only while Codex controls the document."
-        } elseif ($Native -and $Native.requires_action) {
-            $Native.exact_remaining_action
-        } else {
-            "Fix the reported installer error, then rerun install.ps1."
-        }
-        native_note = if ($FullNative) {
-            "Full native setup attempts to open/restart Vectorworks and run native smoke automatically. The installer does not claim native production readiness until phase-0 and phase-2 smoke pass."
-        } elseif ($EnablePythonDialogFallback) {
-            "The explicitly requested Python dialog fallback is modal and blocks manual Vectorworks use while its listener dialog is open."
-        } else {
-            "Native non-modal readiness is required by default. Review the reported native plan, then rerun with -FullNative only after approving its software, download, plug-in-write, restart, and smoke-test side effects."
-        }
-        raw_install_url = $RawInstallUrl
-        error = $ErrorMessage
-    }
-}
-
-function Write-InstallPayload {
-    param([System.Collections.IDictionary]$Payload)
-    if ($Json) {
-        $Payload | ConvertTo-Json -Depth 18
-        return
-    }
-
-    if ($Payload.ok) {
-        Write-Host $Payload.user_message
-        Write-Host "Repo: $($Payload.repo_root)"
-        Write-Host "MCP config: $($Payload.mcp_config)"
-        if ($Payload.python_dialog_fallback_requested) {
-            Write-Host "Vectorworks modal fallback loader: $($Payload.vectorworks_loader)"
-        }
-        if ($Payload.native_requested) {
-            Write-Host "Native prereqs ready: $($Payload.native.prereqs_ready)"
-            Write-Host "Native bridge built: $($Payload.native.bridge_built)"
-            Write-Host "Native bridge installed: $($Payload.native.bridge_installed)"
-            Write-Host "Native bridge smoke-tested: $($Payload.native.bridge_smoke_tested)"
-        }
-        Write-Host "Next: $($Payload.next_action)"
-    } else {
-        Write-Warning $Payload.user_message
-        if ($Payload.error) {
-            Write-Warning $Payload.error
-        }
-        if ($Payload.native_summary) {
-            Write-Host "Native next stage: $($Payload.native_summary.next_stage)"
-            Write-Host "Native next command: $($Payload.native_summary.next_command)"
-            if ($Payload.native_summary.missing_allow_flags.Count -gt 0) {
-                Write-Host "Required approvals: $($Payload.native_summary.missing_allow_flags -join ', ')"
+        $pdir = if ($PluginsDir) { Get-FullPath $PluginsDir } else { Join-Path $env:APPDATA "Nemetschek\Vectorworks\$ver\Plug-ins" }
+        Assert-RealFilesystemPath $pdir "Vectorworks Plug-ins folder"
+        if ($package -and -not $PluginsDir) { throw "Refusing to install the native plug-in from inside the MSIX package '$package': the files would land in its private LocalCache. Run install.ps1 from a normal PowerShell window." }
+        $files = [ordered]@{}
+        foreach ($n in @("VectorworksMCPBridge.vlb", "VectorworksMCPBridge.vwr")) { $files[$n] = Get-Sha256 (Join-Path $art $n) }
+        $oldFiles = @(@("ObjectExample.vlb", "ObjectExample.vwr") | Where-Object { Test-Path -LiteralPath (Join-Path $pdir $_) })
+        $oldVlb = Join-Path $pdir "ObjectExample.vlb"
+        if ((Test-Path -LiteralPath $oldVlb) -and -not (Test-IsOurOldBridge $oldVlb)) { Add-Warn "$oldVlb is not the old Vectorworks MCP bridge; leaving it alone"; $oldFiles = @() }
+        $upToDate = ($oldFiles.Count -eq 0)
+        foreach ($n in $files.Keys) { if ((Get-Sha256 (Join-Path $pdir $n)) -ne $files[$n]) { $upToDate = $false } }
+        $entry = [ordered]@{ vectorworks_version = $ver; plugins_dir = $pdir; source = $art; files = $files; backup_dir = $null; removed = @() }
+        if ($upToDate) { Write-Step "Vectorworks ${ver}: VectorworksMCPBridge already installed" "ok"; $native.installed += $entry; continue }
+        # Test hook: a sandbox -PluginsDir may ignore a running Vectorworks (never the real folder).
+        $ignoreRunning = $PluginsDir -and $env:VW_MCP_TEST_IGNORE_RUNNING -eq "1"
+        if ((Get-VectorworksProcesses) -and -not $ignoreRunning) {
+            if ($WaitForVectorworksExit -and -not $DryRun) {
+                Write-Step "Vectorworks is running - waiting up to $WaitTimeoutSec s for it to exit (save and close it)..." "warn"
+                $deadline = (Get-Date).AddSeconds($WaitTimeoutSec)
+                while ((Get-VectorworksProcesses) -and (Get-Date) -lt $deadline) { Start-Sleep -Seconds 2 }
+            }
+            if ((Get-VectorworksProcesses) -and -not $ignoreRunning) {
+                $native.status = "pending_vectorworks_running"
+                Add-Warn "Vectorworks is running: the bridge plug-in for $ver was NOT installed. Close Vectorworks and rerun: install.ps1 -FullNative (or add -WaitForVectorworksExit)"
+                continue
             }
         }
-        Write-Host "Next: $($Payload.next_action)"
+        if (Plan "would install $art -> $pdir (backup + remove $($oldFiles -join ', '))") { continue }
+        New-Item -ItemType Directory -Path $pdir -Force | Out-Null
+        $bk = Join-Path $Root "backups\plugins-$Stamp\$ver"
+        foreach ($n in @(@($files.Keys) + $oldFiles)) {
+            $f = Join-Path $pdir $n
+            if (Test-Path -LiteralPath $f) { New-Item -ItemType Directory -Path $bk -Force | Out-Null; Copy-Item -LiteralPath $f -Destination (Join-Path $bk $n) -Force; $entry.backup_dir = $bk }
+        }
+        foreach ($n in $oldFiles) { Remove-Item -LiteralPath (Join-Path $pdir $n) -Force; $entry.removed += $n }
+        foreach ($n in $files.Keys) { Copy-Item -LiteralPath (Join-Path $art $n) -Destination (Join-Path $pdir $n) -Force }
+        foreach ($n in $files.Keys) { if ((Get-Sha256 (Join-Path $pdir $n)) -ne $files[$n]) { throw "copy verification failed for $pdir\$n" } }
+        Write-Step "Vectorworks ${ver}: installed VectorworksMCPBridge.vlb/.vwr$(if ($entry.removed.Count) { "; removed old $($entry.removed -join ', ') (backup $bk)" })" "ok"
+        $native.installed += $entry
+    }
+}
+$payload.steps.native = $native
+
+# ---------------------------------------------------------------- clients
+$clientsResult = $null
+if ($Client -ne "none") {
+    Write-Step "Client registration ($Client)" "head"
+    $regArgs = @{ Client = $Client; Root = $Root; Launcher = $Launcher; MarketplaceDir = $MarketplaceDir; Python = $base.executable; Json = $true }
+    if ($CodexHome) { $regArgs.CodexHome = $CodexHome }
+    if ($ClaudeConfig) { $regArgs.ClaudeConfig = $ClaudeConfig }
+    if ($DryRun) { $regArgs.DryRun = $true }
+    $regScript = Join-Path $SourceRoot "scripts\register-clients.ps1"
+    $raw = & $regScript @regArgs
+    try { $clientsResult = ($raw | Out-String) | ConvertFrom-Json } catch { Add-Warn "client registration output unreadable: $raw" }
+    if ($clientsResult) {
+        foreach ($p in $clientsResult.clients.PSObject.Properties) {
+            foreach ($c in @($p.Value.changes)) { Write-Step "$($p.Name): $c" ($(if ($DryRun) { "plan" } else { "ok" })) }
+            foreach ($c in @($p.Value.notes)) { Write-Step "$($p.Name): $c" }
+            if (-not $p.Value.ok) { $payload.ok = $false; Write-Step "$($p.Name): $($p.Value.error)" "fail" }
+        }
+    }
+    $payload.steps.clients = $clientsResult
+} else { Write-Step "Client registration skipped (-Client none)" "head" }
+
+# ---------------------------------------------------------------- receipt
+if (-not $DryRun) {
+    $appHashes = if ($reuse -and $receipt -and $receipt.app_files -and -not $sameAsSource) { $receipt.app_files } else { Get-TreeHashes $AppDir }
+    $prevIds = @()
+    if ($receipt -and $receipt.runtime_id -and $receipt.runtime_id -ne $runtimeId) { $prevIds += $receipt.runtime_id }
+    $sourceDir = $SourceRoot
+    if ($sameAsSource -and $receipt -and $receipt.source_dir -and (Test-Path -LiteralPath (Join-Path ([string]$receipt.source_dir) "install.ps1"))) { $sourceDir = [string]$receipt.source_dir }
+    $newReceipt = [ordered]@{
+        schema = 1
+        product = "vectorworks-mcp"
+        version = $version
+        runtime_id = $runtimeId
+        installer_version = $InstallerVersion
+        installed_at = (Get-Date).ToUniversalTime().ToString("o")
+        source_dir = $sourceDir
+        source_kind = $(if (Test-Path -LiteralPath (Join-Path $SourceRoot ".git")) { "checkout" } elseif ($sameAsSource) { "runtime" } else { "package" })
+        root = $Root
+        launcher = [ordered]@{ path = $Launcher; sha256 = (Get-Sha256 $Launcher) }
+        python = [ordered]@{ base_executable = $base.executable; version = $base.version; venv = $VenvDir }
+        requirements_lock_sha256 = $lockHash
+        app_files = $appHashes
+        auth_token = [ordered]@{ path = $tokenPath; created_now = $tokenCreated }
+        native = $native
+        clients = $clientsResult
+        previous_runtime_ids = $prevIds
+    }
+    Write-JsonFile $ReceiptPath $newReceipt
+    Write-Step "receipt $ReceiptPath" "ok"
+
+    # Remove superseded runtimes that are no longer in use.
+    $rtRoot = Join-Path $Root "runtime"
+    foreach ($d in @(Get-ChildItem -LiteralPath $rtRoot -Directory -ErrorAction SilentlyContinue)) {
+        if ($d.Name -eq $runtimeId) { continue }
+        try { Remove-Tree $d.FullName; Write-Step "removed old runtime $($d.Name)" }
+        catch { Write-VwLog "old runtime $($d.Name) still in use; will be removed by a later install" }
     }
 }
 
-try {
-    if ($FullNative -and $EnablePythonDialogFallback) {
-        throw "-FullNative and -EnablePythonDialogFallback select conflicting runtime modes."
-    }
-    Ensure-BaseDependencies
-    $RepoRoot = Resolve-ConnectorRepoRoot
-    $BootstrapPath = Join-Path $RepoRoot "scripts\bootstrap-agent.ps1"
-    $BootstrapArgs = @("-Client", $Client)
-    if (-not $NoVerify) { $BootstrapArgs += "-Verify" }
-    if ($SkipClipboard) { $BootstrapArgs += "-SkipClipboard" }
-    if ($EnablePythonDialogFallback) { $BootstrapArgs += "-EnablePythonDialogFallback" }
-
-    if ($Json) {
-        $BootstrapResult = Invoke-ProcessCapture -FilePath "powershell.exe" -ArgumentList (@("-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $BootstrapPath) + @($BootstrapArgs)) -WorkingDirectory $RepoRoot
-        if ($BootstrapResult.exitCode -ne 0) {
-            throw "bootstrap-agent.ps1 failed with exit code $($BootstrapResult.exitCode). Output: $($BootstrapResult.output)"
-        }
-    } else {
-        Push-Location $RepoRoot
-        try {
-            & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $BootstrapPath @BootstrapArgs
-            if ($LASTEXITCODE -ne 0) {
-                throw "bootstrap-agent.ps1 failed with exit code $LASTEXITCODE"
+# ---------------------------------------------------------------- doctor
+if (-not $SkipDoctor -and -not $DryRun) {
+    Write-Step "Doctor" "head"
+    $docArgs = @{ Root = $Root; Json = $true }
+    if ($CodexHome) { $docArgs.CodexHome = $CodexHome }
+    if ($ClaudeConfig) { $docArgs.ClaudeConfig = $ClaudeConfig }
+    if ($PluginsDir) { $docArgs.PluginsDir = $PluginsDir }
+    try {
+        $doc = (& (Join-Path $SourceRoot "scripts\doctor.ps1") @docArgs | Out-String) | ConvertFrom-Json
+        $payload.doctor = [ordered]@{ ok = $doc.ok; failures = $doc.failures; warnings = $doc.warnings }
+        foreach ($c in @($doc.checks)) {
+            if ($c.status -in @("fail", "warn") -or $c.id -in @("mcp_startup", "codex", "claude")) {
+                $fixHint = if ($c.PSObject.Properties["fix"]) { "  -> $($c.fix)" } else { "" }
+                Write-Step "$($c.id): $($c.message)$fixHint" ([string]$c.status)
             }
-        } finally {
-            Pop-Location
         }
-    }
-
-    $NativeSummary = $null
-    if ($FullNative) {
-        $NativeSummary = Invoke-FullNativeInstall -RepoRoot $RepoRoot
-        if ($NativeSummary.fatal) {
-            throw "Full native setup failed before reaching the Vectorworks interaction boundary."
-        }
-    } elseif ($NativeRequested) {
-        $NativeSummary = Invoke-NativeInstallPlan -RepoRoot $RepoRoot
-        if ($NativeSummary.fatal) {
-            throw "Native setup planning failed before producing a safe next step."
-        }
-    }
-
-    $InstallOk = [bool](
-        ($NativeSummary -and $NativeSummary.native_production_ready) -or
-        $EnablePythonDialogFallback
-    )
-    $Message = if ($FullNative -and $NativeSummary.native_production_ready) {
-        "Vectorworks MCP installed. Native bridge is built, installed, and smoke-tested."
-    } elseif ($FullNative -and $NativeSummary.vectorworks_interaction_required) {
-        "Vectorworks MCP base install completed, but native bridge production readiness still requires action."
-    } elseif ($FullNative) {
-        "Vectorworks MCP base install completed, but native bridge production readiness is not complete."
-    } elseif ($EnablePythonDialogFallback) {
-        "Vectorworks MCP installed with the explicitly requested modal Python dialog fallback."
-    } else {
-        "Vectorworks MCP host setup completed, but the required non-modal native bridge is not production-ready yet."
-    }
-    $Payload = New-InstallPayload -Ok $InstallOk -RepoRoot $RepoRoot -Message $Message -Native $NativeSummary
-    Write-InstallPayload $Payload
-    if ($InstallOk) { exit 0 }
-    exit 1
-} catch {
-    $Payload = New-InstallPayload -Ok $false -RepoRoot $RepoRoot -Message "Vectorworks MCP install failed." -ErrorMessage $_.Exception.Message
-    Write-InstallPayload $Payload
-    exit 1
+    } catch { Add-Warn "doctor failed: $($_.Exception.Message)" }
 }
+
+Write-Step "Done" "head"
+if (-not $Json) {
+    Write-Host "  Launcher:  $Launcher"
+    Write-Host "  Doctor:    $Bin\vectorworksctl.cmd doctor"
+    Write-Host "  Restart Codex / Claude Code so they pick up the vectorworks server."
+    if ($native.status -eq "pending_vectorworks_running") { Write-Host "  Native plug-in pending: close Vectorworks and rerun with -FullNative." -ForegroundColor Yellow }
+    if ($tokenCreated) { Write-Host "  A new auth token was created: restart Vectorworks." -ForegroundColor Yellow }
+}
+if ($Json) { $payload | ConvertTo-Json -Depth 10 }
+if (-not $payload.ok) { exit 1 }
+exit 0

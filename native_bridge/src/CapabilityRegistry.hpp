@@ -8,7 +8,7 @@
 
 namespace VectorworksMCP {
 
-constexpr std::uint32_t kCapabilityRevision = 5u;
+constexpr std::uint32_t kCapabilityRevision = 6u;
 constexpr bool kDocumentationWritesEnabled = false;
 
 const ActionSpec* FindActionSpec(std::string_view action);
@@ -22,5 +22,6 @@ std::string ObjectKindDescriptorsJson(bool cadHandlersImplemented);
 std::string ObjectReadFeaturesJson(bool cadHandlersImplemented);
 std::string CapabilityFingerprint(bool cadHandlersImplemented);
 std::string CapabilitiesResultJson(bool cadHandlersImplemented);
+std::string ActionsJson(bool cadHandlersImplemented);
 
 }  // namespace VectorworksMCP

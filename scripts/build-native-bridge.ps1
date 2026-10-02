@@ -1,167 +1,171 @@
 [CmdletBinding()]
 param(
+    # 2024 (default), 2025, or "all" (2025 is skipped with a warning when its SDK libs are missing).
     [string]$VectorworksVersion = "2024",
+    # Optional SDK root override (folder that contains SDKLib\Include and SDKLib\LibWin).
     [string]$SdkDir = "",
+    # Legacy parameter (0.x worktree layout). Ignored: the project now lives in native_bridge\project.
     [string]$SourceDir = "",
     [ValidateSet("Debug", "Release")]
     [string]$Configuration = "Release",
-    [switch]$SkipPrereqCheck
+    [switch]$SkipPrereqCheck,
+    [switch]$Clean,
+    [switch]$Json
 )
+
+# Builds native_bridge\project\VectorworksMCPBridge.vcxproj (version controlled)
+# against the Vectorworks SDK in third_party\VectorworksSDKExamples.
+# Output: native_bridge\project\out\<version>\<Configuration>\VectorworksMCPBridge.vlb/.vwr
+# The build id (git short hash + UTC build time) is baked in via generated\BuildInfo.h.
 
 $ErrorActionPreference = "Stop"
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$CheckerPath = Join-Path $PSScriptRoot "check-native-bridge-prereqs.ps1"
-$PreparePath = Join-Path $PSScriptRoot "prepare-native-bridge-source.ps1"
-$WirePath = Join-Path $PSScriptRoot "wire-native-bridge-project.ps1"
-if (-not $SourceDir) {
-    $SourceDir = Join-Path $RepoRoot "native_bridge\worktree\SDKExamples"
+$ProjectDir = Join-Path $RepoRoot "native_bridge\project"
+$ProjectFile = Join-Path $ProjectDir "VectorworksMCPBridge.vcxproj"
+$GeneratedDir = Join-Path $ProjectDir "generated"
+
+function Repair-ProcessPathEnvironment {
+    # Some agent hosts inject both Path and PATH; MSBuild's ToolTask fails with
+    # MSB6001 before CL.exe starts when both spellings are present.
+    $CurrentPath = [Environment]::GetEnvironmentVariable("Path", [EnvironmentVariableTarget]::Process)
+    if (-not $CurrentPath) { return }
+    Remove-Item -LiteralPath "Env:\PATH" -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "Env:\Path" -ErrorAction SilentlyContinue
+    [Environment]::SetEnvironmentVariable("Path", $CurrentPath, [EnvironmentVariableTarget]::Process)
 }
 
-function Get-MSBuildFromPath {
-    $Command = Get-Command msbuild.exe -ErrorAction SilentlyContinue
-    if ($Command) {
-        return $Command.Source
+function Find-MSBuild {
+    $Candidates = @()
+    $VsWhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path -LiteralPath $VsWhere) {
+        $Found = & $VsWhere -latest -products * -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\MSBuild.exe" 2>$null
+        if ($Found) { $Candidates += @($Found) }
+    }
+    $Candidates += @(
+        "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe",
+        "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe",
+        "C:\Program Files\Microsoft Visual Studio\2022\Professional\MSBuild\Current\Bin\MSBuild.exe",
+        "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\MSBuild\Current\Bin\MSBuild.exe"
+    )
+    $OnPath = Get-Command msbuild.exe -ErrorAction SilentlyContinue
+    if ($OnPath) { $Candidates += $OnPath.Source }
+    foreach ($Candidate in $Candidates) {
+        if ($Candidate -and (Test-Path -LiteralPath $Candidate)) { return $Candidate }
     }
     return ""
 }
 
-function Get-CheckByName {
-    param(
-        [object]$Report,
-        [string]$Name
-    )
-    return $Report.checks | Where-Object { $_.name -eq $Name } | Select-Object -First 1
+function Get-SdkRoot([string]$Version) {
+    if ($SdkDir) { return $SdkDir }
+    return Join-Path $RepoRoot "third_party\VectorworksSDKExamples\VectorworksSDK\SDK$Version"
 }
 
-function Repair-ProcessPathEnvironment {
-    # Some agent hosts inject both Path and PATH into the Windows environment
-    # block. MSBuild's ToolTask copies variables into a case-insensitive map and
-    # fails with MSB6001 before CL.exe starts when both spellings are present.
-    $CurrentPath = [Environment]::GetEnvironmentVariable(
-        "Path",
-        [EnvironmentVariableTarget]::Process
+function Test-SdkReady([string]$Root) {
+    $Required = @(
+        "SDKLib\Include\VectorworksSDK.h",
+        "SDKLib\Include\OnlyWin\NNA_PluginBuild_RELEASE.props",
+        "SDKLib\LibWin\Release\VWSDK.lib",
+        "SDKLib\ToolsWin\BuildVWR\buildvwr.exe"
     )
-    if (-not $CurrentPath) {
-        return
-    }
-    Remove-Item -LiteralPath "Env:\PATH" -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath "Env:\Path" -ErrorAction SilentlyContinue
-    [Environment]::SetEnvironmentVariable(
-        "Path",
-        $CurrentPath,
-        [EnvironmentVariableTarget]::Process
-    )
+    $Missing = @($Required | Where-Object { -not (Test-Path -LiteralPath (Join-Path $Root $_)) })
+    return ,$Missing
 }
 
-$MSBuildPath = ""
-if (-not $SkipPrereqCheck) {
-    if (-not (Test-Path -LiteralPath $CheckerPath)) {
-        throw "Native bridge prerequisite checker was not found at $CheckerPath"
+function Write-BuildInfo {
+    New-Item -ItemType Directory -Force -Path $GeneratedDir | Out-Null
+    $Hash = "nogit"
+    try {
+        $Hash = (& git -C $RepoRoot rev-parse --short HEAD 2>$null | Select-Object -First 1)
+        if (-not $Hash) { $Hash = "nogit" }
+        $Dirty = & git -C $RepoRoot status --porcelain -- native_bridge scripts/build-native-bridge.ps1 2>$null
+        if ($Dirty) { $Hash = "$Hash-dirty" }
+    } catch {
+        $Hash = "nogit"
     }
-
-    $CheckerArgs = @("-VectorworksVersion", $VectorworksVersion, "-Advisory", "-Json")
-    if ($SdkDir) { $CheckerArgs += @("-SdkDir", $SdkDir) }
-
-    $Json = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $CheckerPath @CheckerArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "Native prerequisite checker failed with exit code $LASTEXITCODE"
-    }
-    $Report = $Json | ConvertFrom-Json
-
-    if (-not $Report.ready) {
-        $Missing = @($Report.checks | Where-Object { $_.required -and -not $_.ok } | ForEach-Object { $_.name })
-        Write-Error ("Native bridge prerequisites are missing: {0}" -f ($Missing -join ", "))
-        exit 2
-    }
-
-    $MSBuildCheck = Get-CheckByName -Report $Report -Name "MSBuild"
-    if ($MSBuildCheck -and $MSBuildCheck.ok) {
-        $MSBuildPath = [string]$MSBuildCheck.detail
-    }
+    $Now = [DateTime]::UtcNow
+    $Stamp = $Now.ToString("yyyyMMdd'T'HHmmss'Z'")
+    $Iso = $Now.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+    $BuildId = "$Hash-$Stamp"
+    $Content = @"
+// Generated by scripts\build-native-bridge.ps1 - do not edit.
+#pragma once
+#define VWMCP_BUILD_ID "$BuildId"
+#define VWMCP_GIT_HASH "$Hash"
+#define VWMCP_BUILD_TIME_UTC "$Iso"
+"@
+    Set-Content -LiteralPath (Join-Path $GeneratedDir "BuildInfo.h") -Value $Content -Encoding ascii
+    return [pscustomobject]@{ build_id = $BuildId; git_hash = $Hash; built_at = $Iso }
 }
 
+if (-not (Test-Path -LiteralPath $ProjectFile)) {
+    throw "Native bridge project was not found at $ProjectFile"
+}
+$MSBuildPath = Find-MSBuild
 if (-not $MSBuildPath) {
-    $MSBuildPath = Get-MSBuildFromPath
-}
-if (-not $MSBuildPath) {
-    throw "MSBuild was not found. Install Visual Studio Build Tools or rerun without -SkipPrereqCheck for a fuller report."
+    throw "MSBuild was not found. Install Visual Studio 2022 Build Tools (Desktop development with C++)."
 }
 
-if (-not (Test-Path -LiteralPath $SourceDir -PathType Container)) {
-    throw "Native source worktree was not found at $SourceDir. Run $PreparePath first."
-}
-
-$Solution = Get-ChildItem -LiteralPath $SourceDir -Recurse -File -Filter "*$VectorworksVersion.sln" |
-    Select-Object -First 1
-if (-not $Solution) {
-    throw "No Vectorworks $VectorworksVersion solution (*.sln) was found under $SourceDir."
-}
-
-$ScaffoldSourceDir = Join-Path $Solution.DirectoryName "Source\VectorworksMCPBridge"
-$RequiredScaffoldFiles = @(
-    "BridgeProtocol.hpp",
-    "BridgeProtocol.cpp",
-    "NativeTransport.hpp",
-    "NativeTransport.cpp",
-    "NativeDomain.hpp",
-    "CapabilityRegistry.hpp",
-    "CapabilityRegistry.cpp",
-    "ParametricObjectAdapter.hpp",
-    "ParametricObjectAdapter.cpp",
-    "NativeObjectFactory.hpp",
-    "NativeObjectFactory.cpp",
-    "NativeTransaction.hpp",
-    "NativeTransaction.cpp",
-    "BimObjectHandlers.hpp",
-    "BimObjectHandlers.cpp",
-    "SpaceObjectHandlers.hpp",
-    "SpaceObjectHandlers.cpp",
-    "NativeIOHandlers.hpp",
-    "NativeIOHandlers.cpp",
-    "ResourceWorksheetHandlers.hpp",
-    "ResourceWorksheetHandlers.cpp",
-    "ViewDocumentHandlers.hpp",
-    "ViewDocumentHandlers.cpp",
-    "DocumentationHandlers.hpp",
-    "DocumentationHandlers.cpp",
-    "BridgeDispatcher.hpp",
-    "CadRequestQueue.hpp",
-    "VectorworksMCPBridge.cpp"
-)
-$ScaffoldPresent = @($RequiredScaffoldFiles | Where-Object {
-    Test-Path -LiteralPath (Join-Path $ScaffoldSourceDir $_) -PathType Leaf
-}).Count -eq $RequiredScaffoldFiles.Count
-if (-not $ScaffoldPresent) {
-    $MissingScaffoldFiles = @($RequiredScaffoldFiles | Where-Object {
-        -not (Test-Path -LiteralPath (Join-Path $ScaffoldSourceDir $_) -PathType Leaf)
-    }) -join ", "
-    throw "Native bridge scaffold is missing from the SDK project. Run scripts\copy-native-bridge-scaffold.ps1 first. Missing: $MissingScaffoldFiles"
-}
-if (-not (Test-Path -LiteralPath $WirePath -PathType Leaf)) {
-    throw "Native project wiring helper was not found at $WirePath"
-}
-$ProjectFile = Get-ChildItem -LiteralPath $Solution.DirectoryName -Recurse -File -Filter "*.vcxproj" -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -notmatch '\\(Source|include|SDKLib|ThirdPartySource)\\' } |
-    Select-Object -First 1
-if (-not $ProjectFile) {
-    throw "Native bridge scaffold is present, but no SDK Visual C++ project (*.vcxproj) was found next to the solution."
-}
-$WireJson = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $WirePath -VectorworksVersion $VectorworksVersion -ProjectPath $ProjectFile.FullName -SourceDir $ScaffoldSourceDir -CheckOnly -Json | Out-String
-if ($LASTEXITCODE -ne 0) {
-    throw "Native bridge project wiring check failed with exit code $LASTEXITCODE"
-}
-$WireReport = $WireJson | ConvertFrom-Json
-if (-not $WireReport.projectWired) {
-    $MissingItems = @($WireReport.missingProjectItems | ForEach-Object { [string]$_ }) -join ", "
-    throw "Native bridge scaffold is present but not wired into the SDK project. Run scripts\wire-native-bridge-project.ps1 first. Missing: $MissingItems"
-}
-
-Write-Host "Building native bridge worktree"
-Write-Host "Solution: $($Solution.FullName)"
-Write-Host "Configuration: $Configuration|x64"
-Write-Host "MSBuild: $MSBuildPath"
-
+$Versions = if ($VectorworksVersion -eq "all") { @("2024", "2025") } else { @($VectorworksVersion) }
+$BuildInfo = Write-BuildInfo
+$Results = @()
+$ExitCode = 0
 Repair-ProcessPathEnvironment
-& $MSBuildPath $Solution.FullName /m /p:Configuration=$Configuration /p:Platform=x64 /p:LanguageStandard=stdcpp17
-exit $LASTEXITCODE
+
+foreach ($Version in $Versions) {
+    $SdkRoot = Get-SdkRoot $Version
+    $Missing = Test-SdkReady $SdkRoot
+    if ($Missing.Count -gt 0) {
+        $Message = "Vectorworks $Version SDK is incomplete at $SdkRoot (missing: $($Missing -join ', '))"
+        if ($VectorworksVersion -eq "all" -and $Version -ne "2024") {
+            Write-Warning "$Message - skipping $Version"
+            $Results += [pscustomobject]@{ version = $Version; built = $false; skipped = $true; reason = $Message }
+            continue
+        }
+        throw $Message
+    }
+    $OutRoot = Join-Path $ProjectDir "out\$Version"
+    $Target = if ($Clean) { "Rebuild" } else { "Build" }
+    $Arguments = @(
+        $ProjectFile,
+        "/t:$Target",
+        "/m",
+        "/nologo",
+        "/v:minimal",
+        "/p:Configuration=$Configuration",
+        "/p:Platform=x64",
+        "/p:VWVersion=$Version",
+        "/p:VWSDKRoot=$SdkRoot",
+        "/p:VWOutputRoot=$OutRoot"
+    )
+    Write-Host "Building VectorworksMCPBridge for Vectorworks $Version ($Configuration|x64)"
+    Write-Host "  MSBuild: $MSBuildPath"
+    Write-Host "  SDK:     $SdkRoot"
+    & $MSBuildPath @Arguments
+    $Code = $LASTEXITCODE
+    $Vlb = Join-Path $OutRoot "$Configuration\VectorworksMCPBridge.vlb"
+    $Vwr = Join-Path $OutRoot "$Configuration\VectorworksMCPBridge.vwr"
+    $Built = ($Code -eq 0) -and (Test-Path -LiteralPath $Vlb) -and (Test-Path -LiteralPath $Vwr)
+    if (-not $Built) { $ExitCode = if ($Code -ne 0) { $Code } else { 3 } }
+    $Entry = [pscustomobject]@{
+        version = $Version
+        built = $Built
+        exit_code = $Code
+        vlb = $Vlb
+        vwr = $Vwr
+        vlb_sha256 = $(if (Test-Path -LiteralPath $Vlb) { (Get-FileHash -Algorithm SHA256 -LiteralPath $Vlb).Hash } else { $null })
+        build_id = $BuildInfo.build_id
+        built_at = $BuildInfo.built_at
+    }
+    if ($Built) {
+        $Entry | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutRoot "$Configuration\build-info.json") -Encoding utf8
+        Write-Host "  Output:  $Vlb"
+        Write-Host "           $Vwr"
+    }
+    $Results += $Entry
+}
+
+if ($Json) {
+    [pscustomobject]@{ ok = ($ExitCode -eq 0); build_id = $BuildInfo.build_id; results = $Results } | ConvertTo-Json -Depth 4
+}
+exit $ExitCode

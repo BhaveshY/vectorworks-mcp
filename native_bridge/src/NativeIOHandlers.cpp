@@ -21,6 +21,7 @@
 #include "Interfaces/VectorWorks/Filing/IFileIdentifier.h"
 #include "Interfaces/VectorWorks/Filing/IFolderIdentifier.h"
 #include "Interfaces/VectorWorks/Filing/IImportExportDWG.h"
+#include "Interfaces/VectorWorks/Extension/IIFCSupport.h"
 #else
 #define VECTORWORKS_MCP_NATIVE_IO_HAS_SDK 0
 #endif
@@ -287,6 +288,9 @@ Result ExportImageImpl(const ImageExportRequest& request, const std::string& ope
     options.fUpdateVewports = request.updateViewports;
     options.fResetAllPlugIns = request.resetPlugInObjects;
     options.fExportGeoreferencing = request.exportGeoreferencing;
+    if (request.hasExportRect) {
+        options.fExportRect = ViewRect(request.rectLeft, request.rectTop, request.rectRight, request.rectBottom);
+    }
     if (!gSDK || !gSDK->ExportImage(identifier, options)) {
         throw Error(
             ErrorCode::SdkOperationFailed,
@@ -522,9 +526,39 @@ Result ExportPDF(const PDFExportRequest& request) {
     }
     options.fResolution = request.resolutionDpi;
     options.fOpenInViewer = false;
-    options.fExportRangeKind = request.currentViewOnly
+    const std::string range = Lower(request.range);
+    const bool sheetRange = range == "sheet";
+    const bool currentView = request.currentViewOnly || range == "current_view" || sheetRange;
+    if (!range.empty() && range != "current_view" && range != "all_pages" && range != "sheet") {
+        throw Error(ErrorCode::InvalidRequest, "range must be current_view, all_pages or sheet");
+    }
+    options.fExportRangeKind = currentView
         ? VectorWorks::Filing::SExportPDFOptions::eCurrentView
         : VectorWorks::Filing::SExportPDFOptions::eAllPages;
+    MCObjectHandle previousLayer = nullptr;
+    if (sheetRange) {
+        if (request.sheet.empty()) {
+            throw Error(ErrorCode::InvalidRequest, "range=sheet requires sheet (sheet layer name)");
+        }
+        MCObjectHandle sheetLayer = nullptr;
+        gSDK->ForEachLayerN([&](MCObjectHandle layer) {
+            if (sheetLayer || !layer) return;
+            TXString name;
+            gSDK->GetObjectName(layer, name);
+            if (name.GetStdString() == request.sheet) sheetLayer = layer;
+        });
+        if (!sheetLayer) {
+            throw Error(ErrorCode::InputNotFound, "sheet layer was not found: " + request.sheet);
+        }
+        previousLayer = gSDK->GetActiveLayer();
+        gSDK->SetCurrentLayerN(sheetLayer);
+    }
+    struct RestoreLayer {
+        MCObjectHandle layer;
+        ~RestoreLayer() {
+            if (layer && gSDK && gSDK->GetActiveLayer() != layer) gSDK->SetCurrentLayerN(layer);
+        }
+    } restoreLayer{previousLayer};
     options.fUpdateViewports = request.updateViewports;
     options.fResetPluginObjects = request.resetPlugInObjects;
     options.fRecalculateWorksheets = request.recalculateWorksheets;
@@ -688,6 +722,53 @@ Result ExportDWG(const DWGExportRequest& request) {
 #else
     (void) request;
     throw Error(ErrorCode::InterfaceUnavailable, "IImportExportDWG requires an SDK-backed bridge");
+#endif
+}
+
+Result ExportIFC(const IFCRequest& request) {
+#if VECTORWORKS_MCP_NATIVE_IO_HAS_SDK
+    const PreparedOutput output = PrepareOutput(request.output, {".ifc", ".ifczip", ".ifcxml"});
+    const fs::path staged = UniqueSibling(output.target, "ifc");
+    ScopedPathCleanup cleanup(staged);
+    auto identifier = FileIdentifier(staged);
+    VCOMPtr<VectorWorks::IFCLib::IIFCSupport> ifc(VectorWorks::IFCLib::IID_IFCSupport);
+    if (!ifc) {
+        throw Error(ErrorCode::InterfaceUnavailable, "IIFCSupport is unavailable in this Vectorworks runtime/license");
+    }
+    if (VCOM_FAILED(ifc->ExportFile(identifier, false))) {
+        throw Error(ErrorCode::SdkOperationFailed, "silent IIFCSupport::ExportFile failed; no dialog fallback was attempted");
+    }
+    CommitStagedFile(staged, output);
+    cleanup.Release();
+    return CompletedResult("export_ifc", output);
+#else
+    (void) request;
+    throw Error(ErrorCode::InterfaceUnavailable, "IIFCSupport requires an SDK-backed bridge");
+#endif
+}
+
+Result ImportIFC(const IFCRequest& request) {
+#if VECTORWORKS_MCP_NATIVE_IO_HAS_SDK
+    const fs::path input = CanonicalExistingInput(request.absolutePath, {".ifc", ".ifczip", ".ifcxml"});
+    DocumentMutationSnapshot before = CaptureDocumentMutationSnapshot();
+    auto identifier = FileIdentifier(input);
+    VCOMPtr<VectorWorks::IFCLib::IIFCSupport> ifc(VectorWorks::IFCLib::IID_IFCSupport);
+    if (!ifc) {
+        throw Error(ErrorCode::InterfaceUnavailable, "IIFCSupport is unavailable in this Vectorworks runtime/license");
+    }
+    if (VCOM_FAILED(ifc->ImportFile(identifier, false))) {
+        throw Error(ErrorCode::SdkOperationFailed, "silent IIFCSupport::ImportFile failed; no dialog fallback was attempted");
+    }
+    DocumentMutationReceipt mutation = BuildDocumentMutationReceipt(std::move(before), CaptureDocumentMutationSnapshot());
+    std::error_code error;
+    const std::uintmax_t size = fs::file_size(input, error);
+    Result completed{"import_ifc", PathText(input), error ? 0u : size, false};
+    completed.hasDocumentMutationReceipt = true;
+    completed.documentMutationReceipt = std::move(mutation);
+    return completed;
+#else
+    (void) request;
+    throw Error(ErrorCode::InterfaceUnavailable, "IIFCSupport requires an SDK-backed bridge");
 #endif
 }
 

@@ -176,7 +176,7 @@ async def run(args: argparse.Namespace, output: Path, checkpoint_path: Path, tok
     env.update({
         "VW_MCP_HOST": args.host,
         "VW_MCP_PORT": str(args.port),
-        "VW_MCP_TOOL_PROFILE": "fast-native",
+        "VW_MCP_TOOL_PROFILE": "legacy",  # frozen 0.7 tool surface
         "VW_MCP_AUTH_TOKEN_FILE": str(token_file),
     })
     params = StdioServerParameters(command=sys.executable, args=[str(ROOT / "server.py")], cwd=ROOT, env=env)

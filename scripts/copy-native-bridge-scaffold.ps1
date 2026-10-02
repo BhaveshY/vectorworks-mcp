@@ -6,71 +6,11 @@ param(
     [switch]$Force
 )
 
-$ErrorActionPreference = "Stop"
+# 1.0: native_bridge\project\VectorworksMCPBridge.vcxproj compiles native_bridge\src
+# in place, so sources are no longer copied into an SDK sample worktree.
+# Kept as a no-op for older automation.
 
 $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$ScaffoldRoot = Join-Path $RepoRoot "native_bridge\src"
-if (-not $WorktreeRoot) {
-    $WorktreeRoot = Join-Path $RepoRoot "native_bridge\worktree\SDKExamples"
-}
-if (-not $DestinationDir) {
-    $DestinationDir = Join-Path $WorktreeRoot "Examples$VectorworksVersion\VectorworksMCPBridge\Source\VectorworksMCPBridge"
-}
-
-if (-not (Test-Path -LiteralPath $ScaffoldRoot -PathType Container)) {
-    throw "Native bridge scaffold folder was not found at $ScaffoldRoot"
-}
-
-$SourceParent = Split-Path -Parent $DestinationDir
-if (-not (Test-Path -LiteralPath $SourceParent -PathType Container)) {
-    throw "Native bridge worktree Source folder was not found at $SourceParent. Run scripts\prepare-native-bridge-source.ps1 first."
-}
-
-$Files = @(
-    "BridgeProtocol.hpp",
-    "BridgeProtocol.cpp",
-    "NativeTransport.hpp",
-    "NativeTransport.cpp",
-    "NativeDomain.hpp",
-    "CapabilityRegistry.hpp",
-    "CapabilityRegistry.cpp",
-    "ParametricObjectAdapter.hpp",
-    "ParametricObjectAdapter.cpp",
-    "NativeObjectFactory.hpp",
-    "NativeObjectFactory.cpp",
-    "NativeTransaction.hpp",
-    "NativeTransaction.cpp",
-    "BimObjectHandlers.hpp",
-    "BimObjectHandlers.cpp",
-    "SpaceObjectHandlers.hpp",
-    "SpaceObjectHandlers.cpp",
-    "NativeIOHandlers.hpp",
-    "NativeIOHandlers.cpp",
-    "ResourceWorksheetHandlers.hpp",
-    "ResourceWorksheetHandlers.cpp",
-    "ViewDocumentHandlers.hpp",
-    "ViewDocumentHandlers.cpp",
-    "DocumentationHandlers.hpp",
-    "DocumentationHandlers.cpp",
-    "BridgeDispatcher.hpp",
-    "CadRequestQueue.hpp",
-    "VectorworksMCPBridge.cpp"
-)
-
-New-Item -ItemType Directory -Force -Path $DestinationDir | Out-Null
-foreach ($FileName in $Files) {
-    $Source = Join-Path $ScaffoldRoot $FileName
-    $Destination = Join-Path $DestinationDir $FileName
-    if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
-        throw "Native bridge scaffold file was not found at $Source"
-    }
-    if ((Test-Path -LiteralPath $Destination) -and -not $Force) {
-        throw "Refusing to overwrite $Destination. Pass -Force to refresh scaffold files."
-    }
-    Copy-Item -LiteralPath $Source -Destination $Destination -Force:$Force
-}
-
-Write-Host "Copied native bridge scaffold to:"
-Write-Host $DestinationDir
-Write-Host ""
-Write-Host "Next: run scripts\wire-native-bridge-project.ps1, build, then run scripts\smoke-native-bridge.ps1 -Phase 0 -Stop -Json first."
+Write-Host "Nothing to copy: the build project native_bridge\project compiles native_bridge\src directly."
+Write-Host "Build with: $(Join-Path $RepoRoot 'scripts\build-native-bridge.ps1') -VectorworksVersion $VectorworksVersion"
+exit 0

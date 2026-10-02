@@ -4,18 +4,28 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vectorworks-mcp"
-version = "0.7.0"
-description = "Agent-ready MCP server and native/Python Vectorworks bridge for Vectorworks 2024/2025."
+version = "1.0.0"
+description = "MCP server (host) and native bridge protocol client for Vectorworks 2024/2025."
 readme = "README.md"
 requires-python = ">=3.10"
+# The default host profile is standard-library only (fast cold start).
+# pillow: capture downscaling. fastmcp/mcp/pydantic: legacy 0.7 profile
+# (VW_MCP_TOOL_PROFILE=legacy) and the MCP-client acceptance scripts.
 dependencies = [
-  "fastmcp==4.0.3",
+  "fastmcp==4.0.10",
   "mcp==2.2.0",
   "pydantic==2.13.5",
+  "pillow==12.3.0",
 ]
 
 [project.scripts]
-vectorworks-mcp = "server:main"
+vectorworks-mcp = "vectorworks_mcp.server:main"
 
 [tool.setuptools]
-py-modules = ["server", "vw_listener"]
+py-modules = ["server"]
+
+[tool.setuptools.packages.find]
+include = ["vectorworks_mcp*", "legacy*"]
+
+[tool.setuptools.package-data]
+vectorworks_mcp = ["guide.md", "scripts_lib/*.py"]

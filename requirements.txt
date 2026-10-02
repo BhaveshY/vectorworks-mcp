@@ -1,3 +1,4 @@
-fastmcp==4.0.3
+fastmcp==4.0.10
 mcp==2.2.0
 pydantic==2.13.5
+pillow==12.3.0

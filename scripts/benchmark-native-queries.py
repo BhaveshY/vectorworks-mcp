@@ -12,7 +12,7 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import server
+from legacy import server_v07 as server  # 0.7 host internals
 
 
 def run(offset, limit, samples):

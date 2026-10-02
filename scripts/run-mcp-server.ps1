@@ -1,321 +1,36 @@
+<#
+.SYNOPSIS
+  Developer runner: start the MCP server from THIS checkout over stdio.
+
+.DESCRIPTION
+  Clients never use this script; they use the installed launcher
+  %USERPROFILE%\.vectorworks-mcp\bin\vectorworks-mcp.cmd. This runner does no
+  pip/venv work: it uses the installed runtime's venv interpreter when present
+  (for the optional third-party packages of the legacy profile), otherwise
+  python.org Python via `py -3.12`. The default tool profile is stdlib-only.
+
+  Example (in an MCP client config for development only):
+    powershell -NoProfile -ExecutionPolicy Bypass -File <repo>\scripts\run-mcp-server.ps1
+#>
 [CmdletBinding()]
-param(
-    [switch]$SetupOnly
-)
+param([string]$Root = "")
 
 $ErrorActionPreference = "Stop"
-
-$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$ServerPath = Join-Path $RepoRoot "server.py"
-$RequirementsPath = Join-Path $RepoRoot "requirements.txt"
-$LockedRequirementsPath = Join-Path $RepoRoot "requirements.lock"
-$RequirementsOptions = @()
-if (Test-Path -LiteralPath $LockedRequirementsPath -PathType Leaf) {
-    $RequirementsPath = $LockedRequirementsPath
-    $RequirementsOptions = @("--require-hashes")
+$repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+if (-not $Root) { $Root = Join-Path $env:USERPROFILE ".vectorworks-mcp" }
+$py = $null
+$cur = Join-Path $Root "current.txt"
+if (Test-Path -LiteralPath $cur) {
+    $cand = Join-Path $Root ("runtime\" + (Get-Content -LiteralPath $cur -TotalCount 1).Trim() + "\venv\Scripts\python.exe")
+    if (Test-Path -LiteralPath $cand) { $py = $cand }
 }
-$RepoVenvDir = Join-Path $RepoRoot ".venv"
-
-$StateDir = if ($env:LOCALAPPDATA) {
-    Join-Path $env:LOCALAPPDATA "vectorworks-mcp"
-} else {
-    Join-Path $env:TEMP "vectorworks-mcp"
+$pre = @()
+if (-not $py) {
+    $launcher = Get-Command py.exe -ErrorAction SilentlyContinue
+    if (-not $launcher) { [Console]::Error.WriteLine("Python 3.12 not found: winget install --id Python.Python.3.12 -e --scope user"); exit 2 }
+    $py = $launcher.Source; $pre = @("-3.12")
 }
-$BaseLogDir = Join-Path $StateDir "logs"
-$LogPath = Join-Path $BaseLogDir "mcp-server-bootstrap.log"
-$ProtocolStateDir = if ($env:VW_MCP_STOP_DIR) {
-    [System.IO.Path]::GetFullPath($env:VW_MCP_STOP_DIR)
-} else {
-    Join-Path $env:USERPROFILE ".vectorworks-mcp"
-}
-$AuthTokenPath = if ($env:VW_MCP_AUTH_TOKEN_FILE) {
-    [System.IO.Path]::GetFullPath($env:VW_MCP_AUTH_TOKEN_FILE)
-} else {
-    Join-Path $ProtocolStateDir "auth-token"
-}
-$FallbackVenvDir = Join-Path $StateDir "venv"
-$VenvDir = $RepoVenvDir
-$VenvPython = Join-Path $VenvDir "Scripts\python.exe"
-New-Item -ItemType Directory -Force -Path $BaseLogDir *> $null
-
-function Write-BootstrapLog {
-    param([string]$Message)
-    Add-Content -Path $LogPath -Value ("{0} {1}" -f (Get-Date -Format "s"), $Message)
-}
-
-function Use-VenvDir {
-    param([string]$Path)
-
-    $script:VenvDir = $Path
-    $script:VenvPython = Join-Path $script:VenvDir "Scripts\python.exe"
-}
-
-function Invoke-Logged {
-    param([scriptblock]$Command)
-    $OldErrorActionPreference = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = "Continue"
-        & $Command *>> $LogPath
-        $ExitCode = $LASTEXITCODE
-    } finally {
-        $ErrorActionPreference = $OldErrorActionPreference
-    }
-    if ($ExitCode -ne 0) {
-        throw "Command failed with exit code $ExitCode. See $LogPath"
-    }
-}
-
-function Protect-AuthTokenFile {
-    param([string]$Path)
-
-    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        return
-    }
-
-    try {
-        $ResolvedPath = (Resolve-Path -LiteralPath $Path).ProviderPath
-        $Identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-        if ($null -eq $Identity -or $null -eq $Identity.User) {
-            return
-        }
-
-        $Acl = New-Object System.Security.AccessControl.FileSecurity
-        $Rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
-            $Identity.User,
-            [System.Security.AccessControl.FileSystemRights]::FullControl,
-            [System.Security.AccessControl.AccessControlType]::Allow
-        )
-        $Acl.SetOwner($Identity.User)
-        $Acl.SetAccessRuleProtection($true, $false)
-        $Acl.AddAccessRule($Rule)
-        # Use the framework API directly. PowerShell processes spawned by
-        # Python can inherit a module environment where built-in cmdlet
-        # autoloading is unavailable (notably from the Codex desktop app).
-        [System.IO.File]::SetAccessControl($ResolvedPath, $Acl)
-    } catch {
-        return
-    }
-}
-
-function Get-HostPythonCommand {
-    $Py = Get-Command py -ErrorAction SilentlyContinue
-    if ($Py -and (Test-HostPythonCandidate -Path $Py.Source -PrefixArgs @("-3"))) {
-        return @{ Command = $Py.Source; Args = @("-3") }
-    }
-
-    $Python = Get-Command python -ErrorAction SilentlyContinue
-    if ($Python -and (Test-HostPythonCandidate -Path $Python.Source)) {
-        return @{ Command = $Python.Source; Args = @() }
-    }
-
-    throw "Python 3 was not found. Install Python 3.10+ and rerun setup. See $LogPath"
-}
-
-function Test-HostPythonCandidate {
-    param(
-        [string]$Path,
-        [string[]]$PrefixArgs = @()
-    )
-
-    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        return $false
-    }
-
-    $OldErrorActionPreference = $ErrorActionPreference
-    try {
-        # Ignore nonfunctional Windows Store app-execution aliases. They are
-        # discoverable through Get-Command but cannot create the MCP venv.
-        $ErrorActionPreference = "Continue"
-        & $Path @PrefixArgs -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" *> $null
-        return ($LASTEXITCODE -eq 0)
-    } catch {
-        return $false
-    } finally {
-        $ErrorActionPreference = $OldErrorActionPreference
-    }
-}
-
-function Test-PythonExecutable {
-    param([string]$Path)
-
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        return $false
-    }
-
-    try {
-        & $Path -c "import sys; sys.exit(0)" *> $null
-        return ($LASTEXITCODE -eq 0)
-    } catch {
-        return $false
-    }
-}
-
-function Test-PythonPip {
-    param([string]$Path)
-
-    if (-not (Test-PythonExecutable -Path $Path)) {
-        return $false
-    }
-
-    try {
-        & $Path -m pip --version *> $null
-        return ($LASTEXITCODE -eq 0)
-    } catch {
-        return $false
-    }
-}
-
-function Reset-Venv {
-    param([string]$Reason)
-
-    Write-BootstrapLog "$Reason; recreating $VenvDir"
-    try {
-        Remove-Item -LiteralPath $VenvDir -Recurse -Force
-    } catch {
-        if ($VenvDir -ne $FallbackVenvDir) {
-            Write-BootstrapLog "Could not remove stale repo virtual environment: $($_.Exception.Message). Using fallback virtual environment at $FallbackVenvDir"
-            Use-VenvDir -Path $FallbackVenvDir
-            Ensure-Venv
-            return $true
-        }
-        throw
-    }
-
-    return $false
-}
-
-function Ensure-Venv {
-    if (Test-Path -LiteralPath $VenvPython -PathType Leaf) {
-        if (Test-PythonExecutable -Path $VenvPython) {
-            if (Test-PythonPip -Path $VenvPython) {
-                return
-            }
-
-            Write-BootstrapLog "Existing virtual environment pip could not run; attempting ensurepip in $VenvDir"
-            try {
-                Invoke-Logged { & $VenvPython -m ensurepip --upgrade }
-            } catch {
-                Write-BootstrapLog "ensurepip failed for existing virtual environment: $($_.Exception.Message)"
-            }
-            if (Test-PythonPip -Path $VenvPython) {
-                return
-            }
-
-            if (Reset-Venv -Reason "Existing virtual environment pip could not run") {
-                return
-            }
-        } else {
-            if (Reset-Venv -Reason "Existing virtual environment python could not run") {
-                return
-            }
-        }
-    }
-
-    Write-BootstrapLog "Creating virtual environment at $VenvDir"
-    $HostPython = Get-HostPythonCommand
-    try {
-        Invoke-Logged { & $HostPython["Command"] @($HostPython["Args"] + @("-m", "venv", $VenvDir)) }
-    } catch {
-        if ($VenvDir -ne $FallbackVenvDir) {
-            Write-BootstrapLog "Could not create repo virtual environment: $($_.Exception.Message). Using fallback virtual environment at $FallbackVenvDir"
-            Use-VenvDir -Path $FallbackVenvDir
-            Ensure-Venv
-            return
-        }
-        throw
-    }
-}
-
-function Test-FastMcpImport {
-    try {
-        & $VenvPython -c "import fastmcp" *> $null
-        return ($LASTEXITCODE -eq 0)
-    } catch {
-        return $false
-    }
-}
-
-function Ensure-AuthToken {
-    if ($env:VW_MCP_INSECURE_NO_AUTH) {
-        return
-    }
-    $AuthDir = Split-Path -Parent $AuthTokenPath
-    if ($AuthDir) {
-        New-Item -ItemType Directory -Force -Path $AuthDir *> $null
-    }
-    if ($env:VW_MCP_AUTH_TOKEN) {
-        $Token = $env:VW_MCP_AUTH_TOKEN.Trim()
-    } elseif (Test-Path -LiteralPath $AuthTokenPath -PathType Leaf) {
-        $Token = (Get-Content -Raw -LiteralPath $AuthTokenPath).Trim()
-    } else {
-        $Token = ([Guid]::NewGuid().ToString("N") + [Guid]::NewGuid().ToString("N"))
-    }
-    if (-not $Token) {
-        throw "Generated Vectorworks MCP auth token was empty."
-    }
-    if ((-not (Test-Path -LiteralPath $AuthTokenPath -PathType Leaf)) -or ((Get-Content -Raw -LiteralPath $AuthTokenPath).Trim() -ne $Token)) {
-        Set-Content -LiteralPath $AuthTokenPath -Value $Token -Encoding ASCII -NoNewline
-    }
-    Protect-AuthTokenFile -Path $AuthTokenPath
-    $env:VW_MCP_AUTH_TOKEN_FILE = $AuthTokenPath
-    Remove-Item Env:\VW_MCP_AUTH_TOKEN -ErrorAction SilentlyContinue
-}
-
-function Ensure-Requirements {
-    $StampPath = Join-Path $VenvDir ".requirements.sha256"
-    $RequirementsHash = Get-Sha256Hex -Path $RequirementsPath
-    $ExistingHash = if (Test-Path $StampPath) { Get-Content -Raw $StampPath } else { "" }
-
-    if (($ExistingHash.Trim() -ne $RequirementsHash) -or (-not (Test-FastMcpImport))) {
-        Write-BootstrapLog "Installing requirements from $RequirementsPath"
-        Invoke-Logged { & $VenvPython -m pip install @RequirementsOptions -r $RequirementsPath }
-        if (-not (Test-FastMcpImport)) {
-            Write-BootstrapLog "fastmcp import still failed after normal install; force-reinstalling requirements from $RequirementsPath"
-            Invoke-Logged { & $VenvPython -m pip install --upgrade --force-reinstall @RequirementsOptions -r $RequirementsPath }
-        }
-        if (-not (Test-FastMcpImport)) {
-            throw "fastmcp import failed after requirements installation. See $LogPath"
-        }
-        Set-Content -Path $StampPath -Value $RequirementsHash -Encoding ASCII
-    }
-}
-
-function Get-Sha256Hex {
-    param([string]$Path)
-
-    $ResolvedPath = (Resolve-Path -LiteralPath $Path).ProviderPath
-    $Stream = [System.IO.File]::OpenRead($ResolvedPath)
-    try {
-        $Sha256 = [System.Security.Cryptography.SHA256]::Create()
-        try {
-            return ([System.BitConverter]::ToString($Sha256.ComputeHash($Stream))).Replace("-", "")
-        } finally {
-            $Sha256.Dispose()
-        }
-    } finally {
-        $Stream.Dispose()
-    }
-}
-
-try {
-    Ensure-Venv
-    Ensure-Requirements
-    if (-not $env:VW_MCP_STOP_DIR) { $env:VW_MCP_STOP_DIR = Join-Path $env:USERPROFILE ".vectorworks-mcp" }
-    Ensure-AuthToken
-} catch {
-    $ErrorText = ($_ | Out-String).Trim()
-    Write-BootstrapLog "Bootstrap failed: $ErrorText"
-    [Console]::Error.WriteLine("Vectorworks MCP bootstrap failed: $ErrorText")
-    exit 1
-}
-
-if ($SetupOnly) {
-    exit 0
-}
-
-if (-not $env:VW_MCP_HOST) { $env:VW_MCP_HOST = "127.0.0.1" }
-if (-not $env:VW_MCP_PORT) { $env:VW_MCP_PORT = "9877" }
-if (-not $env:VW_MCP_TIMEOUT) { $env:VW_MCP_TIMEOUT = "60" }
-
-& $VenvPython $ServerPath
+$env:PYTHONUTF8 = "1"
+Set-Location -LiteralPath $repo   # -m puts the checkout first on sys.path
+& $py @pre -X utf8 -u -m vectorworks_mcp @args
 exit $LASTEXITCODE

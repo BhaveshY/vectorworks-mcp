@@ -18,7 +18,7 @@ from mcp.client.stdio import stdio_client
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from production_apartment import (  # noqa: E402
+from legacy.production_apartment import (  # noqa: E402
     build_manifest,
     compile_foundation,
     compile_openings,
@@ -82,7 +82,7 @@ async def main() -> None:
         {
             "VW_MCP_HOST": "127.0.0.1",
             "VW_MCP_PORT": "9877",
-            "VW_MCP_TOOL_PROFILE": "fast-native",
+            "VW_MCP_TOOL_PROFILE": "legacy",  # frozen 0.7 tool surface
             "VW_MCP_AUTH_TOKEN_FILE": str(TOKEN_FILE),
         }
     )

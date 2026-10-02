@@ -320,6 +320,10 @@ PreparedOpenDocument PrepareOpenDocument(
 #endif
 }
 
+PreparedOpenDocument PrepareOpenDocumentPath(const std::string& absolutePath) {
+    return {CanonicalAbsolutePath(absolutePath, true).u8string()};
+}
+
 bool LaunchPreparedOpenDocument(const PreparedOpenDocument& request) {
 #if VECTORWORKS_MCP_VIEW_DOCUMENT_HAS_SDK
     const fs::path path = CanonicalAbsolutePath(request.canonicalPath, true);

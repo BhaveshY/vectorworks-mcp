@@ -42,18 +42,34 @@ struct OutputTarget {
 
 struct ImageExportRequest {
     OutputTarget output;
-    bool updateViewports = true;
-    bool resetPlugInObjects = true;
+    // 1.0 defaults: no viewport update / plug-in reset during capture/export.
+    bool updateViewports = false;
+    bool resetPlugInObjects = false;
     bool exportGeoreferencing = false;
+    // Optional export rectangle in view (screen pixel) coordinates.
+    bool hasExportRect = false;
+    short rectLeft = 0;
+    short rectTop = 0;
+    short rectRight = 0;
+    short rectBottom = 0;
 };
 
 struct PDFExportRequest {
     OutputTarget output;
     bool currentViewOnly = false;
     std::int32_t resolutionDpi = 300;
-    bool updateViewports = true;
-    bool resetPlugInObjects = true;
+    bool updateViewports = false;
+    bool resetPlugInObjects = false;
     bool recalculateWorksheets = true;
+    // 1.0: "current_view" | "all_pages" | "sheet" (sheet = activate the sheet
+    // layer named by `sheet`, export its current view, restore the layer).
+    std::string range;
+    std::string sheet;
+};
+
+struct IFCRequest {
+    std::string absolutePath;
+    OutputTarget output;
 };
 
 struct VectorworksExportRequest {
@@ -67,8 +83,8 @@ struct DWGImportRequest {
 
 struct DWGExportRequest {
     OutputTarget output;
-    bool updateViewports = true;
-    bool resetPlugInObjects = true;
+    bool updateViewports = false;
+    bool resetPlugInObjects = false;
     bool recalculateWorksheets = true;
 };
 
@@ -119,6 +135,8 @@ Result ExportPDF(const PDFExportRequest& request);
 Result ExportVectorworksDocument(const VectorworksExportRequest& request);
 Result ImportDWG(const DWGImportRequest& request);
 Result ExportDWG(const DWGExportRequest& request);
+Result ExportIFC(const IFCRequest& request);
+Result ImportIFC(const IFCRequest& request);
 
 const char* ErrorCodeName(ErrorCode code) noexcept;
 

@@ -1,6 +1,7 @@
 #include "StdAfx.h"
 
 #include "DocumentationHandlers.hpp"
+#include "DocumentRegistry.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -939,7 +940,13 @@ std::string BridgeSessionId() {
 DocumentBinding ReadDocumentBinding(VectorWorks::ISDK& sdk) {
     DocumentBinding binding;
     binding.bridgeSessionId = BridgeSessionId();
+#if SDK_VERSION >= 3000
+    // Vectorworks 2025 removed IsActiveFileChangedAfterLastSave; the dirty
+    // state is unknown there and dirty comparisons are skipped.
+    binding.dirty = false;
+#else
     binding.dirty = sdk.IsActiveFileChangedAfterLastSave();
+#endif
 
     VectorWorks::Filing::IFileIdentifierPtr activeFile(VectorWorks::Filing::IID_FileIdentifier);
     bool saved = false;
@@ -956,12 +963,10 @@ DocumentBinding ReadDocumentBinding(VectorWorks::ISDK& sdk) {
     binding.activeLayerUuid = ObjectUuid(sdk, activeLayer);
     binding.activeLayerName = ObjectName(sdk, activeLayer);
 
-    MCObjectHandle header = sdk.GetDrawingHeader();
-    std::string headerUuid = ObjectUuid(sdk, header);
-    std::ostringstream documentInstance;
-    documentInstance << reinterpret_cast<std::uintptr_t>(header);
-    binding.documentFingerprint = "vw-doc-" +
-        HashText(NormalisePath(binding.filePath) + "|" + headerUuid + "|" + documentInstance.str());
+    // 1.0: the fingerprint comes from the document registry so it is stable
+    // for the lifetime of an open document (including untitled documents and
+    // a later Save As) and differs between simultaneously open documents.
+    binding.documentFingerprint = Docs::ActiveFingerprint();
 
     {
         std::lock_guard<std::mutex> lock(gBindingMutex);
@@ -1012,7 +1017,11 @@ void ValidateTargetBinding(
         actual.activeLayerName != expected.activeLayerName) {
         throw std::runtime_error("target binding mismatch: active Vectorworks layer changed");
     }
+#if SDK_VERSION >= 3000
+    if (false) {
+#else
     if (expected.hasDirty && actual.dirty != expected.dirty) {
+#endif
         throw std::runtime_error("target binding mismatch: dirty-document state changed");
     }
 }

@@ -56,9 +56,11 @@ The local protocol is authenticated by default. The native bridge reads
 `%USERPROFILE%\.vectorworks-mcp\auth-token`; unauthenticated frames are rejected
 unless `VW_MCP_INSECURE_NO_AUTH=1` is explicitly set for diagnostics.
 
-Use `HANDLER_MATRIX.md` as the native implementation roadmap. Validate host
-preflight or server changes end-to-end against a loaded bridge with
-`scripts\smoke-native-bridge.ps1 -Json` and `scripts\run-native-full-acceptance.py`.
+Use `HANDLER_MATRIX.md` as the native implementation roadmap and
+`PROTOCOL.md` as the authoritative wire contract (protocol v2, capability
+revision 6). Validate end-to-end against a loaded bridge with
+`python native_bridge\live_acceptance_v2.py` (creates its own untitled
+documents) and `scripts\smoke-native-bridge.ps1 -Json`.
 
 ## Build Prerequisites
 
@@ -108,119 +110,51 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootst
 Downloading is opt-in because the SDK archive is large and covered by
 Vectorworks' SDK terms.
 
-## Source Worktree
+## 1.0 Layout and Build
 
-Once the SDK examples and Visual Studio tools are available, prepare an ignored
-local source worktree from Vectorworks' official `ObjectExample`:
+Since 1.0 the plug-in project is version controlled:
 
-```powershell
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\prepare-native-bridge-source.ps1 -CloneSdkExamples
+```text
+native_bridge/
+  src/                      bridge sources (protocol v2, see PROTOCOL.md)
+  project/
+    VectorworksMCPBridge.vcxproj   MSBuild project (VWVersion=2024|2025)
+    Source/ModuleMain.cpp          module entry (no tool/object registrations)
+    Source/Prefix/                 precompiled header
+    VectorworksMCPBridge.vwr/      resource folder packed by buildvwr
+    generated/BuildInfo.h          written by the build script (git-ignored)
+    out/<ver>/Release/             VectorworksMCPBridge.vlb + .vwr (git-ignored)
+  live_acceptance_v2.py     live acceptance against an installed bridge
+  PROTOCOL.md               wire protocol v2 (authoritative)
 ```
 
-If the SDK was extracted outside the repo-local `third_party` folder, pass the
-same custom SDK root through the native flow:
+The project references the SDK through MSBuild properties instead of copying
+it: `VWSDKRoot` defaults to
+`third_party\VectorworksSDKExamples\VectorworksSDK\SDK<VWVersion>` and
+`VWThirdParty` to `third_party\VectorworksSDKExamples\ThirdPartySource`
+(libcurl, linked like the SDK sample). Get the SDK examples clone with
+`scripts\prepare-native-bridge-source.ps1 -CloneSdkExamples` (the generated
+`worktree/` is no longer needed for building).
+
+Build (Visual Studio 2022 Build Tools, v143, x64):
 
 ```powershell
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-native-bridge.ps1 -SdkDir C:\VectorworksSDK\2024 -PrepareSource -Build
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\prepare-native-bridge-source.ps1 -SdkDir C:\VectorworksSDK\2024
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1 -SdkDir C:\VectorworksSDK\2024
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1 -VectorworksVersion 2024
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1 -VectorworksVersion 2025
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1 -VectorworksVersion all -Json
 ```
 
-Then verify that the unmodified SDK example builds before replacing its example
-extension code with the MCP bridge:
+Output: `native_bridge\project\out\<ver>\Release\VectorworksMCPBridge.vlb`
+and `.vwr` plus `build-info.json` (build id, sha256). The build id
+(`<git short hash>[-dirty]-<UTC timestamp>`) is baked into the module and
+reported by `ping.build_id` and the discovery file. `-SdkDir` overrides the SDK
+root, `-Clean` rebuilds, `-Configuration Debug` builds a debug module.
 
-```powershell
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-native-bridge.ps1
-```
-
-After that proof build, copy the reviewed SDK-agnostic scaffold into the ignored
-worktree and wire it into the SDK project:
-
-```powershell
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\copy-native-bridge-scaffold.ps1
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\wire-native-bridge-project.ps1
-```
-
-The scaffold lives in `native_bridge/src/`. It encodes the protocol constants,
-strict request/response envelope handling, phase-0/phase-1/phase-2 dispatcher map, and
-the worker-thread to Vectorworks main/plugin event-context queue. It
-intentionally has no Vectorworks SDK includes and no standalone project files. A
-copied scaffold should only advertise phase-0 transport readiness; it must not
-report `cad_api_safe: true` until real SDK CAD handlers are implemented and
-smoke-tested.
-
-After a compiled native bridge is loaded in Vectorworks, run the native smoke
-harness:
-
-```powershell
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke-native-bridge.ps1 -Json
-```
-
-It speaks the raw bridge protocol directly, requires a native CAD-safe bridge by
-default, and runs the phase-1 read gate: `ping`, `get_document_info`,
-`get_layers`, `get_objects`, and read-only `selection.get`. The read gate
-validates the minimum response schemas documented in `PROTOCOL.md`, including
-ping safety fields, `native_phase >= 1`, `implemented_actions`, document counts,
-`main_context_pump: "win32_ui_timer"`, `main_context_pump_ready: true`, layer
-names, object handle/type fields, bounded object query semantics, and
-cross-checks between document/layer/object snapshots. Add
-`-MaxPingMilliseconds` and `-MaxReadMilliseconds` when you want the smoke gate
-to fail bridges that are functionally correct but too slow for agent loops. Add
-`-AllowWriteFixture` only in a disposable active test document; it creates a uniquely
-named rectangle with `create_object`, creates a second fixture through atomic
-`batch_create_objects`, and deletes each only after fixture identity, object
-schema, and exact selection are verified. Use `-Phase 2 -AllowWriteFixture` to
-also create and delete one true wall, one text block, one linear dimension, one
-verified property edit, and one temporary class through their native handlers.
-Use `-Phase 0 -Stop` for
-transport-only shutdown/port-release verification. Phase 0 accepts the reviewed native
-scaffold's honest `cad_api_safe: false` / `transport_only: true` ping, but the
-default phase-1 smoke still requires a real CAD-safe bridge.
-The write fixtures require a real open Vectorworks document; the Home screen or
-template chooser can answer transport/read health checks but does not provide a
-writable design layer target.
-The host-side `vw_preflight_for_cad` blocks native bridges that claim
-`cad_api_safe: true` before reporting phase-1 capabilities and a ready
-main-context pump, and it blocks phase-2 tools when a bridge has not advertised
-the corresponding implemented action. Production phase 2 requires
-`create_wall`, `create_text`, `create_linear_dimension`, `set_property`, and
-`manage_classes` in `implemented_actions`.
-Native phase 3 adds read-only production helpers: `find_objects` for criteria
-search and `drawing_summary` for compact counts/bounds/examples in large files.
-Native phase 4 is the required fast-write runtime. It adds true open/closed
-polygon creation and `apply_operations`, which validates and commits creates
-plus property edits in one native undo transaction. Requests use
-document/payload-scoped idempotency keys, return compact verified object
-snapshots and timing, and never fall back automatically to the modal Python
-listener or a decomposed legacy write path.
-The SDK scaffold queue applies bounded backpressure and rejects duplicate
-request ids before work is handed to the Vectorworks main/plugin event context.
-While the copied scaffold is still phase 0, CAD actions fail immediately with
-`native bridge phase 0 CAD handlers are not implemented` instead of waiting on
-the main-context queue.
-
-Before installing a compiled bridge artifact, use the native doctor to inspect
-the current stage and plan the user Plug-ins deployment:
-
-```powershell
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -Json
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\ObjectExample.vlb -Install -WhatIf
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor-native-bridge.ps1 -BuiltArtifact C:\path\to\ObjectExample.vlb -Install
-```
-
-The doctor does not install anything unless `-Install` is passed with an
-explicit `-BuiltArtifact`. By default it reports prerequisites, source worktree
-state, candidate artifact, target user Plug-ins folder, and the next command an
-agent should run.
-The official SDK example scaffold currently emits `ObjectExample.vlb`; pass the
-actual built artifact path reported by `scripts\build-native-bridge.ps1` or the
-native doctor.
-
-The generated worktree lives under `native_bridge/worktree/SDKExamples/` and is
-ignored by git. It preserves the official examples' relative layout so the
-Visual Studio project can find `VectorworksSDK` and `ThirdPartySource`. Copy
-only deliberate, reviewable bridge source back into `native_bridge/src` after
-the SDK-backed build is understood.
+Install by copying both files into
+`%APPDATA%\Nemetschek\Vectorworks\<ver>\Plug-ins` while Vectorworks is
+closed, and remove the pre-1.0 `ObjectExample.vlb/.vwr` (two bridges would
+compete for the port range). Then run
+`python native_bridge\live_acceptance_v2.py` with Vectorworks running.
 
 ## Implementation Rules
 

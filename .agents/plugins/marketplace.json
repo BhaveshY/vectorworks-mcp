@@ -6,6 +6,7 @@
   "plugins": [
     {
       "name": "vectorworks",
+      "version": "1.0.0",
       "source": {
         "source": "local",
         "path": "./plugins/vectorworks"

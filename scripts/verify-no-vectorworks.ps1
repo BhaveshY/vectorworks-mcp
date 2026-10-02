@@ -1,252 +1,115 @@
+<#
+.SYNOPSIS
+  Everything that can be verified without Vectorworks (used by CI).
+
+.DESCRIPTION
+  1. PowerShell parse check of install.ps1 and scripts\*.ps1
+  2. python compileall (vectorworks_mcp, legacy, scripts)
+  3. repair-mode server stdio test (legacy + 2026-07-28 eras)
+  4. client registration fixture tests (Codex TOML / Claude JSON)
+  5. bundled plugin contract (versions, skills-only, front matter)
+  6. skill/doc tool names + example arguments against the live tools/list
+  7. host end-to-end test against the mock bridge + unit tests in tests\ (if any)
+  8. (unless -SkipInstall) sandbox install into a temp root with -Client none:
+     launcher -> initialize -> tools/list timing, repair mode via the launcher,
+     idempotent re-run, uninstall
+#>
 [CmdletBinding()]
 param(
-    [string]$Name = "vectorworks",
-    [string]$LauncherPath = "",
-    [string]$LoaderPath = "",
-    [switch]$EnablePythonDialogFallback
+    [string]$Python = "",
+    [switch]$SkipInstall
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "install-common.ps1")
+$repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+if (-not $Python) { $f = Find-BasePython; if (-not $f) { throw "Python 3.11+ is required" }; $Python = $f.executable }
+$failed = New-Object System.Collections.Generic.List[string]
 
-$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$RunnerPath = Join-Path $RepoRoot "scripts\run-mcp-server.ps1"
-$RegisterPath = Join-Path $RepoRoot "scripts\register-claude-code.ps1"
-$ServerPath = Join-Path $RepoRoot "server.py"
-$ListenerPath = Join-Path $RepoRoot "vw_listener.py"
-$RepoVenvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
-$ProjectMcpPath = Join-Path $RepoRoot ".mcp.json"
-$NativePrereqPath = Join-Path $RepoRoot "scripts\check-native-bridge-prereqs.ps1"
-$NativeDoctorPath = Join-Path $RepoRoot "scripts\doctor-native-bridge.ps1"
-$NativeNextRunnerPath = Join-Path $RepoRoot "scripts\invoke-native-bridge-next.ps1"
-$FreshLauncher = $false
-$FreshLoader = $false
-$PyCacheRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("vectorworks-mcp-verify-pycache-{0}" -f $PID)
-
-if (-not $EnablePythonDialogFallback -and ($LauncherPath -or $LoaderPath)) {
-    throw "Python dialog fallback verification requires -EnablePythonDialogFallback."
-}
-
-if ($EnablePythonDialogFallback) {
-    if (-not $LauncherPath) {
-        $LauncherPath = Join-Path ([System.IO.Path]::GetTempPath()) ("vectorworks-mcp-verify-launcher-{0}.py" -f $PID)
-        $FreshLauncher = $true
-    }
-    if (-not $LoaderPath) {
-        $LoaderPath = Join-Path ([System.IO.Path]::GetTempPath()) ("vectorworks-mcp-verify-loader-{0}.py" -f $PID)
-        $FreshLoader = $true
-    }
-}
-
-function Assert-Path {
-    param(
-        [string]$Path,
-        [string]$Label
-    )
-    if (-not (Test-Path $Path)) {
-        throw "$Label was not found at $Path"
-    }
-}
-
-function Invoke-Checked {
-    param(
-        [string]$Label,
-        [scriptblock]$Command
-    )
-    Write-Host "Checking: $Label"
-    & $Command
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Label failed with exit code $LASTEXITCODE"
-    }
-}
-
-function Invoke-InRepo {
-    param([scriptblock]$Command)
-
-    Push-Location $RepoRoot
+function Step([string]$Label, [scriptblock]$Body) {
+    Write-Host ""
+    Write-Host "== $Label" -ForegroundColor Cyan
+    $sw = [Diagnostics.Stopwatch]::StartNew()
     try {
-        & $Command
-    } finally {
-        Pop-Location
-    }
-}
-
-function Test-PythonExecutable {
-    param([string]$Path)
-
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        return $false
-    }
-    try {
-        & $Path -c "import sys; sys.exit(0)" *> $null
-        return ($LASTEXITCODE -eq 0)
+        & $Body
+        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "exit code $LASTEXITCODE" }
+        Write-Host ("   passed ({0:n1} s)" -f $sw.Elapsed.TotalSeconds) -ForegroundColor Green
     } catch {
-        return $false
+        $failed.Add("$Label - $($_.Exception.Message)") | Out-Null
+        Write-Host "   FAILED: $($_.Exception.Message)" -ForegroundColor Red
     }
+    $global:LASTEXITCODE = 0
 }
 
-function Resolve-ActiveVenvPython {
-    $Candidates = [System.Collections.Generic.List[string]]::new()
-    $Candidates.Add($RepoVenvPython)
-    if ($env:LOCALAPPDATA) {
-        $Candidates.Add((Join-Path $env:LOCALAPPDATA "vectorworks-mcp\venv\Scripts\python.exe"))
-    }
-    if ($env:TEMP) {
-        $Candidates.Add((Join-Path $env:TEMP "vectorworks-mcp\venv\Scripts\python.exe"))
-    }
-
-    foreach ($Candidate in ($Candidates | Select-Object -Unique)) {
-        if (Test-PythonExecutable -Path $Candidate) {
-            return $Candidate
-        }
-    }
-
-    throw "Usable virtualenv Python was not found after bootstrap. Checked: $($Candidates -join ', ')"
+function Py([string[]]$PyArgs) {
+    & $Python @PyArgs
+    if ($LASTEXITCODE -ne 0) { throw "$($PyArgs -join ' ') exited $LASTEXITCODE" }
 }
 
-Assert-Path $RunnerPath "MCP runner"
-Assert-Path $RegisterPath "Claude Code registration script"
-Assert-Path $ServerPath "MCP server"
-Assert-Path $ListenerPath "Vectorworks listener"
-Assert-Path $ProjectMcpPath "Project MCP config"
-Assert-Path $NativePrereqPath "Native bridge prerequisite checker"
-Assert-Path $NativeDoctorPath "Native bridge doctor"
-Assert-Path $NativeNextRunnerPath "Native bridge next-step runner"
-
-Invoke-Checked "bootstrap venv/dependencies" {
-    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $RunnerPath -SetupOnly
+Step "PowerShell parse check" {
+    $bad = @()
+    foreach ($f in @(Get-Item (Join-Path $repo "install.ps1")) + @(Get-ChildItem (Join-Path $repo "scripts") -Filter *.ps1)) {
+        $errs = $null
+        [void][System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$errs)
+        if ($errs) { $bad += "$($f.Name): $($errs[0].Message) (line $($errs[0].Extent.StartLineNumber))" }
+    }
+    if ($bad) { throw ($bad -join "; ") }
 }
 
-$VenvPython = Resolve-ActiveVenvPython
-New-Item -ItemType Directory -Force -Path $PyCacheRoot *> $null
-$env:PYTHONPYCACHEPREFIX = $PyCacheRoot
-
-if ($EnablePythonDialogFallback) {
-    if ($FreshLauncher -or $FreshLoader -or -not (Test-Path $LauncherPath) -or -not (Test-Path $LoaderPath)) {
-        Invoke-Checked "generate Vectorworks Python dialog fallback launcher" {
-            & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $RegisterPath -SkipInstall -NoClaudeConfig -EnablePythonDialogFallback -LauncherPath $LauncherPath -LoaderPath $LoaderPath
-        }
-    }
-
-    Assert-Path $LauncherPath "Generated Vectorworks Python dialog fallback launcher"
-    Assert-Path $LoaderPath "Generated Vectorworks Python dialog fallback loader"
-
-    $LauncherText = Get-Content -Raw -Path $LauncherPath
-    if ($LauncherText -notmatch 'os\.environ\["VW_MCP_MODE"\]\s*=\s*["'']dialog["'']') {
-        throw "Generated Vectorworks launcher does not set VW_MCP_MODE=dialog; regenerate it with scripts\register-claude-code.ps1 -EnablePythonDialogFallback."
-    }
-    if ($LauncherText -notmatch 'os\.environ\["VW_MCP_DIALOG_TIMER_MS"\]\s*=\s*["'']50["'']') {
-        throw "Generated Vectorworks launcher does not set VW_MCP_DIALOG_TIMER_MS=50; regenerate it with scripts\register-claude-code.ps1 -EnablePythonDialogFallback."
-    }
-    $LoaderText = Get-Content -Raw -Path $LoaderPath
-    if ($LoaderText -notmatch 'runpy\.run_path') {
-        throw "Generated Vectorworks loader does not run the launcher with runpy.run_path; regenerate it with scripts\register-claude-code.ps1 -EnablePythonDialogFallback."
-    }
-    $ExpectedLauncherLiteral = $LauncherPath.Replace("\", "\\").Replace('"', '\"')
-    if (-not $LoaderText.Contains($ExpectedLauncherLiteral)) {
-        throw "Generated Vectorworks loader does not point at $LauncherPath; regenerate it with scripts\register-claude-code.ps1 -EnablePythonDialogFallback."
-    }
+Step "python compileall" {
+    $dirs = @("vectorworks_mcp", "legacy", "scripts") | ForEach-Object { Join-Path $repo $_ } | Where-Object { Test-Path -LiteralPath $_ }
+    $env:PYTHONPYCACHEPREFIX = Join-Path ([IO.Path]::GetTempPath()) "vwmcp-verify-pycache"
+    Py (@("-m", "compileall", "-q") + $dirs)
+    Remove-Item Env:\PYTHONPYCACHEPREFIX
 }
 
-Invoke-Checked "fastmcp import" {
-    & $VenvPython -c "import fastmcp"
+Step "repair server (stdio, both protocol eras)" { Py @((Join-Path $repo "scripts\test-repair-server.py")) }
+Step "client registration fixtures" { Py @((Join-Path $repo "scripts\test-register-clients.py")) }
+Step "bundled plugin contract" { & (Join-Path $repo "scripts\check-bundled-plugin-contract.ps1") }
+Step "skill/doc tool names vs live tools/list" { Py @((Join-Path $repo "scripts\check-skill-tool-names.py"), "--live") }
+
+if (Test-Path -LiteralPath (Join-Path $repo "scripts\e2e_host.py")) {
+    Step "host end-to-end vs mock bridge (scripts\e2e_host.py)" { Py @((Join-Path $repo "scripts\e2e_host.py")) }
 }
 
-Invoke-Checked "server import" {
-    Invoke-InRepo {
-        & $VenvPython -c "import server"
+$unit = @(Get-ChildItem (Join-Path $repo "tests") -Filter "test_*.py" -ErrorAction SilentlyContinue)
+if ($unit.Count) { Step "unit tests (tests\)" { Push-Location $repo; try { Py @("-m", "unittest", "discover", "-s", "tests", "-v") } finally { Pop-Location } } }
+
+if (-not $SkipInstall) {
+    $root = Join-Path ([IO.Path]::GetTempPath()) ("vwmcp-verify-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
+    Step "sandbox install (temp root, no clients, no native)" {
+        & (Join-Path $repo "install.ps1") -Root $root -Client none -SkipNative -SkipDoctor -Python $Python
+        if ($LASTEXITCODE -ne 0) { throw "install.ps1 exited $LASTEXITCODE" }
     }
+    $launcher = Join-Path $root "bin\vectorworks-mcp.cmd"
+    Step "launcher -> initialize -> tools/list" {
+        $raw = & $Python (Join-Path $repo "scripts\doctor_probe.py") startup --launcher $launcher --runs 3
+        $st = ($raw | Out-String) | ConvertFrom-Json
+        if (-not $st.ok) { throw "probe failed: $($st.stderr_tail)" }
+        if ($st.repair_mode) { throw "launcher started repair mode" }
+        if (@($st.tools).Count -ne 10) { throw "expected 10 tools, got $(@($st.tools).Count)" }
+        Write-Host "   tools/list after $($st.tools_list_ms) ms (first run $($st.first_run.tools_list_ms) ms)"
+    }
+    Step "idempotent re-run reuses the runtime" {
+        $out = & (Join-Path $repo "install.ps1") -Root $root -Client none -SkipNative -SkipDoctor -Python $Python *>&1 | Out-String
+        if ($out -notmatch "reusing") { throw "second install did not reuse the runtime" }
+    }
+    Step "repair mode through the launcher" {
+        Move-Item (Join-Path $root "current.txt") (Join-Path $root "current.txt.off")
+        try { Py @((Join-Path $repo "scripts\test-repair-server.py"), "--launcher", $launcher) }
+        finally { Move-Item (Join-Path $root "current.txt.off") (Join-Path $root "current.txt") }
+    }
+    Step "uninstall" {
+        & (Join-Path $repo "install.ps1") -Root $root -Uninstall -Client none -CodexHome (Join-Path $root "no-codex") -ClaudeConfig (Join-Path $root "no-claude\.claude.json")
+        if (Test-Path -LiteralPath $launcher) { throw "launcher still present after uninstall" }
+    }
+    Remove-Tree $root
 }
 
-Invoke-Checked "Python compilation" {
-    $CompileTargets = @($ServerPath, $ListenerPath)
-    if ($EnablePythonDialogFallback) {
-        $CompileTargets += @($LauncherPath, $LoaderPath)
-    }
-    & $VenvPython -m py_compile @CompileTargets
+Write-Host ""
+if ($failed.Count) {
+    Write-Host "$($failed.Count) check(s) failed:" -ForegroundColor Red
+    $failed | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
+    exit 1
 }
-
-Invoke-Checked "native bridge prereq advisory" {
-    & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $NativePrereqPath -Advisory
-}
-
-Invoke-Checked "native bridge doctor next command" {
-    $ProbeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("vectorworks-mcp-verify-native-doctor-{0}" -f $PID)
-    $DoctorJson = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $NativeDoctorPath -WorktreeRoot (Join-Path $ProbeRoot "SDKExamples") -InstallDir (Join-Path $ProbeRoot "Plug-ins") -Json
-    $DoctorReport = $DoctorJson | ConvertFrom-Json
-    if ([string]::IsNullOrWhiteSpace([string]$DoctorReport.nextCommand) -or
-        [string]::IsNullOrWhiteSpace([string]$DoctorReport.nextCommandReason) -or
-        [string]::IsNullOrWhiteSpace([string]$DoctorReport.nextCommandSpec.command) -or
-        [string]::IsNullOrWhiteSpace([string]$DoctorReport.nextCommandSpec.stage) -or
-        @($DoctorReport.nextActions).Count -eq 0) {
-        throw "Native bridge doctor JSON did not include nextCommand, nextCommandReason, nextCommandSpec, and nextActions."
-    }
-    if ([string]$DoctorReport.nextCommandSpec.command -ne [string]$DoctorReport.nextCommand -or
-        @($DoctorReport.nextCommandSpec.arguments).Count -lt 6) {
-        throw "Native bridge doctor nextCommandSpec does not match nextCommand."
-    }
-}
-
-Invoke-Checked "native bridge guarded next-step plan" {
-    $ProbeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("vectorworks-mcp-verify-native-runner-{0}" -f $PID)
-    $RunnerJson = & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $NativeNextRunnerPath -WorktreeRoot (Join-Path $ProbeRoot "SDKExamples") -InstallDir (Join-Path $ProbeRoot "Plug-ins") -PlanOnly -Json
-    $RunnerReport = $RunnerJson | ConvertFrom-Json
-    if ($RunnerReport.status -ne "plan_only" -or $RunnerReport.blocked -or $RunnerReport.failed -or -not $RunnerReport.planOnly -or @($RunnerReport.steps).Count -ne 1) {
-        throw "Native bridge next-step runner did not emit a single non-mutating plan."
-    }
-    if (-not $RunnerReport.steps[0].plannedOnly -or [string]::IsNullOrWhiteSpace([string]$RunnerReport.steps[0].stage)) {
-        throw "Native bridge next-step runner plan is missing plannedOnly/stage metadata."
-    }
-    if ($RunnerReport.PSObject.Properties.Name -notcontains "missingAllowFlags" -or
-        $RunnerReport.PSObject.Properties.Name -notcontains "validationErrors" -or
-        $RunnerReport.steps[0].PSObject.Properties.Name -notcontains "safetyBlocks" -or
-        $RunnerReport.steps[0].PSObject.Properties.Name -notcontains "missingAllowFlags" -or
-        $RunnerReport.steps[0].PSObject.Properties.Name -notcontains "validationErrors") {
-        throw "Native bridge next-step runner plan is missing structured status/safety validation fields."
-    }
-    if (@($RunnerReport.validationErrors).Count -ne 0 -or @($RunnerReport.steps[0].validationErrors).Count -ne 0) {
-        throw "Native bridge next-step runner plan unexpectedly reported validation errors."
-    }
-}
-
-try {
-    $ProjectMcp = Get-Content -Raw $ProjectMcpPath | ConvertFrom-Json
-} catch {
-    throw ".mcp.json is not valid JSON: $($_.Exception.Message)"
-}
-if (-not ($ProjectMcp.PSObject.Properties.Name -contains "mcpServers")) {
-    throw ".mcp.json does not contain mcpServers"
-}
-if (-not ($ProjectMcp.mcpServers.PSObject.Properties.Name -contains $Name)) {
-    throw ".mcp.json does not contain mcpServers.$Name"
-}
-
-$ClaudeJsonPath = Join-Path $env:USERPROFILE ".claude.json"
-if (Test-Path $ClaudeJsonPath) {
-    try {
-        $ClaudeJson = Get-Content -Raw $ClaudeJsonPath | ConvertFrom-Json
-    } catch {
-        throw "$ClaudeJsonPath is not valid JSON: $($_.Exception.Message)"
-    }
-    if ($ClaudeJson.PSObject.Properties.Name -contains "mcpServers" -and
-        $ClaudeJson.mcpServers.PSObject.Properties.Name -contains $Name) {
-        $ServerConfig = $ClaudeJson.mcpServers.$Name
-        if (-not $ServerConfig.command) {
-            throw "$ClaudeJsonPath mcpServers.$Name has no command"
-        }
-        Write-Host "Claude user config contains mcpServers.$Name."
-    } else {
-        Write-Warning "$ClaudeJsonPath does not contain mcpServers.$Name. Project .mcp.json still exists."
-    }
-}
-
-if ($FreshLauncher -and (Test-Path -LiteralPath $LauncherPath)) {
-    Remove-Item -LiteralPath $LauncherPath -Force -ErrorAction SilentlyContinue
-}
-if ($FreshLoader -and (Test-Path -LiteralPath $LoaderPath)) {
-    Remove-Item -LiteralPath $LoaderPath -Force -ErrorAction SilentlyContinue
-}
-if (Test-Path -LiteralPath $PyCacheRoot) {
-    Remove-Item -LiteralPath $PyCacheRoot -Recurse -Force -ErrorAction SilentlyContinue
-}
-
-Write-Host "OK: no-Vectorworks verification passed."
+Write-Host "No-Vectorworks verification passed." -ForegroundColor Green

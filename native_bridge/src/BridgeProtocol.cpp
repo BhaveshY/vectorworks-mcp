@@ -129,22 +129,21 @@ public:
                     value.push_back('\t');
                     break;
                 case 'u': {
-                    if (pos_ + 4u > text_.size()) {
-                        throw std::invalid_argument("JSON unicode escape was incomplete");
-                    }
-                    int codepoint = 0;
-                    for (int i = 0; i < 4; ++i) {
-                        const char hex = text_[pos_++];
-                        if (!IsHex(hex)) {
-                            throw std::invalid_argument("JSON unicode escape contained a non-hex digit");
+                    std::uint32_t codepoint = ParseHex4();
+                    if (codepoint >= 0xD800u && codepoint <= 0xDBFFu) {
+                        if (pos_ + 6u > text_.size() || text_[pos_] != 0x5C || text_[pos_ + 1u] != 'u') {
+                            throw std::invalid_argument("JSON unicode escape contained an unpaired high surrogate");
                         }
-                        codepoint = (codepoint << 4) | HexValue(hex);
+                        pos_ += 2u;
+                        const std::uint32_t low = ParseHex4();
+                        if (low < 0xDC00u || low > 0xDFFFu) {
+                            throw std::invalid_argument("JSON unicode escape contained an invalid low surrogate");
+                        }
+                        codepoint = 0x10000u + ((codepoint - 0xD800u) << 10) + (low - 0xDC00u);
+                    } else if (codepoint >= 0xDC00u && codepoint <= 0xDFFFu) {
+                        throw std::invalid_argument("JSON unicode escape contained an unpaired low surrogate");
                     }
-                    if (codepoint <= 0x7f) {
-                        value.push_back(static_cast<char>(codepoint));
-                    } else {
-                        throw std::invalid_argument("native bridge scaffold only supports ASCII request strings");
-                    }
+                    AppendUtf8(value, codepoint);
                     break;
                 }
                 default:
@@ -152,6 +151,28 @@ public:
             }
         }
         throw std::invalid_argument("unterminated JSON string");
+    }
+
+    std::uint32_t ParseHex4() {
+        if (pos_ + 4u > text_.size()) {
+            throw std::invalid_argument("JSON unicode escape was incomplete");
+        }
+        std::uint32_t codepoint = 0;
+        for (int i = 0; i < 4; ++i) {
+            const char hex = text_[pos_++];
+            if (!IsHex(hex)) {
+                throw std::invalid_argument("JSON unicode escape contained a non-hex digit");
+            }
+            codepoint = (codepoint << 4) | static_cast<std::uint32_t>(HexValue(hex));
+        }
+        return codepoint;
+    }
+
+    double ParseNumberValue() {
+        SkipWhitespace();
+        const auto start = pos_;
+        SkipNumber();
+        return std::stod(std::string(text_.substr(start, pos_ - start)));
     }
 
     void CheckDepth(int depth) const {
@@ -280,47 +301,6 @@ void ValidateCompleteJsonValue(std::string_view value, std::string_view label) {
     }
 }
 
-std::string EscapeJsonString(std::string_view value) {
-    std::string escaped;
-    escaped.reserve(value.size() + 8u);
-    constexpr char kHex[] = "0123456789abcdef";
-    for (const unsigned char ch : value) {
-        switch (ch) {
-            case '"':
-                escaped += "\\\"";
-                break;
-            case '\\':
-                escaped += "\\\\";
-                break;
-            case '\b':
-                escaped += "\\b";
-                break;
-            case '\f':
-                escaped += "\\f";
-                break;
-            case '\n':
-                escaped += "\\n";
-                break;
-            case '\r':
-                escaped += "\\r";
-                break;
-            case '\t':
-                escaped += "\\t";
-                break;
-            default:
-                if (ch < 0x20u) {
-                    escaped += "\\u00";
-                    escaped.push_back(kHex[(ch >> 4) & 0x0f]);
-                    escaped.push_back(kHex[ch & 0x0f]);
-                } else {
-                    escaped.push_back(static_cast<char>(ch));
-                }
-                break;
-        }
-    }
-    return escaped;
-}
-
 }  // namespace
 
 std::array<std::uint8_t, kFrameHeaderBytes> EncodeFrameHeader(std::uint32_t payloadSize) {
@@ -389,6 +369,17 @@ RequestEnvelope ParseRequestEnvelope(std::string_view payload) {
                 const auto end = cursor.Position();
                 request.paramsJson = std::string(Trim(payload.substr(start, end - start)));
                 seenParams = true;
+            } else if (key == kFieldTimeoutMs) {
+                cursor.SkipWhitespace();
+                const char next = cursor.Peek();
+                if (next == '-' || (next >= '0' && next <= '9')) {
+                    const double raw = cursor.ParseNumberValue();
+                    if (raw >= 0.0 && raw <= 9.0e15) {
+                        request.timeoutMs = static_cast<std::int64_t>(raw);
+                    }
+                } else {
+                    cursor.SkipValue();
+                }
             } else if (key == kFieldAuthToken) {
                 if (seenAuthToken) {
                     throw std::invalid_argument("duplicate request auth_token field");
@@ -442,14 +433,131 @@ std::string SerializeResponseEnvelope(const ResponseEnvelope& response) {
         return serialized;
     }
 
-    if (Trim(response.error).empty()) {
-        throw std::invalid_argument("failure response error is required");
+    std::string message = response.error;
+    if (Trim(message).empty()) {
+        message = response.errorCode.empty() ? "native bridge request failed" : response.errorCode;
     }
     serialized += "false,\"error\":\"";
-    serialized += EscapeJsonString(response.error);
-    serialized += "\"}";
+    serialized += EscapeJsonString(message);
+    serialized += "\"";
+    if (!response.errorCode.empty()) {
+        serialized += ",\"error_code\":\"";
+        serialized += EscapeJsonString(response.errorCode);
+        serialized += "\"";
+    }
+    if (response.retryable >= 0) {
+        serialized += ",\"retryable\":";
+        serialized += response.retryable ? "true" : "false";
+    }
+    if (!response.commitState.empty()) {
+        serialized += ",\"commit_state\":\"";
+        serialized += EscapeJsonString(response.commitState);
+        serialized += "\"";
+    }
+    const auto details = Trim(response.detailsJson);
+    if (!details.empty()) {
+        try {
+            ValidateCompleteJsonValue(details, "failure details");
+            serialized += ",\"details\":";
+            serialized.append(details.data(), details.size());
+        } catch (...) {
+        }
+    }
+    serialized += "}";
     return serialized;
 }
+
+ResponseEnvelope Ok(const std::string& id, std::string resultJson) {
+    ResponseEnvelope response;
+    response.id = id;
+    response.success = true;
+    response.resultJson = std::move(resultJson);
+    return response;
+}
+
+ResponseEnvelope Fail(
+    const std::string& id,
+    const std::string& code,
+    const std::string& message,
+    bool retryable,
+    const std::string& commitState,
+    const std::string& detailsJson) {
+    ResponseEnvelope response;
+    response.id = id;
+    response.success = false;
+    response.error = message;
+    response.errorCode = code;
+    response.retryable = retryable ? 1 : 0;
+    response.commitState = commitState;
+    response.detailsJson = detailsJson;
+    return response;
+}
+
+ResponseEnvelope FromBridgeError(const std::string& id, const BridgeError& error) {
+    return Fail(id, error.Code(), error.what(), error.Retryable(), error.CommitState(), error.DetailsJson());
+}
+
+void AppendUtf8(std::string& out, std::uint32_t codepoint) {
+    if (codepoint <= 0x7Fu) {
+        out.push_back(static_cast<char>(codepoint));
+    } else if (codepoint <= 0x7FFu) {
+        out.push_back(static_cast<char>(0xC0u | (codepoint >> 6)));
+        out.push_back(static_cast<char>(0x80u | (codepoint & 0x3Fu)));
+    } else if (codepoint <= 0xFFFFu) {
+        out.push_back(static_cast<char>(0xE0u | (codepoint >> 12)));
+        out.push_back(static_cast<char>(0x80u | ((codepoint >> 6) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | (codepoint & 0x3Fu)));
+    } else if (codepoint <= 0x10FFFFu) {
+        out.push_back(static_cast<char>(0xF0u | (codepoint >> 18)));
+        out.push_back(static_cast<char>(0x80u | ((codepoint >> 12) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | ((codepoint >> 6) & 0x3Fu)));
+        out.push_back(static_cast<char>(0x80u | (codepoint & 0x3Fu)));
+    } else {
+        throw std::invalid_argument("unicode codepoint is out of range");
+    }
+}
+
+std::string EscapeJsonString(std::string_view value) {
+    std::string escaped;
+    escaped.reserve(value.size() + 8u);
+    constexpr char kHex[] = "0123456789abcdef";
+    for (const unsigned char ch : value) {
+        switch (ch) {
+            case '"':
+                escaped += "\\\"";
+                break;
+            case '\\':
+                escaped += "\\\\";
+                break;
+            case '\b':
+                escaped += "\\b";
+                break;
+            case '\f':
+                escaped += "\\f";
+                break;
+            case '\n':
+                escaped += "\\n";
+                break;
+            case '\r':
+                escaped += "\\r";
+                break;
+            case '\t':
+                escaped += "\\t";
+                break;
+            default:
+                if (ch < 0x20u) {
+                    escaped += "\\u00";
+                    escaped.push_back(kHex[(ch >> 4) & 0x0f]);
+                    escaped.push_back(kHex[ch & 0x0f]);
+                } else {
+                    escaped.push_back(static_cast<char>(ch));
+                }
+                break;
+        }
+    }
+    return escaped;
+}
+
 
 }  // namespace Protocol
 }  // namespace VectorworksMCP

@@ -283,3 +283,125 @@ The 0.7 server is preserved verbatim as `legacy/server_v07.py`, reachable only w
 
 ## Deviations
 (Record here: stream, section, what changed, why.)
+
+- **H, §2 (framework, "FastMCP 4.0.10 app"):** the default host does not import FastMCP/mcp/pydantic. Importing them
+  costs ~1.8 s on a warm Windows machine, and Codex omits servers not ready ~1 s after thread start
+  (`mcp_optional_startup_grace_ms`). `vectorworks_mcp/mcp_core.py` is a stdlib JSON-RPC stdio core serving static tool
+  data: handshake era (initialize / notifications/initialized / ping, 2024-11-05…2025-11-25) and 2026-07-28
+  (`server/discover`, per-request `_meta` protocol version, `resultType`/`ttlMs`/`cacheScope`, -32022), progress via
+  `_meta.progressToken`, `notifications/cancelled`, resources, prompts, logging/setLevel. Input "schema validation" is
+  the forgiving coercion layer. Measured first `tools/list` ≈ 130 ms cold. `fastmcp==4.0.10`/`mcp==2.2.0` stay pinned
+  for `VW_MCP_TOOL_PROFILE=legacy` and the MCP-client acceptance scripts. The process exits only on stdin EOF
+  (SIGINT/SIGBREAK ignored).
+- **H, §2.3 vw_create `$id` hosting:** for doors/windows the host sends `wall_uuid: "$<local_ref>"` inside the single
+  `apply_operations` on revision ≥ 6 — **N must resolve local refs in `wall_uuid`** (as it does for `target`). On
+  revision ≤ 5 the host runs two transactions (walls, then openings with real UUIDs) and warns "two undo steps".
+- **H, §2.3 vw_edit:** `mirror`, `layer`, `group`, `ungroup`, `record` run through the vetted `run_script` snippet
+  `scripts_lib/edit_engine.py`; when mixed with native ops they form a second undo step (warned). Extra ops `select` /
+  `deselect` (0.7 `vw_selection` parity). Target `"selection"` expands to the selected objects' UUIDs.
+- **H, §2.3 surface additions (parity with the 0.7 47-tool profile, see docs/PARITY.md):** `vw_status(detail,
+  disconnect)`; `vw_read` filters `type/layer/class/name/criteria/query/resource_type/range`; `vw_create(floor_plan,
+  dry_run)` + composite `room` type (0.7 schematic/BIM floor-plan tools); `vw_document(action="info")`;
+  `vw_organize(kind="resource", action="import")`. vw_status never fails: job/transaction lookup errors are reported
+  inside `job` / `transaction` with `ok:true`.
+- **H, §2.1 object by uuid:** the contract has no get-by-uuid read, so `vw_read(what="object")` scans `query_objects`
+  pages (≤ 100 × 1000). Suggestion for N: a `uuid` filter on `query_objects`.
+- **H, §2.1 lost write replies:** resolved through `transaction_status` only for `apply_operations`-based tools
+  (vw_create/vw_edit/vw_apply, which always carry an idempotency key); other lost writes return `unknown_commit_state`.
+- **H, §2.1 pre-1.0 capture:** on revision ≤ 5 `vw_capture` exports the current view as-is (the old fit used
+  select-all / menu fit and changed the user's selection); fit/standard view/render mode need revision 6.
+- **H, files:** `plan_quality.py`/`plan_geometry.py` moved to `vectorworks_mcp/analysis/` (lazy import);
+  `vw_listener.py` and `production_apartment.py` moved to `legacy/`; `legacy/server_v07.py` is the 0.7 server with only
+  its `plan_quality` import path changed. The generated per-user `vw_load_listener_2024.py` /
+  `vw_start_listener_2024.py` (git-ignored) were left in place.
+- **H, errors:** extra codes beyond the contract list: `path_error`, `confirmation_required`, `script_error`,
+  `job_not_found`, `upgrade_required`, `multiple_instances`, `document_not_found`, `native_rejected`, `native_error`,
+  `internal_error`. `next_step` for `upgrade_required` uses `VW_MCP_INSTALL_COMMAND` when set.
+- **I, §3 client command:** both clients start the launcher as `C:\Windows\System32\cmd.exe /d /c
+  <root>\bin\vectorworks-mcp.cmd` instead of the bare `.cmd` path. Node-based clients cannot spawn a `.cmd` without a
+  shell, and `/d` skips cmd AutoRun hooks that could print to stdout and corrupt the MCP stream. Codex additionally gets
+  `env_vars` (USERPROFILE, APPDATA, LOCALAPPDATA, TEMP, TMP, SystemRoot, PATH, PATHEXT, ComSpec), `enabled = true`
+  and the top-level `mcp_optional_startup_grace_ms = 5000` (only raised, never lowered). No client config sets
+  `VW_MCP_PORT` (it would disable instance discovery).
+- **I, §3 launcher:** runs `python.exe -I -X utf8 -u -m vectorworks_mcp` (`-I` added: the client's cwd, e.g. a repo
+  checkout containing `vectorworks_mcp/`, must not shadow the installed package; PYTHON* env and user site are
+  ignored). The code lives in `runtime\<id>\app\` and is put on `sys.path` by a `.pth` in the venv. The launcher
+  derives the root from its own location, reads `current.txt`, sets `VW_MCP_STATE_DIR` (if unset) and
+  `VW_MCP_INSTALL_COMMAND` (baked: the exact install/repair command for this machine). Repair mode uses the base
+  interpreter recorded at install time, then `py -3`, then `python`; `bin\repair_server.py` is a copy of
+  `vectorworks_mcp/repair_server.py`.
+- **I, §3 runtime id:** `current.txt` holds a runtime id, normally the version; when `runtime\<version>` is in use by
+  a running client during a reinstall, the new runtime is installed side by side as `<version>-<yyyyMMdd-HHmmss>` and
+  older ids are removed by a later install once unused.
+- **I, §3 Python:** the installer requires Python >= 3.11 (python.org; 3.12 preferred via `py -3.12`) because the
+  registration helper uses `tomllib`; Codex's bundled runtime and WindowsApps/LocalCache interpreters are refused.
+- **I, §3 plugins:** both plugins are skills-only (no `mcpServers`). Codex: the `vectorworks-mcp` marketplace is
+  re-pointed to the local copy `%USERPROFILE%\.vectorworks-mcp\marketplace` (also a Claude marketplace) and refreshed
+  with `codex plugin add vectorworks@vectorworks-mcp`; while the cached plugin still defines a `vectorworks` server it
+  is disabled so exactly one server is active. Claude Code: the installer also runs `claude plugin marketplace add
+  <root>\marketplace` + `claude plugin install vectorworks@vectorworks-mcp`. The org-synced Claude desktop (Cowork)
+  plugin cannot be changed locally; doctor reports it and `package-release.ps1` builds the replacement zip.
+- **I, §3 native install default:** from a release package the prebuilt plug-in is installed by default (Vectorworks
+  closed); from a git checkout only with `-FullNative` (a checkout may hold a stale dev build). Artifacts are looked up
+  in `-NativeArtifactDir`, `native\<ver>\` (release zip) and `native_bridge\project\out\<ver>\Release\`. The old
+  `ObjectExample.vlb/.vwr` is removed only when it references `.vectorworks-mcp` / `VW_MCP_AUTH_TOKEN` (i.e. it is the
+  0.x bridge, not the SDK sample).
+- **I, §3 skills:** one skill `vectorworks` (`plugins/vectorworks/skills/vectorworks/` with `SKILL.md`,
+  `references/tool-map.md`, `agents/openai.yaml`); the 0.x setup/ping/diagnose/work skills were removed.
+  `scripts/check-skill-tool-names.py --live` checks tool names *and* example argument names against `tools/list`.
+- **N, §1.4 notifications / `loading`:** a module that registers no extensions has no SDK notification sink, so
+  `kNotifyDocChanging`/`kNotifyDocPreOpen` are not subscribed. Instead the main thread polls `GetOpenFilesList` + the
+  drawing header (≤ 200 ms while idle and before every request) and bumps `document_generation` eagerly. `loading` =
+  a bridge-initiated open/new/close in progress, a 250 ms settle window after a switch/close/open was observed, or the
+  main frame missing/hidden (startup). User-initiated loads show as `modal` (progress/convert dialogs) or block the
+  pump (`main_context_idle_ms` grows). `tracking` uses `GetGUIThreadInfo` (menu/popup/move-size), `GetCapture` and
+  mouse-button state while a Vectorworks window is foreground (no tool-mode notification).
+- **N, §1.2 deinit:** Vectorworks may deinit a module with no registered interfaces right after init, so
+  `kPluginModuleDeinit` performs the full shutdown (stop pump, cancel queue, close sockets, join threads, delete
+  discovery file) only when the main frame was seen and is gone; otherwise it is logged and ignored (the DLL stays
+  pinned, as in 0.x). A static destructor deletes the discovery file at process exit. Init returns `kDoNotCache`.
+- **N, §1.2 build:** project `native_bridge/project/VectorworksMCPBridge.vcxproj` (SDK via `VWSDKRoot`, default
+  `third_party/VectorworksSDKExamples/VectorworksSDK/SDK<ver>`); output
+  `native_bridge/project/out/<ver>/Release/VectorworksMCPBridge.{vlb,vwr}`. Both 2024 and 2025 compile (2025 libs
+  present). `build_id` = `<git short hash>[-dirty]-<yyyyMMddTHHmmssZ>`.
+- **N, §1.3 ping:** `main_context_pump` keeps the 0.x value `"win32_ui_timer"` (the 0.7 host and smoke.py require it);
+  the message-only window is reported as `main_context_pump_window:"message_only"`. Extra fields: `ui_state_reason`,
+  `running_action`, `job_count`, `client_count`, `git_hash`, `started_at`, `script_enabled`. `main_context_idle_ms` is
+  -1 before the first tick.
+- **N, §1.5:** `async:true` is accepted by every main-thread action (`supports_async` true for all of them;
+  `long_running` marks the slow ones). `capture_view` is not flagged long-running by render mode in the registry; its
+  result carries `slow_render_mode`. `timeout_ms` is also read from `params.timeout_ms` when the top-level field is
+  absent. Jobs report `blocked_by_ui` + `hint_error_code:"vectorworks_busy"` while a dialog blocks a running job (a
+  running handler cannot be failed with `vectorworks_busy`).
+- **N, §1.6 new_document:** the SDK has no dialog-free "new" call; the bridge opens a blank template (`template_path`,
+  `VW_MCP_NEW_DOCUMENT_TEMPLATE`, or `<VW>\Libraries\Defaults\Templates\Blank (Metric|UK Metric|Imperial).sta`, then any
+  blank/leer/… template) with `OpenDocumentPath(..., false)` and reports `untitled`; `unsupported` when none exists.
+- **N, §1.6 dirty / close:** in Vectorworks 2025 `dirty` is `null` (API removed), so `close_document` there always needs
+  `discard_changes:"discard"`. With discard, a dirty document is first saved to a private temp file and then closed,
+  so `CloseDocument` can never prompt (original file untouched). `open_document`'s `replace_dirty_confirmation` is no
+  longer required (documents open side by side); the open runs synchronously and becomes a job on timeout.
+- **N, §1.6 fingerprints:** keyed by `GetOpenFilesList` `fileRef` (+ active drawing header). If Vectorworks ever
+  changed a document's fileRef (not observed in the SDK docs) its fingerprint would change too.
+- **N, §1.7 handles:** handle ids are `h<N>` (opaque); objects without a UUID get `h0-<N>` ids that never resolve
+  (`stale_reference`). 0.x `0x…` ids are rejected as `stale_reference`.
+- **N, §1.8 fit:** bounds fill ≤ 85 % of the drawing area; the drawing area is derived from the view centre
+  (`WorldPt2ViewPt`) because `GetScreenSize` may include palettes. Zoom is read from program variable
+  `varWindowZoomFactor` (500, "internal"); fit is exact in plan views and "projected best effort" in 3D views (view
+  matrix). Capture crops (`fExportRect`) only in plan views or with an explicit `rect`.
+- **N, §1.8 saved views:** create/delete use in-process `vs.SaveSheet` / `vs.VDelete`; `capture_view` with
+  `saved_view` snapshots class/layer visibility through a temporary saved view (created and deleted around the capture).
+- **N, §1.9:** layer `elevation`/`thickness`/`opacity` read/write go through in-process `vs.GetLayerElevation`,
+  `vs.SetLayerElevation`, `vs.HGetLayerTransp`, `vs.HSetLayerTransp` (one batched script per list page). `stories list`
+  discovers stories through their layers (stories without layers only counted in `sdk_story_count`). `manage_classes
+  list` keeps returning the 0.x array of names; the detailed form needs `detailed:true`. Class `set` uses `vs.*` class
+  calls in one undo step.
+- **N, §1.10:** VectorScript runs return `result:null` and no stdout. `rollback_verified` compares layer count + top-level
+  object counts (cheap structural check, not a UUID diff). Rollback depends on Vectorworks registering `vs.*` creations
+  in the bridge's open undo event — must be live-verified.
+- **N, §1.11:** `group`/`ungroup` and `records` are not native in 1.0 (host `run_script` snippets). `query_objects` gained
+  a `uuids`/`uuid` exact-lookup filter (H suggestion) and a `max_bytes` page budget. `apply_operations` resolves
+  `wall_uuid:"$<local_ref>"` (H request) for doors/windows/hosted parametric objects in one transaction.
+- **N, mock:** `native_bridge/mock/` only held a stale `.pyc` (source removed in 73cf2f9 "live e2e only"); it was not
+  resurrected because H ships `vectorworks_mcp/testing/mock_bridge.py`. Core transport/scheduler/protocol behaviour
+  (timeouts, jobs, cancel, busy gate, no_document, too_many_clients, stop, idle close, oversize response, \u decoding,
+  exclusive port fallback) was verified with a throwaway SDK-free harness, not committed.

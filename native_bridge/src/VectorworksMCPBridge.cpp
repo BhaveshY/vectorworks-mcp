@@ -1,15 +1,20 @@
 #include "StdAfx.h"
 
-#include "BridgeDispatcher.hpp"
+// 0.x CAD handlers (behaviour kept for the 0.7 host). Since 1.0 the runtime
+// plumbing (transport, scheduler, UI gate, ping, documents, view/capture,
+// scripting, organisation) lives in separate files; see BridgeRuntime.cpp.
+
 #include "BridgeProtocol.hpp"
-#include "CadRequestQueue.hpp"
+#include "DocumentRegistry.hpp"
+#include "JsonParams.hpp"
+#include "LegacyHandlers.hpp"
 #include "NativeIOHandlers.hpp"
-#include "NativeTransport.hpp"
 #include "ViewDocumentHandlers.hpp"
 
 #if defined(SDK_VERSION)
 #include "Interfaces/VectorWorks/Extension/ISpaceObjectSupport.h"
 #include "BimObjectHandlers.hpp"
+#include "CapabilityRegistry.hpp"
 #include "DocumentationHandlers.hpp"
 #include "NativeObjectFactory.hpp"
 #include "NativeTransaction.hpp"
@@ -27,7 +32,6 @@
 #include <cstdlib>
 #include <deque>
 #include <exception>
-#include <fstream>
 #include <functional>
 #include <iomanip>
 #include <limits>
@@ -52,919 +56,10 @@
 
 namespace VectorworksMCP {
 
-void OnVectorworksMainPluginEvent();
-
 namespace {
-
-CadRequestQueue gCadQueue;
-NativeTransport gTransport;
-std::atomic_bool gStopRequested{false};
-std::atomic_bool gCadQueuePumpActive{false};
-// Steady-clock milliseconds of the last main-context pump callback. Ping runs
-// on the transport thread and reports its age so the host can fail fast when
-// the Vectorworks main thread is blocked. 0 means "no callback yet".
-std::atomic<std::int64_t> gLastMainContextPumpTickMs{0};
-
-std::int64_t SteadyClockMilliseconds() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count();
-}
-std::mutex gTransportStartMutex;
-std::chrono::steady_clock::time_point gNextTransportStartAttempt{};
-constexpr auto kCadRequestTimeout = std::chrono::seconds(30);
-constexpr auto kTransportStartRetryInterval = std::chrono::seconds(2);
-constexpr bool kCadHandlersImplemented = VECTORWORKS_MCP_HAS_SDK != 0;
-
-#if VECTORWORKS_MCP_HAS_SDK
-struct DeferredDocumentOpen {
-    std::string requestId;
-    ViewDocument::PreparedOpenDocument request;
-    bool responseSent = false;
-};
-
-std::mutex gDeferredDocumentOpenMutex;
-std::optional<DeferredDocumentOpen> gDeferredDocumentOpen;
-#endif
-
-class ScopedAtomicBoolReset {
-public:
-    explicit ScopedAtomicBoolReset(std::atomic_bool& value) : value_(value) {}
-    ~ScopedAtomicBoolReset() {
-        value_.store(false);
-    }
-
-    ScopedAtomicBoolReset(const ScopedAtomicBoolReset&) = delete;
-    ScopedAtomicBoolReset& operator=(const ScopedAtomicBoolReset&) = delete;
-
-private:
-    std::atomic_bool& value_;
-};
-
-#if VECTORWORKS_MCP_HAS_SDK && defined(_WINDOWS)
-constexpr wchar_t kMainContextPumpWindowClassName[] = L"VectorworksMCPMainContextPump";
-constexpr UINT_PTR kMainContextPumpTimerId = 1;
-constexpr UINT kMainContextPumpIntervalMs = 50;
-constexpr UINT kMainContextPumpMessage = WM_APP + 0x4d3;
-
-std::atomic_bool gMainContextPumpReady{false};
-HWND gMainContextPumpWindow = nullptr;
-ATOM gMainContextPumpWindowClass = 0;
-HINSTANCE gMainContextPumpInstance = nullptr;
-int gMainContextPumpModuleAnchor = 0;
-
-LRESULT CALLBACK MainContextPumpWndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
-    if ((message == WM_TIMER && wParam == kMainContextPumpTimerId) ||
-        message == kMainContextPumpMessage) {
-        OnVectorworksMainPluginEvent();
-        return 0;
-    }
-    return DefWindowProcW(window, message, wParam, lParam);
-}
-
-HINSTANCE MainContextPumpModuleHandle() {
-    HMODULE module = nullptr;
-    if (GetModuleHandleExW(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            reinterpret_cast<LPCWSTR>(&gMainContextPumpModuleAnchor),
-            &module) &&
-        module) {
-        return reinterpret_cast<HINSTANCE>(module);
-    }
-    return GetModuleHandleW(nullptr);
-}
-
-bool PinBridgeModuleForProcessLifetime() {
-    HMODULE module = nullptr;
-    return GetModuleHandleExW(
-               GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-               reinterpret_cast<LPCWSTR>(&gMainContextPumpModuleAnchor),
-               &module) != 0 &&
-        module != nullptr;
-}
-
-void UnregisterMainContextPumpWindowClass() {
-    if (gMainContextPumpWindowClass != 0 && gMainContextPumpInstance) {
-        UnregisterClassW(kMainContextPumpWindowClassName, gMainContextPumpInstance);
-        gMainContextPumpWindowClass = 0;
-    }
-    gMainContextPumpInstance = nullptr;
-}
-
-bool StartMainContextPump() {
-    if (gMainContextPumpWindow) {
-        gMainContextPumpReady.store(true);
-        return true;
-    }
-
-    HINSTANCE instance = MainContextPumpModuleHandle();
-    gMainContextPumpInstance = instance;
-    WNDCLASSW windowClass = {};
-    windowClass.lpfnWndProc = MainContextPumpWndProc;
-    windowClass.hInstance = instance;
-    windowClass.lpszClassName = kMainContextPumpWindowClassName;
-
-    const ATOM registeredClass = RegisterClassW(&windowClass);
-    if (registeredClass == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
-        gMainContextPumpReady.store(false);
-        return false;
-    }
-    if (registeredClass != 0) {
-        gMainContextPumpWindowClass = registeredClass;
-    }
-
-    gMainContextPumpWindow = CreateWindowExW(
-        0,
-        kMainContextPumpWindowClassName,
-        L"Vectorworks MCP Main Context Pump",
-        WS_POPUP,
-        0,
-        0,
-        0,
-        0,
-        nullptr,
-        nullptr,
-        instance,
-        nullptr);
-    if (!gMainContextPumpWindow) {
-        UnregisterMainContextPumpWindowClass();
-        gMainContextPumpReady.store(false);
-        return false;
-    }
-
-    if (SetTimer(gMainContextPumpWindow, kMainContextPumpTimerId, kMainContextPumpIntervalMs, nullptr) == 0) {
-        DestroyWindow(gMainContextPumpWindow);
-        gMainContextPumpWindow = nullptr;
-        UnregisterMainContextPumpWindowClass();
-        gMainContextPumpReady.store(false);
-        return false;
-    }
-
-    gMainContextPumpReady.store(true);
-    return true;
-}
-
-void StopMainContextPump() {
-    gMainContextPumpReady.store(false);
-    if (gMainContextPumpWindow) {
-        KillTimer(gMainContextPumpWindow, kMainContextPumpTimerId);
-        DestroyWindow(gMainContextPumpWindow);
-        gMainContextPumpWindow = nullptr;
-    }
-    UnregisterMainContextPumpWindowClass();
-}
-
-bool MainContextPumpReady() {
-    return gMainContextPumpReady.load();
-}
-
-void NotifyMainContextPump() {
-    if (gMainContextPumpWindow && gMainContextPumpReady.load()) {
-        PostMessageW(gMainContextPumpWindow, kMainContextPumpMessage, 0, 0);
-    }
-}
-
-constexpr const char* MainContextPumpName() {
-    return "win32_ui_timer";
-}
-#else
-bool StartMainContextPump() {
-    return false;
-}
-
-void StopMainContextPump() {}
-
-bool MainContextPumpReady() {
-    return false;
-}
-
-void NotifyMainContextPump() {}
-
-constexpr const char* MainContextPumpName() {
-    return "unavailable";
-}
-#endif
-
-#if VECTORWORKS_MCP_HAS_SDK
-void StageDeferredDocumentOpen(
-    const std::string& requestId,
-    ViewDocument::PreparedOpenDocument request) {
-    std::lock_guard<std::mutex> lock(gDeferredDocumentOpenMutex);
-    if (gDeferredDocumentOpen) {
-        throw std::runtime_error("another document open is already pending");
-    }
-    gDeferredDocumentOpen = DeferredDocumentOpen{
-        requestId,
-        std::move(request),
-        false,
-    };
-}
-
-void MarkDeferredDocumentOpenResponseSent(
-    const Protocol::RequestEnvelope& request,
-    const Protocol::ResponseEnvelope& response) {
-    if (request.action != "open_document" || !response.success) {
-        return;
-    }
-    {
-        std::lock_guard<std::mutex> lock(gDeferredDocumentOpenMutex);
-        if (!gDeferredDocumentOpen || gDeferredDocumentOpen->requestId != request.id) {
-            return;
-        }
-        gDeferredDocumentOpen->responseSent = true;
-    }
-    NotifyMainContextPump();
-}
-
-std::optional<ViewDocument::PreparedOpenDocument> TakeReadyDeferredDocumentOpen() {
-    std::lock_guard<std::mutex> lock(gDeferredDocumentOpenMutex);
-    if (!gDeferredDocumentOpen || !gDeferredDocumentOpen->responseSent) {
-        return std::nullopt;
-    }
-    auto request = std::move(gDeferredDocumentOpen->request);
-    gDeferredDocumentOpen.reset();
-    return request;
-}
-
-void ClearDeferredDocumentOpen() {
-    std::lock_guard<std::mutex> lock(gDeferredDocumentOpenMutex);
-    gDeferredDocumentOpen.reset();
-}
-#else
-void MarkDeferredDocumentOpenResponseSent(
-    const Protocol::RequestEnvelope&,
-    const Protocol::ResponseEnvelope&) {}
-#endif
-
-bool CadHandlersRuntimeReady() {
-    return kCadHandlersImplemented && MainContextPumpReady();
-}
 
 bool IsWhitespace(char ch) {
     return ch == ' ' || ch == '\n' || ch == '\r' || ch == '\t';
-}
-
-std::string EscapeJsonString(std::string_view value) {
-    std::string escaped;
-    escaped.reserve(value.size() + 8u);
-    constexpr char kHex[] = "0123456789abcdef";
-    for (const unsigned char ch : value) {
-        switch (ch) {
-            case '"':
-                escaped += "\\\"";
-                break;
-            case '\\':
-                escaped += "\\\\";
-                break;
-            case '\b':
-                escaped += "\\b";
-                break;
-            case '\f':
-                escaped += "\\f";
-                break;
-            case '\n':
-                escaped += "\\n";
-                break;
-            case '\r':
-                escaped += "\\r";
-                break;
-            case '\t':
-                escaped += "\\t";
-                break;
-            default:
-                if (ch < 0x20u) {
-                    escaped += "\\u00";
-                    escaped.push_back(kHex[(ch >> 4) & 0x0f]);
-                    escaped.push_back(kHex[ch & 0x0f]);
-                } else {
-                    escaped.push_back(static_cast<char>(ch));
-                }
-                break;
-        }
-    }
-    return escaped;
-}
-
-std::string JsonString(std::string_view value) {
-    return "\"" + EscapeJsonString(value) + "\"";
-}
-
-std::string JsonNumber(double value) {
-    if (!std::isfinite(value)) {
-        return "0";
-    }
-    std::ostringstream out;
-    out << std::setprecision(15) << value;
-    return out.str();
-}
-
-std::string ToLower(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-    });
-    return value;
-}
-
-struct ParamValue {
-    enum class Type {
-        String,
-        Number,
-        Boolean,
-        Null,
-        Other,
-    };
-
-    Type type = Type::Other;
-    std::string stringValue;
-    std::string rawJson;
-    double numberValue = 0.0;
-    bool boolValue = false;
-};
-
-class FlatJsonParamsParser {
-public:
-    explicit FlatJsonParamsParser(std::string_view text) : text_(text) {}
-
-    std::unordered_map<std::string, ParamValue> Parse() {
-        std::unordered_map<std::string, ParamValue> values;
-        Expect('{', "request params must be a JSON object");
-        if (ConsumeIf('}')) {
-            Finish();
-            return values;
-        }
-        while (true) {
-            const std::string key = ParseString();
-            Expect(':', "expected ':' after params key");
-            values[key] = ParseValue();
-            if (ConsumeIf('}')) {
-                Finish();
-                return values;
-            }
-            Expect(',', "expected ',' between params fields");
-        }
-    }
-
-private:
-    bool AtEnd() const {
-        return pos_ >= text_.size();
-    }
-
-    char Peek() const {
-        if (AtEnd()) {
-            throw std::invalid_argument("unexpected end of params JSON");
-        }
-        return text_[pos_];
-    }
-
-    void SkipWhitespace() {
-        while (!AtEnd() && IsWhitespace(text_[pos_])) {
-            ++pos_;
-        }
-    }
-
-    void Expect(char expected, std::string_view message) {
-        SkipWhitespace();
-        if (AtEnd() || text_[pos_] != expected) {
-            throw std::invalid_argument(std::string(message));
-        }
-        ++pos_;
-    }
-
-    bool ConsumeIf(char expected) {
-        SkipWhitespace();
-        if (!AtEnd() && text_[pos_] == expected) {
-            ++pos_;
-            return true;
-        }
-        return false;
-    }
-
-    bool ConsumeLiteral(std::string_view literal) {
-        if (text_.substr(pos_, literal.size()) == literal) {
-            pos_ += literal.size();
-            return true;
-        }
-        return false;
-    }
-
-    static bool IsHex(char ch) {
-        return ('0' <= ch && ch <= '9') || ('a' <= ch && ch <= 'f') || ('A' <= ch && ch <= 'F');
-    }
-
-    static int HexValue(char ch) {
-        if ('0' <= ch && ch <= '9') {
-            return ch - '0';
-        }
-        if ('a' <= ch && ch <= 'f') {
-            return 10 + (ch - 'a');
-        }
-        return 10 + (ch - 'A');
-    }
-
-    std::string ParseString() {
-        SkipWhitespace();
-        if (AtEnd() || text_[pos_] != '"') {
-            throw std::invalid_argument("expected JSON string in params");
-        }
-        ++pos_;
-        std::string value;
-        while (!AtEnd()) {
-            const char ch = text_[pos_++];
-            if (ch == '"') {
-                return value;
-            }
-            if (static_cast<unsigned char>(ch) < 0x20u) {
-                throw std::invalid_argument("params string contained an unescaped control character");
-            }
-            if (ch != '\\') {
-                value.push_back(ch);
-                continue;
-            }
-            if (AtEnd()) {
-                throw std::invalid_argument("params string ended after escape marker");
-            }
-            const char escaped = text_[pos_++];
-            switch (escaped) {
-                case '"':
-                case '\\':
-                case '/':
-                    value.push_back(escaped);
-                    break;
-                case 'b':
-                    value.push_back('\b');
-                    break;
-                case 'f':
-                    value.push_back('\f');
-                    break;
-                case 'n':
-                    value.push_back('\n');
-                    break;
-                case 'r':
-                    value.push_back('\r');
-                    break;
-                case 't':
-                    value.push_back('\t');
-                    break;
-                case 'u': {
-                    if (pos_ + 4u > text_.size()) {
-                        throw std::invalid_argument("params unicode escape was incomplete");
-                    }
-                    int codepoint = 0;
-                    for (int i = 0; i < 4; ++i) {
-                        const char hex = text_[pos_++];
-                        if (!IsHex(hex)) {
-                            throw std::invalid_argument("params unicode escape contained a non-hex digit");
-                        }
-                        codepoint = (codepoint << 4) | HexValue(hex);
-                    }
-                    if (codepoint <= 0x7f) {
-                        value.push_back(static_cast<char>(codepoint));
-                    } else {
-                        throw std::invalid_argument("native bridge params only support ASCII unicode escapes");
-                    }
-                    break;
-                }
-                default:
-                    throw std::invalid_argument("params string contained an invalid escape sequence");
-            }
-        }
-        throw std::invalid_argument("unterminated params string");
-    }
-
-    ParamValue ParseNumber() {
-        const auto start = pos_;
-        if (!AtEnd() && text_[pos_] == '-') {
-            ++pos_;
-        }
-        if (AtEnd()) {
-            throw std::invalid_argument("incomplete params number");
-        }
-        if (text_[pos_] == '0') {
-            ++pos_;
-        } else if ('1' <= text_[pos_] && text_[pos_] <= '9') {
-            while (!AtEnd() && std::isdigit(static_cast<unsigned char>(text_[pos_]))) {
-                ++pos_;
-            }
-        } else {
-            throw std::invalid_argument("invalid params number");
-        }
-        if (!AtEnd() && text_[pos_] == '.') {
-            ++pos_;
-            const auto digits = pos_;
-            while (!AtEnd() && std::isdigit(static_cast<unsigned char>(text_[pos_]))) {
-                ++pos_;
-            }
-            if (digits == pos_) {
-                throw std::invalid_argument("invalid params number");
-            }
-        }
-        if (!AtEnd() && (text_[pos_] == 'e' || text_[pos_] == 'E')) {
-            ++pos_;
-            if (!AtEnd() && (text_[pos_] == '+' || text_[pos_] == '-')) {
-                ++pos_;
-            }
-            const auto digits = pos_;
-            while (!AtEnd() && std::isdigit(static_cast<unsigned char>(text_[pos_]))) {
-                ++pos_;
-            }
-            if (digits == pos_) {
-                throw std::invalid_argument("invalid params number");
-            }
-        }
-        ParamValue value;
-        value.type = ParamValue::Type::Number;
-        value.numberValue = std::stod(std::string(text_.substr(start, pos_ - start)));
-        return value;
-    }
-
-    void SkipValue() {
-        SkipWhitespace();
-        if (AtEnd()) {
-            throw std::invalid_argument("expected params value");
-        }
-        const char ch = Peek();
-        if (ch == '"') {
-            ParseString();
-            return;
-        }
-        if (ch == '{') {
-            SkipObject();
-            return;
-        }
-        if (ch == '[') {
-            SkipArray();
-            return;
-        }
-        if (ch == '-' || std::isdigit(static_cast<unsigned char>(ch))) {
-            ParseNumber();
-            return;
-        }
-        if (ConsumeLiteral("true") || ConsumeLiteral("false") || ConsumeLiteral("null")) {
-            return;
-        }
-        throw std::invalid_argument("expected params value");
-    }
-
-    void SkipObject() {
-        Expect('{', "expected params object");
-        if (ConsumeIf('}')) {
-            return;
-        }
-        while (true) {
-            ParseString();
-            Expect(':', "expected ':' after params object key");
-            SkipValue();
-            if (ConsumeIf('}')) {
-                return;
-            }
-            Expect(',', "expected ',' between params object fields");
-        }
-    }
-
-    void SkipArray() {
-        Expect('[', "expected params array");
-        if (ConsumeIf(']')) {
-            return;
-        }
-        while (true) {
-            SkipValue();
-            if (ConsumeIf(']')) {
-                return;
-            }
-            Expect(',', "expected ',' between params array items");
-        }
-    }
-
-    ParamValue ParseValue() {
-        SkipWhitespace();
-        if (AtEnd()) {
-            throw std::invalid_argument("expected params value");
-        }
-        const char ch = Peek();
-        if (ch == '"') {
-            ParamValue value;
-            value.type = ParamValue::Type::String;
-            value.stringValue = ParseString();
-            return value;
-        }
-        if (ch == '-' || std::isdigit(static_cast<unsigned char>(ch))) {
-            return ParseNumber();
-        }
-        if (ConsumeLiteral("true")) {
-            ParamValue value;
-            value.type = ParamValue::Type::Boolean;
-            value.boolValue = true;
-            return value;
-        }
-        if (ConsumeLiteral("false")) {
-            ParamValue value;
-            value.type = ParamValue::Type::Boolean;
-            value.boolValue = false;
-            return value;
-        }
-        if (ConsumeLiteral("null")) {
-            ParamValue value;
-            value.type = ParamValue::Type::Null;
-            return value;
-        }
-        ParamValue value;
-        value.type = ParamValue::Type::Other;
-        const auto start = pos_;
-        SkipValue();
-        value.rawJson = std::string(text_.substr(start, pos_ - start));
-        return value;
-    }
-
-    void Finish() {
-        SkipWhitespace();
-        if (!AtEnd()) {
-            throw std::invalid_argument("params contained trailing JSON");
-        }
-    }
-
-    std::string_view text_;
-    std::size_t pos_ = 0u;
-};
-
-using Params = std::unordered_map<std::string, ParamValue>;
-
-Params ParseParams(std::string_view paramsJson) {
-    return FlatJsonParamsParser(paramsJson.empty() ? "{}" : paramsJson).Parse();
-}
-
-std::string GetStringParam(const Params& params, const std::string& key, std::string defaultValue = "") {
-    const auto found = params.find(key);
-    if (found == params.end() || found->second.type == ParamValue::Type::Null) {
-        return defaultValue;
-    }
-    if (found->second.type != ParamValue::Type::String) {
-        throw std::invalid_argument(key + " must be a string");
-    }
-    return found->second.stringValue;
-}
-
-double GetNumberParam(const Params& params, const std::string& key, double defaultValue) {
-    const auto found = params.find(key);
-    if (found == params.end() || found->second.type == ParamValue::Type::Null) {
-        return defaultValue;
-    }
-    if (found->second.type != ParamValue::Type::Number) {
-        throw std::invalid_argument(key + " must be a number");
-    }
-    return found->second.numberValue;
-}
-
-double GetFiniteNumberParam(const Params& params, const std::string& key, double defaultValue) {
-    const double value = GetNumberParam(params, key, defaultValue);
-    if (!std::isfinite(value)) {
-        throw std::invalid_argument(key + " must be a finite number");
-    }
-    return value;
-}
-
-bool GetBoolParam(const Params& params, const std::string& key, bool defaultValue = false) {
-    const auto found = params.find(key);
-    if (found == params.end() || found->second.type == ParamValue::Type::Null) {
-        return defaultValue;
-    }
-    if (found->second.type != ParamValue::Type::Boolean) {
-        throw std::invalid_argument(key + " must be a boolean");
-    }
-    return found->second.boolValue;
-}
-
-std::string GetRawJsonParam(const Params& params, const std::string& key, std::string defaultValue = "") {
-    const auto found = params.find(key);
-    if (found == params.end() || found->second.type == ParamValue::Type::Null) {
-        return defaultValue;
-    }
-    if (found->second.type != ParamValue::Type::Other || found->second.rawJson.empty()) {
-        throw std::invalid_argument(key + " must be an object or array");
-    }
-    return found->second.rawJson;
-}
-
-std::string TrimCopy(std::string value) {
-    auto first = value.begin();
-    while (first != value.end() && std::isspace(static_cast<unsigned char>(*first))) {
-        ++first;
-    }
-    auto last = value.end();
-    while (last != first && std::isspace(static_cast<unsigned char>(*(last - 1)))) {
-        --last;
-    }
-    return std::string(first, last);
-}
-
-bool TruthyEnvironmentFlag(const char* name) {
-    const char* raw = std::getenv(name);
-    if (!raw) {
-        return false;
-    }
-    std::string value = ToLower(TrimCopy(raw));
-    return value == "1" || value == "true" || value == "yes" || value == "on";
-}
-
-std::string DefaultAuthTokenPath() {
-    if (const char* configured = std::getenv("VW_MCP_AUTH_TOKEN_FILE")) {
-        if (configured[0] != '\0') {
-            return configured;
-        }
-    }
-    if (const char* userProfile = std::getenv("USERPROFILE")) {
-        if (userProfile[0] != '\0') {
-            std::string path = userProfile;
-            if (!path.empty() && path.back() != '\\' && path.back() != '/') {
-                path += "\\";
-            }
-            path += ".vectorworks-mcp\\auth-token";
-            return path;
-        }
-    }
-    return "";
-}
-
-std::string ReadAuthTokenFile() {
-    const auto path = DefaultAuthTokenPath();
-    if (path.empty()) {
-        return "";
-    }
-    std::ifstream input(path);
-    if (!input) {
-        return "";
-    }
-    std::string token;
-    std::getline(input, token);
-    return TrimCopy(token);
-}
-
-int GetBoundedIntParam(
-    const Params& params,
-    const std::string& key,
-    int defaultValue,
-    int minValue,
-    int maxValue) {
-    const auto found = params.find(key);
-    if (found == params.end() || found->second.type == ParamValue::Type::Null) {
-        return defaultValue;
-    }
-    if (found->second.type != ParamValue::Type::Number) {
-        throw std::invalid_argument(key + " must be an integer");
-    }
-    const double raw = found->second.numberValue;
-    if (raw < static_cast<double>(std::numeric_limits<int>::min()) ||
-        raw > static_cast<double>(std::numeric_limits<int>::max()) ||
-        raw != static_cast<double>(static_cast<int>(raw))) {
-        throw std::invalid_argument(key + " must be an integer");
-    }
-    const int value = static_cast<int>(raw);
-    if (value < minValue) {
-        throw std::invalid_argument(key + " must be >= " + std::to_string(minValue));
-    }
-    if (value > maxValue) {
-        throw std::invalid_argument(key + " must be <= " + std::to_string(maxValue));
-    }
-    return value;
-}
-
-int GetRequiredBoundedIntParam(
-    const Params& params,
-    const std::string& key,
-    int minValue,
-    int maxValue) {
-    const auto found = params.find(key);
-    if (found == params.end() || found->second.type == ParamValue::Type::Null) {
-        throw std::invalid_argument(key + " is required");
-    }
-    return GetBoundedIntParam(params, key, minValue, minValue, maxValue);
-}
-
-NativeTransportOptions GetTransportOptionsFromEnvironment() {
-    NativeTransportOptions options;
-    if (const char* host = std::getenv("VW_MCP_HOST")) {
-        if (host[0] != '\0') {
-            options.host = host;
-        }
-    }
-    if (const char* port = std::getenv("VW_MCP_PORT")) {
-        try {
-            const auto parsed = std::stoul(port);
-            if (parsed <= 65535u) {
-                options.port = static_cast<std::uint16_t>(parsed);
-            }
-        } catch (...) {
-            // Keep the default port when the environment is malformed.
-        }
-    }
-    return options;
-}
-
-void AppendTransportStartupDiagnostic(
-    const std::string& state,
-    const std::string& detail) noexcept {
-    try {
-        const char* userProfile = std::getenv("USERPROFILE");
-        if (!userProfile || userProfile[0] == '\0') {
-            return;
-        }
-        std::string path = userProfile;
-        if (!path.empty() && path.back() != '\\' && path.back() != '/') {
-            path += "\\";
-        }
-        path += ".vectorworks-mcp\\native-bridge-startup.log";
-        std::ofstream output(path, std::ios::app);
-        if (output) {
-            output << state << ": " << detail << '\n';
-        }
-    } catch (...) {
-    }
-}
-
-std::string RequiredAuthTokenFromEnvironment() {
-    if (const char* token = std::getenv("VW_MCP_AUTH_TOKEN")) {
-        if (token[0] != '\0') {
-            return token;
-        }
-    }
-    return ReadAuthTokenFile();
-}
-
-bool RequestAuthAccepted(const Protocol::RequestEnvelope& request) {
-    if (TruthyEnvironmentFlag("VW_MCP_INSECURE_NO_AUTH")) {
-        return true;
-    }
-    const std::string requiredToken = RequiredAuthTokenFromEnvironment();
-    return !requiredToken.empty() && request.authToken == requiredToken;
-}
-
-Protocol::ResponseEnvelope HandlePingOnTransportThread(const Protocol::RequestEnvelope& request) {
-#if VECTORWORKS_MCP_HAS_SDK
-    const bool ready = CadHandlersRuntimeReady();
-    std::string payload = R"({"pong":true,"version":"native-sdk-bridge-phase4","bridge_kind":"native_sdk_bridge_phase4","dispatch_mode":"native_sdk","handlers":)";
-    payload += std::to_string(ImplementedActionCount(true));
-    payload += ",\"cad_api_safe\":";
-    payload += ready ? "true" : "false";
-    payload += ",\"transport_only\":";
-    payload += ready ? "false" : "true";
-    payload += R"(,"native_bridge":true,"native_phase":4)";
-    payload += ",\"capability_revision\":" + std::to_string(kCapabilityRevision);
-    payload += ",\"capability_fingerprint\":";
-    payload += JsonString(CapabilityFingerprint(true));
-    payload += ",\"bridge_session_id\":";
-    payload += JsonString(Documentation::BridgeSessionId());
-    payload += ",\"implemented_actions\":";
-    payload += ImplementedActionsJson(true);
-    payload += ",\"create_object_types\":";
-    payload += CreateObjectTypesJson(true);
-    payload += ",\"object_read_features\":";
-    payload += ObjectReadFeaturesJson(true);
-    payload += ",\"cad_handlers_implemented\":true";
-    payload += ",\"main_context_pump\":";
-    payload += JsonString(MainContextPumpName());
-    payload += ",\"main_context_pump_ready\":";
-    payload += ready ? "true" : "false";
-    payload += R"(,"dispatch_wakeup":"win32_message","pump_watchdog_ms":50,"pump_budget_ms":8)";
-    const std::int64_t lastPumpTick = gLastMainContextPumpTickMs.load();
-    if (ready && lastPumpTick > 0) {
-        const std::int64_t idleMs = SteadyClockMilliseconds() - lastPumpTick;
-        payload += ",\"main_context_idle_ms\":";
-        payload += std::to_string(idleMs < 0 ? 0 : idleMs);
-    }
-    payload += "}";
-    return {
-        request.id,
-        true,
-        payload,
-        "",
-    };
-#else
-    std::string payload = R"({"pong":true,"version":"native-scaffold-phase0","bridge_kind":"native_sdk_bridge_scaffold","dispatch_mode":"native_sdk","handlers":)";
-    payload += std::to_string(ImplementedActionCount(false));
-    payload += R"(,"cad_api_safe":false,"transport_only":true,"native_bridge":true,"native_phase":0,"implemented_actions":)";
-    payload += ImplementedActionsJson(false);
-    payload += ",\"capability_revision\":" + std::to_string(kCapabilityRevision);
-    payload += ",\"capability_fingerprint\":";
-    payload += JsonString(CapabilityFingerprint(false));
-    payload += ",\"create_object_types\":";
-    payload += CreateObjectTypesJson(false);
-    payload += ",\"object_read_features\":";
-    payload += ObjectReadFeaturesJson(false);
-    payload += R"(,"cad_handlers_implemented":false})";
-    return {
-        request.id,
-        true,
-        payload,
-        "",
-    };
-#endif
-}
-
-Protocol::ResponseEnvelope HandleCapabilitiesOnTransportThread(const Protocol::RequestEnvelope& request) {
-    return {
-        request.id,
-        true,
-        CapabilitiesResultJson(VECTORWORKS_MCP_HAS_SDK != 0),
-        "",
-    };
 }
 
 #if VECTORWORKS_MCP_HAS_SDK
@@ -973,21 +68,12 @@ std::string TxToUtf8(const TXString& value) {
     return value.GetStdString();
 }
 
-std::unordered_set<std::string> gKnownObjectHandleIds;
 constexpr std::size_t kMaxPropertyValueChars = 1024;
 
-std::string HandleIdFromRaw(std::uintptr_t raw) {
-    std::ostringstream out;
-    out << "0x" << std::hex << raw;
-    return out.str();
-}
-
+// 1.0 (C1): handle ids are opaque table keys {handle_id -> uuid, document};
+// raw MCObjectHandle values are never parsed back from client input.
 std::string HandleId(MCObjectHandle handle) {
-    const auto id = HandleIdFromRaw(reinterpret_cast<std::uintptr_t>(handle));
-    if (handle) {
-        gKnownObjectHandleIds.insert(id);
-    }
-    return id;
+    return Handles::IdFor(handle);
 }
 
 std::string ObjectUuidString(MCObjectHandle handle) {
@@ -1783,8 +869,13 @@ std::string HandleQueryObjects(const Params& params) {
     const std::string mode = GetStringParam(params, "mode", "objects");
     const std::string layerName = GetStringParam(params, "layer");
     const std::string objectType = GetStringParam(params, "object_type");
-    if (mode != "objects" && mode != "criteria" && mode != "selection")
-        throw std::invalid_argument("query mode must be objects, criteria, or selection");
+    // v2: mode "uuids" (implicit when uuids/uuid is given) resolves exact
+    // UUIDs directly with GetObjectByUuid (no document scan).
+    std::vector<std::string> uuidFilter = GetStringListParam(params, "uuids");
+    if (HasParam(params, "uuid")) uuidFilter.push_back(GetStringParam(params, "uuid"));
+    const std::string effectiveMode = !uuidFilter.empty() ? std::string("uuids") : mode;
+    if (effectiveMode != "objects" && effectiveMode != "criteria" && effectiveMode != "selection" && effectiveMode != "uuids")
+        throw std::invalid_argument("query mode must be objects, criteria, selection, or uuids");
     MCObjectHandle layer = layerName.empty() ? nullptr : FindLayerByName(layerName);
     if (!layerName.empty() && !layer) throw std::invalid_argument("layer filter was not found");
     std::set<std::string> fields;
@@ -1808,7 +899,20 @@ std::string HandleQueryObjects(const Params& params) {
         if (page.size() == static_cast<std::size_t>(limit)) { hasMore = true; return; }
         page.push_back(object);
     };
-    if (mode == "criteria") {
+    std::vector<std::string> missingUuids;
+    if (effectiveMode == "uuids") {
+        for (std::string uuid : uuidFilter) {
+            uuid = TrimCopy(uuid);
+            if (uuid.rfind("uuid:", 0u) == 0u) uuid = uuid.substr(5);
+            if (uuid.empty()) continue;
+            MCObjectHandle object = gSDK->GetObjectByUuid(TXString(uuid.c_str()));
+            if (!object) {
+                missingUuids.push_back(uuid);
+                continue;
+            }
+            collect(object);
+        }
+    } else if (mode == "criteria") {
         const auto criteria = GetStringParam(params, "criteria", "ALL");
         const auto name = ExactNameFromCriteria(criteria);
         if (name) collect(gSDK->GetNamedObject(TXString(name->c_str())));
@@ -1825,13 +929,27 @@ std::string HandleQueryObjects(const Params& params) {
             if (hasMore) break;
         }
     }
+    const std::size_t maxBytes = static_cast<std::size_t>(
+        GetClampedIntParam(params, "max_bytes", 8 * 1024 * 1024, 64 * 1024, 14 * 1024 * 1024));
     std::string json = "{\"items\":[";
+    std::size_t emitted = 0;
     for (std::size_t index = 0; index < page.size(); ++index) {
-        if (index) json += ",";
-        json += ObjectJson(page[index], fields.empty() ? nullptr : &fields);
+        std::string item = ObjectJson(page[index], fields.empty() ? nullptr : &fields);
+        if (emitted > 0 && json.size() + item.size() + 1024u > maxBytes) {
+            hasMore = true;
+            break;
+        }
+        if (emitted) json += ",";
+        json += item;
+        ++emitted;
     }
     json += "],\"has_more\":" + std::string(hasMore ? "true" : "false");
     json += ",\"offset\":" + std::to_string(offset);
+    json += ",\"returned\":" + std::to_string(emitted);
+    json += ",\"next_offset\":" + std::to_string(offset + static_cast<int>(emitted));
+    if (effectiveMode == "uuids") {
+        json += ",\"missing_uuids\":" + JsonStringArray(missingUuids);
+    }
     json += ",\"binding\":" + Documentation::DocumentBindingJson(binding) + "}";
     return json;
 }
@@ -1914,7 +1032,8 @@ std::string HandleSelection(const Params& params) {
                 if (!gSDK->AddBeforeSwapObject(object)) {
                     throw std::runtime_error("Vectorworks failed to register an object before selection deletion");
                 }
-                gSDK->DeleteObject(object, true);
+                // AddBeforeSwapObject already registered the undo state (M2).
+                gSDK->DeleteObject(object, false);
                 ++deleted;
             }
             EndUndoEventOrThrow("selection deletion");
@@ -2150,8 +1269,6 @@ std::string HandleDescribeParametricSchema(const Params& params) {
     return ParametricDescriptorJson(DescribeParametricDefinition(pluginName));
 }
 
-std::string JsonStringArray(const std::vector<std::string>& values);
-
 std::string NativeIOLayerSnapshotJson(const NativeIO::LayerSnapshot& layer) {
     return "{\"uuid\":" + JsonString(layer.uuid) +
         ",\"name\":" + JsonString(layer.name) +
@@ -2203,7 +1320,7 @@ std::string NativeIOResultJson(const NativeIO::Result& result) {
 
 NativeIO::OutputTarget ParseOutputTarget(const Params& params) {
     NativeIO::OutputTarget output;
-    output.absolutePath = GetStringParam(params, "file_path");
+    output.absolutePath = GetStringParam(params, "file_path", GetStringParam(params, "path"));
     const bool replace = GetBoolParam(params, "replace", false);
     output.overwritePolicy = replace
         ? NativeIO::OverwritePolicy::Replace
@@ -2213,31 +1330,17 @@ NativeIO::OutputTarget ParseOutputTarget(const Params& params) {
 }
 
 std::string HandleNativeIO(const std::string& action, const Params& params) {
-    if (action == "export_image" || action == "capture_view") {
-        if (action == "capture_view" &&
-            (GetBoolParam(params, "fit_to_objects", false) ||
-             GetBoolParam(params, "clear_selection", false))) {
-            ViewDocument::SetViewRequest viewRequest;
-            viewRequest.fitToObjects = GetBoolParam(params, "fit_to_objects", false);
-            viewRequest.clearSelection = GetBoolParam(params, "clear_selection", false);
-            ViewDocument::SetView(viewRequest);
-        }
-        NativeIO::ImageExportRequest request;
-        request.output = ParseOutputTarget(params);
-        request.updateViewports = GetBoolParam(params, "update_viewports", true);
-        request.resetPlugInObjects = GetBoolParam(params, "reset_plugin_objects", true);
-        request.exportGeoreferencing = GetBoolParam(params, "export_georeferencing", false);
-        return NativeIOResultJson(action == "capture_view"
-            ? NativeIO::CaptureView(request)
-            : NativeIO::ExportImage(request));
-    }
     if (action == "export_pdf") {
         NativeIO::PDFExportRequest request;
         request.output = ParseOutputTarget(params);
         request.currentViewOnly = GetBoolParam(params, "current_view_only", false);
-        request.resolutionDpi = GetBoundedIntParam(params, "resolution_dpi", 300, 72, 2400);
-        request.updateViewports = GetBoolParam(params, "update_viewports", true);
-        request.resetPlugInObjects = GetBoolParam(params, "reset_plugin_objects", true);
+        request.range = GetStringParam(params, "range");
+        request.sheet = GetStringParam(params, "sheet");
+        request.resolutionDpi = HasParam(params, "dpi")
+            ? GetBoundedIntParam(params, "dpi", 300, 72, 2400)
+            : GetBoundedIntParam(params, "resolution_dpi", 300, 72, 2400);
+        request.updateViewports = GetBoolParam(params, "update_viewports", false);
+        request.resetPlugInObjects = GetBoolParam(params, "reset_plugin_objects", false);
         request.recalculateWorksheets = GetBoolParam(params, "recalculate_worksheets", true);
         return NativeIOResultJson(NativeIO::ExportPDF(request));
     }
@@ -2250,64 +1353,134 @@ std::string HandleNativeIO(const std::string& action, const Params& params) {
     }
     if (action == "import_dwg") {
         NativeIO::DWGImportRequest request;
-        request.absolutePath = GetStringParam(params, "file_path");
+        request.absolutePath = GetStringParam(params, "file_path", GetStringParam(params, "path"));
         return NativeIOResultJson(NativeIO::ImportDWG(request));
     }
     if (action == "export_dwg") {
         NativeIO::DWGExportRequest request;
         request.output = ParseOutputTarget(params);
-        request.updateViewports = GetBoolParam(params, "update_viewports", true);
-        request.resetPlugInObjects = GetBoolParam(params, "reset_plugin_objects", true);
+        request.updateViewports = GetBoolParam(params, "update_viewports", false);
+        request.resetPlugInObjects = GetBoolParam(params, "reset_plugin_objects", false);
         request.recalculateWorksheets = GetBoolParam(params, "recalculate_worksheets", true);
         return NativeIOResultJson(NativeIO::ExportDWG(request));
+    }
+    if (action == "export_ifc") {
+        NativeIO::IFCRequest request;
+        request.output = ParseOutputTarget(params);
+        return NativeIOResultJson(NativeIO::ExportIFC(request));
+    }
+    if (action == "import_ifc") {
+        NativeIO::IFCRequest request;
+        request.absolutePath = GetStringParam(params, "file_path", GetStringParam(params, "path"));
+        return NativeIOResultJson(NativeIO::ImportIFC(request));
     }
     throw std::invalid_argument("unsupported native I/O action: " + action);
 }
 
+struct PageSpec {
+    std::size_t offset = 0;
+    std::size_t limit = 5000;
+};
+
+PageSpec ParsePage(const Params& params) {
+    PageSpec page;
+    std::string cursor = HasParam(params, "cursor") ? GetStringParam(params, "cursor") : std::string();
+    int offset = GetClampedIntParam(params, "offset", 0, 0, 100000000);
+    if (!cursor.empty()) {
+        try {
+            offset = std::max(0, std::stoi(cursor));
+        } catch (...) {
+            throw std::invalid_argument("cursor must be a next_cursor value returned by a previous page");
+        }
+    }
+    page.offset = static_cast<std::size_t>(offset);
+    page.limit = static_cast<std::size_t>(GetClampedIntParam(params, "limit", 5000, 1, 20000));
+    return page;
+}
+
+std::string PageTail(const PageSpec& page, std::size_t total, std::size_t returned) {
+    const bool hasMore = page.offset + returned < total;
+    return ",\"total\":" + std::to_string(total) + ",\"offset\":" + std::to_string(page.offset) +
+        ",\"has_more\":" + (hasMore ? "true" : "false") +
+        ",\"next_cursor\":" + (hasMore ? JsonString(std::to_string(page.offset + returned)) : std::string("null"));
+}
+
 std::string ResourceRecordsJson(
     const std::vector<ResourceWorksheets::ResourceRecord>& records,
-    const std::string& query) {
+    const std::string& query,
+    const PageSpec& page = PageSpec{},
+    std::size_t* totalOut = nullptr,
+    std::size_t* returnedOut = nullptr) {
     const std::string lowerQuery = ToLower(query);
     std::string json = "[";
-    bool first = true;
+    std::size_t matched = 0;
+    std::size_t returned = 0;
     for (const auto& record : records) {
         if (!lowerQuery.empty() && ToLower(record.name).find(lowerQuery) == std::string::npos) {
             continue;
         }
-        if (!first) json += ",";
-        first = false;
+        const std::size_t position = matched++;
+        if (position < page.offset || returned >= page.limit) continue;
+        if (returned) json += ",";
+        ++returned;
         json += "{\"name\":" + JsonString(record.name) +
             ",\"native_node_type\":" + std::to_string(record.actualNodeType) + "}";
     }
     json += "]";
+    if (totalOut) *totalOut = matched;
+    if (returnedOut) *returnedOut = returned;
+    return json;
+}
+
+std::string WorksheetListJson(const Params& params, bool includeNodeType, std::size_t* totalOut, std::size_t* returnedOut) {
+    const PageSpec page = ParsePage(params);
+    const std::string query = ToLower(GetStringParam(params, "query"));
+    const auto worksheets = ResourceWorksheets::ListWorksheets(*gSDK);
+    std::string json = "[";
+    std::size_t matched = 0;
+    std::size_t returned = 0;
+    for (const auto& worksheet : worksheets) {
+        if (!query.empty() && ToLower(worksheet.name).find(query) == std::string::npos) continue;
+        const std::size_t position = matched++;
+        if (position < page.offset || returned >= page.limit) continue;
+        if (returned) json += ",";
+        ++returned;
+        json += "{\"name\":" + JsonString(worksheet.name) +
+            ",\"rows\":" + std::to_string(worksheet.rowCount) +
+            ",\"columns\":" + std::to_string(worksheet.columnCount);
+        if (includeNodeType) json += ",\"native_node_type\":" + std::to_string(worksheet.actualNodeType);
+        json += "}";
+    }
+    json += "]";
+    if (totalOut) *totalOut = matched;
+    if (returnedOut) *returnedOut = returned;
     return json;
 }
 
 std::string HandleResources(const Params& params) {
-    const std::string query = GetStringParam(params, "query");
+    const PageSpec page = ParsePage(params);
+    std::size_t symbolTotal = 0, symbolReturned = 0, worksheetTotal = 0, worksheetReturned = 0;
     std::string json = "{\"symbols\":" + ResourceRecordsJson(
-        ResourceWorksheets::ListSymbolDefinitions(*gSDK), query);
-    const auto worksheets = ResourceWorksheets::ListWorksheets(*gSDK);
-    json += ",\"worksheets\":[";
-    bool first = true;
-    for (const auto& worksheet : worksheets) {
-        if (!query.empty() && ToLower(worksheet.name).find(ToLower(query)) == std::string::npos) continue;
-        if (!first) json += ",";
-        first = false;
-        json += "{\"name\":" + JsonString(worksheet.name) +
-            ",\"rows\":" + std::to_string(worksheet.rowCount) +
-            ",\"columns\":" + std::to_string(worksheet.columnCount) +
-            ",\"native_node_type\":" + std::to_string(worksheet.actualNodeType) + "}";
-    }
-    json += "]}";
+        ResourceWorksheets::ListSymbolDefinitions(*gSDK), GetStringParam(params, "query"), page,
+        &symbolTotal, &symbolReturned);
+    json += ",\"worksheets\":" + WorksheetListJson(params, true, &worksheetTotal, &worksheetReturned);
+    const std::size_t total = std::max(symbolTotal, worksheetTotal);
+    const std::size_t returned = std::max(symbolReturned, worksheetReturned);
+    json += ",\"symbols_total\":" + std::to_string(symbolTotal);
+    json += ",\"worksheets_total\":" + std::to_string(worksheetTotal);
+    json += PageTail(page, total, returned);
+    json += "}";
     return json;
 }
 
 std::string HandleSymbol(const Params& params) {
     const std::string action = ToLower(GetStringParam(params, "action", "list"));
     if (action == "list") {
-        return "{\"symbols\":" + ResourceRecordsJson(
-            ResourceWorksheets::ListSymbolDefinitions(*gSDK), GetStringParam(params, "query")) + "}";
+        const PageSpec page = ParsePage(params);
+        std::size_t total = 0, returned = 0;
+        std::string json = "{\"symbols\":" + ResourceRecordsJson(
+            ResourceWorksheets::ListSymbolDefinitions(*gSDK), GetStringParam(params, "query"), page, &total, &returned);
+        return json + PageTail(page, total, returned) + "}";
     }
     if (action == "insert") {
         ResourceWorksheets::SymbolInsertionRequest request;
@@ -2367,19 +1540,10 @@ std::string WorksheetCellJson(const ResourceWorksheets::WorksheetCellSnapshot& c
 std::string HandleWorksheet(const Params& params) {
     const std::string action = ToLower(GetStringParam(params, "action", "list"));
     if (action == "list") {
-        const std::string query = ToLower(GetStringParam(params, "query"));
-        const auto worksheets = ResourceWorksheets::ListWorksheets(*gSDK);
-        std::string json = "{\"worksheets\":[";
-        bool first = true;
-        for (const auto& worksheet : worksheets) {
-            if (!query.empty() && ToLower(worksheet.name).find(query) == std::string::npos) continue;
-            if (!first) json += ",";
-            first = false;
-            json += "{\"name\":" + JsonString(worksheet.name) +
-                ",\"rows\":" + std::to_string(worksheet.rowCount) +
-                ",\"columns\":" + std::to_string(worksheet.columnCount) + "}";
-        }
-        return json + "]}";
+        const PageSpec page = ParsePage(params);
+        std::size_t total = 0, returned = 0;
+        std::string json = "{\"worksheets\":" + WorksheetListJson(params, false, &total, &returned);
+        return json + PageTail(page, total, returned) + "}";
     }
     const std::string worksheetName = GetStringParam(params, "worksheet_name");
     const int row = GetRequiredBoundedIntParam(params, "row", 1, 32767);
@@ -2421,60 +1585,6 @@ std::string HandleWorksheet(const Params& params) {
     throw std::invalid_argument("worksheet.action must be list, read, or write");
 }
 
-std::string ViewStateJson(const ViewDocument::ViewState& state) {
-    return "{\"standard_view\":" + std::to_string(state.standardView) +
-        ",\"projection\":" + std::to_string(state.projection) +
-        ",\"render_mode\":" + std::to_string(state.renderMode) +
-        ",\"fit_to_objects_applied\":" + (state.fitToObjectsApplied ? "true" : "false") +
-        ",\"selection_cleared\":" + (state.selectionCleared ? "true" : "false") + "}";
-}
-
-std::string HandleView(const std::string& action, const Params& params) {
-    if (action == "get_view") return ViewStateJson(ViewDocument::GetView());
-    ViewDocument::SetViewRequest request;
-    request.setStandardView = params.find("standard_view") != params.end();
-    request.standardView = static_cast<short>(GetBoundedIntParam(params, "standard_view", 0, 0, 16));
-    request.setProjection = params.find("projection") != params.end();
-    request.projection = static_cast<short>(GetBoundedIntParam(params, "projection", 0, 0, 6));
-    request.setRenderMode = params.find("render_mode") != params.end();
-    request.renderMode = static_cast<short>(GetBoundedIntParam(params, "render_mode", 0, 0, 15));
-    request.fitToObjects = GetBoolParam(params, "fit_to_objects", false);
-    request.clearSelection = GetBoolParam(params, "clear_selection", false);
-    return ViewStateJson(ViewDocument::SetView(request));
-}
-
-std::string HandleDocumentLifecycle(
-    const std::string& action,
-    const Params& params,
-    const std::string& requestId) {
-    ViewDocument::DocumentResult result;
-    if (action == "save_document") {
-        result = ViewDocument::SaveDocument(
-            GetStringParam(params, "file_path"), GetStringParam(params, "replace_confirmation"));
-    } else if (action == "open_document") {
-        auto prepared = ViewDocument::PrepareOpenDocument(
-            GetStringParam(params, "file_path"), GetStringParam(params, "replace_dirty_confirmation"));
-        const std::string requestedPath = prepared.canonicalPath;
-        StageDeferredDocumentOpen(requestId, std::move(prepared));
-        result = {
-            "open_document",
-            requestedPath,
-            false,
-            requestedPath,
-            "",
-            ViewDocument::CommitState::Accepted,
-        };
-    } else {
-        throw std::invalid_argument("unsupported document lifecycle action: " + action);
-    }
-    return "{\"operation\":" + JsonString(result.operation) +
-        ",\"path\":" + JsonString(result.canonicalPath) +
-        ",\"saved\":" + (result.saved ? "true" : "false") +
-        ",\"requested_path\":" + JsonString(result.requestedPath) +
-        ",\"active_path\":" + JsonString(result.activePath) +
-        ",\"commit_state\":" + JsonString(ViewDocument::CommitStateName(result.commitState)) + "}";
-}
-
 std::string CanonicalCreateObjectType(std::string objectType) {
     objectType = ToLower(objectType);
     if (objectType == "rectangle" || objectType == "box") {
@@ -2487,10 +1597,6 @@ std::string CanonicalCreateObjectType(std::string objectType) {
         return "polygon";
     }
     return objectType;
-}
-
-bool HasParam(const Params& params, const std::string& key) {
-    return params.find(key) != params.end();
 }
 
 double GetFiniteNumberParamAlias(
@@ -2509,18 +1615,6 @@ double RequirePositiveNumber(double value, const std::string& label) {
         throw std::invalid_argument(label + " must be > 0");
     }
     return value;
-}
-
-std::string JsonStringArray(const std::vector<std::string>& values) {
-    std::string json = "[";
-    for (std::size_t index = 0; index < values.size(); ++index) {
-        if (index != 0u) {
-            json += ",";
-        }
-        json += JsonString(values[index]);
-    }
-    json += "]";
-    return json;
 }
 
 void ValidatePrimitiveSpec(const PrimitiveSpec& spec, const std::string& label) {
@@ -2897,11 +1991,41 @@ void ApplyWallStyleIfRequested(MCObjectHandle wall, const PrimitiveSpec& spec, s
     }
 }
 
+using LocalObjectMap = std::unordered_map<std::string, MCObjectHandle>;
+
+// Resolves the host wall of a door/window/hosted parametric: an exact UUID
+// (optionally "uuid:"-prefixed) or, inside apply_operations, "$<local_ref>" of
+// a wall created earlier in the same transaction (one undo step).
+MCObjectHandle ResolveHostWall(const std::string& reference, const LocalObjectMap* localObjects, bool& isLocal) {
+    isLocal = false;
+    std::string value = TrimCopy(reference);
+    MCObjectHandle wall = nullptr;
+    if (!value.empty() && value.front() == '$') {
+        if (!localObjects) {
+            throw std::invalid_argument("wall_uuid $local_ref is only supported inside apply_operations");
+        }
+        const auto found = localObjects->find(value.substr(1));
+        if (found == localObjects->end() || !found->second) {
+            throw std::invalid_argument("wall_uuid references an unknown local_ref: " + value);
+        }
+        wall = found->second;
+        isLocal = true;
+    } else {
+        if (value.rfind("uuid:", 0u) == 0u) value = value.substr(5);
+        wall = gSDK->GetObjectByUuid(TXString(value.c_str()));
+    }
+    if (!wall || gSDK->GetObjectTypeN(wall) != kWallNode) {
+        throw std::invalid_argument("host wall was not found or is not a wall: " + reference);
+    }
+    return wall;
+}
+
 MCObjectHandle CreatePrimitiveFromSpec(
     const PrimitiveSpec& spec,
     Transactions::NativeTransaction& transaction,
     Transactions::ArtifactId* transactionArtifact,
-    std::vector<std::string>* warnings = nullptr) {
+    std::vector<std::string>* warnings = nullptr,
+    const LocalObjectMap* localObjects = nullptr) {
     EnsureWritableLayer();
 
     MCObjectHandle object = nullptr;
@@ -2970,12 +2094,14 @@ MCObjectHandle CreatePrimitiveFromSpec(
         object = receipt.object;
         adoptedArtifact = receipt.transactionArtifact;
     } else if (spec.objectType == "door" || spec.objectType == "window") {
-        MCObjectHandle wall = gSDK->GetObjectByUuid(TXString(spec.wallUuid.c_str()));
-        if (!wall || gSDK->GetObjectTypeN(wall) != kWallNode) {
-            throw std::invalid_argument("host wall UUID was not found or is not a wall");
+        bool wallIsLocal = false;
+        MCObjectHandle wall = ResolveHostWall(spec.wallUuid, localObjects, wallIsLocal);
+        // A wall created earlier in this transaction is already an owned
+        // artifact; its final state is registered at commit.
+        std::optional<Transactions::ExternalMutationId> wallMutation;
+        if (!wallIsLocal) {
+            wallMutation = transaction.TrackExternalBefore(wall, Transactions::ObjectFamily::Wall);
         }
-        const auto wallMutation = transaction.TrackExternalBefore(
-            wall, Transactions::ObjectFamily::Wall);
         BuiltInOpeningCreateSpec request;
         request.kind = spec.objectType == "door"
             ? BuiltInParametricKind::Door
@@ -3001,17 +2127,19 @@ MCObjectHandle CreatePrimitiveFromSpec(
                 VerifyBuiltInOpeningReceipt(verifiedOpening, receipt);
             });
         openingGuard.Release();
-        transaction.TrackExternalAfter(wallMutation, wall);
+        if (wallMutation) {
+            transaction.TrackExternalAfter(*wallMutation, wall);
+        }
     } else if (spec.objectType == "parametric") {
         MCObjectHandle wall = nullptr;
         std::optional<Transactions::ExternalMutationId> wallMutation;
         if (spec.requireWallHost) {
-            wall = gSDK->GetObjectByUuid(TXString(spec.wallUuid.c_str()));
-            if (!wall || gSDK->GetObjectTypeN(wall) != kWallNode) {
-                throw std::invalid_argument("host wall UUID was not found or is not a wall");
+            bool wallIsLocal = false;
+            wall = ResolveHostWall(spec.wallUuid, localObjects, wallIsLocal);
+            if (!wallIsLocal) {
+                wallMutation = transaction.TrackExternalBefore(
+                    wall, Transactions::ObjectFamily::Wall);
             }
-            wallMutation = transaction.TrackExternalBefore(
-                wall, Transactions::ObjectFamily::Wall);
         }
         ParametricCreateSpec request;
         request.universalPluginName = spec.pluginName;
@@ -3025,8 +2153,9 @@ MCObjectHandle CreatePrimitiveFromSpec(
         object = CreateVerifiedParametricObject(request);
         if (wallMutation) {
             pendingExternalAfter = *wallMutation;
-            pendingExternalHandle = wall;
         }
+        // The commit verifier checks the exact host wall (local or external).
+        pendingExternalHandle = wall;
     } else if (spec.objectType == "symbol") {
         object = PlaceVerifiedSymbol({
             spec.symbolDefinitionName,
@@ -3369,25 +2498,9 @@ ColorRef ColorRefFromRgbString(const std::string& value) {
 }
 
 MCObjectHandle ObjectHandleFromSessionId(const std::string& handleId) {
-    const std::string value = TrimCopy(handleId);
-    if (value.empty()) {
-        throw std::invalid_argument("handle is required");
-    }
-    std::size_t parsedChars = 0u;
-    unsigned long long raw = 0u;
-    try {
-        raw = std::stoull(value, &parsedChars, 0);
-    } catch (...) {
-        throw std::invalid_argument("handle must be a session handle returned by get_objects");
-    }
-    if (parsedChars != value.size() || raw == 0u) {
-        throw std::invalid_argument("handle must be a session handle returned by get_objects");
-    }
-    const auto canonicalHandleId = HandleIdFromRaw(static_cast<std::uintptr_t>(raw));
-    if (gKnownObjectHandleIds.find(canonicalHandleId) == gKnownObjectHandleIds.end()) {
-        throw std::invalid_argument("handle was not returned by this native bridge session; resolve the object with get_objects first");
-    }
-    return reinterpret_cast<MCObjectHandle>(static_cast<std::uintptr_t>(raw));
+    // Throws BridgeError("stale_reference") for unknown, foreign-document or
+    // deleted objects.
+    return Handles::Resolve(handleId);
 }
 
 void ApplyObjectProperty(MCObjectHandle object, const std::string& propertyName, const std::string& value) {
@@ -3670,13 +2783,7 @@ std::string ActiveDocumentIdentity() {
     if (!gSDK || !gSDK->GetDrawingHeader()) {
         throw std::runtime_error("an active document is required for operation replay identity");
     }
-    const auto header = gSDK->GetDrawingHeader();
-    TXString headerUuid;
-    gSDK->GetObjectUuid(header, headerUuid);
-    std::ostringstream identity;
-    identity << Documentation::BridgeSessionId() << ":" << TxToUtf8(headerUuid)
-             << ":" << reinterpret_cast<std::uintptr_t>(header);
-    return identity.str();
+    return Documentation::BridgeSessionId() + ":" + Docs::ActiveFingerprint();
 }
 
 std::uint64_t ApplyOperationsFingerprint(const Params& params) {
@@ -3797,6 +2904,12 @@ std::vector<ApplyOperation> ParseApplyOperations(const Params& params) {
             ApplyOperation operation;
             operation.kind = ApplyOperationKind::Create;
             operation.primitive = ParsePrimitiveSpec(operationParams, label);
+            if (!operation.primitive.wallUuid.empty() && operation.primitive.wallUuid.front() == '$' &&
+                declaredLocalRefs.find(operation.primitive.wallUuid.substr(1)) == declaredLocalRefs.end()) {
+                throw std::invalid_argument(
+                    label + ".wall_uuid references a local_ref that is not declared earlier: " +
+                    operation.primitive.wallUuid);
+            }
             operation.localRef = GetStringParam(operationParams, "local_ref");
             if (operation.localRef.size() > kMaxApplyReferenceChars) {
                 throw std::invalid_argument(label + ".local_ref is too long");
@@ -4301,9 +3414,31 @@ std::string HandleApplyDocumentationOperations(const Params& params) {
         GetStringParam(params, "plan_hash"));
 }
 
+using NameIndex = std::unordered_map<std::string, std::vector<MCObjectHandle>>;
+
+// Builds a name -> objects index with one document traversal; used when an
+// apply_operations batch references several name: targets (M5).
+NameIndex BuildNameIndex() {
+    NameIndex index;
+    gSDK->ForEachObjectN(
+        allObjects + descendIntoAll + descendIntoViewports + descendIntoAuxLists,
+        [&](MCObjectHandle object) {
+            if (!object || !IsUserVisibleObjectType(gSDK->GetObjectTypeN(object))) {
+                return;
+            }
+            TXString objectName;
+            gSDK->GetObjectName(object, objectName);
+            if (!objectName.IsEmpty()) {
+                index[TxToUtf8(objectName)].push_back(object);
+            }
+        });
+    return index;
+}
+
 MCObjectHandle ResolveApplyOperationTarget(
     const std::string& target,
-    const std::unordered_map<std::string, MCObjectHandle>& localObjects) {
+    const std::unordered_map<std::string, MCObjectHandle>& localObjects,
+    const NameIndex* nameIndex = nullptr) {
     if (!target.empty() && target.front() == '$') {
         const auto found = localObjects.find(target.substr(1));
         if (found == localObjects.end() || !found->second) {
@@ -4330,18 +3465,15 @@ MCObjectHandle ResolveApplyOperationTarget(
             throw std::invalid_argument("name operation target is empty");
         }
         std::vector<MCObjectHandle> matches;
-        gSDK->ForEachObjectN(
-            allObjects + descendIntoAll + descendIntoViewports + descendIntoAuxLists,
-            [&](MCObjectHandle object) {
-                if (!object || !IsUserVisibleObjectType(gSDK->GetObjectTypeN(object))) {
-                    return;
-                }
-                TXString objectName;
-                gSDK->GetObjectName(object, objectName);
-                if (TxToUtf8(objectName) == name) {
-                    matches.push_back(object);
-                }
-            });
+        if (nameIndex) {
+            const auto found = nameIndex->find(name);
+            if (found != nameIndex->end()) matches = found->second;
+        } else {
+            MCObjectHandle named = gSDK->GetNamedObject(TXString(name.c_str()));
+            if (named && IsUserVisibleObjectType(gSDK->GetObjectTypeN(named))) {
+                matches.push_back(named);
+            }
+        }
         if (matches.empty()) {
             throw std::invalid_argument("name operation target was not found: " + name);
         }
@@ -4369,6 +3501,14 @@ PreparedApplyOperationTargets PrepareApplyOperationTargets(
     prepared.deleteUuids.resize(operations.size());
     const std::unordered_map<std::string, MCObjectHandle> noLocalObjects;
     std::unordered_set<MCObjectHandle> deletedTargets;
+    std::optional<NameIndex> nameIndex;
+    std::size_t nameTargets = 0;
+    for (const auto& operation : operations) {
+        if (operation.target.rfind("name:", 0u) == 0u) ++nameTargets;
+    }
+    if (nameTargets > 1u) {
+        nameIndex = BuildNameIndex();
+    }
 
     for (std::size_t index = 0; index < operations.size(); ++index) {
         const auto& operation = operations[index];
@@ -4382,7 +3522,8 @@ PreparedApplyOperationTargets PrepareApplyOperationTargets(
              !operation.target.empty() && operation.target.front() == '$')) {
             continue;
         }
-        MCObjectHandle object = ResolveApplyOperationTarget(operation.target, noLocalObjects);
+        MCObjectHandle object = ResolveApplyOperationTarget(
+            operation.target, noLocalObjects, nameIndex ? &*nameIndex : nullptr);
         if (!object || !IsUserVisibleObjectType(gSDK->GetObjectTypeN(object))) {
             throw std::invalid_argument(
                 "operation_" + std::to_string(index + 1u) + ".target is not a user-visible object");
@@ -4473,7 +3614,7 @@ std::string HandleApplyOperations(const Params& params) {
                 std::vector<std::string> warnings;
                 Transactions::ArtifactId artifact = 0;
                 MCObjectHandle object = CreatePrimitiveFromSpec(
-                    operation.primitive, transaction, &artifact, &warnings);
+                    operation.primitive, transaction, &artifact, &warnings, &localObjects);
                 createdHandles.insert(object);
                 if (!operation.localRef.empty()) {
                     localObjects.emplace(operation.localRef, object);
@@ -4711,7 +3852,8 @@ std::string HandleApplyOperations(const Params& params) {
                     localArtifacts.erase(artifactEntry);
                 } else {
                     uuid = preparedTargets.deleteUuids[index];
-                    gSDK->DeleteObject(object, true);
+                    // TrackExternalBefore registered AddBeforeSwapObject (M2).
+                    gSDK->DeleteObject(object, false);
                     if (gSDK->GetObjectByUuid(TXString(uuid.c_str())) != nullptr) {
                         throw std::runtime_error("Vectorworks did not delete the explicit object target");
                     }
@@ -4849,337 +3991,95 @@ std::string HandleBatchCreateObjects(const Params& params) {
     return json;
 }
 
-#endif
-
-Protocol::ResponseEnvelope DispatchCadRequestOnVectorworksMainContext(const Protocol::RequestEnvelope& request) {
-#if VECTORWORKS_MCP_HAS_SDK
-    try {
-        const Params params = ParseParams(request.paramsJson);
-        if (request.action == "query_objects") {
-            return {request.id, true, HandleQueryObjects(params), ""};
+std::optional<std::string> DispatchLegacy(const std::string& action, const Params& params) {
+    if (action == "query_objects") return HandleQueryObjects(params);
+    if (action == "transaction_status") {
+        if (params.find("expected_document_fingerprint") != params.end()) {
+            auto expected = ParseDocumentationTargetBinding(params);
+            expected.hasDirty = false;
+            Documentation::ValidateTargetBinding(*gSDK, expected);
         }
-        if (request.action == "transaction_status") {
-            if (params.find("expected_document_fingerprint") != params.end()) {
-                auto expected = ParseDocumentationTargetBinding(params);
-                expected.hasDirty = false;
-                Documentation::ValidateTargetBinding(*gSDK, expected);
-            }
-            const auto key = GetStringParam(params, "idempotency_key");
-            if (key.empty() || key.size() > kMaxApplyReferenceChars)
-                throw std::invalid_argument("idempotency_key is required and must be at most 128 characters");
-            const auto identity = ActiveDocumentIdentity();
-            for (const auto& entry : gApplyOperationsCache) {
-                if (entry.idempotencyKey == key && entry.documentIdentity == identity)
-                    return {request.id, true, "{\"state\":\"committed\",\"recorded_result\":" +
-                        entry.transactionJson + ",\"current_objects_verified\":false}", ""};
-            }
-            return {request.id, true, R"({"state":"unknown","retry_safe":false,"reason":"No retained receipt for this key in the active document and bridge session."})", ""};
+        const auto key = GetStringParam(params, "idempotency_key");
+        if (key.empty() || key.size() > kMaxApplyReferenceChars)
+            throw std::invalid_argument("idempotency_key is required and must be at most 128 characters");
+        const auto identity = ActiveDocumentIdentity();
+        for (const auto& entry : gApplyOperationsCache) {
+            if (entry.idempotencyKey == key && entry.documentIdentity == identity)
+                return "{\"state\":\"committed\",\"recorded_result\":" +
+                    entry.transactionJson + ",\"current_objects_verified\":false}";
         }
-        if (request.action == "get_document_info") {
-            return {request.id, true, HandleGetDocumentInfo(), ""};
-        }
-        if (request.action == "describe_parametric_schema") {
-            return {request.id, true, HandleDescribeParametricSchema(params), ""};
-        }
-        if (request.action == "export_image" || request.action == "capture_view" ||
-            request.action == "export_pdf" || request.action == "export_vectorworks_document" ||
-            request.action == "import_dwg" || request.action == "export_dwg") {
-            const bool hasTargetBinding = params.find("expected_document_fingerprint") != params.end();
-            if (hasTargetBinding) {
-                Documentation::ValidateTargetBinding(*gSDK, ParseDocumentationTargetBinding(params));
-            }
-            const std::string result = HandleNativeIO(request.action, params);
-            if (hasTargetBinding) {
-                Documentation::ValidateTargetBinding(*gSDK, ParseDocumentationTargetBinding(params));
-            }
-            return {request.id, true, result, ""};
-        }
-        if (request.action == "resources") {
-            return {request.id, true, HandleResources(params), ""};
-        }
-        if (request.action == "symbol") {
-            return {request.id, true, HandleSymbol(params), ""};
-        }
-        if (request.action == "worksheet") {
-            return {request.id, true, HandleWorksheet(params), ""};
-        }
-        if (request.action == "get_view" || request.action == "set_view") {
-            return {request.id, true, HandleView(request.action, params), ""};
-        }
-        if (request.action == "save_document" || request.action == "open_document") {
-            return {request.id, true, HandleDocumentLifecycle(request.action, params, request.id), ""};
-        }
-        if (request.action == "get_layers") {
-            return {request.id, true, HandleGetLayers(), ""};
-        }
-        if (request.action == "get_sheet_layers") {
-            return {request.id, true, HandleGetSheetLayers(params), ""};
-        }
-        if (request.action == "get_viewports") {
-            return {request.id, true, HandleGetViewports(params), ""};
-        }
-        if (request.action == "get_viewport_annotations") {
-            return {request.id, true, HandleGetViewportAnnotations(params), ""};
-        }
-        if (request.action == "get_objects") {
-            return {request.id, true, HandleGetObjects(params), ""};
-        }
-        if (request.action == "drawing_summary") {
-            return {request.id, true, HandleDrawingSummary(params), ""};
-        }
-        if (request.action == "apply_operations") {
-            return {request.id, true, HandleApplyOperations(params), ""};
-        }
-        if (request.action == "apply_documentation_operations") {
-            return {request.id, true, HandleApplyDocumentationOperations(params), ""};
-        }
-        if (request.action == "find_objects") {
-            return {request.id, true, HandleFindObjects(params), ""};
-        }
-        if (request.action == "selection") {
-            return {request.id, true, HandleSelection(params), ""};
-        }
-        if (request.action == "create_object") {
-            return {request.id, true, HandleCreateObject(params), ""};
-        }
-        if (request.action == "batch_create_objects") {
-            return {request.id, true, HandleBatchCreateObjects(params), ""};
-        }
-        if (request.action == "create_wall") {
-            return {request.id, true, HandleCreateWall(params), ""};
-        }
-        if (request.action == "create_text") {
-            return {request.id, true, HandleCreateText(params), ""};
-        }
-        if (request.action == "create_linear_dimension") {
-            return {request.id, true, HandleCreateLinearDimension(params), ""};
-        }
-        if (request.action == "set_property") {
-            return {request.id, true, HandleSetProperty(params), ""};
-        }
-        if (request.action == "manage_classes") {
-            return {request.id, true, HandleManageClasses(params), ""};
-        }
-        return {request.id, false, "", "unknown native bridge CAD action: " + request.action};
-    } catch (const ViewDocument::Error& exc) {
-        std::string error = "{\"code\":";
-        const bool unknown = exc.State() == ViewDocument::CommitState::Unknown;
-        error += JsonString(unknown
-            ? "unknown_commit_state"
-            : ViewDocument::ErrorCodeName(exc.Code()));
-        error += ",\"message\":" + JsonString(exc.what());
-        error += ",\"requested_path\":" + JsonString(exc.RequestedPath());
-        error += ",\"active_path\":" + JsonString(exc.ActivePath());
-        error += ",\"commit_state\":" +
-            JsonString(ViewDocument::CommitStateName(exc.State()));
-        error += ",\"retryable\":false}";
-        return {request.id, false, "", error};
-    } catch (const std::exception& exc) {
-        return {request.id, false, "", exc.what()};
-    } catch (...) {
-        return {request.id, false, "", "native bridge CAD handler failed"};
+        return std::string(R"({"state":"unknown","retry_safe":false,"reason":"No retained receipt for this key in the active document and bridge session."})");
     }
-#else
-    // Replace this switch with Vectorworks SDK calls after the SDK-backed
-    // ObjectExample worktree builds. This function must run only on the
-    // Vectorworks main/plugin event context.
-    return {
-        request.id,
-        false,
-        "",
-        "native bridge CAD handler not implemented yet: " + request.action,
-    };
-#endif
+    if (action == "get_document_info") return HandleGetDocumentInfo();
+    if (action == "describe_parametric_schema") return HandleDescribeParametricSchema(params);
+    if (action == "export_pdf" || action == "export_vectorworks_document" ||
+        action == "import_dwg" || action == "export_dwg" ||
+        action == "export_ifc" || action == "import_ifc") {
+        const bool hasTargetBinding = params.find("expected_document_fingerprint") != params.end();
+        if (hasTargetBinding) {
+            Documentation::ValidateTargetBinding(*gSDK, ParseDocumentationTargetBinding(params));
+        }
+        std::string result = HandleNativeIO(action, params);
+        if (hasTargetBinding) {
+            Documentation::ValidateTargetBinding(*gSDK, ParseDocumentationTargetBinding(params));
+        }
+        return result;
+    }
+    if (action == "resources") return HandleResources(params);
+    if (action == "symbol") return HandleSymbol(params);
+    if (action == "worksheet") return HandleWorksheet(params);
+    if (action == "get_layers") return HandleGetLayers();
+    if (action == "get_sheet_layers") return HandleGetSheetLayers(params);
+    if (action == "get_viewports") return HandleGetViewports(params);
+    if (action == "get_viewport_annotations") return HandleGetViewportAnnotations(params);
+    if (action == "get_objects") return HandleGetObjects(params);
+    if (action == "drawing_summary") return HandleDrawingSummary(params);
+    if (action == "apply_operations") return HandleApplyOperations(params);
+    if (action == "apply_documentation_operations") return HandleApplyDocumentationOperations(params);
+    if (action == "find_objects") return HandleFindObjects(params);
+    if (action == "selection") return HandleSelection(params);
+    if (action == "create_object") return HandleCreateObject(params);
+    if (action == "batch_create_objects") return HandleBatchCreateObjects(params);
+    if (action == "create_wall") return HandleCreateWall(params);
+    if (action == "create_text") return HandleCreateText(params);
+    if (action == "create_linear_dimension") return HandleCreateLinearDimension(params);
+    if (action == "set_property") return HandleSetProperty(params);
+    if (action == "manage_classes") return HandleManageClasses(params);
+    return std::nullopt;
 }
+
+#endif
 
 }  // namespace
 
-Protocol::ResponseEnvelope DispatchFromSocketWorker(const Protocol::RequestEnvelope& request);
+namespace Legacy {
 
-bool TryStartNativeTransport() {
-    std::lock_guard<std::mutex> lock(gTransportStartMutex);
-    if (gTransport.IsRunning()) {
-        return true;
-    }
-
-    const auto options = GetTransportOptionsFromEnvironment();
-    try {
-        gTransport.Start(
-            options,
-            DispatchFromSocketWorker,
-            MarkDeferredDocumentOpenResponseSent);
-        gNextTransportStartAttempt = {};
-        AppendTransportStartupDiagnostic(
-            "started",
-            options.host + ":" + std::to_string(options.port));
-        return true;
-    } catch (const std::exception& exc) {
-        gNextTransportStartAttempt =
-            std::chrono::steady_clock::now() + kTransportStartRetryInterval;
-        AppendTransportStartupDiagnostic(
-            "start_failed",
-            options.host + ":" + std::to_string(options.port) + " - " + exc.what());
-        return false;
-    } catch (...) {
-        gNextTransportStartAttempt =
-            std::chrono::steady_clock::now() + kTransportStartRetryInterval;
-        AppendTransportStartupDiagnostic(
-            "start_failed",
-            options.host + ":" + std::to_string(options.port) + " - unknown exception");
-        return false;
-    }
-}
-
-void OnPluginLoadStartTransport() {
-    gStopRequested.store(false);
-    gCadQueue.ResetCancellation();
+std::optional<std::string> Dispatch(const std::string& action, const Params& params) {
 #if VECTORWORKS_MCP_HAS_SDK
-    gApplyOperationsCache.clear();
-#endif
-#if VECTORWORKS_MCP_HAS_SDK && defined(_WINDOWS)
-    if (!PinBridgeModuleForProcessLifetime()) {
-        AppendTransportStartupDiagnostic(
-            "pin_failed",
-            "the native bridge DLL could not be pinned for the Vectorworks process lifetime");
-        gStopRequested.store(true);
-        gCadQueue.CancelAll("native bridge module lifetime could not be secured");
-        return;
-    }
-#endif
-    if (!StartMainContextPump() && kCadHandlersImplemented) {
-        AppendTransportStartupDiagnostic(
-            "pump_failed",
-            "Vectorworks main-context timer window could not be created");
-        gStopRequested.store(true);
-        StopMainContextPump();
-        gCadQueue.CancelAll("native bridge main-context pump failed to start");
-        return;
-    }
-    TryStartNativeTransport();
-}
-
-void OnPluginUnloadStopTransport() {
-    gStopRequested.store(true);
-    StopMainContextPump();
-    gCadQueue.CancelAll("native bridge is unloading");
-    gTransport.Stop();
-#if VECTORWORKS_MCP_HAS_SDK
-    ClearDeferredDocumentOpen();
-    gApplyOperationsCache.clear();
-#endif
-}
-
-void OnVectorworksMainPluginEvent() {
-    gLastMainContextPumpTickMs.store(SteadyClockMilliseconds());
-    if (gCadQueuePumpActive.exchange(true)) {
-        return;
-    }
-    ScopedAtomicBoolReset resetPumpActive(gCadQueuePumpActive);
-    if (!gStopRequested.load() && !gTransport.IsRunning()) {
-        const auto now = std::chrono::steady_clock::now();
-        if (gNextTransportStartAttempt == std::chrono::steady_clock::time_point{} ||
-            now >= gNextTransportStartAttempt) {
-            TryStartNativeTransport();
-        }
-    }
-#if VECTORWORKS_MCP_HAS_SDK
-    if (auto deferredOpen = TakeReadyDeferredDocumentOpen()) {
-        try {
-            ViewDocument::LaunchPreparedOpenDocument(*deferredOpen);
-        } catch (...) {
-        }
-        return;
-    }
-#endif
-    constexpr std::size_t kMaxRequestsPerPump = 8u;
-    constexpr auto kPumpBudget = std::chrono::milliseconds(8);
-    const auto pumpStarted = std::chrono::steady_clock::now();
-    std::size_t processed = 0u;
-    while (processed < kMaxRequestsPerPump &&
-           std::chrono::steady_clock::now() - pumpStarted < kPumpBudget) {
-        auto request = gCadQueue.TryDequeueOnVectorworksMainContext();
-        if (!request) {
-            break;
-        }
-        const double queueWaitMs = gCadQueue.QueueWaitMillisecondsForDiagnostics(request->id);
-        const auto handlerStart = std::chrono::steady_clock::now();
-        auto response = DispatchCadRequestOnVectorworksMainContext(*request);
-        const double handlerMs = std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - handlerStart).count();
-        if (response.success &&
-            response.resultJson.size() >= 2u &&
-            response.resultJson.front() == '{' &&
-            response.resultJson.back() == '}') {
-            response.resultJson.pop_back();
-            response.resultJson += ",\"timing\":{\"queue_wait_ms\":";
-            response.resultJson += JsonNumber(queueWaitMs);
-            response.resultJson += ",\"handler_ms\":";
-            response.resultJson += JsonNumber(handlerMs);
-            response.resultJson += ",\"total_native_ms\":";
-            response.resultJson += JsonNumber(queueWaitMs + handlerMs);
-            response.resultJson += "}}";
-        }
-        gCadQueue.CompleteFromVectorworksMainContext(response);
-        ++processed;
-    }
-    if (gCadQueue.PendingCountForDiagnostics() > 0u) {
-        NotifyMainContextPump();
-    }
-}
-
-Protocol::ResponseEnvelope DispatchFromSocketWorker(const Protocol::RequestEnvelope& request) {
-    if (!RequestAuthAccepted(request)) {
-        return {request.id, false, "", "native bridge authentication failed"};
-    }
-    const ActionSpec* actionSpec = FindActionSpec(request.action);
-    if (actionSpec == nullptr) {
-        return {request.id, false, "", "unknown native bridge action: " + request.action};
-    }
-    if (request.action == "ping") {
-        return HandlePingOnTransportThread(request);
-    }
-    if (request.action == "capabilities") {
-        return HandleCapabilitiesOnTransportThread(request);
-    }
-    if (request.action == "stop") {
-        gStopRequested.store(true);
-        gCadQueue.CancelAll("native bridge stop requested");
-        return {request.id, true, R"("Native bridge stop requested")", ""};
-    }
-    if (actionSpec->context == ExecutionContext::VectorworksMainPluginContext) {
-        if (!CadHandlersRuntimeReady()) {
-#if VECTORWORKS_MCP_HAS_SDK
-            return {
-                request.id,
-                false,
-                "",
-                "native bridge CAD handlers are not ready: main context pump is not running",
-            };
+    return DispatchLegacy(action, params);
 #else
-            return {request.id, false, "", "native bridge phase 0 CAD handlers are not implemented: " + request.action};
+    (void) action;
+    (void) params;
+    return std::nullopt;
 #endif
-        }
-        if (gStopRequested.load()) {
-            return {request.id, false, "", "native bridge is stopping"};
-        }
-        if (auto enqueueFailure = gCadQueue.EnqueueFromSocketThread(request)) {
-            return *enqueueFailure;
-        }
-        NotifyMainContextPump();
-        return gCadQueue.WaitForResponseOnSocketThread(
-            request.id,
-            kCadRequestTimeout,
-            actionSpec->mayWriteDocument);
+}
+
+void ValidateBindingIfPresent(const Params& params) {
+#if VECTORWORKS_MCP_HAS_SDK
+    if (params.find("expected_document_fingerprint") != params.end()) {
+        Documentation::ValidateTargetBinding(*gSDK, ParseDocumentationTargetBinding(params));
     }
-    return {request.id, false, "", "native bridge action has no transport handler: " + request.action};
+#else
+    (void) params;
+#endif
 }
 
-bool StopRequested() {
-    return gStopRequested.load();
+void ResetCaches() {
+#if VECTORWORKS_MCP_HAS_SDK
+    gApplyOperationsCache.clear();
+#endif
 }
 
-std::uint16_t NativeTransportPortForDiagnostics() {
-    return gTransport.Port();
-}
+}  // namespace Legacy
 
 }  // namespace VectorworksMCP

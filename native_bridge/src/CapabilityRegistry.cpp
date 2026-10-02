@@ -3,50 +3,72 @@
 #include "CapabilityRegistry.hpp"
 
 #include <array>
+#include <cstdlib>
+#include <string>
 #include <iomanip>
 #include <sstream>
 
 namespace VectorworksMCP {
 namespace {
 
-constexpr std::array<ActionSpec, 37> kActionRegistry = {{
-    {"query_objects", ExecutionContext::VectorworksMainPluginContext, 4u, false, false},
-    {"transaction_status", ExecutionContext::VectorworksMainPluginContext, 4u, false, false},
-    {"ping", ExecutionContext::TransportThread, 0u, false, false},
-    {"stop", ExecutionContext::TransportThread, 0u, false, false},
-    {"capabilities", ExecutionContext::TransportThread, 0u, false, false},
-    {"describe_parametric_schema", ExecutionContext::VectorworksMainPluginContext, 4u, false, false},
-    {"export_image", ExecutionContext::VectorworksMainPluginContext, 4u, false, false},
-    {"capture_view", ExecutionContext::VectorworksMainPluginContext, 4u, false, false},
-    {"export_pdf", ExecutionContext::VectorworksMainPluginContext, 4u, false, false},
-    {"export_vectorworks_document", ExecutionContext::VectorworksMainPluginContext, 4u, false, false},
-    {"import_dwg", ExecutionContext::VectorworksMainPluginContext, 4u, true, false},
-    {"export_dwg", ExecutionContext::VectorworksMainPluginContext, 4u, false, false},
-    {"resources", ExecutionContext::VectorworksMainPluginContext, 4u, false, false},
-    {"symbol", ExecutionContext::VectorworksMainPluginContext, 4u, true, false},
-    {"worksheet", ExecutionContext::VectorworksMainPluginContext, 4u, true, false},
-    {"get_view", ExecutionContext::VectorworksMainPluginContext, 4u, false, false},
-    {"set_view", ExecutionContext::VectorworksMainPluginContext, 4u, false, false},
-    {"save_document", ExecutionContext::VectorworksMainPluginContext, 4u, true, false},
-    {"open_document", ExecutionContext::VectorworksMainPluginContext, 4u, true, true},
-    {"get_document_info", ExecutionContext::VectorworksMainPluginContext, 1u, false, false},
-    {"get_layers", ExecutionContext::VectorworksMainPluginContext, 1u, false, false},
-    {"get_sheet_layers", ExecutionContext::VectorworksMainPluginContext, 4u, false, false},
-    {"get_viewports", ExecutionContext::VectorworksMainPluginContext, 4u, false, false},
-    {"get_viewport_annotations", ExecutionContext::VectorworksMainPluginContext, 4u, false, false},
-    {"get_objects", ExecutionContext::VectorworksMainPluginContext, 1u, false, false},
-    {"selection", ExecutionContext::VectorworksMainPluginContext, 1u, true, true},
-    {"create_object", ExecutionContext::VectorworksMainPluginContext, 1u, true, false},
-    {"batch_create_objects", ExecutionContext::VectorworksMainPluginContext, 1u, true, false},
-    {"create_wall", ExecutionContext::VectorworksMainPluginContext, 2u, true, false},
-    {"create_text", ExecutionContext::VectorworksMainPluginContext, 2u, true, false},
-    {"create_linear_dimension", ExecutionContext::VectorworksMainPluginContext, 2u, true, false},
-    {"set_property", ExecutionContext::VectorworksMainPluginContext, 2u, true, false},
-    {"manage_classes", ExecutionContext::VectorworksMainPluginContext, 2u, true, false},
-    {"find_objects", ExecutionContext::VectorworksMainPluginContext, 3u, false, false},
-    {"drawing_summary", ExecutionContext::VectorworksMainPluginContext, 3u, false, false},
-    {"apply_operations", ExecutionContext::VectorworksMainPluginContext, 4u, true, false},
-    {"apply_documentation_operations", ExecutionContext::VectorworksMainPluginContext, 4u, true, true},
+bool ScriptingEnabledForRegistry() {
+    const char* raw = std::getenv("VW_MCP_ALLOW_SCRIPT");
+    if (!raw) return true;
+    const std::string value(raw);
+    return !(value == "0" || value == "false" || value == "FALSE" || value == "no" || value == "off");
+}
+
+// {action, context, phase, may_write_document, destructive, needs_document, long_running}
+constexpr std::array<ActionSpec, 49> kActionRegistry = {{
+    {"query_objects", ExecutionContext::VectorworksMainPluginContext, 4u, false, false, true, false},
+    {"transaction_status", ExecutionContext::VectorworksMainPluginContext, 4u, false, false, true, false},
+    {"ping", ExecutionContext::TransportThread, 0u, false, false, false, false},
+    {"stop", ExecutionContext::TransportThread, 0u, false, false, false, false},
+    {"capabilities", ExecutionContext::TransportThread, 0u, false, false, false, false},
+    {"job_status", ExecutionContext::TransportThread, 6u, false, false, false, false},
+    {"cancel_job", ExecutionContext::TransportThread, 6u, false, false, false, false},
+    {"describe_parametric_schema", ExecutionContext::VectorworksMainPluginContext, 4u, false, false, true, false},
+    {"export_image", ExecutionContext::VectorworksMainPluginContext, 4u, false, false, true, false},
+    {"capture_view", ExecutionContext::VectorworksMainPluginContext, 4u, false, false, true, false},
+    {"export_pdf", ExecutionContext::VectorworksMainPluginContext, 4u, false, false, true, true},
+    {"export_vectorworks_document", ExecutionContext::VectorworksMainPluginContext, 4u, false, false, true, true},
+    {"import_dwg", ExecutionContext::VectorworksMainPluginContext, 4u, true, false, true, true},
+    {"export_dwg", ExecutionContext::VectorworksMainPluginContext, 4u, false, false, true, true},
+    {"export_ifc", ExecutionContext::VectorworksMainPluginContext, 6u, false, false, true, true},
+    {"import_ifc", ExecutionContext::VectorworksMainPluginContext, 6u, true, false, true, true},
+    {"resources", ExecutionContext::VectorworksMainPluginContext, 4u, false, false, true, false},
+    {"symbol", ExecutionContext::VectorworksMainPluginContext, 4u, true, false, true, false},
+    {"worksheet", ExecutionContext::VectorworksMainPluginContext, 4u, true, false, true, false},
+    {"get_view", ExecutionContext::VectorworksMainPluginContext, 4u, false, false, true, false},
+    {"set_view", ExecutionContext::VectorworksMainPluginContext, 4u, false, false, true, false},
+    {"saved_views", ExecutionContext::VectorworksMainPluginContext, 6u, true, false, true, false},
+    {"save_document", ExecutionContext::VectorworksMainPluginContext, 4u, true, false, true, false},
+    {"open_document", ExecutionContext::VectorworksMainPluginContext, 4u, true, true, false, true},
+    {"list_documents", ExecutionContext::VectorworksMainPluginContext, 6u, false, false, false, false},
+    {"activate_document", ExecutionContext::VectorworksMainPluginContext, 6u, false, false, true, false},
+    {"new_document", ExecutionContext::VectorworksMainPluginContext, 6u, true, false, false, true},
+    {"close_document", ExecutionContext::VectorworksMainPluginContext, 6u, true, true, true, false},
+    {"get_document_info", ExecutionContext::VectorworksMainPluginContext, 1u, false, false, true, false},
+    {"get_layers", ExecutionContext::VectorworksMainPluginContext, 1u, false, false, true, false},
+    {"layers", ExecutionContext::VectorworksMainPluginContext, 6u, true, true, true, false},
+    {"stories", ExecutionContext::VectorworksMainPluginContext, 6u, true, false, true, false},
+    {"get_sheet_layers", ExecutionContext::VectorworksMainPluginContext, 4u, false, false, true, false},
+    {"get_viewports", ExecutionContext::VectorworksMainPluginContext, 4u, false, false, true, false},
+    {"get_viewport_annotations", ExecutionContext::VectorworksMainPluginContext, 4u, false, false, true, false},
+    {"get_objects", ExecutionContext::VectorworksMainPluginContext, 1u, false, false, true, false},
+    {"selection", ExecutionContext::VectorworksMainPluginContext, 1u, true, true, true, false},
+    {"create_object", ExecutionContext::VectorworksMainPluginContext, 1u, true, false, true, false},
+    {"batch_create_objects", ExecutionContext::VectorworksMainPluginContext, 1u, true, false, true, false},
+    {"create_wall", ExecutionContext::VectorworksMainPluginContext, 2u, true, false, true, false},
+    {"create_text", ExecutionContext::VectorworksMainPluginContext, 2u, true, false, true, false},
+    {"create_linear_dimension", ExecutionContext::VectorworksMainPluginContext, 2u, true, false, true, false},
+    {"set_property", ExecutionContext::VectorworksMainPluginContext, 2u, true, false, true, false},
+    {"manage_classes", ExecutionContext::VectorworksMainPluginContext, 2u, true, false, true, false},
+    {"find_objects", ExecutionContext::VectorworksMainPluginContext, 3u, false, false, true, false},
+    {"drawing_summary", ExecutionContext::VectorworksMainPluginContext, 3u, false, false, true, false},
+    {"apply_operations", ExecutionContext::VectorworksMainPluginContext, 4u, true, false, true, false},
+    {"apply_documentation_operations", ExecutionContext::VectorworksMainPluginContext, 4u, true, true, true, false},
+    {"run_script", ExecutionContext::VectorworksMainPluginContext, 6u, true, true, true, false},
 }};
 
 constexpr std::array<ObjectKindSpec, 20> kObjectKindRegistry = {{
@@ -73,6 +95,7 @@ constexpr std::array<ObjectKindSpec, 20> kObjectKindRegistry = {{
 }};
 
 bool IsImplemented(const ActionSpec& spec, bool cadHandlersImplemented) {
+    if (spec.action == "run_script" && !ScriptingEnabledForRegistry()) return false;
     if (spec.action == "apply_documentation_operations" && !kDocumentationWritesEnabled) return false;
     return spec.nativePhase == 0u || cadHandlersImplemented;
 }
@@ -259,7 +282,37 @@ std::string CapabilitiesResultJson(bool cadHandlersImplemented) {
     json += ObjectKindDescriptorsJson(cadHandlersImplemented);
     json += ",\"object_read_features\":";
     json += ObjectReadFeaturesJson(cadHandlersImplemented);
+    json += ",\"protocol\":2";
+    json += ",\"actions\":";
+    json += ActionsJson(cadHandlersImplemented);
     json.push_back('}');
+    return json;
+}
+
+std::string ActionsJson(bool cadHandlersImplemented) {
+    std::string json = "[";
+    bool first = true;
+    for (const auto& spec : kActionRegistry) {
+        if (!IsImplemented(spec, cadHandlersImplemented)) continue;
+        if (!first) json.push_back(',');
+        first = false;
+        json += "{\"name\":";
+        AppendJsonString(json, spec.action);
+        json += ",\"mutates\":";
+        AppendJsonBool(json, spec.mayWriteDocument);
+        json += ",\"destructive\":";
+        AppendJsonBool(json, spec.destructive);
+        json += ",\"long_running\":";
+        AppendJsonBool(json, spec.longRunning);
+        json += ",\"supports_async\":";
+        AppendJsonBool(json, spec.context == ExecutionContext::VectorworksMainPluginContext);
+        json += ",\"needs_document\":";
+        AppendJsonBool(json, spec.needsDocument);
+        json += ",\"execution_context\":";
+        AppendJsonString(json, ExecutionContextName(spec.context));
+        json.push_back('}');
+    }
+    json.push_back(']');
     return json;
 }
 

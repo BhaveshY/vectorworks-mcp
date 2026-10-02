@@ -5,10 +5,9 @@
 #include <array>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <exception>
-#include <mutex>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -21,6 +20,7 @@
 #endif
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <mstcpip.h>
 #else
 #include <arpa/inet.h>
 #include <errno.h>
@@ -50,15 +50,11 @@ void EnsureSocketRuntime() {
 }
 
 void CloseSocket(SocketHandle socket) {
-    if (socket != kInvalidSocket) {
-        closesocket(socket);
-    }
+    if (socket != kInvalidSocket) closesocket(socket);
 }
 
 void ShutdownSocket(SocketHandle socket) {
-    if (socket != kInvalidSocket) {
-        shutdown(socket, SD_BOTH);
-    }
+    if (socket != kInvalidSocket) shutdown(socket, SD_BOTH);
 }
 
 int LastSocketError() {
@@ -69,10 +65,33 @@ bool IsInterruptedAcceptError(int error) {
     return error == WSAEINTR || error == WSAENOTSOCK || error == WSAEINVAL;
 }
 
-void SetSocketTimeouts(SocketHandle socket, int idleSeconds) {
-    const int milliseconds = idleSeconds * 1000;
-    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&milliseconds), sizeof(milliseconds));
-    setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&milliseconds), sizeof(milliseconds));
+bool IsAddressBusyError(int error) {
+    return error == WSAEADDRINUSE || error == WSAEACCES;
+}
+
+void SetSocketTimeouts(SocketHandle socket, int receiveSeconds, int sendSeconds) {
+    const DWORD receiveMs = static_cast<DWORD>(receiveSeconds) * 1000u;
+    const DWORD sendMs = static_cast<DWORD>(sendSeconds) * 1000u;
+    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&receiveMs), sizeof(receiveMs));
+    setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&sendMs), sizeof(sendMs));
+}
+
+void EnableKeepAlive(SocketHandle socket) {
+    BOOL enabled = TRUE;
+    setsockopt(socket, SOL_SOCKET, SO_KEEPALIVE, reinterpret_cast<const char*>(&enabled), sizeof(enabled));
+    tcp_keepalive settings{};
+    settings.onoff = 1;
+    settings.keepalivetime = 30000;
+    settings.keepaliveinterval = 5000;
+    DWORD returned = 0;
+    WSAIoctl(socket, SIO_KEEPALIVE_VALS, &settings, sizeof(settings), nullptr, 0, &returned, nullptr, nullptr);
+    BOOL noDelay = TRUE;
+    setsockopt(socket, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
+}
+
+void SetExclusiveAddressUse(SocketHandle socket) {
+    BOOL enabled = TRUE;
+    setsockopt(socket, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&enabled), sizeof(enabled));
 }
 #else
 using SocketHandle = int;
@@ -81,15 +100,11 @@ constexpr SocketHandle kInvalidSocket = -1;
 void EnsureSocketRuntime() {}
 
 void CloseSocket(SocketHandle socket) {
-    if (socket != kInvalidSocket) {
-        close(socket);
-    }
+    if (socket != kInvalidSocket) close(socket);
 }
 
 void ShutdownSocket(SocketHandle socket) {
-    if (socket != kInvalidSocket) {
-        shutdown(socket, SHUT_RDWR);
-    }
+    if (socket != kInvalidSocket) shutdown(socket, SHUT_RDWR);
 }
 
 int LastSocketError() {
@@ -100,42 +115,34 @@ bool IsInterruptedAcceptError(int error) {
     return error == EBADF || error == EINVAL || error == EINTR;
 }
 
-void SetSocketTimeouts(SocketHandle socket, int idleSeconds) {
-    timeval timeout{};
-    timeout.tv_sec = idleSeconds;
-    timeout.tv_usec = 0;
-    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-    setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+bool IsAddressBusyError(int error) {
+    return error == EADDRINUSE || error == EACCES;
 }
+
+void SetSocketTimeouts(SocketHandle socket, int receiveSeconds, int sendSeconds) {
+    timeval receive{};
+    receive.tv_sec = receiveSeconds;
+    timeval send{};
+    send.tv_sec = sendSeconds;
+    setsockopt(socket, SOL_SOCKET, SO_RCVTIMEO, &receive, sizeof(receive));
+    setsockopt(socket, SOL_SOCKET, SO_SNDTIMEO, &send, sizeof(send));
+}
+
+void EnableKeepAlive(SocketHandle socket) {
+    int enabled = 1;
+    setsockopt(socket, SOL_SOCKET, SO_KEEPALIVE, &enabled, sizeof(enabled));
+}
+
+void SetExclusiveAddressUse(SocketHandle) {}
 #endif
 
 class SocketOwner {
 public:
     explicit SocketOwner(SocketHandle socket = kInvalidSocket) : socket_(socket) {}
-    ~SocketOwner() {
-        CloseSocket(socket_);
-    }
-
+    ~SocketOwner() { CloseSocket(socket_); }
     SocketOwner(const SocketOwner&) = delete;
     SocketOwner& operator=(const SocketOwner&) = delete;
-
-    SocketOwner(SocketOwner&& other) noexcept : socket_(other.socket_) {
-        other.socket_ = kInvalidSocket;
-    }
-
-    SocketOwner& operator=(SocketOwner&& other) noexcept {
-        if (this != &other) {
-            CloseSocket(socket_);
-            socket_ = other.socket_;
-            other.socket_ = kInvalidSocket;
-        }
-        return *this;
-    }
-
-    SocketHandle Get() const {
-        return socket_;
-    }
-
+    SocketHandle Get() const { return socket_; }
     SocketHandle Release() {
         const auto socket = socket_;
         socket_ = kInvalidSocket;
@@ -151,9 +158,7 @@ bool ReadExact(SocketHandle socket, char* buffer, std::size_t size) {
     while (offset < size) {
         const auto remaining = static_cast<int>(size - offset);
         const int received = recv(socket, buffer + offset, remaining, 0);
-        if (received <= 0) {
-            return false;
-        }
+        if (received <= 0) return false;
         offset += static_cast<std::size_t>(received);
     }
     return true;
@@ -164,22 +169,10 @@ bool WriteExact(SocketHandle socket, const char* buffer, std::size_t size) {
     while (offset < size) {
         const auto remaining = static_cast<int>(size - offset);
         const int sent = send(socket, buffer + offset, remaining, 0);
-        if (sent <= 0) {
-            return false;
-        }
+        if (sent <= 0) return false;
         offset += static_cast<std::size_t>(sent);
     }
     return true;
-}
-
-bool ReadFrame(SocketHandle socket, std::string& payload) {
-    std::array<std::uint8_t, Protocol::kFrameHeaderBytes> header{};
-    if (!ReadExact(socket, reinterpret_cast<char*>(header.data()), header.size())) {
-        return false;
-    }
-    const auto payloadSize = Protocol::DecodeFrameHeader(header);
-    payload.assign(payloadSize, '\0');
-    return ReadExact(socket, payload.data(), payload.size());
 }
 
 bool WriteFrame(SocketHandle socket, const std::string& payload) {
@@ -188,11 +181,30 @@ bool WriteFrame(SocketHandle socket, const std::string& payload) {
         WriteExact(socket, payload.data(), payload.size());
 }
 
-Protocol::ResponseEnvelope ErrorResponse(std::string id, const std::exception& error) {
-    if (id.empty()) {
-        id = "native-transport-error";
+// Serialises a response, replacing it with a structured error when it would
+// exceed the 16 MiB frame limit (M8) or cannot be serialised.
+std::string SerializeBounded(const Protocol::ResponseEnvelope& response) {
+    std::string payload;
+    try {
+        payload = Protocol::SerializeResponseEnvelope(response);
+    } catch (const std::exception& error) {
+        payload = Protocol::SerializeResponseEnvelope(Protocol::Fail(
+            response.id.empty() ? "native-transport-error" : response.id,
+            "internal_error",
+            std::string("native bridge produced an invalid response: ") + error.what(),
+            false,
+            response.success ? "unknown" : response.commitState));
     }
-    return {std::move(id), false, "", error.what()};
+    if (payload.size() > Protocol::kMaxFrameBytes) {
+        payload = Protocol::SerializeResponseEnvelope(Protocol::Fail(
+            response.id.empty() ? "native-transport-error" : response.id,
+            "response_too_large",
+            "native bridge response exceeded the 16 MiB frame limit; request a smaller page (limit/offset or max_bytes)",
+            false,
+            response.success ? "committed" : response.commitState,
+            "{\"bytes\":" + std::to_string(payload.size()) + "}"));
+    }
+    return payload;
 }
 
 sockaddr_in MakeLoopbackAddress(const std::string& host, std::uint16_t port) {
@@ -227,46 +239,64 @@ std::uint16_t BoundPort(SocketHandle socket) {
 class NativeTransport::Impl {
 public:
     ~Impl() {
-        Stop();
+        try {
+            Stop();
+        } catch (...) {
+        }
     }
 
-    void Start(
-        const NativeTransportOptions& options,
-        Dispatcher dispatcher,
-        ResponseSentCallback responseSentCallback) {
+    void Start(const NativeTransportOptions& options, Dispatcher dispatcher) {
         if (!dispatcher) {
             throw std::invalid_argument("native transport dispatcher is required");
         }
+        // Reap a previous run first (C3): never assign to a joinable thread.
+        // Active client connections from a previous listener keep serving;
+        // only finished workers and the exited listener are joined here.
+        JoinThreads(false);
 
         std::lock_guard<std::mutex> lock(mutex_);
         if (running_) {
             throw std::runtime_error("native transport is already running");
         }
-
         EnsureSocketRuntime();
-        SocketOwner listener(socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
-        if (listener.Get() == kInvalidSocket) {
-            throw std::runtime_error("native transport could not create listener socket");
-        }
 
-        int enabled = 1;
-        setsockopt(listener.Get(), SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&enabled), sizeof(enabled));
-
-        const auto address = MakeLoopbackAddress(options.host, options.port);
-        if (bind(listener.Get(), reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0) {
-            throw std::runtime_error("native transport could not bind loopback port");
+        SocketHandle bound = kInvalidSocket;
+        std::string lastBindError;
+        const std::uint16_t first = options.portFirst;
+        const std::uint16_t last = options.portLast < first ? first : options.portLast;
+        for (std::uint32_t port = first; port <= last && bound == kInvalidSocket; ++port) {
+            SocketOwner candidate(socket(AF_INET, SOCK_STREAM, IPPROTO_TCP));
+            if (candidate.Get() == kInvalidSocket) {
+                throw std::runtime_error("native transport could not create listener socket");
+            }
+            SetExclusiveAddressUse(candidate.Get());
+            const auto address = MakeLoopbackAddress(options.host, static_cast<std::uint16_t>(port));
+            if (bind(candidate.Get(), reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0) {
+                const int error = LastSocketError();
+                lastBindError = "port " + std::to_string(port) + " bind error " + std::to_string(error);
+                if (IsAddressBusyError(error)) {
+                    continue;
+                }
+                continue;
+            }
+            if (listen(candidate.Get(), SOMAXCONN) != 0) {
+                lastBindError = "port " + std::to_string(port) + " listen failed";
+                continue;
+            }
+            bound = candidate.Release();
         }
-        if (listen(listener.Get(), SOMAXCONN) != 0) {
-            throw std::runtime_error("native transport could not listen on loopback port");
+        if (bound == kInvalidSocket) {
+            throw std::runtime_error(
+                "native transport could not bind any loopback port in " + std::to_string(first) + "-" +
+                std::to_string(last) + " (" + lastBindError + ")");
         }
 
         dispatcher_ = std::move(dispatcher);
-        responseSentCallback_ = std::move(responseSentCallback);
         maxClients_ = options.maxClients < 1 ? 1 : options.maxClients;
-        clientIdleSeconds_ = options.clientIdleSeconds < 30 ? 30 : options.clientIdleSeconds;
+        clientIdleSeconds_ = options.clientIdleSeconds < 5 ? 5 : options.clientIdleSeconds;
         stopRequested_.store(false);
-        listenSocket_.store(listener.Release());
-        boundPort_ = BoundPort(listenSocket_.load());
+        listenSocket_.store(bound);
+        boundPort_ = BoundPort(bound);
         running_ = true;
         lastError_.clear();
         listenerThread_ = std::thread([this] { AcceptLoop(); });
@@ -279,9 +309,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(mutex_);
             listener = listenSocket_.exchange(kInvalidSocket);
-            for (const auto client : clientSockets_) {
-                clients.push_back(client);
-            }
+            clients = clientSockets_;
         }
         ShutdownSocket(listener);
         CloseSocket(listener);
@@ -292,36 +320,24 @@ public:
 
     void Stop() {
         RequestStop();
-        if (listenerThread_.joinable()) {
-            listenerThread_.join();
-        }
-
-        std::vector<ClientWorker> clients;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            clients.swap(clientThreads_);
-            running_ = false;
-            listenSocket_.store(kInvalidSocket);
-            clientSockets_.clear();
-        }
-        for (auto& client : clients) {
-            if (client.thread.joinable()) {
-                client.thread.join();
-            }
-        }
+        JoinThreads(true);
+        std::lock_guard<std::mutex> lock(mutex_);
+        running_ = false;
+        listenSocket_.store(kInvalidSocket);
+        clientSockets_.clear();
     }
 
-    bool IsRunning() const {
-        return running_;
-    }
-
-    std::uint16_t Port() const {
-        return boundPort_;
-    }
+    bool IsRunning() const { return running_.load(); }
+    std::uint16_t Port() const { return boundPort_.load(); }
 
     std::string LastError() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return lastError_;
+    }
+
+    int ClientCount() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return static_cast<int>(clientSockets_.size());
     }
 
 private:
@@ -330,43 +346,124 @@ private:
         std::thread thread;
     };
 
-    void ReapCompletedClients() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        auto worker = clientThreads_.begin();
-        while (worker != clientThreads_.end()) {
-            if (worker->completed->load()) {
-                worker->thread.join();
-                worker = clientThreads_.erase(worker);
+    void JoinThreads(bool includeActiveClients) {
+        std::thread listener;
+        std::vector<ClientWorker> clients;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (listenerThread_.joinable()) {
+                listener = std::move(listenerThread_);
+            }
+            if (includeActiveClients) {
+                clients.swap(clientThreads_);
+                for (const auto client : clientSockets_) {
+                    ShutdownSocket(client);
+                }
             } else {
-                ++worker;
+                auto worker = clientThreads_.begin();
+                while (worker != clientThreads_.end()) {
+                    if (worker->completed->load()) {
+                        clients.push_back(std::move(*worker));
+                        worker = clientThreads_.erase(worker);
+                    } else {
+                        ++worker;
+                    }
+                }
+            }
+        }
+        if (listener.joinable()) {
+            if (listener.get_id() == std::this_thread::get_id()) {
+                listener.detach();
+            } else {
+                stopRequested_.store(true);
+                const SocketHandle socket = listenSocket_.exchange(kInvalidSocket);
+                ShutdownSocket(socket);
+                CloseSocket(socket);
+                listener.join();
+            }
+        }
+        for (auto& client : clients) {
+            if (client.thread.joinable()) {
+                if (client.thread.get_id() == std::this_thread::get_id()) {
+                    client.thread.detach();
+                } else {
+                    client.thread.join();
+                }
             }
         }
     }
 
-    void AcceptLoop() {
-        while (!stopRequested_.load()) {
-            ReapCompletedClients();
-            const auto listener = listenSocket_.load();
-            if (listener == kInvalidSocket) {
-                break;
+    void ReapCompletedClients() {
+        std::vector<std::thread> finished;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto worker = clientThreads_.begin();
+            while (worker != clientThreads_.end()) {
+                if (worker->completed->load()) {
+                    finished.push_back(std::move(worker->thread));
+                    worker = clientThreads_.erase(worker);
+                } else {
+                    ++worker;
+                }
             }
+        }
+        for (auto& thread : finished) {
+            if (thread.joinable()) thread.join();
+        }
+    }
+
+    void RejectClient(SocketHandle client, const std::string& code, const std::string& message) {
+        SetSocketTimeouts(client, 1, 1);
+        try {
+            WriteFrame(client, Protocol::SerializeResponseEnvelope(Protocol::Fail(
+                "native-transport-rejected", code, message, true, "not_started")));
+        } catch (...) {
+        }
+        ShutdownSocket(client);
+        CloseSocket(client);
+    }
+
+    void AcceptLoop() {
+        int consecutiveErrors = 0;
+        while (!stopRequested_.load()) {
+            try {
+                ReapCompletedClients();
+            } catch (...) {
+            }
+            const auto listener = listenSocket_.load();
+            if (listener == kInvalidSocket) break;
             const auto client = accept(listener, nullptr, nullptr);
             if (client == kInvalidSocket) {
                 const int error = LastSocketError();
-                if (stopRequested_.load() || IsInterruptedAcceptError(error)) {
+                if (stopRequested_.load() || IsInterruptedAcceptError(error)) break;
+                SetLastError("native transport accept failed with error " + std::to_string(error));
+                ++consecutiveErrors;
+                if (consecutiveErrors > 50) {
+                    // Give up this listener; the main-thread pump restarts the
+                    // transport with back-off (L2: no busy spin).
                     break;
                 }
-                SetLastError("native transport accept failed");
+                std::this_thread::sleep_for(std::chrono::milliseconds(std::min(1000, 50 * consecutiveErrors)));
+                continue;
+            }
+            consecutiveErrors = 0;
+
+            bool reject = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                reject = static_cast<int>(clientSockets_.size()) >= maxClients_;
+            }
+            if (reject) {
+                SetLastError("native transport rejected a client because the client cap was reached");
+                RejectClient(client, "too_many_clients",
+                    "native bridge already serves the maximum number of clients (" + std::to_string(maxClients_) +
+                    "); close idle connections and retry");
                 continue;
             }
 
+            EnableKeepAlive(client);
+            SetSocketTimeouts(client, clientIdleSeconds_, 60);
             std::lock_guard<std::mutex> lock(mutex_);
-            if (static_cast<int>(clientSockets_.size()) >= maxClients_) {
-                CloseSocket(client);
-                lastError_ = "native transport rejected client because max client count was reached";
-                continue;
-            }
-            SetSocketTimeouts(client, clientIdleSeconds_);
             bool socketRegistered = false;
             bool workerRegistered = false;
             try {
@@ -379,14 +476,15 @@ private:
                     try {
                         HandleClient(client);
                     } catch (...) {
-                        RemoveClient(client);
                         SetLastError("native transport client failed unexpectedly");
                     }
+                    RemoveClient(client);
+                    CloseSocket(client);
                     completed->store(true);
                 });
             } catch (...) {
-                if (workerRegistered) { clientThreads_.pop_back(); }
-                if (socketRegistered) { clientSockets_.pop_back(); }
+                if (workerRegistered) clientThreads_.pop_back();
+                if (socketRegistered) clientSockets_.pop_back();
                 CloseSocket(client);
                 lastError_ = "native transport could not start a client worker";
             }
@@ -394,50 +492,56 @@ private:
 
         std::lock_guard<std::mutex> lock(mutex_);
         running_ = false;
-        listenSocket_.store(kInvalidSocket);
+        const SocketHandle socket = listenSocket_.exchange(kInvalidSocket);
+        CloseSocket(socket);
     }
 
     void HandleClient(SocketHandle client) {
-        SocketOwner clientOwner(client);
-        {
-            std::string payload;
-            while (!stopRequested_.load()) {
-                bool shouldStop = false;
-                bool frameWasRead = false;
+        std::string payload;
+        while (!stopRequested_.load()) {
+            std::array<std::uint8_t, Protocol::kFrameHeaderBytes> header{};
+            if (!ReadExact(client, reinterpret_cast<char*>(header.data()), header.size())) {
+                break;  // closed, reset or idle timeout
+            }
+            std::uint32_t size = 0;
+            try {
+                size = Protocol::DecodeFrameHeader(header);
+            } catch (const std::exception& error) {
+                // The stream cannot be resynchronised after a bad header.
                 try {
-                    if (!ReadFrame(client, payload)) {
-                        break;
-                    }
-                    frameWasRead = true;
-                    const auto request = Protocol::ParseRequestEnvelope(payload);
-                    auto response = dispatcher_(request);
-                    shouldStop = request.action == "stop" && response.success;
-                    if (!WriteFrame(client, Protocol::SerializeResponseEnvelope(response))) {
-                        break;
-                    }
-                    if (responseSentCallback_) {
-                        try {
-                            responseSentCallback_(request, response);
-                        } catch (...) {
-                            SetLastError("native transport response-sent callback failed");
-                        }
-                    }
-                } catch (const std::exception& error) {
-                    auto response = ErrorResponse("", error);
-                    if (!WriteFrame(client, Protocol::SerializeResponseEnvelope(response))) {
-                        break;
-                    }
-                    if (!frameWasRead) {
-                        break;
-                    }
+                    WriteFrame(client, Protocol::SerializeResponseEnvelope(Protocol::Fail(
+                        "native-transport-error", "invalid_frame", error.what(), false, "not_started")));
+                } catch (...) {
                 }
-                if (shouldStop) {
-                    RequestStop();
-                    break;
-                }
+                break;
+            }
+            payload.assign(size, '\0');
+            if (!ReadExact(client, payload.data(), payload.size())) {
+                break;
+            }
+
+            DispatchOutcome outcome;
+            try {
+                const auto request = Protocol::ParseRequestEnvelope(payload);
+                outcome = dispatcher_(request);
+                if (outcome.response.id.empty()) outcome.response.id = request.id;
+            } catch (const Protocol::BridgeError& error) {
+                outcome.response = Protocol::FromBridgeError("native-transport-error", error);
+            } catch (const std::exception& error) {
+                outcome.response = Protocol::Fail(
+                    "native-transport-error", "invalid_request", error.what(), false, "not_started");
+            } catch (...) {
+                outcome.response = Protocol::Fail(
+                    "native-transport-error", "internal_error", "native bridge dispatcher failed", false, "unknown");
+            }
+            if (!WriteFrame(client, SerializeBounded(outcome.response))) {
+                break;
+            }
+            if (outcome.closeConnection) {
+                break;
             }
         }
-        RemoveClient(client);
+        ShutdownSocket(client);
     }
 
     void RemoveClient(SocketHandle client) {
@@ -459,17 +563,16 @@ private:
 
     mutable std::mutex mutex_;
     Dispatcher dispatcher_;
-    ResponseSentCallback responseSentCallback_;
     std::atomic<SocketHandle> listenSocket_{kInvalidSocket};
     std::vector<SocketHandle> clientSockets_;
     std::vector<ClientWorker> clientThreads_;
     std::thread listenerThread_;
     std::atomic_bool stopRequested_{true};
     std::atomic_bool running_{false};
-    std::uint16_t boundPort_ = 0;
+    std::atomic<std::uint16_t> boundPort_{0};
     std::string lastError_;
-    int maxClients_ = 8;
-    int clientIdleSeconds_ = 600;
+    int maxClients_ = 16;
+    int clientIdleSeconds_ = 120;
 };
 
 NativeTransport::NativeTransport() : impl_(new Impl()) {}
@@ -478,11 +581,8 @@ NativeTransport::~NativeTransport() {
     delete impl_;
 }
 
-void NativeTransport::Start(
-    const NativeTransportOptions& options,
-    Dispatcher dispatcher,
-    ResponseSentCallback responseSentCallback) {
-    impl_->Start(options, std::move(dispatcher), std::move(responseSentCallback));
+void NativeTransport::Start(const NativeTransportOptions& options, Dispatcher dispatcher) {
+    impl_->Start(options, std::move(dispatcher));
 }
 
 void NativeTransport::RequestStop() {
@@ -503,6 +603,10 @@ std::uint16_t NativeTransport::Port() const {
 
 std::string NativeTransport::LastError() const {
     return impl_->LastError();
+}
+
+int NativeTransport::ClientCount() const {
+    return impl_->ClientCount();
 }
 
 }  // namespace VectorworksMCP

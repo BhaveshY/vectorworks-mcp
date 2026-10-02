@@ -15,7 +15,7 @@ Legend:
 | Action | Python handler | Safety | Context | Native phase | Smoke test |
 |--------|----------------|--------|---------|--------------|------------|
 | `ping` | transport status | read | transport-only is allowed | 0 | Phase-0 scaffold returns `native_bridge: true`, `cad_api_safe: false`, `transport_only: true`, version, and handler count; production phase-1 returns `cad_api_safe: true` |
-| `stop` | `handle_stop` | write | transport plus plugin unload/stop path | 0 | Releases port `9877` |
+| `stop` | `handle_stop` | read | transport thread | 0 / v2 | v2: closes only the calling connection (`{connection_closed:true, bridge_running:true}`); the bridge keeps running |
 | `get_document_info` | `handle_get_document_info` | read | main/plugin event context | 1/4 | Returns filename, saved path, layer/object counts, stable document fingerprint, active-document generation, bridge session ID, dirty state, and active layer identity. |
 | `get_layers` | `handle_get_layers` | read | main/plugin event context | 1/4 | Lists layer name, UUID, kind, and visibility repeatedly without freezing Vectorworks. |
 | `get_sheet_layers` | no Python fallback | read | main/plugin event context | 4, revision 5 | Bound/paged native sheet-layer metadata and exact viewport counts. |
@@ -36,19 +36,45 @@ Legend:
 | `drawing_summary` | `handle_drawing_summary` | read | main/plugin event context | 3 | Returns compact counts by type/layer/class plus bounded examples without dumping every object |
 | `apply_operations` | no Python fallback | idempotent write | main/plugin event context | 4 | Uses one `NativeTransaction` for create, property, transform, wall/line endpoint reshape, schema-verified parametric update, duplicate, and delete operations. Supports local, handle, UUID, and exact-name refs. Verifies semantic receipts, exact cleanup, undo commit, and idempotency-key reuse across first save/Save As by stable layer identity. |
 | `apply_documentation_operations` | no Python fallback | idempotent/destructive write | main/plugin event context | 4, revision 5 | One bound native transaction for typed create/update/delete of sheet layers, viewports, and viewport annotations. Requires the exact saved path, document fingerprint, active-document generation, bridge session ID, and dirty state; validates parent-child ownership and semantic readback; restores the starting active layer. |
-| `get_view` | native view state | read | main/plugin event context | 4 | Reads the active layer view state. |
-| `set_view` | native view state | view write | main/plugin event context | 4 | Sets view state and supports deselect plus native Fit to Objects for reliable unattended captures. |
+| `get_view` | native view state | read | main/plugin event context | 4 / v2 | v2: zoom, centre, view matrix, active layer + kind, screen/drawing-area pixels, dpi, names for the enums. |
+| `set_view` | native view state | view write | main/plugin event context | 4 / v2 | v2: fit to drawing/selection/objects/layer from object bounds (`SetViewCenter` + `SetZoomFactorN`, no `DoMenuName`, no select-all), zoom/centre/layer/saved view, returns `{previous, current}`. |
 | `worksheet` | `handle_worksheet` | mixed/write | main/plugin event context | 3 | Lists worksheets and reads/writes a temporary cell |
 | `symbol` | `handle_symbol` | mixed/write | main/plugin event context | 3 | Lists symbols and inserts a known symbol in a test document |
 | `export` | `handle_export` | write-file | compatibility only | deferred | Disabled. Production uses the native non-modal `export_image`, `export_pdf`, `export_vectorworks_document`, or `export_dwg` action. |
 | `import_file` | `handle_import_file` | document write | compatibility only | deferred | Disabled for production. The native `import_dwg` action uses silent `IImportExportDWG` and returns a document mutation receipt. |
-| `screenshot` | `handle_screenshot` | write-file | compatibility only | deferred | Disabled. Production uses native `capture_view`, which writes and verifies an image without a dialog. |
-| `run_script` | `handle_run_script` | destructive/open-ended | compatibility only | deferred | Not registered by the native bridge. The fast-native profile never exposes arbitrary code execution. |
+| `screenshot` | `handle_screenshot` | write-file | compatibility only | deferred | Disabled. Production uses native `capture_view` (v2: temporary view/fit/render mode, crop to fit, exact view + selection restore, image size readback). |
+| `run_script` | in-process `IPythonScriptEngine` / `IVectorScriptEngine` | destructive/open-ended | main/plugin event context | v2 | One undo step, rollback on failure (`rolled_back`, `rollback_verified`), stdout/stderr capture, `result` JSON, VS error dialogs suppressed; disabled by `VW_MCP_ALLOW_SCRIPT=0`. |
 | `insert_door` | `handle_insert_door` | write | compatibility only | deferred | Disabled. Production uses `create_object` kind `door`, a runtime schema fingerprint, an exact wall UUID, and semantic host readback. |
 | `insert_window` | `handle_insert_window` | write | compatibility only | deferred | Disabled. Production uses `create_object` kind `window`, a runtime schema fingerprint, an exact wall UUID, and semantic host readback. |
 | `create_slab` | `handle_create_slab` | write | compatibility only | deferred | Disabled. Production uses `create_object` kind `slab`, which calls `ISDK::CreateSlab` and verifies `kSlabNode`. |
 | `create_roof` | `handle_create_roof` | write | compatibility only | deferred | Disabled. Production uses `create_object` kind `roof`, which calls `ISDK::CreateRoof` and verifies `kRoofContainerNode`. No extrusion substitute exists. |
 | `inspect_object` | `handle_inspect_object` | read | compatibility only | deferred | Existing-object inspection is read-only. Temporary plug-in probing is disabled. Production schema discovery uses `describe_parametric_schema`. |
+
+## Protocol v2 additions (capability revision 6)
+
+| Action | Safety | Context | Notes |
+|--------|--------|---------|-------|
+| `job_status` | read | transport thread | Job record for async/converted requests (15 min / 64 jobs). |
+| `cancel_job` | write (queue only) | transport thread | Cancels queued jobs; running handlers are not interruptible. |
+| `list_documents` | read | main (no document needed) | Stable per-document fingerprints, active flag, dirty (2024), untitled. |
+| `activate_document` | view write | main | `SwitchToOpenFile` by fingerprint/path/name. |
+| `new_document` | document write | main (no document needed) | Opens a blank template (no SDK "new" call exists); reports `untitled`. |
+| `close_document` | destructive | main | Never prompts: refuses dirty docs unless `discard_changes:"discard"`. |
+| `open_document` | document write | main (no document needed) | Now synchronous + job conversion (was deferred fire-and-forget). |
+| `capture_view` | read (restores state) | main | See PROTOCOL.md 6.2. |
+| `saved_views` | mixed | main | list/restore native; create/delete via in-process `vs.SaveSheet` / `vs.VDelete`. |
+| `layers` | mixed/destructive | main | list/create/set/delete with visibility, scale, elevation, opacity, story, counts. |
+| `stories` | mixed | main | list/create/set via ISDK story calls. |
+| `manage_classes set` / `list detailed` | write / read | main | visibility, active, colours, line weight, use-at-creation. |
+| `export_ifc` / `import_ifc` | write-file / document write | main | Silent `IIFCSupport` (`bShowUI=false`). |
+| `export_pdf` `range`/`sheet`/`dpi` | write-file | main | current_view, all_pages, or one sheet layer. |
+| `resources` / `symbol list` / `worksheet list` paging | read | main | offset/limit/cursor + `next_cursor`. |
+| `group`, `records` | — | host | Not native in 1.0; hosts use `run_script` snippets. |
+
+All main-thread actions run behind the UI gate (`idle` only, `no_document`
+for document-less actions), accept `async`, `busy_wait_ms`,
+`expect_document_fingerprint` + `activate_document`, and honour `timeout_ms`
+(`timeout_not_started` / `still_running` + job).
 
 ## Mixed Action Safety
 

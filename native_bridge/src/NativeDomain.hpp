@@ -16,6 +16,9 @@ struct ActionSpec {
     std::uint8_t nativePhase;
     bool mayWriteDocument;
     bool destructive;
+    // 1.0 additions
+    bool needsDocument;
+    bool longRunning;
 };
 
 struct ObjectKindSpec {

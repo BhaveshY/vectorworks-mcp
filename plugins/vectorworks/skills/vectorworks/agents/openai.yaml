@@ -1,0 +1,4 @@
+interface:
+  display_name: "Vectorworks"
+  short_description: "Draw, inspect, edit, capture and export Vectorworks drawings through the vectorworks MCP server"
+  default_prompt: "Use $vectorworks: call vw_status first, then complete the Vectorworks task with as few vw_* calls as possible and verify the result with vw_capture."

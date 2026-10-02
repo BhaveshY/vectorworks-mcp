@@ -1,37 +1,27 @@
 {
   "name": "vectorworks",
-  "version": "0.7.0",
-  "description": "Control Vectorworks 2024/2025 through the production fast-native MCP connector.",
+  "version": "1.0.0",
+  "description": "Skills for driving Vectorworks 2024/2025 through the vectorworks MCP server (registered separately by install.ps1).",
   "author": {
     "name": "Bhavesh",
     "url": "https://github.com/BhaveshY"
   },
   "homepage": "https://github.com/BhaveshY/vectorworks-mcp",
   "repository": "https://github.com/BhaveshY/vectorworks-mcp",
-  "keywords": [
-    "vectorworks",
-    "mcp",
-    "cad",
-    "bim",
-    "windows"
-  ],
+  "keywords": ["vectorworks", "mcp", "cad", "bim", "windows"],
   "skills": "./skills/",
-  "mcpServers": "./.mcp.json",
   "interface": {
-    "displayName": "Vectorworks MCP",
-    "shortDescription": "Fast native CAD control for Vectorworks",
-    "longDescription": "Inspect and edit Vectorworks drawings through a guarded phase-4 native SDK bridge while keeping the Vectorworks interface available for manual work.",
+    "displayName": "Vectorworks",
+    "shortDescription": "Draw, inspect, edit, capture and export Vectorworks drawings",
+    "longDescription": "Teaches Codex the 10 Vectorworks MCP tools: status first, document targeting, one-call floor plans with walls, doors, windows and spaces, edits, visual verification with vw_capture, layers and classes, sheet export, multi-document work, scripting and recovery for every error code. The MCP server itself is registered by install.ps1 as [mcp_servers.vectorworks].",
     "developerName": "Bhavesh",
     "category": "Productivity",
-    "capabilities": [
-      "Interactive",
-      "Write"
-    ],
+    "capabilities": ["Interactive", "Write"],
     "websiteURL": "https://github.com/BhaveshY/vectorworks-mcp",
     "defaultPrompt": [
       "Check the Vectorworks connection and summarize the active drawing.",
-      "Create this architecture diagram in the active Vectorworks document.",
-      "Inspect these Vectorworks objects and apply the requested edits."
+      "Draw a 8 x 6 m two-room floor plan with doors, windows and spaces in the active Vectorworks document.",
+      "Export all sheets of the active Vectorworks document to PDF on my desktop."
     ],
     "brandColor": "#D71920"
   }

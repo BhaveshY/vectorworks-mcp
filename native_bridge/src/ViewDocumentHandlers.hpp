@@ -84,6 +84,9 @@ PreparedOpenDocument PrepareOpenDocument(
     const std::string& absolutePath,
     const std::string& replaceDirtyConfirmation);
 bool LaunchPreparedOpenDocument(const PreparedOpenDocument& request);
+// 1.0: canonical path validation only (Vectorworks opens documents side by
+// side, so no dirty-state confirmation is needed and none is read).
+PreparedOpenDocument PrepareOpenDocumentPath(const std::string& absolutePath);
 
 const char* ErrorCodeName(ErrorCode code) noexcept;
 const char* CommitStateName(CommitState state) noexcept;

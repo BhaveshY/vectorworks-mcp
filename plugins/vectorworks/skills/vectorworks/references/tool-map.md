@@ -1,0 +1,182 @@
+# Vectorworks MCP 1.0 tool map
+
+The default tool profile has exactly these 10 tools (`docs/V1_CONTRACT.md`
+section 2.3). `scripts/check-skill-tool-names.py --live` checks this file and
+SKILL.md against the running server's `tools/list` (tool names and argument
+names). The tool's input schema is always authoritative.
+
+Every result uses one envelope. Success: `{"ok": true, ...}`. Failure:
+`{"ok": false, "error": {"code", "message", "retryable", "next_step",
+"commit_state"?, "field"?, "example"?, "details"?}}`; `isError` is set exactly
+when `ok` is false. Every document-touching tool accepts `document` (file
+name, path or fingerprint). Write tools accept an optional `idempotency_key`
+(derived automatically when omitted) and `dry_run`.
+
+## vw_status (read-only, never fails)
+
+| Argument | Meaning |
+|---|---|
+| (none) | instances, open documents, active document, UI state (idle / modal / tracking / loading / no_document), setup problems with their fix, versions |
+| `job_id` | progress / result of a long operation |
+| `idempotency_key` | whether a write with that key was applied |
+| `instance` | pin one Vectorworks instance (pid or port) |
+| `detail` | more diagnostics |
+| `disconnect` | close the host's sockets (fresh connection on the next call) |
+
+## vw_read (read-only)
+
+Arguments: `what` (required), `type`, `layer`, `class`, `name`, `criteria`,
+`query`, `target`, `resource_type`, `fields`, `range`, `limit`, `cursor`,
+`plan`, `document`.
+
+| `what` | Returns / main arguments |
+|---|---|
+| `document` | active document info |
+| `documents` | open documents (active, modified, fingerprint) |
+| `layers` | design + sheet layers with visibility, scale, elevation, story, object count |
+| `classes` | classes with visibility (`query` filters names) |
+| `summary` | whole-drawing counts by type / layer / class (`type`, `layer`) - use for "how many" |
+| `query` | objects; filter `type`, `layer`, `class`, `name`, `criteria`; `fields`; paged by `limit` + `cursor` |
+| `object` | one object in full (`target` = uuid or name) |
+| `selection` | selected objects (`fields`) |
+| `view` | current view, zoom, render mode, active layer |
+| `saved_views` | saved views |
+| `sheets` / `viewports` / `annotations` | sheet layers / viewports of a sheet (`target`) / viewport annotations |
+| `symbols` / `resources` | symbol definitions / resources (`resource_type`) |
+| `worksheets` / `worksheet` | worksheet list / cells of one worksheet (`target`, `range` like `"A1:D20"`) |
+| `records` | record formats and fields |
+| `parametric_schema` | parameter ids, types and defaults of a plug-in object (`target` = "Door", "Window", "Space", "Stair", ...) |
+| `capabilities` | what the connected bridge supports |
+| `plan_quality` | plan checks (overlaps, gaps, unhosted openings); optional `plan` |
+
+## vw_capture (read-only; the user's view is restored)
+
+`view` = `drawing` (default, fit all) / `current` / `selection` / `objects`
+(+ `objects` = uuids) / `layer` (+ `layer`) / `sheet` (+ `sheet`) /
+`saved_view` (+ `saved_view`); optional `standard_view` (top_plan, top, front,
+back, left, right, bottom, iso, right_iso, left_iso, right_rear_iso,
+left_rear_iso), `render_mode` (wireframe, opengl, shaded, hidden_line,
+dashed_hidden_line, final_shaded, sketch, fast_renderworks, final_renderworks),
+`format` (png/jpg), `margin_pct`, `document`. Returns an inline image (long
+edge <= 1568 px) plus a link to the full-resolution file.
+
+## vw_create (write, one undo step)
+
+Arguments: `objects` and/or `floor_plan`, `units`, `dry_run`, `document`,
+`idempotency_key`. Each object: `type` + optional `id` (referenced later in
+the same call as `"$id"`), `name`, `class`.
+
+| `type` | Fields |
+|---|---|
+| `line` | `start`, `end` |
+| `rect` / `oval` | `origin` (or `center`) + `width` + `height`, or `start` + `end` |
+| `circle` / `arc` | `center`, `radius`; arc `start_angle`, `sweep_angle` |
+| `polygon` / `polyline` | `points` (polygon closed) |
+| `wall` | `start`, `end`, `thickness` (200), `height` (3000), `style` |
+| `slab` | `points`, `thickness` (200), `elevation`, `style` |
+| `roof` | `points`, `slope` (30), `thickness`, `overhang` (500), `elevation` |
+| `space` | `points`, `name`, `room_id`, `height` |
+| `text` | `at`, `text`, `size`, `rotation` |
+| `dimension` | `start`, `end`, `offset` (300) |
+| `symbol` | `symbol` (definition name), `at`, `rotation` |
+| `door` / `window` | `wall` (`"$id"` or uuid), `offset` (same-call wall) or `at`, `width`, `height`; window `sill`; `parameters` |
+| `parametric` | `plugin`, `at`, `rotation`, `parameters` `{"ParamId": value}` |
+| `room` | `origin`, `width`, `depth`, `name` (+ `space`, `dimensions`): 4 real walls + label |
+
+`floor_plan` = `{"rooms": [{name, origin, width, depth}], "walls": [...],
+"doors": [{at, width}], "windows": [{at, width}], "wall_thickness",
+"wall_height", "style": "bim" | "schematic"}`.
+
+## vw_edit (write, destructive, one undo step)
+
+Arguments: `changes` (required), `units`, `dry_run`, `document`,
+`idempotency_key`. Each change: `op` + `target` or `targets` (uuid,
+`"name:..."`, `"$id"`, `"selection"`).
+
+| `op` | Fields |
+|---|---|
+| `set` | `properties`: name, class, fill_color, pen_color, fill_pattern, line_weight, opacity |
+| `move` | `by` `[dx, dy]` |
+| `rotate` | `angle` (degrees), `center` |
+| `scale` | `factor` |
+| `mirror` | `axis` "x" / "y", `center` |
+| `reshape` | walls / lines: `start`, `end` |
+| `duplicate` | `by`, `count` (1-100) |
+| `delete` | target only |
+| `parametric` | `plugin`, `parameters` |
+| `class` / `layer` | `class` / `layer` |
+| `group` / `ungroup` | - |
+| `record` | `record`, `fields` |
+| `select` / `deselect` | `targets` or `criteria` |
+
+## vw_apply (write, destructive) - 0.7 grammar
+
+`operations` = `[{"type", "operation_id"?, "params"}]` with type `create`
+(`params.object_type` + 0.7 fields, e.g. wall `start_x, start_y, end_x, end_y`),
+`set_properties` (`{"edits": [{"ref", "properties"}]}`), `transform` (`target,
+dx, dy, rotation_deg, scale_x, scale_y, pivot_x, pivot_y`), `reshape`,
+`update_parametric`, `duplicate`, `delete`; sheet / viewport / annotation
+lifecycle operations when the bridge supports them. `coordinate_units`,
+`idempotency_key`, `document`. Full grammar: MCP resource `vw://guide`.
+
+## vw_view (changes the view only)
+
+`standard_view`, `projection` (orthogonal / perspective / plan),
+`render_mode`, `fit` (drawing / selection / objects / layer) + `objects`,
+`zoom`, `center` `[x, y]`, `margin_pct`, `saved_view` (restore),
+`save_view_as` (create), `layer` (make active), `document`. No arguments =
+report the current view.
+
+## vw_organize (write)
+
+`kind` (layer, class, story, saved_view, worksheet, resource) + `action`
+(create, set, delete, write, import). Fields: `name`, `new_name`,
+`visibility` (show / gray / hide), `active`, `scale`, `elevation`, `opacity`,
+`fill_color`, `pen_color`, `line_weight`, `use_at_creation`, `layer_kind`
+(design / sheet), `title`, `cell` + `value` (worksheet write), `source` +
+`resource_type` (resource import), `force` (delete non-empty layer), `units`,
+`document`. Saved views: create, set (= restore), delete. Stories: create, set.
+
+## vw_document (write, destructive)
+
+`action` = list, info, activate, new (`template`), open (`path`), save,
+save_as (`path`), close (`document`, `discard_changes="discard"`), export
+(`path`, `format` pdf / dwg / dxf / ifc / png / jpg / tif / bmp / vwx, `range`
+current_view / all_pages / sheet + `sheet`, `dpi`, `replace`), import (`path`,
+`format`, `at`). Long exports / imports become jobs (`still_running` +
+`job_id`).
+
+## vw_script (write, destructive)
+
+`code` (required), `language` (python / vectorscript), `undo_label`,
+`background` (run as a job), `document`. Python gets `vs` pre-imported and may
+set `result`. Returns `{ok, result, stdout, stderr, error?, rolled_back,
+duration_ms}`. Disabled when Vectorworks runs with `VW_MCP_ALLOW_SCRIPT=0`.
+
+## Old (0.7) tools -> 1.0
+
+Nothing was removed: every 0.7 capability maps to a 1.0 tool. The complete
+table is `docs/PARITY.md` in the repository.
+
+<!-- tool-check: legacy-begin -->
+| 0.7 call | 1.0 call |
+|---|---|
+| `vw_status(action="health" / "context")` | `vw_status()` |
+| `vw_status(action="transaction", idempotency_key=...)` | `vw_status(idempotency_key=...)` |
+| `vw_read(action="document" / "layers" / "summary" / "query" / "selection")` | `vw_read(what=...)` (same names; `object_type` -> `type`) |
+| `vw_read(action="sheet_layers" / "viewports" / "viewport_annotations")` | `vw_read(what="sheets" / "viewports" / "annotations")` |
+| `vw_read(action="plan_quality")` | `vw_read(what="plan_quality")` |
+| `vw_catalog(action="capabilities" / "classes" / "symbols" / "worksheets" / "resources")` | `vw_read(what=...)` |
+| `vw_catalog(action="parametric_schemas", query=X)` | `vw_read(what="parametric_schema", target=X)` |
+| `vw_apply(...)` | `vw_create` / `vw_edit`, or `vw_apply` with the same grammar |
+| `vw_execute_operations(...)` | `vw_apply` (same grammar) |
+| `vw_io(action="capture")`, `vw_view(action="capture")` | `vw_capture` |
+| `vw_io(action="export" / "import")` | `vw_document(action="export" / "import")` |
+| `vw_view(action="get")` | `vw_read(what="view")` or `vw_view()` |
+| `vw_view(action="set" / "fit")` | `vw_view(...)` |
+| `vw_document(action="info")` | `vw_document(action="info")` or `vw_read(what="document")` |
+| `vw_document(action="save" / "export" / "open")` | `vw_document` (same actions) |
+| `vw_tool_safety` | removed: tool annotations + `error.retryable` / `error.commit_state` + the recovery table in SKILL.md |
+| schematic floor-plan tools (`vw_create_schematic_*`) | `vw_create(floor_plan={..., "style": "schematic"})` |
+| compatibility tools (`vw_ping`, `vw_bridge_status`, `vw_preflight_for_cad`, per-object create tools) | `vw_status` + `vw_create` / `vw_edit`; the 0.7 server stays available with `VW_MCP_TOOL_PROFILE=legacy` |
+<!-- tool-check: legacy-end -->
