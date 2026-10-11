@@ -47,6 +47,26 @@ def _png_size(data: bytes) -> Optional[tuple[int, int]]:
     return None
 
 
+def _trim_background(img):
+    """Crop uniform background margins (3D fits are approximate, sheets have
+    paper around the drawing) so the model sees the drawing larger for the same
+    token cost. The full-resolution file on disk is never modified. Returns
+    (cropped image, [left, top, right, bottom]) or None when nothing to trim."""
+    from PIL import Image, ImageChops
+    rgb = img.convert("RGB")
+    background = rgb.getpixel((0, 0))
+    diff = ImageChops.difference(rgb, Image.new("RGB", rgb.size, background)).convert("L")
+    box = diff.point(lambda value: 255 if value > 12 else 0).getbbox()
+    if not box:
+        return None
+    width, height = rgb.size
+    pad = max(8, int(0.03 * max(box[2] - box[0], box[3] - box[1])))
+    box = (max(0, box[0] - pad), max(0, box[1] - pad), min(width, box[2] + pad), min(height, box[3] + pad))
+    if (box[2] - box[0]) * (box[3] - box[1]) > 0.85 * width * height:
+        return None
+    return rgb.crop(box), list(box)
+
+
 def model_image(path: Path, max_edge: int = MAX_EDGE) -> tuple[Optional[bytes], str, dict]:
     """Return (bytes, mime, info) sized for the model. Pillow is optional and lazily imported."""
     info: dict = {}
@@ -69,8 +89,12 @@ def model_image(path: Path, max_edge: int = MAX_EDGE) -> tuple[Optional[bytes], 
         with Image.open(io.BytesIO(raw)) as img:
             img.load()
             info["width"], info["height"] = img.size
+            trimmed = _trim_background(img)
+            if trimmed is not None:
+                img, info["trimmed_box"] = trimmed
+                raw = b""  # force re-encode of the trimmed image below
             long_edge = max(img.size)
-            if long_edge <= max_edge and len(raw) <= 2_000_000:
+            if raw and long_edge <= max_edge and len(raw) <= 2_000_000:
                 return raw, mime, info
             scale = min(1.0, max_edge / float(long_edge))
             target = (max(1, int(img.size[0] * scale)), max(1, int(img.size[1] * scale)))
