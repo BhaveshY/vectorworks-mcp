@@ -86,11 +86,15 @@ class _Linter(ast.NodeVisitor):
         self._checked_calls: set[int] = set()
 
     # -- helpers -------------------------------------------------------------
-    def _issue(self, node: ast.AST, name: str, problem: str) -> None:
+    def _issue(self, node: ast.AST, name: str, problem: str, severity: str = "warning") -> None:
+        # "error" blocks the script (unknown function, wrong argument count,
+        # dialog-opening call). Type mismatches are only warnings: live tests
+        # (2026-10-11) showed Vectorworks accepts e.g. x, y for POINT and an
+        # index for COLOR, so rejecting them would cost capability.
         if len(self.issues) >= MAX_ISSUES:
             return
         item: dict[str, Any] = {"line": getattr(node, "lineno", 0), "function": f"vs.{name}" if name else "",
-                                "problem": problem}
+                                "problem": problem, "severity": severity}
         sig = signature(name) if name else ""
         if sig:
             item["signature"] = sig
@@ -115,7 +119,7 @@ class _Linter(ast.NodeVisitor):
             close = difflib.get_close_matches(name, list(self.table), n=3, cutoff=0.75)
             if close:
                 hint = "; did you mean " + " / ".join("vs." + c for c in close) + "?"
-        self._issue(node, "", f"unknown function vs.{name} (not in the Vectorworks 2024/2025 vs.py stub){hint}")
+        self._issue(node, "", f"unknown function vs.{name} (not in the Vectorworks 2024/2025 vs.py stub){hint}", severity="error")
         if lowered:
             self.issues[-1]["signature"] = signature(lowered)
         return False
@@ -178,7 +182,7 @@ class _Linter(ast.NodeVisitor):
         if entry.get("ui"):
             self._issue(node, name, f"vs.{name} opens a modal dialog or waits for a mouse click; that blocks the "
                                     "Vectorworks main thread (and the bridge) until the user reacts. Pass the values "
-                                    "in the script instead")
+                                    "in the script instead", severity="error")
             return
         params = entry["p"]
         args = node.args
@@ -191,7 +195,7 @@ class _Linter(ast.NodeVisitor):
                 self._check_arg_type(node, name, arg, pname, ptype)
             return
         if len(args) < len(params):
-            self._issue(node, name, f"too few arguments: {len(args)} given, {len(params)} expected")
+            self._issue(node, name, f"too few arguments: {len(args)} given, {len(params)} expected", severity="error")
             return
         # More args than declared params: POINT/POINT3D/VECTOR may be passed as
         # separate coordinates (COLOR may not: it must be one (r, g, b) value).
@@ -200,7 +204,7 @@ class _Linter(ast.NodeVisitor):
         if len(args) > total:
             self._issue(node, name, f"too many arguments: {len(args)} given, {len(params)} expected"
                                     + (f" (up to {total} with expanded coordinates)" if total != len(params) else "")
-                                    + ("; COLOR must be one (r, g, b) tuple" if has_color else ""))
+                                    + ("; COLOR must be one (r, g, b) tuple" if has_color else ""), severity="error")
             return
         index = sub = 0
         for arg in args:
@@ -228,7 +232,7 @@ class _Linter(ast.NodeVisitor):
                 sub = 0
         if index < len(params) or sub:
             self._issue(node, name, f"argument count does not match: {len(args)} given for {len(params)} "
-                                    "parameters (POINT = (x, y) or x, y; COLOR = (r, g, b))")
+                                    "parameters (POINT = (x, y) or x, y; COLOR = (r, g, b))", severity="error")
 
     def _check_arg_type(self, node: ast.Call, name: str, arg: ast.AST, pname: str, ptype: str) -> None:
         if ptype == "COLOR":

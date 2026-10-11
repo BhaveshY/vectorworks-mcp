@@ -18,10 +18,13 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         # call, never at server start-up.
         from .. import vs_lint
         issues = vs_lint.lint(code)
-        if issues:
-            raise VWError("script_lint_failed", "vs.* call check failed: " + vs_lint.summary(issues),
-                          retryable=True, commit_state="not_started", next_step=vs_lint.next_step(issues),
+        errors = [i for i in issues if i.get("severity") == "error"]
+        if errors:
+            raise VWError("script_lint_failed", "vs.* call check failed: " + vs_lint.summary(errors),
+                          retryable=True, commit_state="not_started", next_step=vs_lint.next_step(errors),
                           details={"issues": issues})
+        for issue in issues:
+            warnings.append(f"line {issue.get('line')}: {issue.get('function')} {issue.get('problem')}"[:300])
     host = get_host()
     target = host.session.target(a.get("document"), write=True)
     if not target.inst.supports("run_script"):

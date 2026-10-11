@@ -6,6 +6,7 @@
 #include "BridgeProtocol.hpp"
 
 #include "Interfaces/VectorWorks/Scripting/IPythonScriptEngine.h"
+#include <cstdlib>
 #include "Interfaces/VectorWorks/Scripting/IVectorScriptEngine.h"
 
 #include <malloc.h>  // _resetstkoflw
@@ -62,6 +63,24 @@ unsigned long GuardedPythonExecute(
     VectorWorks::Scripting::IPythonLogger* logger, VCOMError* error) {
     __try {
         *error = engine->ExecuteScript(*script, logger);
+        return 0;
+    } __except (ScriptFaultFilter(GetExceptionCode())) {
+        const unsigned long code = GetExceptionCode();
+        if (code == EXCEPTION_STACK_OVERFLOW) _resetstkoflw();
+        return code ? code : 1u;
+    }
+}
+
+// SDK example pattern (ImageComparisonTesting.cpp): ScriptContext_Begin +
+// ScriptContext_Run(Ex) sets up the full scripting context. Live test
+// 2026-10-11: bare ExecuteScript runs read/attribute scripts but faults (AV)
+// as soon as the script creates an object (vs.Rect, vs.Locus...).
+unsigned long GuardedPythonContextRun(
+    VectorWorks::Scripting::IPythonScriptEngine* engine, const TXString* script,
+    VectorWorks::Scripting::IPythonLogger* logger, VCOMError* error) {
+    __try {
+        *error = engine->ScriptContext_Begin(*script, logger);
+        if (*error == kVCOMError_NoError) *error = engine->ScriptContext_RunEx(logger);
         return 0;
     } __except (ScriptFaultFilter(GetExceptionCode())) {
         const unsigned long code = GetExceptionCode();
@@ -342,7 +361,11 @@ ScriptOutcome ExecutePython(const std::string& code) {
     unsigned long fault = 0;
     {
         ScopedVectorScriptErrorSuppression suppress;
-        fault = GuardedPythonExecute(python.operator->(), &scriptText, &logger, &error);
+        // VW_MCP_PY_MODE=execute restores the bare ExecuteScript path (diagnostics).
+        const char* mode = std::getenv("VW_MCP_PY_MODE");
+        fault = (mode && std::string(mode) == "execute")
+            ? GuardedPythonExecute(python.operator->(), &scriptText, &logger, &error)
+            : GuardedPythonContextRun(python.operator->(), &scriptText, &logger, &error);
     }
     if (fault) {
         // Do not touch Python again (interpreter/thread state is unknown after

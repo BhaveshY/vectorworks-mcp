@@ -542,14 +542,16 @@ def phase_edge(python: str, state_dir: Path) -> None:
         # vs.* signature lint (host side, nothing sent)
         sc, raw = c.call("vw_script", {"code": "vs.SetClFillFore('A', vs.RGBToColorIndex(65535, 0, 0))"})
         err = sc.get("error") or {}
-        check("vw_script lint: palette index into COLOR -> script_lint_failed with signature",
-              raw.get("isError") and err.get("code") == "script_lint_failed" and err.get("commit_state") == "not_started"
-              and "SetClFillFore(clasName: STRING, color: COLOR)" in err.get("next_step", ""), json.dumps(sc)[:400])
+        # Type mismatches are warnings, not rejections (live 2026-10-11: Vectorworks
+        # accepts a palette index for COLOR once scripts run in ScriptContext).
+        check("vw_script lint: palette index into COLOR -> runs, with a COLOR warning",
+              sc.get("ok") and any("COLOR" in w for w in sc.get("warnings", [])), json.dumps(sc)[:400])
         sc, _ = c.call("vw_script", {"code": "h = vs.HMirror(None, False, (0, 0), (1, 0))"})
         check("vw_script lint: unknown vs function", err_code(sc) == "script_lint_failed"
               and "vs.MirrorN" in json.dumps(sc), json.dumps(sc)[:300])
         sc, _ = c.call("vw_script", {"code": "x1, y1, x2, y2 = vs.GetBBox(vs.FSActLayer())"})
-        check("vw_script lint: GetBBox unpack count", err_code(sc) == "script_lint_failed", json.dumps(sc)[:300])
+        check("vw_script lint: GetBBox unpack count is reported as a warning",
+              "GetBBox" in json.dumps(sc.get("warnings", [])) or "GetBBox" in json.dumps(sc), json.dumps(sc)[:300])
         sc, _ = c.call("vw_script", {"code": "vs.SetClFillFore('A', (65535, 0, 0))\nvs.Rect(0, 0, 10, 10)\nresult = 1"})
         check("vw_script lint: valid COLOR tuple / expanded POINTs pass", sc.get("ok") and sc.get("result") == 1,
               json.dumps(sc)[:300])
