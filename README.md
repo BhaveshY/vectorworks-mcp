@@ -69,7 +69,8 @@ Tools: `vw_status`, `vw_read`, `vw_capture`, `vw_create`, `vw_edit`, `vw_apply`,
 | `vw_status` says `setup_required` (repair mode) | Run the `repair_command` it prints. |
 | `bridge_unreachable` | Start Vectorworks; check the plug-in with `doctor` (native check). |
 | `upgrade_required` | Close Vectorworks, run `install.ps1 -FullNative`. |
-| `vectorworks_busy` | Close the open dialog / finish the drag in Vectorworks. |
+| `vectorworks_busy` | Close the open dialog / finish the drag in Vectorworks. The Home screen and the "new version available" notice are closed automatically. |
+| Vectorworks asks for the licence server at every start ("Login Settings") | Press Login, or tick "Don't show at startup" in that dialog so unattended starts work. |
 | Old 0.x tool names appear, or two Vectorworks servers | A stale plugin or old registration is active; `doctor` names it and the cleanup command. |
 
 Security: loopback only, per-user token in `%USERPROFILE%\.vectorworks-mcp\auth-token`

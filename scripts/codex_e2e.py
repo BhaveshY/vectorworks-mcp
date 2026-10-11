@@ -77,7 +77,7 @@ def run(name: str, model: str, prompt: str) -> dict:
            "-C", str(WORK), "-c", 'model_reasoning_effort="medium"', prompt]
     started = time.time()
     with open(log, "w", encoding="utf-8") as handle:
-        proc = subprocess.run(cmd, stdout=handle, stderr=subprocess.STDOUT, timeout=1800)
+        proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=handle, stderr=subprocess.STDOUT, timeout=1800)
     calls: list[str] = []
     errors: list[str] = []
     final = ""

@@ -26,6 +26,10 @@ To *use* Vectorworks from an agent, read the skill
 | `scripts/package-release.ps1` | portable release zip (+ wheels, + prebuilt plug-in) and plugin zip |
 | `scripts/build-native-bridge.ps1` & co. | native build / prerequisites / smoke (stream N) |
 | `scripts/e2e_host.py` | host end-to-end test against the mock bridge (`--real`: read-only against Vectorworks) |
+| `native_bridge/live_acceptance_v2.py` | live native acceptance (creates and discards its own untitled documents) |
+| `scripts/e2e_connectivity.py` | live: one MCP session (installed launcher) must survive a full Vectorworks restart |
+| `scripts/codex_e2e.py` | live: real `codex exec` scenarios (weak + strong model) with tool-call/error summary |
+| `scripts/dev-restart-vectorworks.ps1` | test-PC helper: discard untitled docs, restart Vectorworks, press the licence Login, wait for the bridge |
 | `scripts/verify-no-vectorworks.ps1` | everything checkable without Vectorworks (CI entry point) |
 | `scripts/check-skill-tool-names.py` | fails on unknown `vw_*` tools / arguments in skills and docs (`--live` = against tools/list) |
 | `plugins/vectorworks/` | the one plugin for Codex (`.codex-plugin/`) and Claude (`.claude-plugin/`): skills only |
@@ -55,3 +59,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\verify-no-vectorwo
 py -3.12 scripts\e2e_host.py                                                              # host vs mock bridge
 %USERPROFILE%\.vectorworks-mcp\bin\vectorworksctl.cmd doctor                              # installed system
 ```
+
+Live (Vectorworks running, test PC only; never while someone works in it):
+
+```powershell
+py -3.12 native_bridge\live_acceptance_v2.py     # native bridge, 59 checks
+py -3.12 scripts\e2e_connectivity.py             # restart survival, 10 checks
+py -3.12 scripts\codex_e2e.py                    # real Codex runs (uses OpenAI quota)
+```
+
+Last live results (2026-10-11, Vectorworks 2024): acceptance 59/59, connectivity 10/10;
+Codex weak model (gpt-5.6-luna) room scenario 10 calls / 0 errors (52 calls / 12 errors
+before the round-2 fixes); strong model (gpt-6-astra) multi-document scenario 25 calls / 0 errors.
+
+Live lessons baked into the bridge: run Python through `ScriptContext_Begin/RunEx`
+(bare `ExecuteScript` faults as soon as a script creates objects); Vectorworks buttons
+are owner-drawn; VectorScript compile shows an OK box even with dialogs disabled (the
+bridge acknowledges handler-owned single-button message boxes); doors/windows live
+inside wall containers; the Home screen and update notice block the UI after start.
