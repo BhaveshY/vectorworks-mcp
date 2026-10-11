@@ -101,6 +101,21 @@ def handle(args: dict, ctx, warnings: list) -> dict:
                 "document state after the crash is unknown.",
                 "Ask the user to save their work and restart Vectorworks. Native (non-script) tools still work; "
                 "do not call vw_script until then."))
+        early = chosen.status.get("modal_dialog")
+        if (isinstance(early, dict) and early.get("kind") in {"home", "update_available"}
+                and chosen.status.get("auto_dismiss_dialogs", True) is not False):
+            # Harmless startup dialogs: close them now so a status check right
+            # after Vectorworks starts already reports ready (live 2026-10-11).
+            try:
+                host.bridge.call(chosen, "dismiss_home", {"wait_ms": 3000}, kind="read", budget_s=8)
+                host.bridge.ping(chosen)
+                out["dismissed_dialog"] = early.get("kind")
+                for row in rows:
+                    if row.get("instance") == chosen.key:
+                        row["ui_state"] = chosen.status.get("ui_state")
+                        row.pop("modal_dialog", None)
+            except VWError:
+                pass
         ui_state = chosen.status.get("ui_state")
         chosen_row = next((r for r in rows if r.get("instance") == chosen.key), {})
         busy = ui_state in {"modal", "tracking", "loading"} or chosen_row.get("ui_state") == "busy"
@@ -134,7 +149,9 @@ def handle(args: dict, ctx, warnings: list) -> dict:
                 out["summary"] = summary
             except VWError as exc:
                 problems.append(_problem(exc.code, exc.message))
-        out["ready"] = not any(p["code"] in {"vectorworks_busy", "modal_dialog", "no_active_document", "bridge_unreachable", "auth_failed",
+        # no_active_document is not blocking: the model can fix it itself with
+        # vw_document(action="new"/"open"), so report ready with that next step.
+        out["ready"] = not any(p["code"] in {"vectorworks_busy", "modal_dialog", "bridge_unreachable", "auth_failed",
                                              "multiple_instances", "setup_required"} for p in problems)
 
     if a.get("job_id"):
