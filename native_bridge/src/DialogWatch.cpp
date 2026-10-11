@@ -31,6 +31,7 @@ struct DismissRecord {
     std::string title;
     std::string at;
     std::string trigger;
+    std::string message;
 };
 
 std::mutex gMutex;
@@ -95,6 +96,10 @@ struct Candidate {
     bool Blocking() const { return kind == "other" && dialogLike && enabled && !toolWindow; }
     HWND notNowButton = nullptr;
     int notNowId = 0;
+    // Message box with exactly one visible, enabled, labelled button (OK).
+    HWND singleButton = nullptr;
+    int singleButtonId = 0;
+    std::string messageText;
 };
 
 struct ChildScan {
@@ -102,6 +107,11 @@ struct ChildScan {
     bool availableText = false;
     HWND notNow = nullptr;
     int notNowId = 0;
+    int buttons = 0;
+    HWND button = nullptr;
+    int buttonId = 0;
+    bool otherInputs = false;
+    std::string statics;
 };
 
 BOOL CALLBACK ScanChild(HWND child, LPARAM param) {
@@ -117,7 +127,29 @@ BOOL CALLBACK ScanChild(HWND child, LPARAM param) {
             scan->notNow = child;
             scan->notNowId = GetDlgCtrlID(child);
         }
+        const bool visible = IsWindowVisible(child) != FALSE;
+        if (cls == "button" && visible && IsWindowEnabled(child) && !lower.empty()) {
+            // Vectorworks draws its own buttons: OK is BS_OWNERDRAW (live 2026-10-11).
+            const LONG_PTR style = GetWindowLongPtrW(child, GWL_STYLE) & BS_TYPEMASK;
+            switch (style) {
+                case BS_PUSHBUTTON: case BS_DEFPUSHBUTTON: case BS_OWNERDRAW: case BS_USERBUTTON:
+                case 0x0C: case 0x0D: case 0x0E: case 0x0F:  // split buttons, command links (commctrl)
+                    ++scan->buttons;
+                    scan->button = child;
+                    scan->buttonId = GetDlgCtrlID(child);
+                    break;
+                case BS_GROUPBOX:
+                    break;
+                default:
+                    scan->otherInputs = true;  // check box / radio: the dialog asks something
+                    break;
+            }
+        } else if (cls == "static" && visible && !lower.empty() && scan->statics.size() < 2000u) {
+            if (!scan->statics.empty()) scan->statics += " ";
+            scan->statics += TrimCopy(text);
+        }
     }
+    if (ToLower(WindowClass(child)) == "edit" || ToLower(WindowClass(child)) == "combobox") scan->otherInputs = true;
     return TRUE;
 }
 
@@ -154,6 +186,11 @@ Candidate Classify(HWND window) {
         candidate.notNowId = scan.notNowId;
     } else {
         candidate.kind = "other";
+    }
+    if (lowerClass == "#32770" && scan.buttons == 1 && !scan.otherInputs && scan.buttonId > 0) {
+        candidate.singleButton = scan.button;
+        candidate.singleButtonId = scan.buttonId;
+        candidate.messageText = scan.statics;
     }
     return candidate;
 }
@@ -206,6 +243,7 @@ void Record(const Candidate& candidate, const char* trigger) {
     record.seq = gSequence.fetch_add(1) + 1;
     record.kind = candidate.kind;
     record.title = candidate.title;
+    record.message = candidate.messageText;
     record.at = IsoUtcNow();
     record.trigger = trigger ? trigger : "";
     gRecords.push_back(std::move(record));
@@ -224,7 +262,8 @@ std::string RecordsJson(std::uint64_t after, std::size_t maxCount) {
     for (std::size_t index = 0; index < selected.size(); ++index) {
         if (index) json += ",";
         json += "{\"kind\":" + JsonString(selected[index]->kind) + ",\"title\":" + JsonString(selected[index]->title) +
-            ",\"at\":" + JsonString(selected[index]->at) + ",\"trigger\":" + JsonString(selected[index]->trigger) + "}";
+            ",\"at\":" + JsonString(selected[index]->at) + ",\"trigger\":" + JsonString(selected[index]->trigger) +
+            (selected[index]->message.empty() ? std::string() : ",\"message\":" + JsonString(selected[index]->message)) + "}";
     }
     return json + "]";
 }
@@ -401,6 +440,64 @@ std::string HandleDismissHome(int waitMs) {
     json += AutoDismissEnabled() ? "true" : "false";
     json += "}";
     return json;
+}
+
+
+// ---------------------------------------------------------------- handler scope
+// While a bridge handler runs, a message box that appears DURING that handler
+// and offers exactly one button (e.g. VectorScript's "Script compiled
+// successfully." with OK, live 2026-10-11) is the handler's own informational
+// message: its text is recorded and its single button pressed. Dialogs that
+// existed before the handler, or that offer a choice/input, are never touched.
+namespace {
+std::atomic_bool gHandlerScope{false};
+std::vector<HWND> gScopeExisting;  // guarded by gMutex
+}
+
+void BeginHandlerScope() {
+#ifdef _WIN32
+    try {
+        const Scan scan = ScanThread();
+        std::lock_guard<std::mutex> lock(gMutex);
+        gScopeExisting.clear();
+        for (const auto& candidate : scan.candidates) gScopeExisting.push_back(candidate.hwnd);
+    } catch (...) {
+    }
+#endif
+    gHandlerScope.store(true);
+}
+
+void EndHandlerScope() {
+    gHandlerScope.store(false);
+}
+
+bool TryAckHandlerMessage(const char* trigger) {
+#ifdef _WIN32
+    if (!gHandlerScope.load() || !AutoDismissEnabled()) return false;
+    try {
+        const Scan scan = ScanThread();
+        for (const auto& candidate : scan.candidates) {
+            if (!candidate.singleButton || !candidate.enabled || candidate.kind != "other") continue;
+            std::lock_guard<std::mutex> lock(gMutex);
+            if (std::find(gScopeExisting.begin(), gScopeExisting.end(), candidate.hwnd) != gScopeExisting.end()) continue;
+            const std::int64_t now = SteadyNowMs();
+            const auto last = gLastPost.find(candidate.hwnd);
+            if (last != gLastPost.end() && now - last->second.lastMs < kRepostIntervalMs) continue;
+            if (!PostMessageW(candidate.hwnd, WM_COMMAND,
+                    MAKEWPARAM(static_cast<WORD>(candidate.singleButtonId), BN_CLICKED),
+                    reinterpret_cast<LPARAM>(candidate.singleButton))) continue;
+            gLastPost[candidate.hwnd] = PostState{now, (last != gLastPost.end() ? last->second.attempts : 0) + 1};
+            Candidate recorded = candidate;
+            recorded.kind = "handler_message";
+            Record(recorded, trigger);
+            return true;
+        }
+    } catch (...) {
+    }
+#else
+    (void) trigger;
+#endif
+    return false;
 }
 
 }  // namespace VectorworksMCP::DialogWatch

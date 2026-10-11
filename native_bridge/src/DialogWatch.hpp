@@ -51,6 +51,14 @@ bool HomeDismissedSince(std::uint64_t after);
 // Last few dismissals (ping).
 std::string RecentDismissedJson();
 
+// Handler scope (main thread): snapshot the dialogs open when a handler starts.
+// While the scope is active, TryAckHandlerMessage presses the single button of
+// a NEW message box (one push button, no inputs) and records it as
+// kind "handler_message" with its text. Safe from any thread (PostMessage).
+void BeginHandlerScope();
+void EndHandlerScope();
+bool TryAckHandlerMessage(const char* trigger);
+
 // Socket-thread `dismiss_home` action (caller appends ui_state).
 std::string HandleDismissHome(int waitMs);
 

@@ -543,6 +543,7 @@ DispatchOutcome DispatchFromSocket(const Protocol::RequestEnvelope& request) {
             const UiState published = UiGate::Published();
             if (published == UiState::Modal || published == UiState::Loading ||
                 !Scheduler().RunningAction().empty()) {
+                DialogWatch::TryAckHandlerMessage("request_watchdog");
                 DialogWatch::TryDismissKnown("request_watchdog", true);
             }
         };
@@ -705,6 +706,7 @@ void OnVectorworksMainPluginEvent() {
             // A handler (close_document of the last document, new/open
             // document) may have opened the Home screen synchronously; its
             // nested modal loop dispatches this timer. Close it.
+            DialogWatch::TryAckHandlerMessage("during_handler");
             DialogWatch::TryDismissKnown("during_handler", true);
             return;
         }
@@ -738,11 +740,13 @@ void OnVectorworksMainPluginEvent() {
                 entry->startedAt - entry->enqueuedAt).count();
             const auto handlerStarted = std::chrono::steady_clock::now();
             Protocol::ResponseEnvelope response;
+            DialogWatch::BeginHandlerScope();
             try {
                 response = RunOnMainThread(*entry);
             } catch (...) {
                 response = Protocol::Fail(entry->request.id, "handler_failed", "native bridge CAD handler failed", false, "unknown");
             }
+            DialogWatch::EndHandlerScope();
             const double handlerMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - handlerStarted).count();
             AppendDismissed(response, entry->options.dialogSeq);
