@@ -1,6 +1,7 @@
 #include "StdAfx.h"
 
 #include "NativeIOHandlers.hpp"
+#include "WallInserts.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -377,10 +378,14 @@ DocumentMutationSnapshot CaptureDocumentMutationSnapshot() {
     gSDK->ForEachObjectN(
         allObjects + descendIntoAll + descendIntoViewports + descendIntoAuxLists,
         [&](MCObjectHandle object) {
-            const std::string uuid = ObjectUuid(object);
-            if (!uuid.empty()) {
-                objectUuids.insert(uuid);
-            }
+            const auto add = [&](MCObjectHandle candidate) {
+                const std::string uuid = ObjectUuid(candidate);
+                if (!uuid.empty()) {
+                    objectUuids.insert(uuid);
+                }
+            };
+            add(object);
+            WallInserts::ForEachInsert(object, add);  // doors/windows in walls
         });
     snapshot.objectUuids.assign(objectUuids.begin(), objectUuids.end());
     std::sort(snapshot.objectUuids.begin(), snapshot.objectUuids.end());

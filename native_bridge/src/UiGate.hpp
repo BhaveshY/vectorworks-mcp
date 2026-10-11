@@ -45,4 +45,8 @@ bool MainWindowAlive();
 // True once a visible main frame was observed in this process.
 bool MainWindowEverAlive();
 
+// Thread-safe snapshots for DialogWatch (0 / nullptr before module init).
+unsigned long MainThreadId();
+void* MainWindowHandle();
+
 }  // namespace VectorworksMCP::UiGate

@@ -1,6 +1,7 @@
 #include "StdAfx.h"
 
 #include "ScriptEngine.hpp"
+#include "WallInserts.hpp"
 
 #include "BridgeProtocol.hpp"
 
@@ -302,11 +303,7 @@ std::string StructureSignature() {
         if (!layer) return;
         ++layers;
         std::size_t count = 0;
-        for (MCObjectHandle object = gSDK->FirstMemberObj(layer);
-             object && gSDK->GetObjectTypeN(object) != kTermNode;
-             object = gSDK->NextObject(object)) {
-            ++count;
-        }
+        WallInserts::ForEachLayerObject(layer, [&](MCObjectHandle) { ++count; });  // incl. wall inserts
         out << count << ',';
     });
     return std::to_string(layers) + ":" + out.str();

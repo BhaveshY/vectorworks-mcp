@@ -111,46 +111,60 @@ struct LayerExtras {
     double opacity = 100.0;
 };
 
+bool ReadLayerElevationNative(MCObjectHandle layer, double& elevation, double& thickness) {
+    // ovLayerHeightInCurrUnits / ovLayerThicknessInCurrUnits (ObjectVariables.h
+    // 157/158): base elevation and thickness in document units, the same
+    // values vs.GetLayerElevation returns.
+    double base = 0.0;
+    double thick = 0.0;
+    TVariableBlock baseBlock(base);
+    TVariableBlock thickBlock(thick);
+    if (!layer || !gSDK->GetObjectVariable(layer, ovLayerHeightInCurrUnits, baseBlock) || !baseBlock.GetReal64(base)) {
+        return false;
+    }
+    if (!gSDK->GetObjectVariable(layer, ovLayerThicknessInCurrUnits, thickBlock) || !thickBlock.GetReal64(thick)) {
+        return false;
+    }
+    elevation = base;
+    thickness = thick;
+    return true;
+}
+
 std::map<std::string, LayerExtras> ReadLayerExtras(const std::vector<std::string>& names) {
     std::map<std::string, LayerExtras> extras;
     if (names.empty()) return extras;
+    std::vector<std::string> opacityNames;
+    for (const auto& name : names) {
+        LayerExtras entry;
+        entry.known = ReadLayerElevationNative(FindLayer("name:" + name), entry.elevation, entry.thickness);
+        extras[name] = entry;
+        opacityNames.push_back(name);
+    }
+    // Layer opacity has no ISDK/ObjectVariables accessor in SDK 2024/2025, so
+    // it is the one value still read through the internal Python engine. It is
+    // skipped (null) when scripting is disabled or the engine is poisoned.
+    if (opacityNames.empty() || !Scripting::ScriptingAllowed() || Scripting::ScriptEnginePoisoned()) return extras;
     const std::string code =
         "import json\n"
-        "_names = json.loads(" + Scripting::PythonStringLiteral(JsonStringArray(names)) + ")\n"
+        "_names = json.loads(" + Scripting::PythonStringLiteral(JsonStringArray(opacityNames)) + ")\n"
         "_out = {}\n"
         "for _n in _names:\n"
         "    _h = vs.GetLayerByName(_n)\n"
         "    if not _h:\n"
         "        continue\n"
-        "    _row = [None, None, None]\n"
         "    try:\n"
-        "        _e = vs.GetLayerElevation(_h)\n"
-        "        _row[0] = float(_e[0]); _row[1] = float(_e[1])\n"
+        "        _out[_n] = float(vs.HGetLayerTransp(_h))\n"
         "    except Exception:\n"
         "        pass\n"
-        "    try:\n"
-        "        _row[2] = float(vs.HGetLayerTransp(_h))\n"
-        "    except Exception:\n"
-        "        pass\n"
-        "    _out[_n] = _row\n"
         "result = _out\n";
     try {
         const JsonValue parsed = ParseJsonValue(Scripting::RunInternalPython(code));
         if (!parsed.IsObject()) return extras;
         for (const auto& member : parsed.members) {
-            if (!member.second.IsArray() || member.second.items.size() < 3u) continue;
-            LayerExtras entry;
-            const auto& row = member.second.items;
-            if (row[0].IsNumber() && row[1].IsNumber()) {
-                entry.known = true;
-                entry.elevation = row[0].numberValue;
-                entry.thickness = row[1].numberValue;
-            }
-            if (row[2].IsNumber()) {
-                entry.hasOpacity = true;
-                entry.opacity = std::clamp(100.0 - row[2].numberValue, 0.0, 100.0);
-            }
-            extras[member.first] = entry;
+            if (!member.second.IsNumber()) continue;
+            auto& entry = extras[member.first];
+            entry.hasOpacity = true;
+            entry.opacity = std::clamp(100.0 - member.second.numberValue, 0.0, 100.0);
         }
     } catch (...) {
     }
@@ -223,17 +237,28 @@ private:
     bool done_ = false;
 };
 
-void SetLayerElevationViaScript(const std::string& name, std::optional<double> elevation, std::optional<double> opacity) {
-    std::string code = "_h = vs.GetLayerByName(" + Scripting::PythonStringLiteral(name) + ")\n"
-        "if not _h:\n    raise RuntimeError('layer not found')\n";
+void SetLayerElevationAndOpacity(MCObjectHandle layer, std::optional<double> elevation, std::optional<double> opacity) {
     if (elevation) {
-        code += "_e = vs.GetLayerElevation(_h)\nvs.SetLayerElevation(_h, " + JsonNumber(*elevation) + ", _e[1])\n";
+        // Native: ovLayerHeightInCurrUnits (document units); thickness unchanged.
+        TVariableBlock block(*elevation);
+        if (!gSDK->SetObjectVariable(layer, ovLayerHeightInCurrUnits, block)) {
+            throw Protocol::BridgeError("sdk_operation_failed", "Vectorworks rejected the layer elevation", false, "rolled_back");
+        }
+        double readElevation = 0.0;
+        double readThickness = 0.0;
+        if (ReadLayerElevationNative(layer, readElevation, readThickness) &&
+            std::fabs(readElevation - *elevation) > 1e-6 * std::max(1.0, std::fabs(*elevation))) {
+            throw Protocol::BridgeError("sdk_operation_failed", "layer elevation readback mismatch", false, "rolled_back");
+        }
     }
     if (opacity) {
-        code += "vs.HSetLayerTransp(_h, " + JsonNumber(std::clamp(100.0 - *opacity, 0.0, 100.0)) + ")\n";
+        // No native layer-opacity setter exists in SDK 2024/2025 (see ReadLayerExtras).
+        std::string code = "_h = vs.GetLayerByName(" + Scripting::PythonStringLiteral(NameOf(layer)) + ")\n"
+            "if not _h:\n    raise RuntimeError('layer not found')\n"
+            "vs.HSetLayerTransp(_h, " + JsonNumber(std::clamp(100.0 - *opacity, 0.0, 100.0)) + ")\n"
+            "result = True\n";
+        Scripting::RunInternalPython(code);
     }
-    code += "result = True\n";
-    Scripting::RunInternalPython(code);
 }
 
 std::string ClassVisibilityName(int value) {
@@ -309,7 +334,7 @@ std::string HandleLayers(const Params& params) {
             gSDK->SetSheetLayerTitle(layer, TXString(GetStringParam(params, "title").c_str()));
         }
         if (kind == "design" && elevation) {
-            SetLayerElevationViaScript(name, elevation, std::nullopt);
+            SetLayerElevationAndOpacity(layer, elevation, std::nullopt);
         }
         if (!activate && previous && gSDK->GetActiveLayer() != previous) {
             gSDK->SetCurrentLayerN(previous);
@@ -356,7 +381,7 @@ std::string HandleLayers(const Params& params) {
             gSDK->SetSheetLayerTitle(layer, TXString(GetStringParam(params, "title").c_str()));
         }
         if (elevation || opacity) {
-            SetLayerElevationViaScript(NameOf(layer), elevation, opacity);
+            SetLayerElevationAndOpacity(layer, elevation, opacity);
         }
         gSDK->AddAfterSwapObject(layer);
         if (GetLenientBoolParam(params, "active", false) && gSDK->GetActiveLayer() != layer) {
@@ -399,10 +424,9 @@ std::string HandleLayers(const Params& params) {
             }
         }
         UndoScope undo("Vectorworks MCP delete layer");
-        if (!gSDK->AddBeforeSwapObject(layer)) {
-            throw Protocol::BridgeError("sdk_operation_failed", "Vectorworks failed to register the layer before deletion", false, "rolled_back");
-        }
-        gSDK->DeleteObject(layer, false);
+        // One undo registration: DeleteObject(h, true) records the removal in
+        // the open undo event (same rule as object deletes).
+        gSDK->DeleteObject(layer, true);
         if (FindLayer(uuid.empty() ? name : "uuid:" + uuid)) {
             throw Protocol::BridgeError("sdk_operation_failed", "Vectorworks did not delete the layer", false, "rolled_back");
         }
@@ -510,32 +534,21 @@ std::string HandleClassesExtension(const Params& params) {
         for (int index = offset; index < static_cast<int>(names.size()) && static_cast<int>(page.size()) < limit; ++index) {
             page.push_back(names[static_cast<std::size_t>(index)]);
         }
-        std::map<std::string, int> visibility;
+        // Native ISDK readback only (no Python): GetClVisibility returns
+        // 0 normal, -1 hidden, 2 grayed; GetActiveClass is the active class.
         std::string activeClass;
-        try {
-            const std::string code =
-                "import json\n_names = json.loads(" + Scripting::PythonStringLiteral(JsonStringArray(page)) + ")\n"
-                "result = {'active': vs.ActiveClass(), 'vis': {n: vs.GetCVis(n) for n in _names}}\n";
-            const JsonValue parsed = ParseJsonValue(Scripting::RunInternalPython(code));
-            if (const JsonValue* active = parsed.Find("active")) {
-                if (active->IsString()) activeClass = active->stringValue;
-            }
-            if (const JsonValue* vis = parsed.Find("vis")) {
-                for (const auto& member : vis->members) {
-                    if (member.second.IsNumber()) visibility[member.first] = static_cast<int>(member.second.numberValue);
-                }
-            }
-        } catch (...) {
+        const InternalIndex activeId = gSDK->GetActiveClass();
+        if (activeId != 0 && gSDK->ValidClass(activeId)) {
+            TXString activeName;
+            gSDK->ClassIDToName(activeId, activeName);
+            activeClass = activeName.GetStdString();
         }
         std::string json = "{\"classes\":[";
         for (std::size_t index = 0; index < page.size(); ++index) {
             if (index) json += ",";
             const std::string& name = page[index];
             const InternalIndex classId = gSDK->ClassNameToID(TXString(name.c_str()));
-            const auto found = visibility.find(name);
-            const std::string vis = found != visibility.end()
-                ? ClassVisibilityName(found->second)
-                : (gSDK->GetClassVisibility(classId) ? "show" : "hide");
+            const std::string vis = ClassVisibilityName(gSDK->GetClVisibility(classId));
             json += "{\"name\":" + JsonString(name) + ",\"visible\":" + JsonString(vis) +
                 ",\"active\":" + (name == activeClass ? "true" : "false") +
                 ",\"use_at_creation\":" + (gSDK->GetClUseGraphic(classId) ? "true" : "false") + "}";
@@ -553,101 +566,157 @@ std::string HandleClassesExtension(const Params& params) {
     if (name.empty()) throw Protocol::BridgeError("invalid_request", "name is required");
     const InternalIndex classId = gSDK->ClassNameToID(TXString(name.c_str()));
     if (!gSDK->ValidClass(classId)) throw Protocol::BridgeError("invalid_request", "class was not found: " + name);
-    const std::string literal = Scripting::PythonStringLiteral(name);
-    std::string code = "_c = " + literal + "\n";
+    // Native ISDK only (no Python; a vs.SetClFillFore call crashed the 2024
+    // Python engine). Class attributes are document settings, not objects, so
+    // they cannot be registered with kUndoSwapObjects: the change is NOT part
+    // of Vectorworks Undo. The handler snapshots the previous state and
+    // restores it itself if any step fails (PROTOCOL.md manage_classes set).
+    struct ClassState {
+        short visibility = 0;
+        ObjectColorType colors{};
+        short lineWeight = 0;
+        bool useGraphic = false;
+        InternalIndex active = 0;
+    };
+    const auto snapshot = [&]() {
+        ClassState state;
+        state.visibility = gSDK->GetClVisibility(classId);
+        gSDK->GetClColor(classId, state.colors);
+        state.lineWeight = gSDK->GetClLineWeight(classId);
+        state.useGraphic = gSDK->GetClUseGraphic(classId) != 0;
+        state.active = gSDK->GetActiveClass();
+        return state;
+    };
+    const ClassState before = snapshot();
+    ClassState wanted = before;
     std::vector<std::string> changed;
+    bool setVisibility = false;
+    bool setActive = false;
+    bool setColors = false;
+    bool setLineWeight = false;
+    bool setUseGraphic = false;
     if (HasParam(params, "visibility")) {
-        const short vis = ParseVisibility(params, "visibility");
-        code += vis == -1 ? "vs.HideClass(_c)\n" : (vis == 2 ? "vs.GrayClass(_c)\n" : "vs.ShowClass(_c)\n");
+        wanted.visibility = ParseVisibility(params, "visibility");
+        setVisibility = true;
         changed.push_back("visibility");
     }
     if (GetLenientBoolParam(params, "active", false)) {
-        code += "vs.NameClass(_c)\n";
+        setActive = true;
         changed.push_back("active");
     }
-    const auto colorCode = [&](const std::string& key, const char* function) {
+    const auto parseColor = [&](const std::string& key, ColorRef& target) {
         if (!HasParam(params, key)) return;
         const JsonValue value = GetJsonParam(params, key);
         int rgb[3] = {0, 0, 0};
         bool ok = false;
-        if (value.IsArray() && value.items.size() >= 3u) {
-            ok = true;
-            for (int index = 0; index < 3; ++index) {
-                if (!value.items[static_cast<std::size_t>(index)].IsNumber()) ok = false;
-                else rgb[index] = static_cast<int>(value.items[static_cast<std::size_t>(index)].numberValue);
-            }
-            const bool eightBit = rgb[0] <= 255 && rgb[1] <= 255 && rgb[2] <= 255;
-            if (eightBit) {
-                for (int& channel : rgb) channel *= 257;
-            }
-        } else if (value.IsString()) {
-            std::string text = TrimCopy(value.stringValue);
-            if (!text.empty() && text[0] == '#' && text.size() == 7u) {
+        try {
+            if (value.IsArray() && value.items.size() >= 3u) {
                 ok = true;
                 for (int index = 0; index < 3; ++index) {
-                    rgb[index] = std::stoi(text.substr(1u + 2u * static_cast<std::size_t>(index), 2u), nullptr, 16) * 257;
+                    if (!value.items[static_cast<std::size_t>(index)].IsNumber()) ok = false;
+                    else rgb[index] = static_cast<int>(value.items[static_cast<std::size_t>(index)].numberValue);
                 }
-            } else {
-                // "r,g,b" with 0..65535 components (legacy property format).
-                std::vector<int> parts;
-                std::size_t start = 0;
-                while (start <= text.size()) {
-                    const auto comma = text.find(',', start);
-                    const std::string part = TrimCopy(text.substr(start, comma == std::string::npos ? std::string::npos : comma - start));
-                    if (!part.empty()) parts.push_back(std::stoi(part));
-                    if (comma == std::string::npos) break;
-                    start = comma + 1;
+                const bool eightBit = rgb[0] <= 255 && rgb[1] <= 255 && rgb[2] <= 255;
+                if (eightBit) {
+                    for (int& channel : rgb) channel *= 257;
                 }
-                if (parts.size() == 3u) {
+            } else if (value.IsString()) {
+                std::string text = TrimCopy(value.stringValue);
+                if (!text.empty() && text[0] == '#' && text.size() == 7u) {
                     ok = true;
-                    for (int index = 0; index < 3; ++index) rgb[index] = parts[static_cast<std::size_t>(index)];
+                    for (int index = 0; index < 3; ++index) {
+                        rgb[index] = std::stoi(text.substr(1u + 2u * static_cast<std::size_t>(index), 2u), nullptr, 16) * 257;
+                    }
+                } else {
+                    // "r,g,b" with 0..65535 components (legacy property format).
+                    std::vector<int> parts;
+                    std::size_t start = 0;
+                    while (start <= text.size()) {
+                        const auto comma = text.find(',', start);
+                        const std::string part = TrimCopy(text.substr(start, comma == std::string::npos ? std::string::npos : comma - start));
+                        if (!part.empty()) parts.push_back(std::stoi(part));
+                        if (comma == std::string::npos) break;
+                        start = comma + 1;
+                    }
+                    if (parts.size() == 3u) {
+                        ok = true;
+                        for (int index = 0; index < 3; ++index) rgb[index] = parts[static_cast<std::size_t>(index)];
+                    }
                 }
             }
+        } catch (const std::exception&) {
+            ok = false;
         }
         if (!ok) throw Protocol::BridgeError("invalid_request", key + " must be [r,g,b], \"#rrggbb\" or \"r,g,b\"");
-        for (int& channel : rgb) channel = std::clamp(channel, 0, 65535);
-        // vs.SetClFillFore/SetClPenFore(className, color): COLOR is ONE (r, g, b)
-        // tuple with 0..65535 components (SDK vs.py stub). Passing a palette
-        // index from vs.RGBToColorIndex crashed Vectorworks 2024 (access
-        // violation inside the vs call) instead of raising a Python error.
-        code += std::string("vs.") + function + "(_c, (" + std::to_string(rgb[0]) + ", " +
-            std::to_string(rgb[1]) + ", " + std::to_string(rgb[2]) + "))\n";
+        RGBColor color = {};
+        color.red = static_cast<unsigned short>(std::clamp(rgb[0], 0, 65535));
+        color.green = static_cast<unsigned short>(std::clamp(rgb[1], 0, 65535));
+        color.blue = static_cast<unsigned short>(std::clamp(rgb[2], 0, 65535));
+        ColorRef index = 0;
+        gSDK->RGBToColorIndexN(color, index, false);
+        target = index;
+        setColors = true;
         changed.push_back(key);
     };
-    colorCode("fill_color", "SetClFillFore");
-    colorCode("pen_color", "SetClPenFore");
+    parseColor("fill_color", wanted.colors.fillFore);
+    parseColor("pen_color", wanted.colors.penFore);
     if (HasParam(params, "line_weight")) {
-        const int mils = GetClampedIntParam(params, "line_weight", 1, 0, 2000);
-        code += "vs.SetClLW(_c, " + std::to_string(mils) + ")\n";
+        wanted.lineWeight = static_cast<short>(GetClampedIntParam(params, "line_weight", 1, 0, 2000));
+        setLineWeight = true;
         changed.push_back("line_weight");
     }
     if (HasParam(params, "use_at_creation")) {
-        code += std::string("vs.SetClUseGraphic(_c, ") + (GetLenientBoolParam(params, "use_at_creation", true) ? "True" : "False") + ")\n";
+        wanted.useGraphic = GetLenientBoolParam(params, "use_at_creation", true);
+        setUseGraphic = true;
         changed.push_back("use_at_creation");
     }
     if (changed.empty()) {
         throw Protocol::BridgeError(
             "invalid_request", "manage_classes set requires visibility, active, fill_color, pen_color, line_weight or use_at_creation");
     }
-    code += "result = {'visibility': vs.GetCVis(_c), 'active': vs.ActiveClass() == _c}\n";
-    UndoScope undo("Vectorworks MCP set class");
-    const std::string readback = Scripting::RunInternalPython(code);
-    undo.Commit();
-    gSDK->DrawScreen();
-    std::string visible = "show";
-    bool active = false;
+    const auto apply = [&](const ClassState& state, bool all) {
+        if (all || setColors) gSDK->SetClColor(classId, state.colors);
+        if (all || setLineWeight) gSDK->SetClLineWeight(classId, state.lineWeight);
+        if (all || setUseGraphic) gSDK->SetClUseGraphic(classId, state.useGraphic ? 1 : 0);
+        if (all || setVisibility) gSDK->SetClVisibility(classId, state.visibility);
+    };
     try {
-        const JsonValue parsed = ParseJsonValue(readback);
-        if (const JsonValue* vis = parsed.Find("visibility")) {
-            if (vis->IsNumber()) visible = ClassVisibilityName(static_cast<int>(vis->numberValue));
-        }
-        if (const JsonValue* act = parsed.Find("active")) active = act->IsBool() && act->boolValue;
+        apply(wanted, false);
+        if (setActive && gSDK->GetActiveClass() != classId) gSDK->SetDefaultClass(classId);
     } catch (...) {
+        try {
+            apply(before, true);
+            if (setActive && before.active != 0 && gSDK->ValidClass(before.active)) gSDK->SetDefaultClass(before.active);
+        } catch (...) {
+        }
+        throw Protocol::BridgeError(
+            "sdk_operation_failed", "Vectorworks rejected a class attribute change; the previous state was restored",
+            false, "rolled_back");
     }
+    gSDK->DrawScreen();
+    const ClassState after = snapshot();
+    std::vector<std::string> mismatched;
+    if (setVisibility && after.visibility != wanted.visibility) mismatched.push_back("visibility");
+    if (setLineWeight && after.lineWeight != wanted.lineWeight) mismatched.push_back("line_weight");
+    if (setUseGraphic && after.useGraphic != wanted.useGraphic) mismatched.push_back("use_at_creation");
+    if (HasParam(params, "fill_color") && after.colors.fillFore != wanted.colors.fillFore) mismatched.push_back("fill_color");
+    if (HasParam(params, "pen_color") && after.colors.penFore != wanted.colors.penFore) mismatched.push_back("pen_color");
+    if (setActive && after.active != classId) mismatched.push_back("active");
+    const auto rgbJson = [](ColorRef color) {
+        RGBColor rgb = {};
+        gSDK->ColorIndexToRGB(color, rgb);
+        return "[" + std::to_string(rgb.red / 257) + "," + std::to_string(rgb.green / 257) + "," +
+            std::to_string(rgb.blue / 257) + "]";
+    };
     return "{\"action\":\"set\",\"class_name\":" + JsonString(name) + ",\"changed\":" + JsonStringArray(changed) +
-        ",\"class\":{\"name\":" + JsonString(name) + ",\"visible\":" + JsonString(visible) +
-        ",\"active\":" + (active ? "true" : "false") +
-        ",\"use_at_creation\":" + (gSDK->GetClUseGraphic(classId) ? "true" : "false") + "}}";
+        ",\"undoable\":false" +
+        ",\"readback_mismatch\":" + JsonStringArray(mismatched) +
+        ",\"class\":{\"name\":" + JsonString(name) + ",\"visible\":" + JsonString(ClassVisibilityName(after.visibility)) +
+        ",\"active\":" + (after.active == classId ? "true" : "false") +
+        ",\"use_at_creation\":" + (after.useGraphic ? "true" : "false") +
+        ",\"line_weight\":" + std::to_string(after.lineWeight) +
+        ",\"fill_color\":" + rgbJson(after.colors.fillFore) +
+        ",\"pen_color\":" + rgbJson(after.colors.penFore) + "}}";
 }
 
 }  // namespace VectorworksMCP::Organization

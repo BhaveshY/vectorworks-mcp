@@ -129,6 +129,12 @@ public:
     ExternalMutationId TrackExternalBefore(
         MCObjectHandle handle,
         ObjectFamily family = ObjectFamily::Simple);
+    // Existing object that will be deleted with DeleteObject(h, true) and was
+    // not mutated before in this transaction: identity only, no AddBefore.
+    ExternalMutationId TrackExternalDeleteTarget(
+        MCObjectHandle handle,
+        ObjectFamily family = ObjectFamily::Simple);
+    bool ExternalBeforeRegistered(ExternalMutationId id) const;
     void TrackExternalAfter(ExternalMutationId id, MCObjectHandle handle);
     void TrackExternalDeleted(ExternalMutationId id);
 
@@ -153,6 +159,7 @@ private:
     void RegisterFinalObjects();
     void RegisterExternalAfterStates();
     RollbackReceipt RollbackImpl() noexcept;
+    ExternalMutationId TrackExternalImpl(MCObjectHandle handle, ObjectFamily family, bool registerBefore);
     static std::string DescribeException(std::exception_ptr failure);
 
     VectorWorks::ISDK& sdk_;

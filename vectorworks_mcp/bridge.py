@@ -30,12 +30,29 @@ log = logging.getLogger("vectorworks_mcp.bridge")
 MAX_FRAME = 16 * 1024 * 1024
 UNREACHABLE_CACHE_S = 2.0
 STATUS_TTL_S = 3.0
-SOCKET_THREAD_ACTIONS = {"ping", "capabilities", "job_status", "cancel_job", "stop"}
+SOCKET_THREAD_ACTIONS = {"ping", "capabilities", "job_status", "cancel_job", "stop", "dismiss_home"}
 # Actions that do not need the main-thread lock on v2 bridges.
 
 # Native actions every pre-1.0 (rev <= 5) bridge is known to lack.
 V2_ONLY = {"list_documents", "activate_document", "new_document", "close_document", "job_status", "cancel_job",
-           "layers", "saved_views", "stories", "run_script", "export_ifc", "import_ifc", "group", "records"}
+           "layers", "saved_views", "stories", "run_script", "export_ifc", "import_ifc", "group", "records",
+           "dismiss_home"}
+
+# Dialog kinds the bridge may close by itself (Vectorworks Home screen, "new version available").
+AUTO_DISMISS_KINDS = {"home", "update_available"}
+
+
+def modal_dialog_next_step(dialog: Any) -> Optional[str]:
+    """next_step for a blocking dialog reported by the bridge (ping / error details `modal_dialog`)."""
+    if not isinstance(dialog, dict):
+        return None
+    if dialog.get("kind") in AUTO_DISMISS_KINDS:
+        return ("The Vectorworks Home screen (or a 'new version available' dialog) is in front. Call vw_status again; "
+                "the bridge closes the Home screen automatically (or call vw_document(action=\"dismiss_home\")). Then "
+                "retry once.")
+    title = str(dialog.get("title") or "").strip() or "the open dialog"
+    return (f"A dialog is open in Vectorworks. Ask the user to close the dialog titled '{title}' in Vectorworks, "
+            "then retry once.")
 
 
 class TransportError(Exception):
@@ -540,7 +557,8 @@ class BridgeClient:
             if kind == "read":
                 if exc.timeout:
                     raise VWError("vectorworks_busy", f"Vectorworks did not answer {action} within {budget:.0f} s (busy or blocked by a dialog).",
-                                  commit_state="not_started") from None
+                                  commit_state="not_started",
+                                  next_step=modal_dialog_next_step(inst.status.get("modal_dialog"))) from None
                 try:
                     return self._raw(inst, action, params, budget, which=which, timeout_ms=timeout_ms)
                 except TransportError as exc2:
@@ -590,7 +608,16 @@ class BridgeClient:
         host_code = NATIVE_CODE_MAP.get(code, code)
         if host_code == "unknown_commit_state":
             commit_state = "unknown"
-        return VWError(host_code, message, retryable=retryable, commit_state=commit_state, details=details or None)
+        next_step = None
+        if host_code in {"vectorworks_busy", "timeout_not_started"}:
+            dialog = details.get("modal_dialog") if isinstance(details, dict) else None
+            if not isinstance(dialog, dict):
+                dialog = inst.status.get("modal_dialog") if isinstance(inst.status, dict) else None
+            next_step = modal_dialog_next_step(dialog)
+            if next_step and isinstance(dialog, dict) and isinstance(details, dict):
+                details.setdefault("modal_dialog", dialog)
+        return VWError(host_code, message, retryable=retryable, commit_state=commit_state, details=details or None,
+                       next_step=next_step)
 
     def missing_action(self, inst: Instance, action: str) -> VWError:
         if not inst.v2:

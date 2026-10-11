@@ -595,6 +595,11 @@ bool SavedViewExists(const std::string& name) {
     return std::find(names.begin(), names.end(), name) != names.end();
 }
 
+// Named saved views: ISDK 2024/2025 has list (GetNumSavedViews/GetSavedView)
+// and restore (RestoreSavedView) but no dialog-free create or delete call
+// (only CreateSavedViewWithUI), so these two stay on the internal Python
+// engine (vs.SaveSheet / vs.VDelete). Captures no longer use them: the capture
+// restore point is a native ViewCreateCurrent/ViewRestore snapshot.
 void CreateSavedViewViaScript(const std::string& name, bool saveView, bool saveClasses, bool saveLayers) {
     Scripting::RunInternalPython(
         "vs.SaveSheet(" + Scripting::PythonStringLiteral(name) + ", " + (saveView ? "True" : "False") + ", " +
@@ -894,12 +899,13 @@ std::string HandleCaptureView(const Params& params) {
 
     const FullView before = ReadFullView();
     const std::vector<MCObjectHandle> selection = SelectedObjects();
-    std::string restorePoint;
+    GSHandle restorePoint = nullptr;
     if (restore && !change.savedView.empty()) {
-        // Snapshot classes/layers/view with Vectorworks' own saved-view
-        // mechanism so restoring a saved view for the capture is reversible.
-        restorePoint = "__vw_mcp_restore_" + std::to_string(UnixMillisecondsNow());
-        CreateSavedViewViaScript(restorePoint, true, true, true);
+        // Snapshot view + class/layer visibilities natively (ISDK
+        // ViewCreateCurrent/ViewRestore/ViewDelete: an unnamed in-memory view,
+        // no saved-view object and no Python) so restoring a saved view for the
+        // capture is reversible.
+        restorePoint = gSDK->ViewCreateCurrent();
     }
 
     bool restored = false;
@@ -955,12 +961,11 @@ std::string HandleCaptureView(const Params& params) {
 
     if (restore) {
         try {
-            if (!restorePoint.empty()) {
-                gSDK->RestoreSavedView(TXString(restorePoint.c_str()));
-                try {
-                    DeleteSavedViewViaScript(restorePoint);
-                } catch (...) {
-                }
+            if (restorePoint) {
+                GSHandle snapshot = restorePoint;
+                restorePoint = nullptr;
+                gSDK->ViewRestore(snapshot);
+                gSDK->ViewDelete(snapshot);
             }
             RestoreFullView(before);
             RestoreSelection(selection);

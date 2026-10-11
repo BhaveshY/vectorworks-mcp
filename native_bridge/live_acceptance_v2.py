@@ -14,7 +14,15 @@ Safety rules (enforced by this script):
   * Every write carries `expect_document_fingerprint` of a document this script
     created, so a write can never land in one of your own documents.
   * Created documents are closed with discard_changes at the end (unless
-    --keep-documents). The originally active document is re-activated.
+    --keep-documents). The originally active document is re-activated. The run
+    never leaves Vectorworks with zero documents: before closing the last open
+    document it opens a fresh blank one (closing the last document would bring
+    up the modal Home screen).
+  * If the Vectorworks Home screen (or the "update available" notice) blocks
+    the bridge at start, it is closed with the `dismiss_home` action.
+  * Python-engine-backed checks that could crash the engine (manage_classes
+    set used to) run AFTER the run_script checks so a contained engine fault
+    cannot mask other results.
 
 Stdlib only. Prints a JSON report and exits 0 when every required check passed.
 """
@@ -213,8 +221,23 @@ def main() -> int:
     original_active: Optional[str] = None
 
     try:
-        # ------------------------------------------------------------ ping
+        # ------------------------------------------------- Home screen gate
         ping = client.call("ping")
+        report.check("ping_modal_dialog_field", "modal_dialog" in ping and "auto_dismiss_dialogs" in ping,
+                     {k: ping.get(k) for k in ("modal_dialog", "auto_dismiss_dialogs", "ui_state")})
+        dialog = ping.get("modal_dialog") or {}
+        if dialog.get("kind") in ("home", "update_available"):
+            dis = report.run("dismiss_home_at_start", lambda: client.call("dismiss_home", {"wait_ms": 5000}))
+            report.check("dismiss_home_at_start", bool(dis and not dis.get("still_shown")), dis)
+            time.sleep(0.5)
+            ping = client.call("ping")
+        elif dialog:
+            report.notes.append(f"a non-Home dialog is open in Vectorworks: {dialog}; close it and re-run")
+        else:
+            nop = report.run("dismiss_home_noop", lambda: client.call("dismiss_home", {"wait_ms": 0}))
+            report.check("dismiss_home_noop", bool(nop and nop.get("dismissed") is False), nop)
+
+        # ------------------------------------------------------------ ping
         needed = ["protocol", "capability_revision", "bridge_version", "build_id", "pid", "port", "session_id",
                   "vectorworks_version", "ui_state", "handler_running_ms", "queue_depth", "main_context_idle_ms",
                   "active_document", "open_document_count", "pong", "bridge_kind", "implemented_actions"]
@@ -231,7 +254,7 @@ def main() -> int:
         names = {a.get("name") for a in caps.get("actions", [])}
         report.check("capabilities_actions",
                      {"list_documents", "new_document", "close_document", "run_script", "layers", "capture_view",
-                      "job_status", "cancel_job"} <= names, sorted(names))
+                      "job_status", "cancel_job", "dismiss_home"} <= names, sorted(names))
         if ping.get("active_document"):
             original_active = ping["active_document"].get("fingerprint")
 
@@ -336,16 +359,27 @@ def main() -> int:
             report.check("delete_reduced_object_count",
                          info_after["total_objects"] == info_before["total_objects"] - 1,
                          {"before": info_before["total_objects"], "after": info_after["total_objects"]})
-            # Undo check (best effort: Undo through the universal menu command).
+            # Undo check (best effort: Undo through the universal menu command,
+            # outside any bridge undo event: transaction False). The delete
+            # registers exactly one undo record (DeleteObject(h, true), no
+            # AddBeforeSwapObject), so ONE Undo must bring back exactly ONE
+            # object with the same uuid.
             undo = report.run("undo_delete_via_menu", lambda: client.call("run_script", w({
                 "language": "python", "transaction": False, "undo_label": "acceptance undo",
                 "code": "vs.DoMenuTextByName('Undo', 0)\nresult = True\n"})), required=False)
             if undo and undo.get("ok"):
                 info_undo = client.call("get_document_info", w({}))
+                restored = client.call("query_objects", w({"uuids": [rect_uuid]}))
+                detail = {"before": info_before["total_objects"], "after_delete": info_after["total_objects"],
+                          "after_undo": info_undo["total_objects"], "uuid_found": len(restored.get("items", [])),
+                          "missing": restored.get("missing_uuids")}
+                if info_undo["total_objects"] == info_after["total_objects"]:
+                    detail["hint"] = ("nothing changed: Undo invoked from inside a script may be ignored by "
+                                      "Vectorworks; verify manually with Edit > Undo")
                 report.check("undo_restores_deleted_object_once",
-                             info_undo["total_objects"] == info_before["total_objects"],
-                             {"before": info_before["total_objects"], "after_undo": info_undo["total_objects"]},
-                             required=False)
+                             info_undo["total_objects"] == info_before["total_objects"]
+                             and len(restored.get("items", [])) == 1,
+                             detail, required=False)
 
         # ------------------------------------------- doors in a local wall
         schema = report.run("describe_door_schema",
@@ -364,6 +398,32 @@ def main() -> int:
             dres = report.run("door_in_local_wall_one_transaction", lambda: client.call("apply_operations", w(p2)),
                               required=False)
             report.check("door_in_local_wall_one_transaction", bool(dres and dres.get("ok")), required=False)
+            if dres and dres.get("ok"):
+                door_uuid = dres["transaction"]["operations"][1].get("uuid")
+                wall_uuid = dres["transaction"]["operations"][0].get("uuid")
+                doors = client.call("query_objects", w({"object_type": "door", "limit": 100}))["items"]
+                hit = next((d for d in doors if d.get("uuid") == door_uuid), None)
+                report.check("door_in_wall_listed_by_query", bool(hit and hit.get("parent_uuid") == wall_uuid
+                                                                  and hit.get("host") == "wall"), hit)
+                by_uuid = client.call("query_objects", w({"uuids": [door_uuid]}))
+                report.check("door_in_wall_resolvable_by_uuid", len(by_uuid.get("items", [])) == 1, by_uuid)
+
+        # ------------------------------------------------ automatic wall joins
+        jops = [
+            {"op": "create", "local_ref": "j1", "object_type": "wall", "x1": 10000, "y1": 0, "x2": 14000, "y2": 0,
+             "thickness": 200, "height": 2800},
+            {"op": "create", "local_ref": "j2", "object_type": "wall", "x1": 14000, "y1": 0, "x2": 14000, "y2": 3000,
+             "thickness": 200, "height": 2800},
+            {"op": "create", "local_ref": "j3", "object_type": "wall", "x1": 12000, "y1": 0, "x2": 12000, "y2": 2000,
+             "thickness": 200, "height": 2800},
+        ]
+        jp = {"idempotency_key": f"acc-join-{time.time_ns()}", "operation_count": len(jops)}
+        for i, op in enumerate(jops, 1):
+            jp[f"operation_{i}_json"] = json.dumps(op)
+        jres = report.run("wall_joins_apply", lambda: client.call("apply_operations", w(jp)), required=False)
+        if jres:
+            kinds = sorted(j.get("kind") for j in jres.get("wall_joins", []) if j.get("joined"))
+            report.check("wall_joins_L_and_T", kinds == ["L", "T"], jres.get("wall_joins"), required=False)
 
         # ------------------------------------------------------------- view
         v0 = report.run("get_view", lambda: client.call("get_view", w({})))
@@ -417,15 +477,6 @@ def main() -> int:
                      required=False)
         ll = report.run("layers_list", lambda: client.call("layers", w({"action": "list"})))
         report.check("layers_list_contains_new", bool(ll and any(l["name"] == lname for l in ll["layers"])))
-        cname = f"ACC-Class-{int(time.time())}"
-        report.run("classes_create", lambda: client.call("manage_classes", w({"action": "create", "class_name": cname})))
-        cs = report.run("classes_set", lambda: client.call("manage_classes", w({
-            "action": "set", "name": cname, "visibility": "hide", "fill_color": [255, 0, 0], "line_weight": 10})))
-        report.check("classes_set", bool(cs and cs["class"]["visible"] == "hide"), cs)
-        cl = report.run("classes_list_detailed", lambda: client.call("manage_classes", w({"action": "list", "detailed": True})))
-        report.check("classes_list_detailed", bool(cl and any(c["name"] == cname for c in cl["classes"])))
-        legacy = report.run("classes_list_legacy_array", lambda: client.call("manage_classes", w({"action": "list"})))
-        report.check("classes_list_legacy_array", isinstance(legacy, list) and cname in legacy)
         svn = f"ACC View {int(time.time())}"
         report.run("saved_views_create", lambda: client.call("saved_views", w({"action": "create", "name": svn})),
                    required=False)
@@ -482,6 +533,27 @@ def main() -> int:
                 break
             time.sleep(0.25)
 
+        # ----------------------------------------------------------- classes
+        # Runs after run_script on purpose (see module docstring). manage_classes
+        # set is native ISDK now (no Python engine).
+        cname = f"ACC-Class-{int(time.time())}"
+        report.run("classes_create", lambda: client.call("manage_classes", w({"action": "create", "class_name": cname})))
+        cs = report.run("classes_set", lambda: client.call("manage_classes", w({
+            "action": "set", "name": cname, "visibility": "hide", "fill_color": [255, 0, 0], "line_weight": 10})))
+        report.check("classes_set", bool(cs and cs["class"]["visible"] == "hide"), cs)
+        report.check("classes_set_readback", bool(cs and not cs.get("readback_mismatch")
+                                                  and cs["class"].get("line_weight") == 10
+                                                  and cs["class"].get("fill_color") == [255, 0, 0]),
+                     cs and cs.get("class"), required=False)
+        cl = report.run("classes_list_detailed", lambda: client.call("manage_classes", w({"action": "list", "detailed": True})))
+        report.check("classes_list_detailed", bool(cl and any(c["name"] == cname and c["visible"] == "hide"
+                                                              for c in cl["classes"])))
+        legacy = report.run("classes_list_legacy_array", lambda: client.call("manage_classes", w({"action": "list"})))
+        report.check("classes_list_legacy_array", isinstance(legacy, list) and cname in legacy)
+        ping_engine = client.call("ping")
+        report.check("script_engine_ok_after_classes", ping_engine.get("script_engine") == "ok",
+                     ping_engine.get("script_engine"))
+
         if not args.skip_pdf:
             pdf = os.path.join(work_dir, "acceptance.pdf")
             job = report.run("export_pdf_async", lambda: client.call("export_pdf", w({
@@ -531,11 +603,28 @@ def main() -> int:
         if not args.keep_documents:
             for fp in reversed(created):
                 try:
+                    open_count = len(client.call("list_documents").get("documents", []))
+                    if open_count <= 1:
+                        # Closing the last document would show the modal Home
+                        # screen; open a blank one first so one document stays.
+                        try:
+                            keep = client.call("new_document", {}, timeout_ms=120000)
+                            report.notes.append(f"opened {keep['document'].get('name')} so a document stays open")
+                        except Exception as error:  # noqa: BLE001
+                            report.notes.append(f"kept {fp} open (could not open a blank document: {error})")
+                            continue
                     res = client.call("close_document", {"fingerprint": fp, "discard_changes": "discard"},
                                       timeout_ms=60000)
                     report.check(f"close_document_{fp}", bool(res.get("closed")), res)
                 except Exception as error:  # noqa: BLE001
                     report.check(f"close_document_{fp}", False, str(error)[:300])
+            try:
+                final = client.call("ping")
+                report.check("documents_remain_open", (final.get("open_document_count") or 0) >= 1
+                             and not final.get("modal_dialog"),
+                             {k: final.get(k) for k in ("open_document_count", "modal_dialog", "ui_state")})
+            except Exception as error:  # noqa: BLE001
+                report.check("documents_remain_open", False, str(error)[:300])
         if original_active:
             try:
                 client.call("activate_document", {"fingerprint": original_active})

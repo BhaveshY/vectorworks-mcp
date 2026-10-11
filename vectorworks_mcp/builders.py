@@ -8,6 +8,7 @@ scale 1 so its validation (types, ranges, wall-host rules) still applies.
 from __future__ import annotations
 
 import math
+import re
 from typing import Any, Optional
 
 from . import coerce as C
@@ -24,8 +25,26 @@ CREATE_TYPES = ["line", "rect", "oval", "circle", "arc", "polygon", "polyline", 
                 "text", "dimension", "symbol", "door", "window", "parametric", "room"]
 
 DEFAULTS_MM = {"wall_height": 3000.0, "wall_thickness": 200.0, "slab_thickness": 200.0, "door_width": 900.0,
-               "door_height": 2100.0, "window_width": 1200.0, "window_height": 1200.0, "window_sill": 900.0,
+               "door_height": 2100.0, "window_width": 1200.0, "window_height": 1500.0, "window_sill": 900.0,
                "dimension_offset": 300.0, "roof_overhang": 500.0}
+
+# Door/Window parameters that duplicate the dedicated width/height/sill fields (compared lower-case, letters and
+# digits only). Weak models send e.g. {"DoorWidth": "900"}; DoorWidth is the read-only leaf width in Vectorworks,
+# so setting it fails the native readback. They are mapped onto the dedicated fields instead.
+OPENING_PARAM_ALIASES = {
+    "width": {"width", "doorwidth", "windowwidth", "overallwidth", "leafwidth", "openingwidth", "w"},
+    "height": {"height", "doorheight", "windowheight", "overallheight", "leafheight", "openingheight", "h"},
+    "sill": {"sill", "sillheight", "sillelevation", "elevation", "sillheightabovefloor"},
+}
+_UUID_RE = re.compile(r"^\{?[0-9A-Fa-f]{8}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{12}\}?$")
+
+
+def _semantic(key: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(key).lower())
+
+
+def is_uuid(value: Any) -> bool:
+    return isinstance(value, str) and bool(_UUID_RE.match(value.strip()))
 
 EDIT_OPS = ["set", "move", "rotate", "scale", "mirror", "reshape", "duplicate", "delete", "parametric", "class",
             "layer", "group", "ungroup", "record", "select", "deselect"]
@@ -93,16 +112,52 @@ class CreatePlan:
         self.needs_descriptor: set[str] = set()
         self.warnings: list[str] = []
         self.ids: list[str] = []
+        self.wall_ids: set[str] = set()     # ids of walls declared anywhere in this call
+        self.doc_mm_per_unit = 1.0
+
+
+def wall_ids_of(objects: list[dict]) -> set[str]:
+    """Local ids of the walls in a vw_create objects list (for door/window wall refs)."""
+    out: set[str] = set()
+    for index, raw in enumerate(objects):
+        if not isinstance(raw, dict):
+            continue
+        src = C.lower_keys(raw)
+        kind = str(_get(src, "type", "object_type", "kind", "op", default="")).strip().lower()
+        local_id = _get(src, "id", "operation_id", "ref")
+        if kind == "wall" and local_id is not None:
+            out.add(str(local_id).lstrip("$"))
+        elif kind in {"room", "schematic_room"}:
+            base = str(local_id).lstrip("$") if local_id is not None else f"o{index + 1}"
+            out.update(f"{base}_{side}" for side in ("south", "east", "north", "west"))
+    return out
+
+
+def _effective_kind(kind: str, src: dict) -> str:
+    """{"type":"parametric","plugin":"Door","wall":...} is a door: use the door path (dedicated width/height)."""
+    if kind == "parametric":
+        plugin = str(_get(src, "plugin", "plugin_name", "object", "pio", default="")).strip().lower()
+        if plugin in {"door", "window"} and _get(src, "wall", "wall_uuid", "host", "in_wall") is not None:
+            return plugin
+    return kind
 
 
 def compile_create(objects: list[dict], scale: float, *, descriptors: dict[str, str],
-                   schemas: dict[str, dict]) -> CreatePlan:
+                   schemas: dict[str, dict], extra_wall_ids: Optional[set[str]] = None,
+                   doc_mm_per_unit: float = 1.0) -> CreatePlan:
     plan = CreatePlan()
+    plan.wall_ids = wall_ids_of(objects) | set(extra_wall_ids or ())
+    plan.doc_mm_per_unit = doc_mm_per_unit or 1.0
     seen_ids: set[str] = set()
-    for index, raw in enumerate(objects):
+    # Walls first, so doors/windows may reference a wall listed after them (offset needs its geometry).
+    order = sorted(range(len(objects)), key=lambda i: 0 if isinstance(objects[i], dict) and str(
+        C.lower_keys(objects[i]).get("type") or "").strip().lower() == "wall" else 1)
+    for index in order:
+        raw = objects[index]
         field = f"objects[{index}]"
         src = C.lower_keys(raw)
         kind = C.choice(_get(src, "type", "object_type", "kind", "op"), f"{field}.type", CREATE_TYPES, CREATE_SYNONYMS)
+        kind = _effective_kind(kind, src)
         local_id = _get(src, "id", "operation_id", "ref")
         if local_id is not None:
             local_id = str(local_id).lstrip("$")
@@ -180,6 +235,9 @@ def _create_params(kind: str, src: dict, field: str, scale: float, plan: CreateP
         style = _get(src, "style", "style_name", "wall_style")
         if style:
             p["style_name"] = str(style)
+        join = _get(src, "join_walls", "join", "auto_join")
+        if join is not None:
+            p["join_walls"] = C.boolean(join, f"{field}.join_walls")
     elif kind in {"slab", "roof", "space"}:
         pts = C.points(_get(src, "points", "boundary", "outline", "vertices"), f"{field}.points", scale, minimum=3)
         p = {"object_type": kind, "points": pts, "closed": True}
@@ -263,15 +321,43 @@ def _parametric_params(kind: str, src: dict, field: str, scale: float, plan: Cre
     p["descriptor_fingerprint"] = str(fingerprint)
     wall_ref = _get(src, "wall", "wall_uuid", "host", "in_wall")
     at = _pt(src, ("at", "position", "location", "point", "center"), ("x", "y"), f"{field}.at", scale, required=False)
+    raw_params = _get(src, "parameters", "params", "values", "fields")
+    raw_params = C.parse_json_maybe(raw_params) if raw_params is not None else None
+    if kind in {"door", "window"} and isinstance(raw_params, dict):
+        # Dedicated-field duplicates inside parameters ({"DoorWidth": "900"}) -> width/height/sill.
+        kept: dict = {}
+        for key, value in raw_params.items():
+            sem = _semantic(key)
+            target = next((name for name, aliases in OPENING_PARAM_ALIASES.items() if sem in aliases), None)
+            if target == "sill" and kind != "window":
+                target = None
+            if target is None:
+                kept[key] = value
+                continue
+            src_keys = {"width": ("width", "w"), "height": ("height", "h"), "sill": ("sill", "sill_height", "elevation")}[target]
+            if _get(src, *src_keys) is None:
+                src[src_keys[0]] = value
+                plan.warnings.append(f"{field}.parameters.{key} was applied as the {kind}'s {target} field.")
+            else:
+                plan.warnings.append(f"{field}.parameters.{key} ignored: {target} is already given.")
+        raw_params = kept
     if kind in {"door", "window"}:
         if wall_ref is None:
             raise validation(f"{field}.wall is required (the wall's uuid, or \"$<id>\" of a wall created in this call)",
                              f"{field}.wall", "$w1")
-        wall_ref = str(wall_ref)
+        wall_ref = str(wall_ref).strip()
         if wall_ref.startswith("uuid:"):
             wall_ref = wall_ref[5:]
-        if not wall_ref.startswith("$") and len(wall_ref) < 8:
-            wall_ref = "$" + wall_ref  # "w1" -> "$w1" when it names a local wall
+        if not wall_ref.startswith("$") and not is_uuid(wall_ref):
+            if wall_ref in plan.wall_ids or len(wall_ref) < 8:
+                wall_ref = "$" + wall_ref  # "w1" -> "$w1" when it names a local wall
+            else:
+                raise validation(f"{field}.wall {wall_ref!r} is neither a wall uuid nor the id of a wall in this call "
+                                 f"(wall ids here: {sorted(plan.wall_ids) or 'none'})", f"{field}.wall", "$w1")
+        if wall_ref.startswith("$") and plan.wall_ids and wall_ref[1:] not in plan.wall_ids:
+            raise validation(f"{field}.wall {wall_ref!r} does not name a wall created in this call (wall ids: "
+                             f"{sorted(plan.wall_ids)}); for an existing wall pass its uuid", f"{field}.wall",
+                             "$" + sorted(plan.wall_ids)[0])
         if at is None:
             offset = _len(src, ("offset", "distance", "along", "position_along"), f"{field}.offset", scale)
             local = plan.local_walls.get(wall_ref.lstrip("$")) if wall_ref.startswith("$") else None
@@ -298,49 +384,117 @@ def _parametric_params(kind: str, src: dict, field: str, scale: float, plan: Cre
     p["x"] = at[0]
     p["y"] = at[1]
     p["rotation"] = C.number(_get(src, "rotation", "angle", default=0), f"{field}.rotation")
-    params = _get(src, "parameters", "params", "values", "fields")
-    if params is not None:
-        p["parameters"] = parametric_parameters(C.parse_json_maybe(params), f"{field}.parameters", scale, schemas.get(plugin))
+    if raw_params is not None and raw_params != {}:
+        p["parameters"] = parametric_parameters(raw_params, f"{field}.parameters", scale, schemas.get(plugin),
+                                                warnings=plan.warnings, doc_mm_per_unit=plan.doc_mm_per_unit)
     return p
 
 
-def parametric_parameters(params: Any, field: str, scale: float, schema: Optional[dict]) -> list[dict]:
-    """{id: value} or [{id,type,value}] -> 0.7 typed parameter list (types inferred from the schema)."""
-    styles: dict[str, int] = {}
+# Vectorworks parameter field styles (describe_parametric_schema.field_style).
+_STYLE_INT, _STYLE_BOOL = 1, 2
+_STYLE_REAL = {3, 9, 13}           # real / radio-ish numeric / angle
+_STYLE_LENGTH = {7, 10, 11}        # dimension, coordinate X/Y (document length units)
+_STYLE_TEXT = {4, 8}               # text, popup
+
+
+def _schema_index(schema: Optional[dict]) -> tuple[dict[str, dict], dict[str, str]]:
+    """by_id {id: entry}, alias {semantic id or display name: id}."""
+    by_id: dict[str, dict] = {}
+    alias: dict[str, str] = {}
     for entry in (schema or {}).get("parameters") or []:
         if isinstance(entry, dict) and isinstance(entry.get("id"), str):
-            styles[entry["id"]] = entry.get("field_style") if isinstance(entry.get("field_style"), int) else 0
-    out: list[dict] = []
-    items = params.items() if isinstance(params, dict) else None
-    if items is None:
-        if not isinstance(params, list):
-            raise validation(f"{field} must be an object {{\"ParamId\": value}}", field, {"OpenAngle": 45})
+            pid = entry["id"]
+            by_id[pid] = entry
+            alias.setdefault(_semantic(pid), pid)
+            display = str(entry.get("display_name") or "")
+            display = re.sub(r"\(read only\)", "", display, flags=re.I)
+            if display and not display.startswith("__"):
+                alias.setdefault(_semantic(display), pid)
+    return by_id, alias
+
+
+def _read_only(entry: Optional[dict]) -> bool:
+    return bool(entry) and "read only" in str(entry.get("display_name") or "").lower()
+
+
+def parametric_parameters(params: Any, field: str, scale: float, schema: Optional[dict], *,
+                          warnings: Optional[list] = None, doc_mm_per_unit: float = 1.0) -> list[dict]:
+    """{id: value} or [{id,type,value}] -> 0.7 typed parameter list.
+
+    With the live schema: ids are matched case-insensitively (also by display name), values are coerced to the
+    parameter's type (numeric strings -> numbers, "90cm" -> document units for dimension fields, numbers -> text
+    for popups) and read-only parameters are dropped with a warning (setting them fails the native readback)."""
+    by_id, alias = _schema_index(schema)
+    note = warnings.append if warnings is not None else (lambda _m: None)
+    entries: list[tuple[str, Any, Optional[str]]] = []
+    if isinstance(params, dict):
+        entries = [(str(k), v, None) for k, v in params.items()]
+    elif isinstance(params, list):
         for entry in params:
             if not isinstance(entry, dict) or "id" not in entry:
                 raise validation(f"{field} entries need id and value", field, [{"id": "OpenAngle", "value": 45}])
-            if "type" in entry:
-                out.append({"id": str(entry["id"]), "type": str(entry["type"]).lower(), "value": entry.get("value")})
-            else:
-                out.append(_typed(str(entry["id"]), entry.get("value"), styles, scale, field))
-        return out
-    for key, value in items:
-        out.append(_typed(str(key), value, styles, scale, field))
+            entries.append((str(entry["id"]), entry.get("value"), str(entry["type"]).lower() if "type" in entry else None))
+    else:
+        raise validation(f"{field} must be an object {{\"ParamId\": value}}", field, {"OpenAngle": 45})
+    out: list[dict] = []
+    seen: set[str] = set()
+    for key, value, explicit_type in entries:
+        pid = key if key in by_id else alias.get(_semantic(key), key)
+        if pid != key:
+            note(f"{field}.{key} -> parameter id {pid!r}.")
+        entry = by_id.get(pid)
+        if _read_only(entry):
+            note(f"{field}.{key} ignored: {pid!r} is read-only in Vectorworks (it is computed by the object).")
+            continue
+        if pid in seen:
+            raise validation(f"{field}.{key} sets {pid!r} twice", field, {"OpenAngle": 45})
+        seen.add(pid)
+        if explicit_type and entry is None:
+            out.append({"id": pid, "type": explicit_type, "value": value})
+            continue
+        out.append(_typed(pid, value, entry, scale, field, doc_mm_per_unit))
     return out
 
 
-def _typed(pid: str, value: Any, styles: dict[str, int], scale: float, field: str) -> dict:
-    style = styles.get(pid)
-    if style == 2 or isinstance(value, bool):
-        return {"id": pid, "type": "boolean", "value": C.boolean(value, f"{field}.{pid}")}
-    if style == 1:
-        return {"id": pid, "type": "integer", "value": C.integer(value, f"{field}.{pid}")}
-    if style in {3, 7, 9, 10, 13}:
-        if style == 7 and isinstance(value, str) and any(ch.isalpha() or ch in "'\"" for ch in value):
-            return {"id": pid, "type": "real", "value": C.length(value, f"{field}.{pid}", scale)}
-        return {"id": pid, "type": "real", "value": C.number(value, f"{field}.{pid}")}
+def _numeric(value: Any) -> bool:
+    if C.is_number(value):
+        return True
+    try:
+        float(str(value).strip())
+        return str(value).strip() != ""
+    except ValueError:
+        return False
+
+
+def _num_text(value: Any) -> str:
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _typed(pid: str, value: Any, entry: Optional[dict], scale: float, field: str, doc_mm_per_unit: float = 1.0) -> dict:
+    style = entry.get("field_style") if isinstance(entry, dict) and isinstance(entry.get("field_style"), int) else None
+    label = f"{field}.{pid}"
+    if style == _STYLE_BOOL or (style is None and isinstance(value, bool)):
+        return {"id": pid, "type": "boolean", "value": C.boolean(value, label)}
+    if style == _STYLE_INT:
+        return {"id": pid, "type": "integer", "value": int(round(C.number(value, label)))}
+    if style in _STYLE_LENGTH or (style is None and entry is not None and _numeric(entry.get("value"))
+                                  and (C.is_number(value) or isinstance(value, str))):
+        if isinstance(value, str) and any(ch.isalpha() or ch in "'\"" for ch in value):
+            mm = C.length(value, label, 1.0)  # explicit unit in the string wins over `units`
+        elif style in _STYLE_LENGTH:
+            mm = C.length(value, label, scale)
+        else:
+            return {"id": pid, "type": "real", "value": C.number(value, label)}
+        return {"id": pid, "type": "real", "value": mm / (doc_mm_per_unit or 1.0)}
+    if style in _STYLE_REAL:
+        return {"id": pid, "type": "real", "value": C.number(value, label)}
+    if style in _STYLE_TEXT:
+        return {"id": pid, "type": "string", "value": _num_text(value)}
     if style is None and C.is_number(value):
         return {"id": pid, "type": "integer" if isinstance(value, int) else "real", "value": value}
-    return {"id": pid, "type": "string", "value": str(value)}
+    return {"id": pid, "type": "string", "value": _num_text(value)}
 
 
 def _room_objects(src: dict, field: str, scale: float, base_id: str) -> list[dict]:
@@ -570,7 +724,11 @@ def compile_edit(changes: list[dict], scale: float, *, schemas: dict[str, dict],
                 raise validation(f"{field} needs plugin (e.g. 'Door') and parameters {{id: value}}", f"{field}.parameters",
                                  {"op": "parametric", "target": "uuid:...", "plugin": "Door", "parameters": {"OpenAngle": 45}})
             plugin = str(plugin)
-            parameters = parametric_parameters(C.parse_json_maybe(params_src), f"{field}.parameters", scale, schemas.get(plugin))
+            parameters = parametric_parameters(C.parse_json_maybe(params_src), f"{field}.parameters", scale, schemas.get(plugin),
+                                               warnings=plan.warnings)
+            if not parameters:
+                raise validation(f"{field}.parameters has nothing settable (see warnings: read-only parameters are "
+                                 "computed by Vectorworks)", f"{field}.parameters", {"OpenAngle": 45})
             fingerprint = _get(src, "descriptor_fingerprint") or descriptors.get(plugin) or "pending"
             script_item.update({"plugin": plugin, "parameters": {p["id"]: p["value"] for p in parameters}})
             native = [{"type": "update_parametric", "params": {"target": t, "plugin_name": plugin,

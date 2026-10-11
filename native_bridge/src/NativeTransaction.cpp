@@ -192,6 +192,23 @@ void NativeTransaction::DisposeFinal(ArtifactId id) {
 ExternalMutationId NativeTransaction::TrackExternalBefore(
     MCObjectHandle handle,
     ObjectFamily family) {
+    return TrackExternalImpl(handle, family, true);
+}
+
+ExternalMutationId NativeTransaction::TrackExternalDeleteTarget(
+    MCObjectHandle handle,
+    ObjectFamily family) {
+    return TrackExternalImpl(handle, family, false);
+}
+
+bool NativeTransaction::ExternalBeforeRegistered(ExternalMutationId id) const {
+    return id < externalMutations_.size() && externalMutations_[id].beforeRegistered;
+}
+
+ExternalMutationId NativeTransaction::TrackExternalImpl(
+    MCObjectHandle handle,
+    ObjectFamily family,
+    bool registerBefore) {
     if (state_ != TransactionState::Active) {
         throw std::logic_error("cannot track an external object outside an active native transaction");
     }
@@ -220,6 +237,13 @@ ExternalMutationId NativeTransaction::TrackExternalBefore(
     // Persist the identity before AddBefore. A false/throwing AddBefore then
     // still leaves a complete transaction diagnostic and rollback scope.
     externalMutations_.push_back(std::move(mutation));
+    if (!registerBefore) {
+        // Deletion target: DeleteObject(h, true) records the removal in the
+        // open undo event itself. An extra AddBeforeSwapObject would make the
+        // undo restore it twice; AddBefore + DeleteObject(h, false) was
+        // live-verified NOT to restore it at all (1.0 acceptance).
+        return id;
+    }
     if (!sdk_.AddBeforeSwapObject(handle)) {
         throw std::runtime_error(
             "Vectorworks rejected external-object before-state undo registration: " + uuid);

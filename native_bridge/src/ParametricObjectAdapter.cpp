@@ -2,11 +2,15 @@
 
 #include "ParametricObjectAdapter.hpp"
 
+#include "JsonParams.hpp"
+
 #include "Interfaces/VectorWorks/Extension/IExtendedProps.h"
 #include "Interfaces/VectorWorks/Extension/IExtensionParametric.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
@@ -130,8 +134,44 @@ void ApplyParameters(VWParametricObj& object, const std::vector<ParametricValue>
     }
 }
 
+// Leading number of a parameter string ("900", "900.0", "900mm", "0.9 m",
+// "3'-0\"" -> 3): readback of numeric values stored in string/dimension fields
+// is reformatted by Vectorworks, so string values that both parse as numbers
+// are compared numerically (1.0 adds no unit conversion: the plug-in stores
+// what was written; only its formatting changes).
+bool LeadingNumber(const std::string& text, double& out) {
+    std::size_t start = 0;
+    while (start < text.size() && std::isspace(static_cast<unsigned char>(text[start]))) ++start;
+    if (start == text.size()) return false;
+    const char* begin = text.c_str() + start;
+    char* end = nullptr;
+    const double value = std::strtod(begin, &end);
+    if (end == begin || !std::isfinite(value)) return false;
+    out = value;
+    return true;
+}
+
+bool NumbersClose(double left, double right) {
+    const double scale = std::max({1.0, std::abs(left), std::abs(right)});
+    return std::abs(left - right) <= 1e-6 * scale;
+}
+
+bool StringValuesMatch(const std::string& actual, const std::string& expected) {
+    if (actual == expected) return true;
+    const std::string a = TrimCopy(actual);
+    const std::string e = TrimCopy(expected);
+    if (a == e) return true;
+    const std::string al = ToLower(a);
+    const std::string el = ToLower(e);
+    const auto truthy = [](const std::string& v) { return v == "true" || v == "1" || v == "yes"; };
+    const auto falsy = [](const std::string& v) { return v == "false" || v == "0" || v == "no"; };
+    if ((truthy(al) && truthy(el)) || (falsy(al) && falsy(el))) return true;
+    double av = 0.0;
+    double ev = 0.0;
+    return LeadingNumber(a, av) && LeadingNumber(e, ev) && NumbersClose(av, ev);
+}
+
 void VerifyParameters(const VWParametricObj& object, const std::vector<ParametricValue>& values) {
-    constexpr double kTolerance = 1e-7;
     for (const auto& value : values) {
         const TXString name(value.universalName.c_str());
         bool matches = false;
@@ -143,15 +183,30 @@ void VerifyParameters(const VWParametricObj& object, const std::vector<Parametri
                 matches = object.GetParamBool(name) == value.booleanValue;
                 break;
             case ParametricValueKind::Real:
-                matches = std::abs(object.GetParamReal(name) - value.realValue) <= kTolerance;
+                matches = NumbersClose(object.GetParamReal(name), value.realValue);
                 break;
             case ParametricValueKind::String:
-                matches = Utf8(object.GetParamString(name)) == value.stringValue;
+                matches = StringValuesMatch(Utf8(object.GetParamString(name)), value.stringValue);
                 break;
         }
         if (!matches) {
+            std::string actual;
+            try {
+                switch (value.kind) {
+                    case ParametricValueKind::Integer: actual = std::to_string(object.GetParamLong(name)); break;
+                    case ParametricValueKind::Boolean: actual = object.GetParamBool(name) ? "true" : "false"; break;
+                    case ParametricValueKind::Real: actual = JsonNumber(object.GetParamReal(name)); break;
+                    case ParametricValueKind::String: actual = Utf8(object.GetParamString(name)); break;
+                }
+            } catch (...) {
+            }
             throw std::runtime_error(
-                "Vectorworks parametric readback mismatch: " + value.universalName);
+                "Vectorworks parametric readback mismatch: " + value.universalName +
+                " (wrote " + (value.kind == ParametricValueKind::String ? value.stringValue
+                    : value.kind == ParametricValueKind::Real ? JsonNumber(value.realValue)
+                    : value.kind == ParametricValueKind::Integer ? std::to_string(value.integerValue)
+                    : std::string(value.booleanValue ? "true" : "false")) +
+                ", read back " + actual + "; check the parameter name/type with describe_parametric_schema)");
         }
     }
 }
@@ -522,10 +577,11 @@ BuiltInOpeningReceipt CreateVerifiedBuiltInOpening(
     const double actualSill = ids.windowSillUniversalName.empty()
         ? 0.0
         : parametric.GetParamReal(TXString(ids.windowSillUniversalName.c_str()));
-    if (std::abs(actualWidth - spec.width) > kTolerance ||
-        std::abs(actualHeight - spec.height) > kTolerance ||
+    (void) kTolerance;
+    if (!NumbersClose(actualWidth, spec.width) ||
+        !NumbersClose(actualHeight, spec.height) ||
         (!ids.windowSillUniversalName.empty() &&
-         std::abs(actualSill - spec.windowSillHeight) > kTolerance)) {
+         !NumbersClose(actualSill, spec.windowSillHeight))) {
         throw std::runtime_error("built-in opening semantic dimension readback mismatch");
     }
     if (!IsObjectHostedByWall(object, spec.expectedWall)) {

@@ -43,7 +43,7 @@ NO_DOC_ACTIONS = {"list_documents", "new_document", "open_document"}
 ASYNC_ACTIONS = {"export_pdf", "export_dwg", "import_dwg", "export_ifc", "import_ifc", "open_document",
                  "export_vectorworks_document", "run_script", "capture_view"}
 LEGACY_MISSING = {"list_documents", "activate_document", "new_document", "close_document", "layers", "saved_views",
-                  "stories", "run_script", "export_ifc", "import_ifc", "job_status", "cancel_job"}
+                  "stories", "run_script", "export_ifc", "import_ifc", "job_status", "cancel_job", "dismiss_home"}
 
 
 class BridgeError(Exception):
@@ -126,6 +126,39 @@ def _bounds(obj: dict) -> Optional[dict]:
     return {"top_left": [min(xs), max(ys)], "bottom_right": [max(xs), min(ys)]}
 
 
+def _join_walls(new_walls: list, d: "Doc", no_join: set) -> list:
+    """Mock of the native wall joining: coincident endpoints (1 mm) -> L, endpoint on a centreline -> T."""
+    joins = []
+    walls = [o for o in d.objects.values() if o.get("type") == "wall" and o["uuid"] not in no_join]
+    done = set()
+    for w in new_walls:
+        for other in walls:
+            if other["uuid"] == w["uuid"] or frozenset((w["uuid"], other["uuid"])) in done:
+                continue
+            ends_w = [(w["start_x"], w["start_y"]), (w["end_x"], w["end_y"])]
+            ends_o = [(other["start_x"], other["start_y"]), (other["end_x"], other["end_y"])]
+            hit = None
+            for a in ends_w:
+                for b in ends_o:
+                    if abs(a[0] - b[0]) <= 1 and abs(a[1] - b[1]) <= 1:
+                        hit = ("L", a)
+            if hit is None:
+                for first, second in ((w, other), (other, w)):
+                    sx, sy, ex, ey = second["start_x"], second["start_y"], second["end_x"], second["end_y"]
+                    length2 = (ex - sx) ** 2 + (ey - sy) ** 2
+                    for px, py in ((first["start_x"], first["start_y"]), (first["end_x"], first["end_y"])):
+                        t = ((px - sx) * (ex - sx) + (py - sy) * (ey - sy)) / length2 if length2 else -1
+                        if 0 < t < 1:
+                            cx, cy = sx + t * (ex - sx), sy + t * (ey - sy)
+                            if abs(cx - px) <= 1 and abs(cy - py) <= 1:
+                                hit = ("T", (px, py))
+            if hit:
+                done.add(frozenset((w["uuid"], other["uuid"])))
+                joins.append({"first_uuid": w["uuid"], "second_uuid": other["uuid"], "kind": hit[0],
+                              "point": [hit[1][0], hit[1][1]], "joined": True})
+    return joins
+
+
 def _png(path: str, width: int, height: int) -> int:
     row = bytes([0]) + bytes((x * 255 // max(1, width - 1)) for x in range(width) for _ in range(3))
     raw = row * height
@@ -155,6 +188,22 @@ class Model:
         self.max_clients = 16
         self.calls: list[str] = []
         self.drop_reply_once: Optional[str] = None
+        self.modal_dialog: Optional[dict] = None   # {title, class, kind: home|update_available|other}
+        self.dismissed: list[dict] = []
+        self.auto_dismiss = os.environ.get("VW_MCP_AUTO_DISMISS_HOME", "1").strip().lower() not in {"0", "false", "no"}
+
+    def dismiss_dialog(self) -> Optional[dict]:
+        """Close the Home screen / update dialog (never other dialogs). Returns the dismissal record."""
+        dialog = self.modal_dialog
+        if not dialog or dialog.get("kind") not in {"home", "update_available"}:
+            return None
+        self.modal_dialog = None
+        if self.ui_state == "modal":
+            self.ui_state = "idle"
+        record = {"kind": dialog["kind"], "title": dialog.get("title", ""),
+                  "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+        self.dismissed = (self.dismissed + [record])[-10:]
+        return record
 
     @property
     def doc(self) -> Optional[Doc]:
@@ -384,9 +433,26 @@ class FakeVS:
         pass
 
 
+def _norm_name(value: Any) -> str:
+    return re.sub(r"[ _\-]", "", str(value or "")).lower()
+
+
+def _type_match(obj: dict, object_type: str) -> bool:
+    """Native object_type filter: node type name, door/window/space, or a plug-in name (case/space-insensitive)."""
+    if not object_type:
+        return True
+    if obj.get("type") == object_type:
+        return True
+    return bool(obj.get("plugin_name")) and _norm_name(obj["plugin_name"]) == _norm_name(object_type)
+
+
 def _criteria_match(obj: dict, criteria: str) -> bool:
     if not criteria or criteria.strip().upper() in {"ALL", "(ALL)"}:
         return True
+    for value in re.findall(r"\bPON\s*=\s*'((?:[^']|'')*)'", criteria):
+        if (obj.get("plugin_name") or "") != value.replace("''", "'"):
+            return False
+    criteria = re.sub(r"\bPON\s*=\s*'(?:[^']|'')*'", "", criteria)
     for key, value in re.findall(r"\b([NCTL])\s*=\s*'?((?:[^'()]|'')*)'?", criteria):
         value = value.replace("''", "'")
         if key == "N" and obj.get("name") != value:
@@ -434,7 +500,25 @@ class Handler:
                 if job["state"] == "queued":
                     job["state"] = "cancelled"
                 return self.ok(rid, {"job_id": job["job_id"], "state": job["state"], "cancellable": job["state"] != "running"})
+            if action == "dismiss_home":
+                record = None
+                if m.modal_dialog and m.modal_dialog.get("kind") in {"home", "update_available"}:
+                    time.sleep(0.05)
+                    record = m.dismiss_dialog()
+                blocked = m.modal_dialog is not None
+                result = {"dismissed": record is not None, "home_dismissed": record is not None,
+                          "dismissed_dialogs": [{k: record[k] for k in ("kind", "title")}] if record else [],
+                          "still_shown": False, "modal_dialog": dict(m.modal_dialog) if m.modal_dialog else None,
+                          "auto_dismiss_enabled": m.auto_dismiss, "ui_state": m.ui_state if m.doc else "no_document"}
+                if blocked:
+                    result["blocked_by"] = "other_dialog_open"
+                return self.ok(rid, result)
             if action == "mock_set":
+                if "modal_dialog" in params:
+                    m.modal_dialog = params["modal_dialog"] or None
+                    m.ui_state = "modal" if m.modal_dialog else "idle"
+                if "auto_dismiss" in params:
+                    m.auto_dismiss = bool(params["auto_dismiss"])
                 if "drop_reply_once" in params:
                     m.drop_reply_once = params["drop_reply_once"]
                 for key in ("ui_state", "latency"):
@@ -472,7 +556,8 @@ class Handler:
         base = {"pong": True, "version": "mock", "bridge_kind": "native_sdk_bridge_mock", "dispatch_mode": "native_sdk",
                 "native_bridge": True, "cad_api_safe": True, "transport_only": False, "native_phase": 4,
                 "main_context_pump_ready": True, "main_context_idle_ms": 5,
-                "capability_fingerprint": "mockfp", "object_read_features": ["text_content", "paged_object_reads", "bound_apply_operations"],
+                "capability_fingerprint": "mockfp", "object_read_features": ["text_content", "paged_object_reads", "bound_apply_operations"]
+                + ([] if m.legacy else ["wall_inserts", "object_type_plugin_names", "uuid_lookup"]),
                 "create_object_types": ["arc", "box", "circle", "line", "oval", "polygon", "polyline", "rect", "rectangle", "wall",
                                         "door", "window", "text", "dimension", "linear_dimension", "slab", "roof", "space",
                                         "parametric", "symbol"],
@@ -486,11 +571,13 @@ class Handler:
                      "active_document": {k: v for k, v in doc.brief().items() if k != "active"} if doc else None,
                      "open_document_count": len(m.docs),
                      "script_enabled": os.environ.get("VW_MCP_ALLOW_SCRIPT") != "0",
-                     "script_engine": "poisoned" if getattr(m, "script_poisoned", False) else "ok"})
+                     "script_engine": "poisoned" if getattr(m, "script_poisoned", False) else "ok",
+                     "modal_dialog": dict(m.modal_dialog) if m.modal_dialog else None,
+                     "auto_dismiss_dialogs": m.auto_dismiss, "dismissed_dialogs": list(m.dismissed)})
         return base
 
     def actions(self) -> set:
-        names = MAIN_ACTIONS | {"ping", "capabilities", "stop", "job_status", "cancel_job"}
+        names = MAIN_ACTIONS | {"ping", "capabilities", "stop", "job_status", "cancel_job", "dismiss_home"}
         return names - LEGACY_MISSING if self.m.legacy else names
 
     def capabilities(self) -> dict:
@@ -529,11 +616,24 @@ class Handler:
         m = self.m
         busy_wait = (params.get("busy_wait_ms") or 3000) / 1000.0
         deadline = time.time() + busy_wait
+        auto_closed = m.dismiss_dialog() if m.auto_dismiss and m.modal_dialog else None
         while m.ui_state not in {"idle", "no_document"}:
             if time.time() > deadline:
-                raise BridgeError(f"Vectorworks is busy ({m.ui_state})", "vectorworks_busy", True, "not_started",
-                                  {"ui_state": m.ui_state})
+                details = {"ui_state": m.ui_state}
+                if m.modal_dialog:
+                    details["modal_dialog"] = dict(m.modal_dialog)
+                raise BridgeError(f"Vectorworks is busy ({m.ui_state})", "vectorworks_busy", True, "not_started", details)
             time.sleep(0.05)
+        if auto_closed:
+            result = self._main_locked(action, params, timeout_ms)
+            if isinstance(result, dict):
+                result = dict(result, home_dismissed=True,
+                              dismissed_dialogs=[{"kind": auto_closed["kind"], "title": auto_closed["title"]}])
+            return result
+        return self._main_locked(action, params, timeout_ms)
+
+    def _main_locked(self, action: str, params: dict, timeout_ms: Optional[int]) -> Any:
+        m = self.m
         with m.main_lock:
             if m.latency:
                 if timeout_ms is not None and m.latency * 1000 > timeout_ms and action in ASYNC_ACTIONS:
@@ -748,7 +848,7 @@ class Handler:
     def a_drawing_summary(self, p):
         d = self.m.doc
         objs = [o for o in d.objects.values() if (not p.get("layer") or o["layer"] == p["layer"]) and
-                (not p.get("object_type") or o["type"] == p["object_type"])]
+                _type_match(o, p.get("object_type") or "")]
         def count(key):
             out: dict = {}
             for o in objs:
@@ -764,6 +864,16 @@ class Handler:
         if fields:
             fields |= {"uuid"}
         items = []
+        wanted = p.get("uuids") if p.get("uuids") is not None else p.get("uuid")
+        if wanted is not None:
+            wanted = [w for w in (wanted if isinstance(wanted, list) else str(wanted).split(",")) if w]
+            wanted = [str(w).strip()[5:] if str(w).strip().startswith("uuid:") else str(w).strip() for w in wanted]
+            found = [d.objects[w.upper()] for w in wanted if w.upper() in d.objects]
+            found = [o for o in found if _type_match(o, p.get("object_type") or "")
+                     and (not p.get("layer") or o["layer"] == p["layer"])]
+            return {"items": [d.record(o, fields) for o in found], "has_more": False, "offset": 0,
+                    "missing_uuids": [w for w in wanted if w.upper() not in d.objects],
+                    "binding": d.info(self.m.session)["binding"]}
         for u in d.order:
             o = d.objects.get(u)
             if o is None:
@@ -772,7 +882,7 @@ class Handler:
                 continue
             if mode == "criteria" and not _criteria_match(o, p.get("criteria", "ALL")):
                 continue
-            if p.get("object_type") and o["type"] != p["object_type"]:
+            if not _type_match(o, p.get("object_type") or ""):
                 continue
             if p.get("layer") and o["layer"] != p["layer"]:
                 continue
@@ -797,12 +907,40 @@ class Handler:
 
     def a_describe_parametric_schema(self, p):
         name = p.get("plugin_name")
-        params = {"Door": [{"id": "OpenAngle", "field_style": 3, "value": "90"}, {"id": "Config", "field_style": 8, "value": "Swing"}],
-                  "Window": [{"id": "SashOp", "field_style": 8, "value": "Fixed"}],
-                  "Space": [{"id": "Name", "field_style": 4, "value": ""}]}.get(name)
+        params = {"Door": [{"id": "DoorWidth", "display_name": "Leaf Width (Read Only)", "field_style": 7, "value": "826"},
+                           {"id": "Width", "display_name": "Width", "field_style": 7, "value": "915"},
+                           {"id": "OpenAngle", "display_name": "Open Angle", "field_style": 3, "value": "90"},
+                           {"id": "Config", "field_style": 8, "value": "Swing"}],
+                  "Window": [{"id": "SashOp", "field_style": 8, "value": "Fixed"},
+                             {"id": "Width", "display_name": "Width", "field_style": 7, "value": "900"}],
+                  "Space": [{"id": "Name", "field_style": 4, "value": ""}],
+                  "Stair": [{"id": "TotalRise", "display_name": "Total Rise", "field_style": 7, "value": "3000"},
+                            {"id": "NumRisers", "display_name": "Number of Risers", "field_style": 1, "value": "17"},
+                            {"id": "StairType", "display_name": "Stair Type", "field_style": 8, "value": "Straight"}]}.get(name)
         if params is None:
             raise BridgeError(f"plug-in not found: {name}", "not_found")
         return {"universal_plugin_name": name, "descriptor_fingerprint": "fp-" + name.lower(), "parameters": params}
+
+    def _check_parametric(self, plugin: str, op: dict) -> dict:
+        """Mirror the native readback: read-only or wrongly typed values fail 'parametric readback mismatch'."""
+        try:
+            schema = {e["id"]: e for e in self.a_describe_parametric_schema({"plugin_name": plugin})["parameters"]}
+        except BridgeError:
+            schema = {}
+        values = {}
+        for n in range(1, int(op.get("parameter_count", 0)) + 1):
+            pid, ptype = op[f"parameter_{n}_name"], op[f"parameter_{n}_type"]
+            value = op.get(f"parameter_{n}_{ptype}")
+            entry = schema.get(pid)
+            if entry is not None:
+                read_only = "read only" in str(entry.get("display_name", "")).lower()
+                numeric = entry.get("field_style") in {1, 3, 7, 9, 10, 11, 13}
+                text = entry.get("field_style") in {4, 8}
+                if read_only or (numeric and ptype not in {"real", "integer"}) or (text and ptype != "string"):
+                    raise BridgeError(f"Vectorworks parametric readback mismatch: {pid}", "sdk_operation_failed",
+                                      False, "rolled_back")
+            values[pid] = value
+        return values
 
     def a_transaction_status(self, p):
         rec = self.m.transactions.get(p.get("idempotency_key"))
@@ -894,6 +1032,10 @@ class Handler:
         snapshot = copy.deepcopy((d.objects, d.order))
         local: dict[str, str] = {}
         receipts = []
+        touched: set[str] = set()
+        plan_join = p.get("join_walls", True) is not False
+        new_walls: list = []
+        no_join: set[str] = set()
 
         def resolve(ref: str) -> dict:
             if ref.startswith("$"):
@@ -914,24 +1056,45 @@ class Handler:
                 if kind == "create":
                     params = {k: v for k, v in op.items() if k not in {"op", "local_ref", "object_type"}}
                     otype = op["object_type"]
-                    if otype in {"door", "window"}:
+                    if otype in {"door", "window"} or (otype == "parametric" and params.get("wall_uuid")):
                         wall = params.get("wall_uuid", "")
                         host = resolve("$" + wall[1:] if wall.startswith("$") else "uuid:" + wall)
                         if host["type"] != "wall":
                             raise BridgeError("wall_uuid does not reference a wall")
+                        params["wall_uuid"] = host["uuid"]
+                        params["parent_uuid"] = host["uuid"]
+                        params["host"] = "wall"
+                    if otype in {"door", "window"}:
                         if params.get("descriptor_fingerprint") != "fp-" + otype:
                             raise BridgeError("descriptor_fingerprint mismatch")
-                        params["wall_uuid"] = host["uuid"]
                         params["plugin_name"] = otype.title()
+                    if otype in {"door", "window", "parametric"}:
+                        values = self._check_parametric(params.get("plugin_name", ""), params)
+                        params = {k: v for k, v in params.items() if not k.startswith("parameter_")}
+                        if values:
+                            params["parameters"] = values
+                    if otype == "wall":
+                        params.pop("join_walls", None)
+                        if op.get("join_walls", True) and plan_join:
+                            new_walls.append(None)  # placeholder, filled below
                     obj = d.add(otype, **params)
+                    if otype == "wall" and new_walls and new_walls[-1] is None:
+                        new_walls[-1] = obj
+                    elif otype == "wall":
+                        no_join.add(obj["uuid"])
                     if op.get("local_ref"):
                         local[op["local_ref"]] = obj["uuid"]
-                    receipts.append({"index": i, "op": "create", "local_ref": op.get("local_ref"), "uuid": obj["uuid"],
-                                     "type": otype, "verified": True})
+                    receipt = {"index": i, "op": "create", "local_ref": op.get("local_ref"), "uuid": obj["uuid"],
+                               "type": otype, "verified": True}
+                    if params.get("parent_uuid"):
+                        receipt["parent_uuid"] = params["parent_uuid"]
+                    receipts.append(receipt)
+                    touched.add(obj["uuid"])
                 elif kind == "set_property":
                     obj = resolve(op["target"])
                     name = op["property_name"]
                     obj["class" if name == "class" else name] = op["value"]
+                    touched.add(obj["uuid"])
                     receipts.append({"index": i, "op": kind, "uuid": obj["uuid"], "verified": True})
                 elif kind == "object.transform":
                     obj = resolve(op["target"])
@@ -941,6 +1104,7 @@ class Handler:
                             obj[ky] += op.get("delta_y", 0)
                     obj["rotation"] = obj.get("rotation", 0) + op.get("rotation_degrees", 0)
                     obj["bounds"] = _bounds(obj)
+                    touched.add(obj["uuid"])
                     receipts.append({"index": i, "op": kind, "uuid": obj["uuid"], "verified": True})
                 elif kind == "object.reshape":
                     obj = resolve(op["target"])
@@ -960,23 +1124,36 @@ class Handler:
                                      "duplicate": {"uuid": new["uuid"], "type": new["type"]}})
                 elif kind == "object.delete":
                     obj = resolve(op["target"])
+                    inserts = [o["uuid"] for o in d.objects.values() if o.get("parent_uuid") == obj["uuid"]]
+                    if obj["uuid"] in touched or any(u in touched for u in inserts):
+                        raise BridgeError(f"operations[{i}] deletes an object that this plan created or changed; "
+                                          "split it into two calls", "invalid_request", False, "not_started")
+                    for u in inserts:
+                        del d.objects[u]
                     del d.objects[obj["uuid"]]
-                    receipts.append({"index": i, "op": kind, "target": obj["uuid"], "verified": True})
+                    receipt = {"index": i, "op": kind, "target": obj["uuid"], "verified": True}
+                    if inserts:
+                        receipt["cascaded_inserts"] = inserts
+                    receipts.append(receipt)
                 elif kind == "object.update_parametric":
                     obj = resolve(op["target"])
                     obj.setdefault("parameters", {})
                     for n in range(1, int(op.get("parameter_count", 0)) + 1):
                         ptype = op[f"parameter_{n}_type"]
                         obj["parameters"][op[f"parameter_{n}_name"]] = op[f"parameter_{n}_{ptype}"]
+                    touched.add(obj["uuid"])
                     receipts.append({"index": i, "op": kind, "uuid": obj["uuid"], "verified": True})
                 else:
                     raise BridgeError(f"operations[{i}].op is unsupported: {kind}")
+            wall_joins = _join_walls([w for w in new_walls if w], d, no_join) if plan_join else []
         except Exception:
             d.objects, d.order = snapshot
             raise
         d.touch()
         result = {"committed": True, "verified": True, "operation_count": count, "operations": receipts,
-                  "timing": {"handler_ms": 1.0}}
+                  "wall_joins": wall_joins, "timing": {"handler_ms": 1.0}}
+        result["transaction"] = {"committed": True, "operation_count": count, "operations": receipts,
+                                 "wall_joins": wall_joins}
         if key:
             m.transactions[key] = result
         return result

@@ -65,7 +65,8 @@ TOOLS: list[dict] = [
         "title": "Read drawing data",
         "description": (
             "Read-only. what=document|documents|layers|classes|summary (counts by type/layer/class)|query (objects; "
-            "filter type/layer/class/name/criteria, paged by cursor)|object (target)|selection|view|saved_views|sheets|"
+            "filter type (wall, door, window, space, stair, ...; doors/windows in walls come with wall+width)/layer/"
+            "class/name/criteria, paged by cursor)|object (target)|selection|view|saved_views|sheets|"
             "viewports (target=sheet)|annotations|symbols|worksheets|worksheet (target, range 'A1:D20')|resources "
             "(resource_type)|records|parametric_schema (target='Door')|capabilities|plan_quality (plan). Lengths in mm; "
             "use the returned uuid in later calls. Example: vw_read(what=\"query\", type=\"wall\", limit=50)."),
@@ -96,20 +97,21 @@ TOOLS: list[dict] = [
         "name": "vw_create",
         "title": "Create objects",
         "description": (
-            "Create many objects in ONE undo step. objects=[{type, id?, ...}]; lengths in units (default mm) or strings "
-            "like \"3m\"; points [x,y]. Types: line start,end | rect origin,width,height | circle center,radius | polygon "
-            "points | wall start,end,thickness,height | slab/roof/space points | text at,text | dimension start,end | "
-            "symbol symbol,at | door/window wall:\"$<id>\"|uuid, at or offset | parametric plugin | room origin,width,depth. "
-            "floor_plan={rooms,walls,doors,windows} builds a plan. Example: objects=[{\"type\":\"wall\",\"id\":\"w1\","
-            "\"start\":[0,0],\"end\":[5000,0]},{\"type\":\"door\",\"wall\":\"$w1\",\"offset\":1500}]."),
+            "Create many objects in ONE call (one undo step); the receipt (ids->uuids) is authoritative. Room in ONE "
+            "call: walls with ids + {type:door|window, wall:\"$<wall id>\", at:[x,y], width} + space points; touching "
+            "walls are joined (join_walls). mm unless units. Types: line start,end | rect origin,width,height | circle "
+            "center,radius | polygon/slab/roof/space points | wall start,end,thickness,height | text at,text | dimension "
+            "| symbol | door/window | parametric plugin,parameters | room. Example: objects=[{\"type\":\"wall\",\"id\":"
+            "\"w1\",\"start\":[0,0],\"end\":[5000,0]},{\"type\":\"door\",\"wall\":\"$w1\",\"at\":[1500,0]}]."),
         "input": obj({
             "objects": {"type": "array", "items": {"type": "object", "properties": {
                 "type": {"type": "string", "enum": CREATE_TYPES}, "id": S, "name": S, "class": S,
                 "start": PT, "end": PT, "at": PT, "center": PT, "origin": PT, "points": {"type": ["array", "string"]},
                 "width": LEN, "height": LEN, "depth": LEN, "radius": LEN, "thickness": LEN, "offset": LEN, "sill": LEN,
                 "elevation": LEN, "rotation": N, "text": S, "size": N, "symbol": S, "plugin": S, "wall": S, "style": S,
-                "parameters": {"type": "object"}}, "required": ["type"]}},
-            "floor_plan": {"type": "object"}, "units": UNITS, "dry_run": B, "document": DOC, "idempotency_key": IDEM}),
+                "parameters": {"type": "object"}, "join_walls": B}, "required": ["type"]}},
+            "floor_plan": {"type": "object"}, "units": UNITS, "join_walls": B, "dry_run": B, "document": DOC,
+            "idempotency_key": IDEM}),
         "output": out_schema(created={"type": "array"}, ids={"type": "object"}, document={"type": "object"}),
         "annotations": WRITE,
     },
@@ -140,10 +142,11 @@ TOOLS: list[dict] = [
             "Power-user transaction in the 0.7 grammar (one undo step): operations=[{type, operation_id?, params}] with "
             "type create (params.object_type + fields) | set_properties | transform | reshape | update_parametric | "
             "duplicate | delete, or sheet/viewport/annotation lifecycle ops when the bridge supports them; '$id' refers "
-            "to an earlier create. Prefer vw_create/vw_edit. Grammar: resource vw://guide. Example: operations=[{\"type\":"
+            "to an earlier create. Doors/windows: prefer vw_create. join_walls (default true) joins touching walls. "
+            "Grammar: resource vw://guide. Example: operations=[{\"type\":"
             "\"create\",\"operation_id\":\"r1\",\"params\":{\"object_type\":\"rect\",\"x1\":0,\"y1\":0,\"x2\":100,\"y2\":50}}]."),
         "input": obj({"operations": {"type": "array", "items": {"type": "object"}}, "coordinate_units": UNITS,
-                      "idempotency_key": IDEM, "document": DOC}, ("operations",)),
+                      "join_walls": B, "idempotency_key": IDEM, "document": DOC}, ("operations",)),
         "output": out_schema(committed=B, receipts={"type": "array"}, idempotency_key=S),
         "annotations": DESTRUCTIVE,
     },
@@ -187,15 +190,16 @@ TOOLS: list[dict] = [
         "name": "vw_document",
         "title": "Documents and files",
         "description": (
-            "Documents and file I/O. action=list|info|activate|new|open|save|save_as|close|export|import. path = absolute "
+            "Documents and file I/O. action=list|info|activate|new|open|save|save_as|close|export|import|dismiss_home "
+            "(close the Vectorworks Home screen). path = absolute "
             "file path; format pdf|dwg|dxf|ifc|png|jpg|vwx (from extension if omitted). close of a modified document needs "
             "discard_changes=\"discard\" (ask the user). Long exports/imports report progress; if still_running, poll "
             "vw_status(job_id). Example: vw_document(action=\"export\", path=\"C:\\\\Out\\\\plan.pdf\", range=\"all_pages\")."),
         "input": obj({"action": {"type": "string", "enum": ["list", "info", "activate", "new", "open", "save", "save_as",
-                                                             "close", "export", "import"]},
+                                                             "close", "export", "import", "dismiss_home"]},
                       "path": S, "format": {"type": "string", "enum": ["pdf", "dwg", "dxf", "ifc", "png", "jpg", "tif", "bmp", "vwx"]},
                       "document": DOC, "range": {"type": "string", "enum": ["current_view", "all_pages", "sheet"]},
-                      "sheet": S, "dpi": I, "replace": B, "discard_changes": S, "template": S, "at": PT},
+                      "sheet": S, "dpi": I, "replace": B, "discard_changes": S, "template": S, "at": PT, "wait_ms": I},
                      ("action",)),
         "output": out_schema(result={}, document={"type": "object"}, job_id=S),
         "annotations": DESTRUCTIVE,

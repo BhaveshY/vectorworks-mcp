@@ -9,6 +9,7 @@ import sys
 from .. import __version__, config
 from .. import coerce as C
 from ..documents import normalise_doc
+from ..bridge import modal_dialog_next_step
 from ..errors import INSTALL_COMMAND, NEXT_STEPS, VWError
 from ..host import doc_brief, get_host
 
@@ -55,6 +56,12 @@ def handle(args: dict, ctx, warnings: list) -> dict:
                 row["script_engine"] = status["script_engine"]
             if status.get("handler_running_ms"):
                 row["busy_ms"] = status["handler_running_ms"]
+            if isinstance(status.get("modal_dialog"), dict):
+                row["modal_dialog"] = status["modal_dialog"]
+            if isinstance(status.get("auto_dismiss_dialogs"), bool):
+                row["auto_dismiss_dialogs"] = status["auto_dismiss_dialogs"]
+            if isinstance(status.get("dismissed_dialogs"), list) and status["dismissed_dialogs"]:
+                row["dismissed_dialogs"] = status["dismissed_dialogs"][-5:]
             idle = status.get("main_context_idle_ms")
             if not inst.v2 and isinstance(idle, (int, float)) and idle >= bridge.budgets.busy_idle_ms > 0:
                 row["ui_state"] = "busy"
@@ -97,9 +104,16 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         ui_state = chosen.status.get("ui_state")
         chosen_row = next((r for r in rows if r.get("instance") == chosen.key), {})
         busy = ui_state in {"modal", "tracking", "loading"} or chosen_row.get("ui_state") == "busy"
-        if busy:
+        dialog = chosen.status.get("modal_dialog")
+        if isinstance(dialog, dict):
+            kind = dialog.get("kind") or "other"
+            what = {"home": "The Vectorworks Home screen", "update_available": "The 'new Vectorworks version available' "
+                    "dialog"}.get(kind, f"A dialog ('{dialog.get('title') or 'untitled'}')")
+            problems.append(_problem("modal_dialog", f"{what} is open and blocks Vectorworks.",
+                                     modal_dialog_next_step(dialog) or ""))
+        elif busy:
             problems.append(_problem("vectorworks_busy", f"Vectorworks is busy (ui_state={ui_state or 'busy'})."))
-        else:
+        if not (busy or isinstance(dialog, dict)):
             try:
                 docs = host.session.list_documents(chosen)
                 out["documents"] = [doc_brief(d, True) | ({"active": True} if d.get("active") else {}) for d in docs]
@@ -120,7 +134,7 @@ def handle(args: dict, ctx, warnings: list) -> dict:
                 out["summary"] = summary
             except VWError as exc:
                 problems.append(_problem(exc.code, exc.message))
-        out["ready"] = not any(p["code"] in {"vectorworks_busy", "no_active_document", "bridge_unreachable", "auth_failed",
+        out["ready"] = not any(p["code"] in {"vectorworks_busy", "modal_dialog", "no_active_document", "bridge_unreachable", "auth_failed",
                                              "multiple_instances", "setup_required"} for p in problems)
 
     if a.get("job_id"):

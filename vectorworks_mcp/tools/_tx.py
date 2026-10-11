@@ -26,8 +26,11 @@ def check_create_types(target: Target, normalised: list[dict]) -> None:
                       details={"supported_types": sorted(have)})
 
 
-def run_general(host: Host, target: Target, normalised: list[dict], key: str, ctx, *, label: str = "") -> dict:
-    """Compile + send one apply_operations transaction; returns the compact receipt."""
+def run_general(host: Host, target: Target, normalised: list[dict], key: str, ctx, *, label: str = "",
+                join_walls: Optional[bool] = None) -> dict:
+    """Compile + send one apply_operations transaction; returns the compact receipt.
+
+    join_walls: plan-level wall joining (native default true); sent only when given."""
     if not normalised:
         return {"committed": True, "applied": 0, "receipts": []}
     check_create_types(target, normalised)
@@ -35,9 +38,12 @@ def run_general(host: Host, target: Target, normalised: list[dict], key: str, ct
         wire = ops.compile_general(normalised)
     except ValueError as exc:
         raise VWError("validation_error", str(exc)) from None
-    digest = plan_hash([normalised, (target.document or {}).get("fingerprint")])
+    digest_src: list = [normalised, (target.document or {}).get("fingerprint")]
+    if join_walls is not None:
+        digest_src.append({"join_walls": join_walls})
+    digest = plan_hash(digest_src)
     host.session.check_plan(key, digest)
-    params = ops.wire_params(wire, key)
+    params = ops.wire_params(wire, key, {"join_walls": bool(join_walls)} if join_walls is not None else None)
     result = host.call(target, "apply_operations", params, kind="write", ctx=ctx, idempotency_key=key)
     summary = ops.summarise_transaction(result, len(wire))
     if not summary["committed"]:
@@ -65,6 +71,17 @@ def run_documentation(host: Host, target: Target, normalised: list[dict], key: s
             params["expected_dirty_is_set"] = True
     result = host.call(target, "apply_documentation_operations", params, kind="write", ctx=ctx, idempotency_key=key)
     return ops.summarise_transaction(result, len(wire))
+
+
+def doc_mm_per_unit(target: Optional[Target]) -> float:
+    """Millimetres per document length unit, when the bridge reports it (document record `mm_per_unit`)."""
+    if target is None:
+        return 1.0
+    for doc in (target.document, target.inst.status.get("active_document")):
+        value = doc.get("mm_per_unit") if isinstance(doc, dict) else None
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+            return float(value)
+    return 1.0
 
 
 def ids_from(summary: dict) -> dict[str, str]:

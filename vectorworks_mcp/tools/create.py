@@ -24,7 +24,8 @@ def _plugins_needed(objects: list[dict]) -> set[str]:
         elif kind in {"parametric", "plugin", "pio"}:
             plugin = src.get("plugin") or src.get("plugin_name")
             if plugin:
-                needed.add(str(plugin))
+                plugin = str(plugin).strip()
+                needed.add({"door": "Door", "window": "Window"}.get(plugin.lower(), plugin))
     return needed
 
 
@@ -43,18 +44,24 @@ def handle(args: dict, ctx, warnings: list) -> dict:
     if not objects and not fp_objects:
         raise validation("objects (or floor_plan) is required", "objects", [builders._example("wall")])
     dry_run = C.boolean(a.get("dry_run", False), "dry_run")
+    join_walls = C.boolean(a["join_walls"], "join_walls") if a.get("join_walls") not in (None, "") else None
     host = get_host()
+    all_wall_ids = builders.wall_ids_of(objects) | builders.wall_ids_of(fp_objects)
 
-    def compile_all(descriptors: dict, schemas: dict) -> builders.CreatePlan:
-        plan = builders.compile_create(objects, scale, descriptors=descriptors, schemas=schemas) if objects else builders.CreatePlan()
+    def compile_all(descriptors: dict, schemas: dict, mm_per_unit: float = 1.0) -> builders.CreatePlan:
+        plan = builders.compile_create(objects, scale, descriptors=descriptors, schemas=schemas,
+                                       extra_wall_ids=all_wall_ids, doc_mm_per_unit=mm_per_unit) \
+            if objects else builders.CreatePlan()
         if fp_objects:
-            fplan = builders.compile_create(fp_objects, 1.0, descriptors=descriptors, schemas=schemas)
+            fplan = builders.compile_create(fp_objects, 1.0, descriptors=descriptors, schemas=schemas,
+                                            extra_wall_ids=all_wall_ids, doc_mm_per_unit=mm_per_unit)
             clash = set(plan.ids) & set(fplan.ids)
             if clash:
                 raise validation(f"ids {sorted(clash)} are used both in objects and floor_plan", "objects", "w1")
             plan.primary += fplan.primary
             plan.hosted += fplan.hosted
             plan.ids += fplan.ids
+            plan.warnings += fplan.warnings
         return plan
 
     plan = compile_all({}, {})  # validate everything before touching Vectorworks
@@ -65,10 +72,13 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         needed = _plugins_needed(objects + fp_objects)
         if needed:
             descriptors, schemas = _tx.load_schemas(host, target, needed)
-            plan = compile_all(descriptors, schemas)
+            plan = compile_all(descriptors, schemas, _tx.doc_mm_per_unit(target))
+    warnings.extend(dict.fromkeys(plan.warnings))
     if dry_run:
         out = {"ok": True, "dry_run": True, "units": units, "native_units": "mm",
                "operations": plan.primary + plan.hosted, "count": len(plan.primary) + len(plan.hosted)}
+        if join_walls is not None:
+            out["join_walls"] = join_walls
         if fp_counts:
             out["floor_plan"] = fp_counts
         return out
@@ -78,15 +88,18 @@ def handle(args: dict, ctx, warnings: list) -> dict:
     inst = target.inst
     created_ids: dict[str, str] = {}
     receipts: list = []
+    wall_joins: list = []
     if plan.hosted and inst.v2:
         # v2: native resolves "$wall" refs inside one transaction (contract 2.3 vw_create).
-        summary = _tx.run_general(host, target, plan.primary + plan.hosted, key, ctx)
+        summary = _tx.run_general(host, target, plan.primary + plan.hosted, key, ctx, join_walls=join_walls)
         created_ids.update(_tx.ids_from(summary))
         receipts += summary["receipts"]
+        wall_joins += summary.get("wall_joins") or []
     else:
-        summary = _tx.run_general(host, target, plan.primary, key, ctx)
+        summary = _tx.run_general(host, target, plan.primary, key, ctx, join_walls=join_walls)
         created_ids.update(_tx.ids_from(summary))
         receipts += summary["receipts"]
+        wall_joins += summary.get("wall_joins") or []
         if plan.hosted:
             for op in plan.hosted:
                 ref = op["params"]["wall_uuid"]
@@ -103,12 +116,17 @@ def handle(args: dict, ctx, warnings: list) -> dict:
     created = []
     for r in receipts:
         entry = {"id": r.get("operation_id") or r.get("local_ref"), "uuid": r.get("uuid"), "type": r.get("type")}
+        if r.get("parent_uuid"):
+            entry["wall"] = r["parent_uuid"]
         created.append({k: v for k, v in entry.items() if v})
     out = {"ok": True, "created": created, "ids": created_ids, "count": len(created), "idempotency_key": key,
            "undo": "one undo step" if not (plan.hosted and not inst.v2) else "two undo steps"}
+    if wall_joins:
+        out["wall_joins"] = wall_joins
     if fp_counts:
         out["floor_plan"] = fp_counts
     if target.document:
         out["document"] = doc_brief(target.document)
-    out["next_step"] = "Verify with vw_capture(view='objects', objects=[...uuids]) or vw_read(what='query')."
+    out["next_step"] = ("Done: this receipt is authoritative (every listed object exists). Do not re-create or re-check "
+                        "each object; use vw_capture() once if a visual check is needed.")
     return out

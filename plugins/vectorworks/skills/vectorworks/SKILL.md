@@ -19,9 +19,12 @@ working in Vectorworks at the same time. Follow these rules exactly.
 3. **Units:** lengths are millimetres unless you pass `units` (`"mm"`, `"cm"`,
    `"m"`, `"in"`, `"ft"`) or a string with a unit (`"3.5m"`, `"250 mm"`,
    `"12'6\""`). Points: `[x, y]`. Read results are always in mm.
-4. **Look before you claim.** After drawing, call `vw_capture` and check the
-   image. Never use computer-use, desktop screenshots, mouse or keyboard
-   automation: `vw_capture` is how you see the drawing.
+4. **Receipts are authoritative.** A successful `vw_create` / `vw_edit` /
+   `vw_apply` result lists every object it created or changed (`ids`, `created`,
+   `receipts`). Do not re-read objects one by one, do not create them again,
+   and do not restart in a new document because a query looked empty. For a
+   visual check call `vw_capture` once and look at the image. Never use
+   computer-use, desktop screenshots, mouse or keyboard automation.
 5. **Every failure has `error.code` and `error.next_step`. Do what `next_step`
    says.** Never repeat an identical failing call. Never resend a write after
    `unknown_commit_state` or `still_running` (see Recovery).
@@ -90,9 +93,35 @@ Object references: the `uuid` from `vw_read` (best), `"name:<name>"`, `"$<id>"`
 
 ## Recipes
 
-### A. Draw a floor plan (walls + doors + windows + spaces)
+### A. Draw a room or floor plan (walls + doors + windows + spaces)
 
-Fast path - rooms become real walls with labels; doors/windows are hosted on the
+**Canonical recipe - one room in ONE `vw_create` call** (walls get ids, doors and
+windows reference them with `"wall": "$<id>"`, the space closes the room):
+
+```text
+vw_create(units="mm", objects=[
+  {"type": "wall", "id": "south", "start": [0, 0],       "end": [6000, 0],    "thickness": 200, "height": 2700},
+  {"type": "wall", "id": "east",  "start": [6000, 0],    "end": [6000, 4000], "thickness": 200, "height": 2700},
+  {"type": "wall", "id": "north", "start": [6000, 4000], "end": [0, 4000],    "thickness": 200, "height": 2700},
+  {"type": "wall", "id": "west",  "start": [0, 4000],    "end": [0, 0],       "thickness": 200, "height": 2700},
+  {"type": "door",   "wall": "$south", "at": [3000, 0],    "width": 900},
+  {"type": "window", "wall": "$north", "at": [3000, 4000], "width": 1200},
+  {"type": "space", "name": "Office", "points": [[0, 0], [6000, 0], [6000, 4000], [0, 4000]]}
+])
+```
+
+- That single call is the whole job: one undo step, walls meeting at their ends
+  are joined automatically (`join_walls`, default true; the result lists
+  `wall_joins`), doors/windows are inserted into their walls. The result's
+  `ids` are the uuids - report them; do not verify object by object.
+- Door/window defaults: door 900 x 2100; window 1200 x 1500, sill 900. Only
+  `wall` and `at` (or `offset` along a same-call wall) are required. Do not use
+  `type: "parametric"` with `DoorWidth`/`Width` parameters for doors/windows -
+  use `type: "door"`/`"window"` with `width`/`height`/`sill`.
+- Doors/windows show up in `vw_read(what="query", type="door")` /
+  `type="window"` with their host `wall` uuid, `width` and `height`.
+
+Fast path for several rooms - rooms become real walls with labels; doors/windows are hosted on the
 nearest wall:
 
 ```text
@@ -129,7 +158,8 @@ vw_create(units="mm", objects=[
 - Doors/windows: `"wall": "$<id>"` (wall from the same call) or the wall's uuid
   (existing wall). Position with `"offset"` (distance from the wall start;
   same-call walls only) or `"at": [x, y]` (a point on the wall). Defaults:
-  door 900 x 2100, window 1200 x 1200 with sill 900, wall 200 thick, 3000 high.
+  door 900 x 2100, window 1200 x 1500 with sill 900, wall 200 thick, 3000 high.
+  `"join_walls": false` (per wall or for the whole call) keeps walls unjoined.
 - Simple room: `{"type": "room", "origin": [0, 0], "width": 4000, "depth": 3000, "name": "Bedroom"}`
   = 4 real walls + label (add `"space": true`, `"dimensions": true`).
 - Slab `{"type": "slab", "points": [...], "thickness": 250}` · roof
@@ -140,14 +170,16 @@ vw_create(units="mm", objects=[
   `{"type": "parametric", "plugin": "Stair", "at": [0, 0], "parameters": {"ParamId": value}}`
   (ids from `vw_read(what="parametric_schema", target="Stair")`). Every object
   accepts `name` and `class`.
-- Then verify: `vw_capture()` and look at the image. Report the uuids from the
-  result; do not re-read every object.
+- Then, if a visual check is wanted: `vw_capture()` once and look at the image.
+  Report the uuids from the result; do not re-read every object.
 
 ### B. Edit existing objects
 
 1. Find them: `vw_read(what="query", type="door", fields=["uuid","name","layer"])`
-   (follow `next_cursor` only when you need every object; for counts use
-   `what="summary"`).
+   (`type` = wall, door, window, space/room, slab, roof, text, symbol, stair,
+   column or any plug-in name; doors/windows inside walls are listed with
+   `wall`, `width`, `height`). Follow `next_cursor` only when you need every
+   object; for counts use `what="summary"`.
 2. Change them in ONE call:
 
 ```text
@@ -256,13 +288,14 @@ runs VectorScript instead.
 |---|---|---|
 | `setup_required` | runtime not installed, server in repair mode | Show the user `repair_command` from the result; they run it in PowerShell and restart Codex / Claude. Stop. |
 | `bridge_unreachable` | Vectorworks closed or the bridge plug-in not loaded | Ask the user to start Vectorworks with a document open. Then `vw_status()` once. |
-| `vectorworks_busy` | dialog open, mouse drag, render or file loading (`details.ui_state`) | Tell the user what blocks, wait a few seconds, retry the same call once. Nothing changed. |
+| `vectorworks_busy` | dialog open, mouse drag, render or file loading (`details.ui_state`, `details.modal_dialog`) | Follow `next_step`: the Vectorworks Home screen / "new version available" dialog is closed by the bridge automatically (or `vw_document(action="dismiss_home")`); any other dialog: ask the user to close the dialog named in `next_step`. Then retry the same call once. Nothing changed. |
+| `modal_dialog` (a `vw_status` problem) | a dialog blocks Vectorworks | Home screen: `vw_status()` again or `vw_document(action="dismiss_home")`. Other dialog: ask the user to close it (title in the message). |
 | `document_changed` | the active document is not the one you used | `vw_read(what="documents")`, then pass `document=` or ask the user. |
 | `multiple_instances` | several Vectorworks running | `vw_status(instance=...)` to pin one, or pass `document=`. |
 | `still_running` | the operation continues inside Vectorworks (`job_id`) | Poll `vw_status(job_id=...)` every 2-5 s. Never resend. |
 | `unknown_commit_state` | the write may or may not have happened | Do NOT resend. `vw_status(idempotency_key=...)` once; if still unknown, inspect with `vw_read` / `vw_capture`, then decide. |
 | `upgrade_required` | the Vectorworks bridge plug-in is older than the host | Tell the user: close Vectorworks, run `install.ps1 -FullNative` (exact command in `next_step`). Other tools keep working. |
-| `validation_error` | wrong arguments; nothing was sent | Fix `error.field` using `error.example`; call again. |
+| `validation_error` | wrong arguments; nothing was sent | Fix `error.field` using `error.example` - and every item of `error.details.issues` when present - in ONE corrected call. For doors/windows switch to `vw_create`. |
 | `native_rejected` | Vectorworks refused and rolled back | Fix the item named in the message; send a corrected call. |
 | `no_active_document` / `document_not_found` | no document open / no match | Ask the user, `vw_read(what="documents")`, or `vw_document(action="new"/"open")`. |
 | `stale_reference` / `not_found` | uuid/name no longer valid | Re-query with `vw_read(what="query")` and use the new uuid. |

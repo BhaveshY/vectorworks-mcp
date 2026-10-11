@@ -42,6 +42,9 @@ struct SubmitOptions {
     std::int64_t busyWaitMs = 3000;
     bool needsDocument = true;
     bool mutates = false;
+    // DialogWatch::DismissSequence() when the request was submitted; results
+    // report dialogs auto-dismissed after this point.
+    std::uint64_t dialogSeq = 0;
 };
 
 enum class JobState {
@@ -79,14 +82,21 @@ public:
     static constexpr std::int64_t kMinTimeoutMs = 50;
 
     using Notifier = std::function<void()>;
+    // Returns extra JSON members (",\"key\":value...") appended to the
+    // details of vectorworks_busy / timeout_not_started failures.
+    using DetailsProvider = std::function<std::string()>;
 
     void SetNotifier(Notifier notifier);
+    void SetBusyDetailsProvider(DetailsProvider provider);
 
     // ---- socket threads -------------------------------------------------
+    // `whileWaiting` (optional) runs on the waiting socket thread about every
+    // 200 ms until the request finishes (dialog watchdog).
     Protocol::ResponseEnvelope SubmitAndWait(
         const Protocol::RequestEnvelope& request,
         const SubmitOptions& options,
-        const std::function<std::string()>& uiStateProvider);
+        const std::function<std::string()>& uiStateProvider,
+        const std::function<void()>& whileWaiting = {});
     std::string JobStatusJson(const std::string& jobId, const std::string& uiState);
     std::string CancelJobJson(const std::string& jobId);
 
@@ -111,6 +121,7 @@ private:
         Protocol::ResponseEnvelope response,
         JobState state);
     std::string NewJobIdLocked();
+    std::string BusyExtraLocked() const;
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;
@@ -119,6 +130,7 @@ private:
     std::unordered_map<std::string, std::shared_ptr<ScheduledRequest>> jobs_;
     std::unordered_set<std::string> inFlightIds_;
     Notifier notifier_;
+    DetailsProvider busyDetails_;
     bool cancelled_ = false;
     std::string cancelReason_;
     std::uint64_t jobCounter_ = 0;

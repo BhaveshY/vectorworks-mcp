@@ -12,10 +12,12 @@ from ..documents import normalise_doc
 from ..errors import VWError, validation
 from ..host import doc_brief, get_host
 
-ACTIONS = ["list", "info", "activate", "new", "open", "save", "save_as", "close", "export", "import"]
+ACTIONS = ["list", "info", "activate", "new", "open", "save", "save_as", "close", "export", "import", "dismiss_home"]
 ACTION_SYN = {"documents": "list", "ls": "list", "get": "info", "document_info": "info", "switch": "activate",
               "focus": "activate", "create": "new", "load": "open", "saveas": "save_as", "save_copy": "save_as",
-              "write": "export", "print": "export", "publish": "export", "pdf": "export", "insert": "import"}
+              "write": "export", "print": "export", "publish": "export", "pdf": "export", "insert": "import",
+              "close_home": "dismiss_home", "home": "dismiss_home", "dismiss": "dismiss_home",
+              "dismiss_dialog": "dismiss_home", "close_home_screen": "dismiss_home"}
 EXPORT_FORMATS = {"pdf": "export_pdf", "dwg": "export_dwg", "dxf": "export_dwg", "ifc": "export_ifc",
                   "png": "export_image", "jpg": "export_image", "tif": "export_image", "bmp": "export_image",
                   "vwx": "export_vectorworks_document"}
@@ -62,6 +64,8 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         out["documents"] = [doc_brief(d, True) | ({"active": True} if d.get("active") else {})
                             for d in session.list_documents(target.inst)]
         return out
+    if action == "dismiss_home":
+        return _dismiss_home(host, a, out)
     if action == "info":
         target = session.target(a.get("document"))
         info = host.call(target, "get_document_info", {})
@@ -179,6 +183,29 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         out["via"] = "script"
         return out
     out["result"] = _clean(host.call(target, native, {"file_path": path, "path": path, "format": fmt}, kind="long", ctx=ctx))
+    return out
+
+
+def _dismiss_home(host, a: dict, out: dict) -> dict:
+    """Close the Vectorworks Home screen / 'new version available' dialog (never any other dialog)."""
+    inst = host.bridge.select(a.get("instance"))
+    wait_ms = C.integer(a["wait_ms"], "wait_ms") if a.get("wait_ms") not in (None, "") else 3000
+    wait_ms = max(0, min(wait_ms, 15000))
+    result = host.bridge.call(inst, "dismiss_home", {"wait_ms": wait_ms}, kind="read", budget_s=wait_ms / 1000 + 5)
+    result = _clean(result) if isinstance(result, dict) else {"result": result}
+    out["result"] = result
+    try:
+        host.bridge.ping(inst)  # refresh ui_state / modal_dialog for the next call
+    except VWError:
+        pass
+    dialog = result.get("modal_dialog")
+    if isinstance(dialog, dict) and dialog.get("kind") not in {"home", "update_available"}:
+        out["next_step"] = (f"Another dialog is open: ask the user to close '{dialog.get('title') or 'the dialog'}' in "
+                            "Vectorworks, then continue.")
+    elif result.get("still_shown"):
+        out["next_step"] = "The Home screen is still shown; call vw_status in a few seconds."
+    else:
+        out["next_step"] = "Continue with the task (no need to call vw_status first)."
     return out
 
 

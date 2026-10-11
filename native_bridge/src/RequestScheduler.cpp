@@ -55,6 +55,11 @@ void RequestScheduler::SetNotifier(Notifier notifier) {
     notifier_ = std::move(notifier);
 }
 
+void RequestScheduler::SetBusyDetailsProvider(DetailsProvider provider) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    busyDetails_ = std::move(provider);
+}
+
 std::string RequestScheduler::NewJobIdLocked() {
     static std::mt19937_64 generator{std::random_device{}()};
     std::ostringstream out;
@@ -88,7 +93,8 @@ void RequestScheduler::PruneJobsLocked(std::chrono::steady_clock::time_point now
 Protocol::ResponseEnvelope RequestScheduler::SubmitAndWait(
     const Protocol::RequestEnvelope& request,
     const SubmitOptions& rawOptions,
-    const std::function<std::string()>& uiStateProvider) {
+    const std::function<std::string()>& uiStateProvider,
+    const std::function<void()>& whileWaiting) {
     SubmitOptions options = rawOptions;
     if (options.timeoutMs <= 0) options.timeoutMs = kDefaultTimeoutMs;
     options.timeoutMs = std::clamp(options.timeoutMs, kMinTimeoutMs, kMaxTimeoutMs);
@@ -151,9 +157,21 @@ Protocol::ResponseEnvelope RequestScheduler::SubmitAndWait(
     }
 
     std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait_for(lock, std::chrono::milliseconds(options.timeoutMs), [&] {
-        return IsTerminal(entry->state);
-    });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(options.timeoutMs);
+    while (!IsTerminal(entry->state)) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) break;
+        const auto slice = std::min<std::chrono::steady_clock::duration>(
+            deadline - now, std::chrono::milliseconds(whileWaiting ? 200 : options.timeoutMs));
+        cv_.wait_for(lock, slice, [&] { return IsTerminal(entry->state); });
+        if (IsTerminal(entry->state) || !whileWaiting) continue;
+        lock.unlock();
+        try {
+            whileWaiting();
+        } catch (...) {
+        }
+        lock.lock();
+    }
     if (IsTerminal(entry->state)) {
         inFlightIds_.erase(request.id);
         return entry->response;
@@ -163,8 +181,16 @@ Protocol::ResponseEnvelope RequestScheduler::SubmitAndWait(
         queue_.erase(std::remove(queue_.begin(), queue_.end(), entry), queue_.end());
         entry->state = JobState::Cancelled;
         inFlightIds_.erase(request.id);
+        DetailsProvider extraProvider = busyDetails_;
         lock.unlock();
         std::string uiState = uiStateProvider ? uiStateProvider() : "";
+        std::string extra;
+        if (extraProvider) {
+            try {
+                extra = extraProvider();
+            } catch (...) {
+            }
+        }
         return Protocol::Fail(
             request.id,
             "timeout_not_started",
@@ -172,7 +198,7 @@ Protocol::ResponseEnvelope RequestScheduler::SubmitAndWait(
             true,
             "not_started",
             "{\"timeout_ms\":" + std::to_string(options.timeoutMs) +
-                ",\"ui_state\":" + JsonString(uiState) + "}");
+                ",\"ui_state\":" + JsonString(uiState) + extra + "}");
     }
     // Running: convert into a job so the result is never silently dropped.
     if (!entry->isJob) {
@@ -285,6 +311,15 @@ void RequestScheduler::FinishLocked(
     cv_.notify_all();
 }
 
+std::string RequestScheduler::BusyExtraLocked() const {
+    if (!busyDetails_) return std::string();
+    try {
+        return busyDetails_();
+    } catch (...) {
+        return std::string();
+    }
+}
+
 std::shared_ptr<ScheduledRequest> RequestScheduler::TryDequeue(UiState state) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (cancelled_ || running_) {
@@ -329,7 +364,7 @@ std::shared_ptr<ScheduledRequest> RequestScheduler::TryDequeue(UiState state) {
                     true,
                     "not_started",
                     std::string("{\"ui_state\":") + JsonString(UiStateName(state)) +
-                        ",\"busy_wait_ms\":" + std::to_string(entry->options.busyWaitMs) + "}"),
+                        ",\"busy_wait_ms\":" + std::to_string(entry->options.busyWaitMs) + BusyExtraLocked() + "}"),
                 JobState::Failed);
             continue;
         }

@@ -118,6 +118,7 @@ _PRIMITIVE_ALLOWED_KEYS = {
     "name",
     "room_id",
     "class_name",
+    "join_walls",
 }
 
 
@@ -489,6 +490,8 @@ def _normalise_create_primitive(
         style_name = _optional_text(raw, "style_name", "")
         if style_name:
             params["style_name"] = style_name
+        if "join_walls" in raw:
+            params["join_walls"] = _coerce_bool(raw, "join_walls", True, label=label)
     elif object_type in {"parametric", "door", "window"}:
         raw_plugin_name = raw.get("plugin_name")
         raw_descriptor_fingerprint = raw.get("descriptor_fingerprint")
@@ -1390,6 +1393,12 @@ def _compact_operation_receipts(value: Any) -> list[dict[str, Any]]:
         after_endpoints = entry.get("after_endpoints")
         if isinstance(after_endpoints, list):
             receipt["after_endpoints"] = after_endpoints
+        # Deleting a wall also deletes the doors/windows inserted in it (native reports them).
+        cascaded = entry.get("cascaded_inserts")
+        if isinstance(cascaded, list) and cascaded:
+            receipt["cascaded_inserts"] = [str(u) for u in cascaded if isinstance(u, str) and u]
+        if isinstance(entry.get("parent_uuid"), str) and entry["parent_uuid"]:
+            receipt["parent_uuid"] = entry["parent_uuid"]
         # Native duplicate receipts carry the newly created object's stable
         # identity in the nested semantic snapshot. Promote only the compact
         # identity fields so callers can safely target the duplicate in a
@@ -1507,4 +1516,9 @@ def summarise_transaction(decoded: Any, expected_wire_count: int) -> dict[str, A
     }
     if decoded.get("replayed"):
         out["replayed"] = True
+    joins = decoded.get("wall_joins")
+    if not isinstance(joins, list):
+        joins = transaction.get("wall_joins")
+    if isinstance(joins, list):
+        out["wall_joins"] = [j for j in joins if isinstance(j, dict)]
     return out

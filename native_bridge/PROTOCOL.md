@@ -182,11 +182,54 @@ SDK calls). `ui_state`:
   as soon as the pump sees `no_document`.
 - If the gate stays closed (`modal`/`tracking`/`loading`) longer than
   `busy_wait_ms`, the request fails `vectorworks_busy` (nothing ran).
+  `vectorworks_busy` and `timeout_not_started` details carry `modal_dialog`
+  (§3.1) when a dialog blocks.
 - A pump tick that re-enters while a handler runs (nested message loop)
   never dequeues; it only publishes a non-idle `ui_state`.
 - One request runs at a time; per tick at most 8 requests / 8 ms.
 - Before a request runs the bridge refreshes the document registry, checks
   `needs_document`, then `expect_document_fingerprint`.
+
+### 3.1 Modal dialogs and the Home screen
+
+Vectorworks shows a modal web-view **Home** screen at startup and whenever
+the last document is closed (top-level main frame disabled; a window titled
+`Vectorworks … - Home` with a descendant of class `VectorworksCDlgWebView`),
+and sometimes an **update notice** (`#32770` titled `Vectorworks`, static text
+"… is available", buttons `Download…` / `Not Now` / `Notification Settings…`).
+Both close the UI gate (`ui_state:"modal"`).
+
+The bridge classifies the dialog that blocks the main UI thread with Win32
+only (`EnumThreadWindows` on the Vectorworks main thread, class names and
+`InternalGetWindowText`; never a cross-thread `SendMessage`, so it is safe on
+any thread) and reports it as `modal_dialog: {title, class, kind}` with
+`kind` `home` | `update_available` | `other` (`null` when none) in `ping` and
+in `vectorworks_busy` / `timeout_not_started` details.
+
+**Automatic dismissal** (env `VW_MCP_AUTO_DISMISS_HOME`, default on; `0`
+disables): only kinds `home` (`PostMessage(WM_CLOSE)`; a retry 1.5 s later
+alternates with `WM_COMMAND IDCANCEL`) and `update_available`
+("Not Now" via `PostMessage(WM_COMMAND, BN_CLICKED)` with that button's id —
+`Download…` is never pressed) are ever touched, one dialog per attempt (update
+notice first), at most once per window per 1.5 s, and only if **no other
+dialog** is open (any other enabled, non-tool-window `#32770` / `*Dlg*` /
+`*Dialog*` top-level window of the main thread, or a known dialog disabled by
+something on top of it, blocks dismissal). Every
+other dialog is reported, never touched. Triggers:
+- a pump tick sees `modal`/`loading` while requests are queued (the request
+  then runs as soon as the gate opens, within its `busy_wait_ms`);
+- a pump tick re-entered from a nested modal loop while a handler runs
+  (`close_document` of the last document, `new_document`, `open_document`
+  open the Home screen synchronously inside the SDK call);
+- the socket thread waiting for a request (every 200 ms) while the gate is
+  `modal`/`loading` or a handler runs.
+
+Results of requests during or before which a dialog was auto-dismissed carry
+`"dismissed_dialogs":[{kind,title,at,trigger}]` and, for the Home screen,
+`"home_dismissed":true` (in `details` for failures). With auto-dismissal
+disabled, closing the last document leaves the request running until the user
+closes the Home screen (the caller gets `still_running` + job id; nothing is
+lost).
 
 Timeouts and jobs:
 
@@ -241,8 +284,19 @@ v2 fields:
 | `open_document_count` | int | |
 | `client_count` | int | open connections |
 | `main_context_pump_window` | "message_only" | |
+| `modal_dialog` | object \| null | `{title, class, kind:"home"\|"update_available"\|"other"}` (§3.1) |
+| `auto_dismiss_dialogs` | bool | `VW_MCP_AUTO_DISMISS_HOME` is not `0` |
+| `dismissed_dialogs` | array | last ≤ 5 auto/explicit dismissals `{kind,title,at,trigger}` |
 | `script_enabled` | bool | `run_script` allowed |
 | `script_engine` | "ok" \| "poisoned" | "poisoned" after a contained script crash (§6.4.1); then also `script_engine_fault` (hex code of the first fault) and `script_engine_faults` (count) |
+
+### `dismiss_home {wait_ms?=3000 (0–15000)}`
+
+Closes the Home screen and/or the update notice (§3.1 rules; works even when
+`VW_MCP_AUTO_DISMISS_HOME=0`), waiting up to `wait_ms` for them to go away.
+No-op success when neither is shown; never touches any other dialog. No
+document needed. →
+`{"dismissed":bool,"home_dismissed":bool,"dismissed_dialogs":[{kind,title,at,trigger}],"still_shown":bool,"blocked_by"?:"other_dialog_open","blocking_dialog"?:{title,class},"modal_dialog":obj|null,"auto_dismiss_enabled":bool,"ui_state":"…"}`.
 
 ### `capabilities`
 
@@ -368,6 +422,12 @@ a dirty document is first saved to a private temp file
 cannot prompt; the document's original file on disk is untouched. The
 previously active document is re-activated if still open. →
 `{"closed":true,"fingerprint":"…","discarded_changes":bool,"active_document":record|null,"open_document_count":n}`.
+Closing the **last** open document makes Vectorworks open the modal Home
+screen inside `CloseDocument`; the bridge closes it automatically (§3.1,
+result then has `home_dismissed:true`), leaving Vectorworks with zero
+documents but responsive (`ui_state:"no_document"`; `new_document` /
+`open_document` still work). Callers that want a document to remain should
+open one before closing the last.
 
 **`open_document {file_path | path, replace_dirty_confirmation?}`** (W, D, L,
 no document needed) opens synchronously on the main thread (or activates the
@@ -463,9 +523,10 @@ reset_plugin_objects?, export_georeferencing?, fit_to_objects?}`** (R):
 
 1. Remembers the view (active layer, standard view, view matrix, projection,
    render mode, zoom, centre) and the selection (`ForEachObjectN(allSelected)`).
-   With `saved_view` and `restore`, class/layer visibilities are also
-   snapshotted by creating a temporary saved view
-   (`vs.SaveSheet("__vw_mcp_restore_<ms>", True, True, True)`, deleted after).
+   With `saved_view` and `restore`, the view and class/layer visibilities are
+   also snapshotted natively with ISDK `ViewCreateCurrent` (an unnamed
+   in-memory view; restored with `ViewRestore`, freed with `ViewDelete`; no
+   saved-view object, no Python).
 2. Applies the temporary changes exactly like `set_view`, then `DrawScreen`.
 3. `ExportImage` with `fExportRect` = `rect` (world coordinates, converted
    with `WorldRect2ViewRect`, clamped to the drawing area) or — when a plan
@@ -510,6 +571,15 @@ the current view as-is → `{"operation":"export_image","path","size_bytes",
   (`already_exists` if taken)
 - `delete {name}` → `vs.VDelete` → `{"deleted":true,"name","method":"script:VDelete"}`
 
+`list`/`restore` are native. ISDK 2024/2025 has no dialog-free call to
+create or delete a *named* saved view (only `CreateSavedViewWithUI`), so
+`create`/`delete` remain the only internal-Python users here; they fail
+`script_engine_unavailable` once the engine is poisoned.
+
+Rule (1.0): built-in handlers use native SDK calls; the internal Python engine
+is used only where no native API exists — today layer opacity and named
+saved-view create/delete.
+
 ### 6.3 Organisation
 
 **`layers {action:"list", kind?, offset?, limit?, include_extras?}`** (R) →
@@ -524,11 +594,13 @@ Layer record:
 ```
 
 `visible` is `show|gray|hide` (`visibility` 0/2/-1). `elevation`/`thickness`
-(document units, `vs.GetLayerElevation`) and `opacity` (100 −
-`vs.HGetLayerTransp`) come from one in-process Python call per page (design
-layers only; `null` for sheet layers, on failure, or with
-`include_extras:false`). `story` is the story name or `null`.
-`object_count` counts top-level objects.
+(document units) are read natively (`ObjectVariables` `ovLayerHeightInCurrUnits`
+/ `ovLayerThicknessInCurrUnits`). `opacity` (100 − `vs.HGetLayerTransp`) has
+no ISDK/ObjectVariables accessor in SDK 2024/2025 and is the one value still
+read through one internal Python call per page; it is `null` when scripting
+is disabled or the engine is poisoned. Both are design-layer only (`null` for
+sheet layers, on failure, or with `include_extras:false`). `story` is the
+story name or `null`. `object_count` counts top-level objects.
 
 **`layers {action:"create", name, kind?="design"|"sheet", scale?, elevation?,
 title?, activate?=false}`** (W) → one undo step → `{"created":true,"layer":layer}`;
@@ -537,11 +609,14 @@ the previously active layer is restored unless `activate:true`.
 **`layers {action:"set", target (name | "uuid:…" | "name:…"; `name` accepted
 as alias), new_name?, visibility? (show|gray|hide|0|2|-1), active?, scale?,
 elevation?, opacity? (0–100, design layers), title? (sheet layers)}`** (W) →
-one undo step → `{"updated":true,"layer":layer}`.
+one undo step → `{"updated":true,"layer":layer}`. `elevation` is set natively
+(`ovLayerHeightInCurrUnits`, read back); `opacity` uses `vs.HSetLayerTransp`
+(no native setter).
 
 **`layers {action:"delete", target, confirm:"delete", force?}`** (W, D):
 refuses non-empty layers (`layer_not_empty`, `details.object_count`) unless
 `force:true`, and the last design layer → `{"deleted":true,"name","uuid","object_count"}`.
+The layer is removed with `DeleteObject(layer, true)` (one undo record).
 
 **`stories {action:"list"}`** (R) →
 `{"stories":[{"name","uuid","elevation","suffix","layers":[…]}],"count","sdk_story_count","note"}`.
@@ -557,14 +632,24 @@ counted in `sdk_story_count`.
 - `{action:"list"}` → v1: **JSON array of class names** (unchanged).
 - `{action:"list", detailed:true, offset?, limit?=1000}` (v2) →
   `{"classes":[{"name","visible":"show|gray|hide","active":bool,"use_at_creation":bool}],
-  "total","offset","has_more","next_cursor","active_class"}`.
+  "total","offset","has_more","next_cursor","active_class"}`. Native readback
+  (`GetClVisibility`, `GetActiveClass`, `GetClUseGraphic`; no Python).
 - `{action:"create", class_name}` → `{"action":"create","class_name","created","existed"}` (v1).
 - `{action:"delete", class_name, confirm:"DELETE_CLASS"}` → `{"action":"delete","class_name","deleted"}` (v1).
 - `{action:"set", name|class_name, visibility?, active?, fill_color?,
-  pen_color?, line_weight? (mils, 0–2000), use_at_creation?}` (v2, one undo
-  step; implemented in-process with `vs.ShowClass/HideClass/GrayClass/
-  NameClass/SetClFillFore/SetClPenFore/SetClLW/SetClUseGraphic`) →
-  `{"action":"set","class_name","changed":[…],"class":{"name","visible","active","use_at_creation"}}`.
+  pen_color?, line_weight? (mils, 0–2000), use_at_creation?}` (v2). **Native
+  ISDK only** (1.0: the earlier Python implementation crashed the 2024 Python
+  engine in `vs.SetClFillFore`): `SetClVisibility`, `GetClColor`/`SetClColor`
+  (fill/pen fore; RGB → `RGBToColorIndexN`), `SetClLineWeight`,
+  `SetClUseGraphic`, active class via `SetDefaultClass` / `GetActiveClass`.
+  Class attributes are document settings, not objects, so they cannot be
+  registered with `kUndoSwapObjects`: **the change is not part of Vectorworks
+  Undo** (`undoable:false`). The handler snapshots the previous state and
+  restores it itself if a step fails (`sdk_operation_failed`,
+  `commit_state:"rolled_back"`). →
+  `{"action":"set","class_name","changed":[…],"undoable":false,"readback_mismatch":[…],
+  "class":{"name","visible","active","use_at_creation","line_weight","fill_color":[r,g,b],"pen_color":[r,g,b]}}`
+  (colours 0–255).
   Colours: `[r,g,b]` (0–255 scaled ×257, or 0–65535), `"#rrggbb"`, or
   `"r,g,b"` (0–65535).
 
@@ -649,9 +734,10 @@ After a contained fault the bridge:
   (`commit_state:"not_started"`, before any undo event is opened); `ping`
   reports `script_engine:"poisoned"`; the host adds a `vw_status` problem
   with next_step "save your work and restart Vectorworks". Native
-  (non-script) actions keep working. `layers list` silently omits
-  elevation/opacity and `capture_view {saved_view, restore:true}` fails
-  while poisoned (both need Python).
+  (non-script) actions keep working, including `manage_classes set`,
+  layer elevation and `capture_view {saved_view, restore:true}` (native since
+  1.0). While poisoned `layers list` reports `opacity:null`, `layers set
+  {opacity}` and `saved_views create/delete` fail (no native API).
 
 Trade-off / residual risk: containment converts a certain crash into a
 degraded but running Vectorworks so the user can save, but the process
@@ -698,6 +784,21 @@ Object record (`get_objects`, `selection get`, `find_objects`, receipts):
 "fillPattern","opacity","bounds":{"top_left":[x,y],"bottom_right":[x,y]}}`
 (`handle` is now an opaque table id, §5).
 
+**Wall inserts (1.0).** Doors, windows, symbols and other plug-in objects
+inserted in a wall live in the wall's member list, which the layer walk and
+`ForEachObjectN(descendIntoAll)` never visit. Every enumeration — `get_objects`,
+`query_objects` (objects / `criteria:"ALL"` / selection modes), `find_objects`
+with `criteria:"ALL"`, `drawing_summary`, `get_document_info.total_objects`,
+name-target resolution, selection, import/rollback snapshots — walks each
+wall's inserts right after the wall. Insert records add
+`"parent_uuid":"<wall uuid>","host":"wall"`; door/window records add
+`width`/`height` (plug-in parameters `Width`/`Height`). Other criteria
+strings go through `ForEachObjectInCriteria` unchanged (e.g.
+`((PON='Door'))` already finds inserts). `object_type` accepts node type names
+(`wall`, `rect`, …), `door`/`window`/`space`, and any parametric plug-in name
+compared case-insensitively ignoring spaces, `_` and `-` (`"Stair"`,
+`"custom stair"`).
+
 - `get_objects {layer?, object_type?, limit?=100 (≤ 1000)}` → array.
 - `query_objects {mode?="objects"|"criteria"|"selection", criteria?, layer?,
   object_type?, offset?, limit?=100 (≤ 1000), field_count?, field_N?,
@@ -711,8 +812,9 @@ Object record (`get_objects`, `selection get`, `find_objects`, receipts):
 - `find_objects {criteria="ALL", layer?, object_type?, limit?}` → array.
 - `drawing_summary {scan_limit?, limit?, include_examples?, example_limit?, layer?, object_type?}` → v1 summary.
 - `selection {action: get|clear|select|delete, criteria?, limit?, confirm?}` →
-  v1 shapes; v2: delete registers undo once (`AddBeforeSwapObject` +
-  `DeleteObject(undo=false)`).
+  v1 shapes; delete registers undo exactly once with `DeleteObject(h, true)`
+  (1.0: the v2 `AddBeforeSwapObject` + `DeleteObject(h, false)` combination
+  was live-verified NOT to restore the object on Undo).
 - `create_object`, `create_wall`, `create_text`, `create_linear_dimension`
   (flat params) → `{type, handle, uuid, warnings?, vertex_count?, closed?,
   object, transaction_artifact, undo_committed}`.
@@ -733,9 +835,32 @@ Object record (`get_objects`, `selection get`, `find_objects`, receipts):
     at parse time (`invalid_request`, nothing ran).
   - multiple `name:` targets are resolved with one document traversal; a
     single one uses `GetNamedObject`.
-  - `object.delete` registers undo once.
+  - `object.delete` registers undo exactly once: `DeleteObject(h, true)`
+    moves the object into the open undo event; no `AddBeforeSwapObject`
+    (an extra before-record would restore it twice; before-record +
+    `DeleteObject(h, false)` did not restore it at all). One Undo brings back
+    exactly one object with the same uuid. Consequently a plan may not delete
+    an existing object that an earlier op of the same plan changed (or that
+    hosts an insert created in it) → `invalid_request`; use two calls. The op
+    result adds `"cascaded_inserts":[uuid…]` (doors/windows/symbols deleted
+    with a wall).
+  - **automatic wall joins** (`join_walls`, plan-level, default `true`; a
+    wall `create` op may set `"join_walls":false` to opt out): walls created
+    in the plan are joined inside the same undo event before any later op
+    (door/window insertion, edits) and before commit — L join where two
+    endpoints coincide (≤ 1 mm), T join where an endpoint lies on another
+    wall's centreline (collinear continuations are left alone). ISDK
+    `JoinWalls(first, second, firstPt, secondPt, kLWallJoin|kTWallJoin,
+    capped:false, showAlerts:false)` (identical in SDK 2024/2025; each wall's
+    midpoint picks the portion to keep). Result: `transaction.wall_joins` and
+    a top-level copy `wall_joins`:
+    `[{"first_uuid","second_uuid","kind":"L"|"T","point":[x,y],"joined":bool}]`.
   - idempotency identity is `<bridge session>:<document fingerprint>`.
-  Result `{ok:true, atomic:true, verified:true, replayed, idempotency_key?, transaction:{…}}`.
+  - parametric parameter readback is tolerant: reals compare with a relative
+    1e-6 tolerance; string values that both parse as numbers ("900",
+    "900.0", "900mm") compare numerically; `true/1/yes` and `false/0/no` are
+    equal. A remaining mismatch names the written and read-back values.
+  Result `{ok:true, atomic:true, verified:true, replayed, idempotency_key?, transaction:{…}, wall_joins:[…]}`.
 - `transaction_status {idempotency_key, expected_document_*?}` →
   `{state:"committed", recorded_result, current_objects_verified:false}` or
   `{state:"unknown", retry_safe:false, reason}`.
@@ -795,3 +920,4 @@ listed in `capabilities`.
 | `VW_MCP_PORT` | pin one port (no range fallback) |
 | `VW_MCP_ALLOW_SCRIPT=0` | disable `run_script` |
 | `VW_MCP_NEW_DOCUMENT_TEMPLATE` | template for `new_document` |
+| `VW_MCP_AUTO_DISMISS_HOME=0` | do not auto-close the Home screen / update notice (§3.1); `dismiss_home` still works |

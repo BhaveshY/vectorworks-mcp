@@ -25,7 +25,8 @@ std::atomic_bool gMainWindowEverAlive{false};
 
 #ifdef _WIN32
 HWND gMainWindow = nullptr;
-DWORD gMainThreadId = 0;
+std::atomic<HWND> gMainWindowShared{nullptr};
+std::atomic<DWORD> gMainThreadId{0};
 
 std::int64_t SteadyNowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -70,6 +71,7 @@ HWND ResolveMainWindow() {
         window = search.best;
     }
     gMainWindow = window;
+    gMainWindowShared.store(window);
     if (window && IsWindowVisible(window)) gMainWindowEverAlive.store(true);
     return window;
 }
@@ -194,6 +196,22 @@ std::string PublishedReason() {
 
 bool MainWindowEverAlive() {
     return gMainWindowEverAlive.load();
+}
+
+unsigned long MainThreadId() {
+#ifdef _WIN32
+    return gMainThreadId.load();
+#else
+    return 0;
+#endif
+}
+
+void* MainWindowHandle() {
+#ifdef _WIN32
+    return gMainWindowShared.load();
+#else
+    return nullptr;
+#endif
 }
 
 bool MainWindowAlive() {

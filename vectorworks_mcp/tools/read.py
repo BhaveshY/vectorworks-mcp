@@ -28,6 +28,8 @@ _SUMMARY_DROP = {"ok", "tool", "native_summary", "query", "document", "timing", 
 def _clean(item: Any, fields: list[str]) -> Any:
     if not isinstance(item, dict):
         return item
+    if item.get("parent_uuid") and "wall" not in item and item.get("host", "wall") == "wall":
+        item = dict(item, wall=item["parent_uuid"])  # door/window/symbol inserted in a wall
     if fields:
         return {k: item.get(k) for k in fields if k in item}
     out = {k: v for k, v in item.items() if k not in _DROP}
@@ -131,7 +133,8 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         out["data"], out["page"] = _page(items, offset, limit, fields)
         return out
     if what == "summary":
-        data = host.call(target, "drawing_summary", {"layer": a.get("layer") or "", "object_type": _otype(a.get("type")),
+        native_type, plugin = _type_filter(a.get("type"))
+        data = host.call(target, "drawing_summary", {"layer": a.get("layer") or "", "object_type": native_type or plugin or "",
                                                      "limit": 5, "scan_limit": 100_000, "include_examples": False,
                                                      "example_limit": 0})
         out["data"] = {k: v for k, v in data.items() if k not in _SUMMARY_DROP} if isinstance(data, dict) else data
@@ -216,8 +219,43 @@ _OTYPE = {"walls": "wall", "rectangle": "rect", "rectangles": "rect", "rects": "
 
 
 def _otype(value: Any) -> str:
-    text = str(value or "").strip().lower().replace(" ", "_")
+    text = str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
     return _OTYPE.get(text, text)
+
+
+# Native node / object types the bridge filters on directly (object_type).
+NATIVE_TYPES = {"line", "rect", "oval", "circle", "arc", "polygon", "polyline", "text", "symbol", "group", "wall",
+                "dimension", "linear_dimension", "slab", "roof", "space", "door", "window", "viewport", "image",
+                "parametric", "locus", "extrude", "mesh", "solid", "worksheet", "layer_link"}
+# Friendly names of common plug-in objects -> universal plug-in name (native compares case/space-insensitively).
+PLUGIN_TYPES = {"stair": "Stair", "stairs": "Stair", "staircase": "Stair", "column": "Column", "columns": "Column",
+                "pillar": "Column", "railing": "Railing", "railings": "Railing", "handrail": "Railing", "ramp": "Ramp",
+                "data_tag": "Data Tag", "tag": "Data Tag", "tags": "Data Tag", "grid": "Grid Line",
+                "grid_line": "Grid Line", "elevation_benchmark": "Elevation Benchmark", "lighting_device": "Lighting Device"}
+_OPENINGS = {"door": "Door", "window": "Window"}
+
+
+def _type_filter(value: Any) -> tuple[str, Optional[str]]:
+    """Friendly type -> (native object_type, plug-in name or None)."""
+    text = _otype(value)
+    if not text:
+        return "", None
+    if text in _OPENINGS:
+        return text, _OPENINGS[text]
+    if text in NATIVE_TYPES:
+        return text, None
+    singular = text[:-1] if text.endswith("s") and text[:-1] in PLUGIN_TYPES else text
+    plugin = PLUGIN_TYPES.get(singular) or str(value).strip()
+    return "", plugin
+
+
+def _known_type(value: Any) -> bool:
+    text = _otype(value)
+    return bool(text) and (text in NATIVE_TYPES or text in PLUGIN_TYPES or text.rstrip("s") in PLUGIN_TYPES)
+
+
+def _pon(plugin: str) -> str:
+    return "(PON='" + plugin.replace("'", "''") + "')"
 
 
 def _uuid(value: Any, field: str, label: str) -> str:
@@ -242,10 +280,33 @@ def _native_page(out: dict, data: Any, offset: int, fields: list[str], key: str 
 
 def _query(host, target, a: dict, what: str, fields: list[str], limit: int, offset: int, out: dict) -> dict:
     inst = target.inst
+    if what == "query" and a.get("type") in (None, "") and a.get("query") not in (None, ""):
+        if _known_type(a["query"]):
+            a = dict(a, type=a["query"])  # weak models write query="Door" for type="door"
+        else:
+            out.setdefault("warnings", []).append("query is a text filter only for symbols/classes/worksheets; for "
+                                                  "objects use type=, name=, class=, layer= or criteria=.")
     criteria = _criteria(a) if what == "query" else None
+    native_type, plugin = _type_filter(a.get("type"))
+    features = inst.status.get("object_read_features")
+    features = set(features) if isinstance(features, list) else set()
+    object_type = native_type
+    if plugin and what == "query":
+        # Doors/windows sit inside walls and other plug-ins are matched by name: bridges that advertise these
+        # features filter natively; older ones need the plug-in-object-name criterion (PON).
+        native_ok = ("wall_inserts" in features) if native_type in _OPENINGS else ("object_type_plugin_names" in features)
+        if native_ok:
+            object_type = native_type or plugin
+        else:
+            object_type = ""
+            criteria = "(" + _pon(plugin) + (" & " + criteria if criteria else "") + ")"
+    elif plugin:
+        object_type = native_type or plugin
     native_fields = list(dict.fromkeys(fields + (["type"] if fields and "type" not in fields else []))) if fields else []
+    if native_fields and "wall" in native_fields:
+        native_fields = list(dict.fromkeys(native_fields + ["parent_uuid", "host"]))
     params: dict = {"mode": "selection" if what == "selection" else ("criteria" if criteria else "objects"),
-                    "offset": offset, "limit": limit, "layer": a.get("layer") or "", "object_type": _otype(a.get("type")),
+                    "offset": offset, "limit": limit, "layer": a.get("layer") or "", "object_type": object_type,
                     "criteria": criteria or "ALL", "field_count": len(native_fields)}
     params.update({f"field_{i}": f for i, f in enumerate(native_fields, 1)})
     if not inst.supports("query_objects"):
@@ -264,6 +325,21 @@ def _query(host, target, a: dict, what: str, fields: list[str], limit: int, offs
 
 
 def _find_by_uuid(host, target, uuid: str, fields: list[str]) -> Optional[dict]:
+    if target.inst.v2:
+        # v2: exact lookup (GetObjectByUuid; also finds doors/windows inside walls). Filter anyway in case an
+        # older bridge ignores the uuid parameter and returns a normal page.
+        try:
+            data = host.call(target, "query_objects", {"mode": "objects", "uuids": [uuid], "offset": 0,
+                                                       "limit": 5, "layer": "", "object_type": "", "criteria": "ALL",
+                                                       "field_count": 0})
+            for item in (data.get("items") if isinstance(data, dict) else None) or []:
+                if isinstance(item, dict) and str(item.get("uuid", "")).lower() == uuid.lower():
+                    return item
+            if isinstance(data, dict) and "missing_uuids" in data:
+                return None  # the bridge did an exact lookup: the object does not exist
+        except VWError as exc:
+            if exc.code not in {"native_error", "native_rejected", "stale_reference"}:
+                raise
     offset = 0
     for _ in range(100):
         data = host.call(target, "query_objects", {"mode": "objects", "offset": offset, "limit": 1000, "layer": "",

@@ -49,6 +49,7 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         if plugins:
             descriptors, schemas = _tx.load_schemas(host, target, plugins)
             plan = builders.compile_edit(changes, scale, schemas=schemas, descriptors=descriptors)
+    warnings.extend(plan.warnings)
     if dry_run:
         return {"ok": True, "dry_run": True, "native_operations": plan.ops, "script_operations":
                 [s for s in plan.script_ops if s["op"] in SCRIPT_EDIT_OPS], "selection_operations": plan.selection_ops}
@@ -69,6 +70,10 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         out["applied"] += summary["applied"]
         out["receipts"] += summary["receipts"]
         out["idempotency_key"] = key
+        cascaded = [u for r in summary["receipts"] for u in r.get("cascaded_inserts") or []]
+        if cascaded:
+            out["cascaded_inserts"] = cascaded
+            warnings.append(f"Deleting wall(s) also deleted {len(cascaded)} inserted door/window/symbol object(s).")
         dup_ids = _tx.ids_from(summary)
         if dup_ids:
             out["ids"] = dup_ids

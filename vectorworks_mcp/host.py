@@ -19,6 +19,13 @@ log = logging.getLogger("vectorworks_mcp.host")
 
 _host: Optional["Host"] = None
 _host_lock = threading.Lock()
+_notices = threading.local()  # per tool call: notes merged into the result's warnings by tool_entry
+
+
+def notice(message: str) -> None:
+    items = getattr(_notices, "items", None)
+    if items is not None and message not in items:
+        items.append(message)
 
 
 class Host:
@@ -36,8 +43,14 @@ class Host:
         merged.update(target.params)
         progress = ctx.report_progress if ctx is not None else None
         cancelled = ctx.cancelled if ctx is not None else None
-        return self.bridge.call(target.inst, action, merged, kind=kind, idempotency_key=idempotency_key,
-                                budget_s=budget_s, progress=progress, cancelled=cancelled)
+        result = self.bridge.call(target.inst, action, merged, kind=kind, idempotency_key=idempotency_key,
+                                  budget_s=budget_s, progress=progress, cancelled=cancelled)
+        if isinstance(result, dict) and (result.get("home_dismissed") or result.get("dismissed_dialogs")):
+            dialogs = result.get("dismissed_dialogs") if isinstance(result.get("dismissed_dialogs"), list) else []
+            titles = ", ".join(f"'{d.get('title')}'" for d in dialogs if isinstance(d, dict) and d.get("title"))
+            notice(f"The bridge closed the Vectorworks Home screen{' (' + titles + ')' if titles else ''} before "
+                   f"{action}; nothing else was affected.")
+        return result
 
     def can_script(self, inst: Instance) -> bool:
         return inst.supports("run_script")
@@ -105,6 +118,7 @@ def tool_entry(fn: Callable[[dict, CallContext, list], Any]) -> Callable[[dict, 
     def run(args: dict, ctx: CallContext) -> ToolOutput:
         warnings: list[str] = []
         started = time.perf_counter()
+        _notices.items = []
         try:
             result = fn(args, ctx, warnings)
         except VWError as exc:
@@ -112,6 +126,9 @@ def tool_entry(fn: Callable[[dict, CallContext, list], Any]) -> Callable[[dict, 
         except Exception as exc:  # noqa: BLE001
             log.error("tool failure: %s", traceback.format_exc())
             result = error_envelope("internal_error", f"{type(exc).__name__}: {exc}")
+        finally:
+            warnings.extend(_notices.items)
+            _notices.items = None
         output = result if isinstance(result, ToolOutput) else ToolOutput(result)
         structured = output.structured
         if warnings:

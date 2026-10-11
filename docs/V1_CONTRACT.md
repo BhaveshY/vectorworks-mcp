@@ -115,8 +115,9 @@ capture so computer-use is never needed; current MCP spec (2026-07-28, dual-era 
   refs map through a table `{handle_id → uuid, document_fingerprint}`, re-resolve by
   UUID, and fail `stale_reference` on mismatch. Table cleared per document close.
 - Every object record and every create/duplicate receipt includes `uuid`.
-- Deletes: verify no double undo registration (`AddBeforeSwapObject` + `DeleteObject`
-  with undo=false); live-verify undo/redo restores exactly once.
+- Deletes: exactly one undo registration — `DeleteObject(h, true)` only (1.0 live
+  acceptance showed `AddBeforeSwapObject` + `DeleteObject(h, false)` does not
+  restore on Undo); live-verify undo/redo restores exactly once.
 
 ### 1.8 View and capture
 - `get_view` → `{standard_view, projection, render_mode, zoom, center:[x,y],

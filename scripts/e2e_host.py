@@ -576,6 +576,107 @@ def phase_edge(python: str, state_dir: Path) -> None:
         shutil.rmtree(out_dir, ignore_errors=True)
 
 
+def phase_weak_model(python: str, state_dir: Path) -> None:
+    """Regressions from a real weak-model Codex run (test-artifacts/codex-e2e/luna_room.jsonl)."""
+    print("\n== 3c. weak-model room recipe: one-call room, door queries, forgiving vw_apply, Home screen ==")
+    weak_dir = state_dir / "weak"
+    weak_dir.mkdir(exist_ok=True)
+    (weak_dir / "auth-token").write_text(MOCK_TOKEN, encoding="utf-8")
+    mock, port = start_mock(python, weak_dir)
+    try:
+        c = Client(python, base_env(weak_dir), "weak")
+        c.initialize()
+        # Home screen in front, auto-dismiss off -> vw_status explains; dismiss_home closes it
+        mock_ctl(port, auto_dismiss=False, modal_dialog={"title": "Vectorworks Home", "class": "Chrome_WidgetWin_1",
+                                                         "kind": "home"})
+        st, _ = c.call("vw_status")
+        probs = [p for p in st.get("problems", []) if p.get("code") == "modal_dialog"]
+        check("vw_status: Home screen -> modal_dialog problem pointing to dismiss_home",
+              st.get("ready") is False and bool(probs) and "dismiss_home" in probs[0].get("next_step", ""),
+              json.dumps(st)[:400])
+        sc, _ = c.call("vw_read", {"what": "layers"})
+        check("busy with Home screen -> next_step names dismiss_home", err_code(sc) == "vectorworks_busy"
+              and "dismiss_home" in (sc.get("error") or {}).get("next_step", ""), json.dumps(sc)[:300])
+        sc, _ = c.call("vw_document", {"action": "dismiss_home"})
+        check("vw_document(action='dismiss_home') closes it",
+              sc.get("ok") and (sc.get("result") or {}).get("dismissed") is True, json.dumps(sc)[:300])
+        st, _ = c.call("vw_status")
+        check("vw_status ready after dismiss_home", st.get("ready") is True, json.dumps(st)[:300])
+        mock_ctl(port, auto_dismiss=True, modal_dialog={"title": "Vectorworks 2026 is available", "kind": "update_available"})
+        sc, _ = c.call("vw_read", {"what": "layers"})
+        check("auto-dismissed update dialog -> call succeeds with a warning", sc.get("ok") and
+              any("Home screen" in w for w in sc.get("warnings", [])), json.dumps(sc)[:300])
+        mock_ctl(port, modal_dialog={"title": "Save changes?", "kind": "other"})
+        sc, _ = c.call("vw_read", {"what": "layers"})
+        check("other dialog -> busy, next_step asks the user to close it by title", err_code(sc) == "vectorworks_busy"
+              and "Save changes?" in (sc.get("error") or {}).get("next_step", ""), json.dumps(sc)[:300])
+        mock_ctl(port, modal_dialog=None)
+        # canonical one-call room: walls + door/window into "$id" walls + space
+        sc, _ = c.call("vw_create", {"units": "mm", "objects": [
+            {"type": "door", "id": "d1", "wall": "south", "at": [3000, 0], "width": "900mm"},
+            {"type": "wall", "id": "south", "start": [0, 0], "end": [6000, 0], "thickness": "200mm", "height": "2700mm"},
+            {"type": "wall", "id": "east", "start": [6000, 0], "end": [6000, 4000]},
+            {"type": "wall", "id": "north", "start": [6000, 4000], "end": [0, 4000]},
+            {"type": "wall", "id": "west", "start": [0, 4000], "end": [0, 0]},
+            {"type": "window", "id": "win1", "wall": "$north", "offset": "2400mm", "width": "1200mm"},
+            {"type": "space", "id": "office", "name": "Office", "points": [[0, 0], [6000, 0], [6000, 4000], [0, 4000]]}]})
+        ids = sc.get("ids") or {}
+        joins = sc.get("wall_joins") or []
+        check("one-call room (door listed before its wall, bare wall id) -> 7 objects, 4 L joins",
+              sc.get("ok") and len(ids) == 7 and sum(1 for j in joins if j.get("kind") == "L") == 4, json.dumps(sc)[:500])
+        door_row = next((r for r in sc.get("created", []) if r.get("id") == "d1"), {})
+        check("receipt names the host wall of the door", door_row.get("wall") == ids.get("south"), json.dumps(door_row))
+        sc, _ = c.call("vw_read", {"what": "query", "type": "door"})
+        rows = sc.get("data") or []
+        check("vw_read(query, type=door) lists doors in walls with wall + width",
+              len(rows) == 1 and rows[0].get("wall") == ids.get("south") and rows[0].get("width") == 900.0,
+              json.dumps(sc)[:400])
+        sc, _ = c.call("vw_read", {"what": "query", "query": "Window"})
+        check("query='Window' (weak model) treated as type", len(sc.get("data") or []) == 1, json.dumps(sc)[:300])
+        sc, _ = c.call("vw_read", {"what": "query", "type": "rooms"})
+        check("type='rooms' -> spaces", len(sc.get("data") or []) == 1 and sc["data"][0].get("type") == "space",
+              json.dumps(sc)[:300])
+        sc, _ = c.call("vw_read", {"what": "object", "target": ids.get("d1")})
+        check("vw_read(object) finds a door inside a wall (exact uuid lookup)", sc.get("ok") and
+              (sc.get("data") or {}).get("uuid") == ids.get("d1"), json.dumps(sc)[:300])
+        # parametric Door with DoorWidth (read-only leaf width) as a numeric string
+        sc, _ = c.call("vw_create", {"units": "mm", "objects": [
+            {"type": "parametric", "plugin": "Door", "wall": ids.get("east"), "at": [6000, 2000],
+             "parameters": {"DoorWidth": "900", "doorheight": "2100", "open angle": "45"}}]})
+        check("parametric Door {DoorWidth:'900'} -> door width field, coerced params", sc.get("ok") and
+              any("DoorWidth" in w for w in sc.get("warnings", [])), json.dumps(sc)[:400])
+        sc, _ = c.call("vw_create", {"objects": [{"type": "parametric", "plugin": "Stair", "at": [1000, 1000],
+                                                 "parameters": {"TotalRise": "2.7m", "NumRisers": "15", "StairType": 1}}]})
+        check("parametric Stair: '2.7m' -> 2700, '15' -> int, popup -> text", sc.get("ok"), json.dumps(sc)[:300])
+        sc, _ = c.call("vw_read", {"what": "query", "type": "stair"})
+        check("vw_read(query, type=stair) -> plug-in object", len(sc.get("data") or []) == 1, json.dumps(sc)[:300])
+        # vw_apply: every problem in one error, then the weak model's natural door/window shape works
+        sc, _ = c.call("vw_apply", {"coordinate_units": "mm", "operations": [
+            {"type": "create", "operation_id": "a1", "params": {"object_type": "door", "width": 900}},
+            {"type": "create", "operation_id": "a2", "params": {"object_type": "window", "at": [3000, 4000]}},
+            {"type": "create", "operation_id": "a3", "params": {"object_type": "rect", "x1": 0}}]})
+        issues = ((sc.get("error") or {}).get("details") or {}).get("issues") or []
+        check("vw_apply reports ALL issues at once (+ vw_create hint)", err_code(sc) == "validation_error"
+              and len(issues) >= 4 and "vw_create" in sc["error"].get("next_step", ""), json.dumps(sc)[:600])
+        sc, _ = c.call("vw_apply", {"coordinate_units": "mm", "operations": [
+            {"type": "create", "operation_id": "door_apply", "params": {"object_type": "door", "wall": ids.get("south"),
+                                                                        "at": [1500, 0], "width": 900}},
+            {"type": "create", "operation_id": "window_apply", "params": {"object_type": "window", "wall": ids.get("west"),
+                                                                          "x1": 0, "y1": 1400, "x2": 0, "y2": 2600}}]})
+        check("vw_apply door/window with vw_create aliases + defaults", sc.get("ok") and sc.get("committed"),
+              json.dumps(sc)[:400])
+        sc, _ = c.call("vw_apply", {"coordinate_units": "mm", "join_walls": False, "operations": [
+            {"type": "create", "operation_id": "x1", "params": {"object_type": "wall", "x1": 6000, "y1": 4000,
+                                                                "x2": 9000, "y2": 4000}}]})
+        check("vw_apply join_walls=false -> no joins", sc.get("ok") and not sc.get("wall_joins"), json.dumps(sc)[:300])
+        sc, _ = c.call("vw_edit", {"changes": [{"op": "delete", "target": ids.get("south")}]})
+        check("deleting a wall reports cascaded_inserts (its doors)", sc.get("ok")
+              and len(sc.get("cascaded_inserts") or []) == 2, json.dumps(sc)[:400])
+        c.close()
+    finally:
+        mock.kill()
+
+
 def _first_uuid(c: "Client") -> str:
     sc, _ = c.call("vw_read", {"what": "query", "limit": 1, "fields": ["uuid"]})
     return sc["data"][0]["uuid"]
@@ -612,7 +713,7 @@ def main() -> int:
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--real", action="store_true", help="also run READ-ONLY checks against Vectorworks on 9877")
     parser.add_argument("--keep", action="store_true")
-    parser.add_argument("--only", default="", help="comma list: startup,absent,mock,legacy,real")
+    parser.add_argument("--only", default="", help="comma list: startup,absent,mock,edge,weak,legacy,real")
     args = parser.parse_args()
     only = set(filter(None, args.only.split(",")))
     state_dir = Path(tempfile.mkdtemp(prefix="vwmcp-state-"))
@@ -625,6 +726,8 @@ def main() -> int:
             phase_mock(args.python, state_dir)
         if not only or "edge" in only:
             phase_edge(args.python, state_dir)
+        if not only or "edge" in only or "weak" in only:
+            phase_weak_model(args.python, state_dir)
         if not only or "legacy" in only:
             phase_legacy_mock(args.python, state_dir)
         if args.real or "real" in only:

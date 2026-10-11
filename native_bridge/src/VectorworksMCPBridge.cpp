@@ -21,6 +21,7 @@
 #include "ParametricObjectAdapter.hpp"
 #include "ResourceWorksheetHandlers.hpp"
 #include "SpaceObjectHandlers.hpp"
+#include "WallInserts.hpp"
 #endif
 
 #include <algorithm>
@@ -192,7 +193,24 @@ bool MatchesObjectType(MCObjectHandle object, std::string requestedType) {
     if (requestedType == "space" || requestedType == "door" || requestedType == "window") {
         return ToLower(ParametricPluginName(object)) == requestedType;
     }
-    return ObjectTypeName(gSDK->GetObjectTypeN(object)) == requestedType;
+    if (ObjectTypeName(gSDK->GetObjectTypeN(object)) == requestedType) {
+        return true;
+    }
+    // Any parametric plug-in name ("Stair", "custom stair", "Custom_Stair"),
+    // compared case-insensitively ignoring spaces, '_' and '-'.
+    if (gSDK->GetObjectTypeN(object) != kParametricNode) {
+        return false;
+    }
+    const auto squash = [](const std::string& text) {
+        std::string out;
+        for (char c : text) {
+            if (c == ' ' || c == '_' || c == '-') continue;
+            out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        }
+        return out;
+    };
+    const std::string wanted = squash(requestedType);
+    return !wanted.empty() && squash(ParametricPluginName(object)) == wanted;
 }
 
 bool IsUserVisibleObjectType(short type) {
@@ -267,6 +285,35 @@ std::string ObjectJson(MCObjectHandle object, const std::set<std::string>* field
     if (wants("name")) {
         json += ",\"name\":";
         json += JsonString(TxToUtf8(name));
+    }
+
+    if (wants("parent_uuid") || wants("host")) {
+        if (MCObjectHandle hostWall = WallInserts::HostWall(object)) {
+            const std::string wallUuid = ObjectUuidString(hostWall);
+            if (wants("parent_uuid")) {
+                json += ",\"parent_uuid\":";
+                json += JsonString(wallUuid);
+            }
+            if (wants("host")) {
+                json += ",\"host\":\"wall\"";
+            }
+        }
+    }
+    if ((semanticType == "door" || semanticType == "window") && (wants("width") || wants("height"))) {
+        try {
+            VWFC::VWObjects::VWParametricObj parametric(object);
+            const double width = parametric.GetParamReal(TXString("Width"));
+            const double height = parametric.GetParamReal(TXString("Height"));
+            if (wants("width") && std::isfinite(width) && width > 0.0) {
+                json += ",\"width\":";
+                json += JsonNumber(width);
+            }
+            if (wants("height") && std::isfinite(height) && height > 0.0) {
+                json += ",\"height\":";
+                json += JsonNumber(height);
+            }
+        } catch (...) {
+        }
     }
 
     if (type == kTextNode && wants("text")) {
@@ -446,13 +493,12 @@ std::string HandleGetDocumentInfo() {
     const auto layerNames = CollectLayerNames();
     int totalObjects = 0;
     for (MCObjectHandle layer : CollectLayerHandles()) {
-        for (MCObjectHandle object = gSDK->FirstMemberObj(layer);
-             object && gSDK->GetObjectTypeN(object) != kTermNode;
-             object = gSDK->NextObject(object)) {
+        // Includes doors/windows/symbols inserted in walls.
+        WallInserts::ForEachLayerObject(layer, [&](MCObjectHandle object) {
             if (IsUserVisibleObjectType(gSDK->GetObjectTypeN(object))) {
                 ++totalObjects;
             }
-        }
+        });
     }
 
     const Documentation::DocumentBinding binding = Documentation::ReadDocumentBinding(*gSDK);
@@ -581,17 +627,16 @@ void CollectObjectsInLayer(
     const std::string& objectType,
     int limit,
     std::vector<MCObjectHandle>& outObjects) {
-    for (MCObjectHandle object = gSDK->FirstMemberObj(layer);
-         object && gSDK->GetObjectTypeN(object) != kTermNode && static_cast<int>(outObjects.size()) < limit;
-         object = gSDK->NextObject(object)) {
-        const short type = gSDK->GetObjectTypeN(object);
-        if (!IsUserVisibleObjectType(type)) {
-            continue;
+    WallInserts::ForEachLayerObject(layer, [&](MCObjectHandle object) -> bool {
+        if (static_cast<int>(outObjects.size()) >= limit) {
+            return false;
         }
-        if (MatchesObjectType(object, objectType)) {
+        const short type = gSDK->GetObjectTypeN(object);
+        if (IsUserVisibleObjectType(type) && MatchesObjectType(object, objectType)) {
             outObjects.push_back(object);
         }
-    }
+        return true;
+    });
 }
 
 std::string HandleGetObjects(const Params& params) {
@@ -647,9 +692,9 @@ std::string HandleDrawingSummary(const Params& params) {
         if (!layerFilter.empty() && layerName != layerFilter) {
             continue;
         }
-        for (MCObjectHandle object = gSDK->FirstMemberObj(layer);
-             object && gSDK->GetObjectTypeN(object) != kTermNode;
-             object = gSDK->NextObject(object)) {
+        std::vector<MCObjectHandle> layerObjects;
+        WallInserts::ForEachLayerObject(layer, [&](MCObjectHandle object) { layerObjects.push_back(object); });
+        for (MCObjectHandle object : layerObjects) {
             const short type = gSDK->GetObjectTypeN(object);
             if (!IsUserVisibleObjectType(type) || !MatchesObjectType(object, objectTypeFilter)) {
                 continue;
@@ -759,10 +804,16 @@ std::string HandleDrawingSummary(const Params& params) {
 
 std::vector<MCObjectHandle> CollectSelectedObjects() {
     std::vector<MCObjectHandle> selected;
-    gSDK->ForEachObjectN(allObjects + descendIntoAll + descendIntoViewports + descendIntoAuxLists, [&](MCObjectHandle object) {
-        if (object && IsUserVisibleObjectType(gSDK->GetObjectTypeN(object)) && gSDK->IsSelected(object)) {
+    std::unordered_set<MCObjectHandle> seen;
+    const auto visit = [&](MCObjectHandle object) {
+        if (object && IsUserVisibleObjectType(gSDK->GetObjectTypeN(object)) && gSDK->IsSelected(object) &&
+            seen.insert(object).second) {
             selected.push_back(object);
         }
+    };
+    gSDK->ForEachObjectN(allObjects + descendIntoAll + descendIntoViewports + descendIntoAuxLists, [&](MCObjectHandle object) {
+        visit(object);
+        WallInserts::ForEachInsert(object, visit);
     });
     return selected;
 }
@@ -784,6 +835,15 @@ std::vector<MCObjectHandle> CollectObjectsByCriteria(const std::string& criteria
 }
 
 std::optional<std::string> ExactNameFromCriteria(const std::string& criteria);
+
+bool IsAllCriteria(const std::string& criteria) {
+    std::string squashed;
+    for (char c : criteria) {
+        if (c == ' ' || c == '(' || c == ')') continue;
+        squashed.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+    }
+    return squashed == "ALL";
+}
 
 std::string HandleFindObjects(const Params& params) {
     const std::string criteria = TrimCopy(GetStringParam(params, "criteria", "ALL"));
@@ -825,6 +885,11 @@ std::string HandleFindObjects(const Params& params) {
     const auto exactName = ExactNameFromCriteria(criteria);
     if (exactName) {
         collect(gSDK->GetNamedObject(TXString(exactName->c_str())));
+    } else if (IsAllCriteria(criteria)) {
+        // "ALL" through the layer walk so wall inserts are included.
+        for (MCObjectHandle layerHandle : CollectLayerHandles()) {
+            WallInserts::ForEachLayerObject(layerHandle, collect);
+        }
     } else {
         gSDK->ForEachObjectInCriteria(TXString(criteria.c_str()), collect);
     }
@@ -916,16 +981,32 @@ std::string HandleQueryObjects(const Params& params) {
         const auto criteria = GetStringParam(params, "criteria", "ALL");
         const auto name = ExactNameFromCriteria(criteria);
         if (name) collect(gSDK->GetNamedObject(TXString(name->c_str())));
-        else gSDK->ForEachObjectInCriteria(TXString(criteria.c_str()), collect);
+        else if (IsAllCriteria(criteria)) {
+            const auto layers = layer ? std::vector<MCObjectHandle>{layer} : CollectLayerHandles();
+            for (MCObjectHandle currentLayer : layers) {
+                WallInserts::ForEachLayerObject(currentLayer, [&](MCObjectHandle object) -> bool {
+                    collect(object);
+                    return !hasMore;
+                });
+                if (hasMore) break;
+            }
+        } else gSDK->ForEachObjectInCriteria(TXString(criteria.c_str()), collect);
     } else if (mode == "selection") {
+        const auto selected = [&](MCObjectHandle object) { if (object && gSDK->IsSelected(object)) collect(object); };
         gSDK->ForEachObjectN(allObjects + descendIntoAll + descendIntoViewports + descendIntoAuxLists,
-            [&](MCObjectHandle object) { if (object && gSDK->IsSelected(object)) collect(object); });
+            [&](MCObjectHandle object) {
+                selected(object);
+                WallInserts::ForEachInsert(object, selected);
+            });
     } else {
+        // Layer walk including objects inserted in walls (doors, windows,
+        // symbols), each reported with parent_uuid / host:"wall".
         const auto layers = layer ? std::vector<MCObjectHandle>{layer} : CollectLayerHandles();
         for (MCObjectHandle currentLayer : layers) {
-            for (MCObjectHandle object = gSDK->FirstMemberObj(currentLayer);
-                 object && !hasMore && gSDK->GetObjectTypeN(object) != kTermNode;
-                 object = gSDK->NextObject(object)) collect(object);
+            WallInserts::ForEachLayerObject(currentLayer, [&](MCObjectHandle object) -> bool {
+                collect(object);
+                return !hasMore;
+            });
             if (hasMore) break;
         }
     }
@@ -1029,11 +1110,10 @@ std::string HandleSelection(const Params& params) {
         int deleted = 0;
         try {
             for (MCObjectHandle object : targets) {
-                if (!gSDK->AddBeforeSwapObject(object)) {
-                    throw std::runtime_error("Vectorworks failed to register an object before selection deletion");
-                }
-                // AddBeforeSwapObject already registered the undo state (M2).
-                gSDK->DeleteObject(object, false);
+                // Exactly one undo registration: DeleteObject(h, true) moves the
+                // object into the open undo event. (AddBeforeSwapObject +
+                // DeleteObject(h, false) did not restore it on Undo.)
+                gSDK->DeleteObject(object, true);
                 ++deleted;
             }
             EndUndoEventOrThrow("selection deletion");
@@ -2736,7 +2816,134 @@ struct ApplyOperation {
     double endX = 0.0;
     double endY = 0.0;
     std::string confirmation;
+    // Create ops only: false excludes this wall from automatic joining.
+    bool joinWalls = true;
 };
+
+// ---- automatic wall joins (apply_operations) ------------------------------
+// Walls created in one apply_operations call are joined inside the same undo
+// event, before any door/window/plug-in insertion that follows them:
+//   * L join where two wall endpoints coincide (within kWallJoinTolerance),
+//   * T join where an endpoint lies on another wall's centreline.
+// ISDK JoinWalls(first, second, firstPt, secondPt, JoinModifierType, capped,
+// showAlerts) is identical in SDK 2024 and 2025; the points pick the wall
+// portion to keep, so each wall's midpoint is passed.
+
+constexpr double kWallJoinTolerance = 1.0;  // internal units (mm)
+
+struct WallJoinRecord {
+    std::string firstUuid;
+    std::string secondUuid;
+    std::string kind;
+    double x = 0.0;
+    double y = 0.0;
+    bool joined = false;
+};
+
+double PointDistance(const WorldPt& a, const WorldPt& b) {
+    return std::hypot(a.x - b.x, a.y - b.y);
+}
+
+// Distance from p to segment ab and the parameter t of the projection.
+double SegmentDistance(const WorldPt& p, const WorldPt& a, const WorldPt& b, double& t) {
+    const double dx = b.x - a.x;
+    const double dy = b.y - a.y;
+    const double lengthSquared = dx * dx + dy * dy;
+    if (lengthSquared <= 0.0) {
+        t = 0.0;
+        return PointDistance(p, a);
+    }
+    t = std::clamp(((p.x - a.x) * dx + (p.y - a.y) * dy) / lengthSquared, 0.0, 1.0);
+    const WorldPt projection(a.x + t * dx, a.y + t * dy);
+    return PointDistance(p, projection);
+}
+
+bool NearlyParallel(const WorldPt& as, const WorldPt& ae, const WorldPt& bs, const WorldPt& be) {
+    const double ax = ae.x - as.x, ay = ae.y - as.y, bx = be.x - bs.x, by = be.y - bs.y;
+    const double la = std::hypot(ax, ay), lb = std::hypot(bx, by);
+    if (la <= 0.0 || lb <= 0.0) return true;
+    return std::abs(ax * by - ay * bx) / (la * lb) < 1e-3;  // ~0.06 degrees
+}
+
+std::vector<WallJoinRecord> JoinCreatedWalls(
+    const std::vector<MCObjectHandle>& walls,
+    std::set<std::pair<MCObjectHandle, MCObjectHandle>>& done) {
+    std::vector<WallJoinRecord> records;
+    for (std::size_t i = 0; i < walls.size(); ++i) {
+        for (std::size_t j = i + 1; j < walls.size(); ++j) {
+            MCObjectHandle a = walls[i];
+            MCObjectHandle b = walls[j];
+            if (!a || !b || done.count({a, b}) != 0u) continue;
+            if (gSDK->GetObjectTypeN(a) != kWallNode || gSDK->GetObjectTypeN(b) != kWallNode) continue;
+            WorldPt as, ae, bs, be;
+            gSDK->GetEndPoints(a, as, ae);
+            gSDK->GetEndPoints(b, bs, be);
+            const WorldPt midA((as.x + ae.x) / 2.0, (as.y + ae.y) / 2.0);
+            const WorldPt midB((bs.x + be.x) / 2.0, (bs.y + be.y) / 2.0);
+            const bool parallel = NearlyParallel(as, ae, bs, be);
+            WallJoinRecord record;
+            MCObjectHandle first = nullptr;
+            MCObjectHandle second = nullptr;
+            WorldPt firstPt, secondPt, at;
+            JoinModifierType modifier = kLWallJoin;
+            // L: shared endpoint (collinear continuations are left alone).
+            const WorldPt endsA[2] = {as, ae};
+            const WorldPt endsB[2] = {bs, be};
+            for (const WorldPt& pa : endsA) {
+                for (const WorldPt& pb : endsB) {
+                    if (!first && !parallel && PointDistance(pa, pb) <= kWallJoinTolerance) {
+                        first = a; second = b; firstPt = midA; secondPt = midB; at = pa;
+                        modifier = kLWallJoin; record.kind = "L";
+                    }
+                }
+            }
+            // T: an endpoint on the other wall's centreline, away from its ends.
+            if (!first && !parallel) {
+                const auto onInterior = [&](const WorldPt& p, const WorldPt& s0, const WorldPt& s1) {
+                    double t = 0.0;
+                    return SegmentDistance(p, s0, s1, t) <= kWallJoinTolerance &&
+                        PointDistance(p, s0) > kWallJoinTolerance && PointDistance(p, s1) > kWallJoinTolerance;
+                };
+                for (const WorldPt& pa : endsA) {
+                    if (!first && onInterior(pa, bs, be)) {
+                        first = a; second = b; firstPt = midA; secondPt = midB; at = pa;
+                    }
+                }
+                for (const WorldPt& pb : endsB) {
+                    if (!first && onInterior(pb, as, ae)) {
+                        first = b; second = a; firstPt = midB; secondPt = midA; at = pb;
+                    }
+                }
+                if (first) {
+                    modifier = kTWallJoin;
+                    record.kind = "T";
+                }
+            }
+            if (!first) continue;
+            done.insert({a, b});
+            record.firstUuid = ObjectUuidString(first);
+            record.secondUuid = ObjectUuidString(second);
+            record.x = at.x;
+            record.y = at.y;
+            record.joined = gSDK->JoinWalls(first, second, firstPt, secondPt, modifier, false, false) != 0;
+            records.push_back(std::move(record));
+        }
+    }
+    return records;
+}
+
+std::string WallJoinsJson(const std::vector<WallJoinRecord>& records) {
+    std::string json = "[";
+    for (std::size_t index = 0; index < records.size(); ++index) {
+        if (index) json += ",";
+        json += "{\"first_uuid\":" + JsonString(records[index].firstUuid) +
+            ",\"second_uuid\":" + JsonString(records[index].secondUuid) +
+            ",\"kind\":" + JsonString(records[index].kind) +
+            ",\"point\":[" + JsonNumber(records[index].x) + "," + JsonNumber(records[index].y) + "]" +
+            ",\"joined\":" + (records[index].joined ? "true" : "false") + "}";
+    }
+    return json + "]";
+}
 
 struct ApplyOperationsCacheEntry {
     std::string idempotencyKey;
@@ -2877,6 +3084,29 @@ std::string WrapApplyOperationsResult(
     }
     json += ",\"transaction\":";
     json += transactionJson;
+    // Convenience copy of transaction.wall_joins at the top level.
+    const std::string key = "\"wall_joins\":[";
+    const auto start = transactionJson.rfind(key);
+    if (start != std::string::npos) {
+        // Copy the array text verbatim (bracket matching outside strings).
+        const std::size_t open = start + key.size() - 1u;
+        int depth = 0;
+        bool inString = false;
+        for (std::size_t index = open; index < transactionJson.size(); ++index) {
+            const char c = transactionJson[index];
+            if (inString) {
+                if (c == '\\') ++index;
+                else if (c == '"') inString = false;
+                continue;
+            }
+            if (c == '"') inString = true;
+            else if (c == '[') ++depth;
+            else if (c == ']' && --depth == 0) {
+                json += ",\"wall_joins\":" + transactionJson.substr(open, index - open + 1u);
+                break;
+            }
+        }
+    }
     json += "}";
     return json;
 }
@@ -2904,6 +3134,7 @@ std::vector<ApplyOperation> ParseApplyOperations(const Params& params) {
             ApplyOperation operation;
             operation.kind = ApplyOperationKind::Create;
             operation.primitive = ParsePrimitiveSpec(operationParams, label);
+            operation.joinWalls = GetLenientBoolParam(operationParams, "join_walls", true);
             if (!operation.primitive.wallUuid.empty() && operation.primitive.wallUuid.front() == '$' &&
                 declaredLocalRefs.find(operation.primitive.wallUuid.substr(1)) == declaredLocalRefs.end()) {
                 throw std::invalid_argument(
@@ -3423,14 +3654,21 @@ NameIndex BuildNameIndex() {
     gSDK->ForEachObjectN(
         allObjects + descendIntoAll + descendIntoViewports + descendIntoAuxLists,
         [&](MCObjectHandle object) {
-            if (!object || !IsUserVisibleObjectType(gSDK->GetObjectTypeN(object))) {
-                return;
-            }
-            TXString objectName;
-            gSDK->GetObjectName(object, objectName);
-            if (!objectName.IsEmpty()) {
-                index[TxToUtf8(objectName)].push_back(object);
-            }
+            const auto add = [&](MCObjectHandle candidate) {
+                if (!candidate || !IsUserVisibleObjectType(gSDK->GetObjectTypeN(candidate))) {
+                    return;
+                }
+                TXString objectName;
+                gSDK->GetObjectName(candidate, objectName);
+                if (!objectName.IsEmpty()) {
+                    auto& bucket = index[TxToUtf8(objectName)];
+                    if (std::find(bucket.begin(), bucket.end(), candidate) == bucket.end()) {
+                        bucket.push_back(candidate);
+                    }
+                }
+            };
+            add(object);
+            WallInserts::ForEachInsert(object, add);
         });
     return index;
 }
@@ -3584,6 +3822,11 @@ std::string HandleApplyOperations(const Params& params) {
     created.reserve(operations.size());
     operationResults.reserve(operations.size());
 
+    const bool joinWallsEnabled = GetLenientBoolParam(params, "join_walls", true);
+    std::vector<MCObjectHandle> joinableWalls;
+    std::size_t joinedWallCount = 0;
+    std::set<std::pair<MCObjectHandle, MCObjectHandle>> joinedPairs;
+    std::vector<WallJoinRecord> wallJoins;
     auto transactionOptions = MakeSdkManagedObjectTransactionOptions(operations.size() * 2u);
     Transactions::NativeTransaction transaction(
         *gSDK,
@@ -3608,14 +3851,30 @@ std::string HandleApplyOperations(const Params& params) {
             return uuid;
         };
 
+        const auto runPendingWallJoins = [&]() {
+            if (!joinWallsEnabled || joinableWalls.size() < 2u || joinableWalls.size() == joinedWallCount) return;
+            auto records = JoinCreatedWalls(joinableWalls, joinedPairs);
+            joinedWallCount = joinableWalls.size();
+            for (auto& record : records) wallJoins.push_back(std::move(record));
+        };
         for (std::size_t index = 0; index < operations.size(); ++index) {
             const auto& operation = operations[index];
+            const bool isWallCreate = operation.kind == ApplyOperationKind::Create &&
+                ToLower(operation.primitive.objectType) == "wall";
+            if (!isWallCreate) {
+                // Join the walls created so far before anything is inserted
+                // into them (doors/windows) or they are edited.
+                runPendingWallJoins();
+            }
             if (operation.kind == ApplyOperationKind::Create) {
                 std::vector<std::string> warnings;
                 Transactions::ArtifactId artifact = 0;
                 MCObjectHandle object = CreatePrimitiveFromSpec(
                     operation.primitive, transaction, &artifact, &warnings, &localObjects);
                 createdHandles.insert(object);
+                if (isWallCreate && operation.joinWalls && gSDK->GetObjectTypeN(object) == kWallNode) {
+                    joinableWalls.push_back(object);
+                }
                 if (!operation.localRef.empty()) {
                     localObjects.emplace(operation.localRef, object);
                     localArtifacts.emplace(operation.localRef, artifact);
@@ -3633,6 +3892,9 @@ std::string HandleApplyOperations(const Params& params) {
                 std::string result = "{\"index\":" + std::to_string(index + 1u) +
                     ",\"op\":\"create\",\"handle\":" + JsonString(HandleId(object)) +
                     ",\"uuid\":" + JsonString(transaction.Uuid(artifact));
+                if (MCObjectHandle hostWall = WallInserts::HostWall(object)) {
+                    result += ",\"parent_uuid\":" + JsonString(ObjectUuidString(hostWall)) + ",\"host\":\"wall\"";
+                }
                 if (!operation.localRef.empty()) {
                     result += ",\"local_ref\":";
                     result += JsonString(operation.localRef);
@@ -3647,7 +3909,26 @@ std::string HandleApplyOperations(const Params& params) {
                 object = ResolveApplyOperationTarget(operation.target, localObjects);
             }
             std::string externalUuid;
-            if (operation.kind != ApplyOperationKind::Duplicate &&
+            if (operation.kind == ApplyOperationKind::Delete &&
+                createdHandles.find(object) == createdHandles.end()) {
+                // Deletion of an existing object: identity only; the SDK
+                // registers the removal itself (DeleteObject(h, true)).
+                externalUuid = ObjectUuidString(object);
+                if (externalUuid.empty()) {
+                    throw std::runtime_error(
+                        "external deletion target does not expose a stable Vectorworks UUID");
+                }
+                if (externalMutationIds.find(externalUuid) != externalMutationIds.end()) {
+                    throw std::invalid_argument(
+                        "operation_" + std::to_string(index + 1u) +
+                        " deletes an object that an earlier operation in the same transaction changed "
+                        "(or hosts an insert created in it); delete it in a separate apply_operations call");
+                }
+                externalBefore.emplace(externalUuid, ObjectJson(object));
+                externalMutationIds.emplace(
+                    externalUuid,
+                    transaction.TrackExternalDeleteTarget(object, ExternalMutationFamily(object)));
+            } else if (operation.kind != ApplyOperationKind::Duplicate &&
                 createdHandles.find(object) == createdHandles.end()) {
                 externalUuid = trackExternalBefore(object);
             }
@@ -3837,6 +4118,7 @@ std::string HandleApplyOperations(const Params& params) {
             if (operation.kind == ApplyOperationKind::Delete) {
                 const std::string before = ObjectJson(object);
                 std::string uuid;
+                std::vector<std::string> cascaded;
                 if (!operation.target.empty() && operation.target.front() == '$') {
                     const std::string localRef = operation.target.substr(1);
                     const auto artifactEntry = localArtifacts.find(localRef);
@@ -3852,8 +4134,11 @@ std::string HandleApplyOperations(const Params& params) {
                     localArtifacts.erase(artifactEntry);
                 } else {
                     uuid = preparedTargets.deleteUuids[index];
-                    // TrackExternalBefore registered AddBeforeSwapObject (M2).
-                    gSDK->DeleteObject(object, false);
+                    cascaded = WallInserts::InsertUuids(object);
+                    // Exactly one undo registration: DeleteObject(h, true) moves
+                    // the object into the open undo event (no AddBefore, see
+                    // NativeTransaction::TrackExternalDeleteTarget).
+                    gSDK->DeleteObject(object, true);
                     if (gSDK->GetObjectByUuid(TXString(uuid.c_str())) != nullptr) {
                         throw std::runtime_error("Vectorworks did not delete the explicit object target");
                     }
@@ -3868,13 +4153,15 @@ std::string HandleApplyOperations(const Params& params) {
                 }
                 std::string result = "{\"index\":" + std::to_string(index + 1u) +
                     ",\"op\":\"object.delete\",\"target\":" + JsonString(operation.target) +
-                    ",\"before\":" + before + ",\"deleted\":true,\"uuid\":" + JsonString(uuid) + "}";
+                    ",\"before\":" + before + ",\"deleted\":true,\"uuid\":" + JsonString(uuid) +
+                    ",\"cascaded_inserts\":" + JsonStringArray(cascaded) + "}";
                 operationResults.push_back(std::move(result));
                 continue;
             }
             throw std::runtime_error("unsupported prepared apply operation kind");
         }
 
+        runPendingWallJoins();
         for (MCObjectHandle object : dirtyHandles) {
             gSDK->ResetObject(object);
         }
@@ -3929,7 +4216,8 @@ std::string HandleApplyOperations(const Params& params) {
             : ObjectJson(finalHandle->second);
         transactionJson += "}";
     }
-    transactionJson += "],\"undo_committed\":";
+    transactionJson += "],\"wall_joins\":" + WallJoinsJson(wallJoins);
+    transactionJson += ",\"undo_committed\":";
     transactionJson += transactionReceipt.endUndoEventSucceeded ? "true" : "false";
     transactionJson += "}";
 

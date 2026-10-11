@@ -19,7 +19,7 @@ bool ScriptingEnabledForRegistry() {
 }
 
 // {action, context, phase, may_write_document, destructive, needs_document, long_running}
-constexpr std::array<ActionSpec, 49> kActionRegistry = {{
+constexpr std::array<ActionSpec, 50> kActionRegistry = {{
     {"query_objects", ExecutionContext::VectorworksMainPluginContext, 4u, false, false, true, false},
     {"transaction_status", ExecutionContext::VectorworksMainPluginContext, 4u, false, false, true, false},
     {"ping", ExecutionContext::TransportThread, 0u, false, false, false, false},
@@ -27,6 +27,7 @@ constexpr std::array<ActionSpec, 49> kActionRegistry = {{
     {"capabilities", ExecutionContext::TransportThread, 0u, false, false, false, false},
     {"job_status", ExecutionContext::TransportThread, 6u, false, false, false, false},
     {"cancel_job", ExecutionContext::TransportThread, 6u, false, false, false, false},
+    {"dismiss_home", ExecutionContext::TransportThread, 6u, false, false, false, false},
     {"describe_parametric_schema", ExecutionContext::VectorworksMainPluginContext, 4u, false, false, true, false},
     {"export_image", ExecutionContext::VectorworksMainPluginContext, 4u, false, false, true, false},
     {"capture_view", ExecutionContext::VectorworksMainPluginContext, 4u, false, false, true, false},
@@ -235,7 +236,7 @@ std::string ObjectKindDescriptorsJson(bool cadHandlersImplemented) {
 }
 
 std::string ObjectReadFeaturesJson(bool cadHandlersImplemented) {
-    return cadHandlersImplemented ? R"(["text_content","paged_object_reads","bound_apply_operations"])" : "[]";
+    return cadHandlersImplemented ? R"(["text_content","paged_object_reads","bound_apply_operations","wall_inserts","object_type_plugin_names","wall_joins"])" : "[]";
 }
 
 std::string CapabilityFingerprint(bool cadHandlersImplemented) {

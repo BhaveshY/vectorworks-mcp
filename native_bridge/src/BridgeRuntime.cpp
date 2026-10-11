@@ -9,6 +9,7 @@
 
 #include "BridgeProtocol.hpp"
 #include "CapabilityRegistry.hpp"
+#include "DialogWatch.hpp"
 #include "Discovery.hpp"
 #include "DocumentRegistry.hpp"
 #include "DocumentationHandlers.hpp"
@@ -426,6 +427,10 @@ std::string PingJson() {
     json += ",\"main_context_pump_ready\":";
     json += ready ? "true" : "false";
     json += R"(,"dispatch_wakeup":"win32_message","pump_watchdog_ms":50,"pump_budget_ms":8)";
+    json += ",\"modal_dialog\":" + DialogWatch::CurrentDialogJson();
+    json += ",\"auto_dismiss_dialogs\":";
+    json += DialogWatch::AutoDismissEnabled() ? "true" : "false";
+    json += ",\"dismissed_dialogs\":" + DialogWatch::RecentDismissedJson();
     json += ",\"script_enabled\":";
     json += Scripting::ScriptingAllowed() ? "true" : "false";
     json += ",\"script_engine\":" + JsonString(Scripting::ScriptEngineState());
@@ -497,6 +502,15 @@ DispatchOutcome DispatchFromSocket(const Protocol::RequestEnvelope& request) {
             outcome.response = Protocol::Ok(request.id, Scheduler().CancelJobJson(GetStringParam(params, "job_id")));
             return outcome;
         }
+        if (request.action == "dismiss_home") {
+            // Socket thread: classification and PostMessage are thread-safe and
+            // never send a message to the (possibly blocked) main thread.
+            std::string json = DialogWatch::HandleDismissHome(GetClampedIntParam(params, "wait_ms", 3000, 0, 15000));
+            json.pop_back();
+            json += ",\"ui_state\":" + JsonString(UiStateText()) + "}";
+            outcome.response = Protocol::Ok(request.id, json);
+            return outcome;
+        }
         if (spec->context != ExecutionContext::VectorworksMainPluginContext) {
             outcome.response = Protocol::Fail(
                 request.id, "unknown_action", "native bridge action has no transport handler: " + request.action);
@@ -521,7 +535,18 @@ DispatchOutcome DispatchFromSocket(const Protocol::RequestEnvelope& request) {
         options.busyWaitMs = GetClampedIntParam(params, "busy_wait_ms", 3000, 0, 600000);
         options.needsDocument = spec->needsDocument;
         options.mutates = spec->mayWriteDocument;
-        outcome.response = Scheduler().SubmitAndWait(request, options, UiStateText);
+        options.dialogSeq = DialogWatch::DismissSequence();
+        // Watchdog on the waiting socket thread: if the request is blocked by,
+        // or its handler opened, the Home screen (or the update notice), close
+        // it (PostMessage only; never any other dialog).
+        const auto watchdog = [] {
+            const UiState published = UiGate::Published();
+            if (published == UiState::Modal || published == UiState::Loading ||
+                !Scheduler().RunningAction().empty()) {
+                DialogWatch::TryDismissKnown("request_watchdog", true);
+            }
+        };
+        outcome.response = Scheduler().SubmitAndWait(request, options, UiStateText, watchdog);
         return outcome;
     } catch (const Protocol::BridgeError& error) {
         outcome.response = Protocol::FromBridgeError(request.id, error);
@@ -632,6 +657,28 @@ void AppendTiming(Protocol::ResponseEnvelope& response, double queueWaitMs, doub
         ",\"total_native_ms\":" + JsonNumber(queueWaitMs + handlerMs) + "}}";
 }
 
+void AppendDismissed(Protocol::ResponseEnvelope& response, std::uint64_t sinceSeq) {
+    if (DialogWatch::DismissSequence() <= sinceSeq) return;
+    const std::string list = DialogWatch::DismissedSinceJson(sinceSeq);
+    const bool home = DialogWatch::HomeDismissedSince(sinceSeq);
+    if (response.success) {
+        if (response.resultJson.size() < 2u || response.resultJson.front() != '{' || response.resultJson.back() != '}') return;
+        response.resultJson.pop_back();
+        if (response.resultJson.size() > 1u) response.resultJson += ",";
+        response.resultJson += "\"dismissed_dialogs\":" + list;
+        if (home) response.resultJson += ",\"home_dismissed\":true";
+        response.resultJson += "}";
+        return;
+    }
+    std::string details = response.detailsJson;
+    if (details.size() < 2u || details.front() != '{' || details.back() != '}') details = "{}";
+    details.pop_back();
+    if (details.size() > 1u) details += ",";
+    details += "\"dismissed_dialogs\":" + list;
+    if (home) details += ",\"home_dismissed\":true";
+    response.detailsJson = details + "}";
+}
+
 class ScopedFlag {
 public:
     explicit ScopedFlag(std::atomic_bool& flag) : flag_(flag) {}
@@ -655,6 +702,10 @@ void OnVectorworksMainPluginEvent() {
             std::string reason;
             const UiState state = UiGate::ComputeWin32State(&reason);
             if (state != UiState::Idle) UiGate::Publish(state, reason);
+            // A handler (close_document of the last document, new/open
+            // document) may have opened the Home screen synchronously; its
+            // nested modal loop dispatches this timer. Close it.
+            DialogWatch::TryDismissKnown("during_handler", true);
             return;
         }
         ScopedFlag reset(gPumpActive);
@@ -675,6 +726,11 @@ void OnVectorworksMainPluginEvent() {
                 }
             }
             UiGate::Publish(state, reason);
+            if ((state == UiState::Modal || state == UiState::Loading) && Scheduler().QueueDepth() > 0u) {
+                // A queued request is blocked: dismiss the Home screen /
+                // update notice if it is the only dialog (DialogWatch rules).
+                DialogWatch::TryDismissKnown("blocked_request", true);
+            }
             if (processed >= kMaxRequestsPerTick || SteadyNowMs() - tickStarted > kTickBudgetMs) break;
             auto entry = Scheduler().TryDequeue(state);
             if (!entry) break;
@@ -689,6 +745,7 @@ void OnVectorworksMainPluginEvent() {
             }
             const double handlerMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - handlerStarted).count();
+            AppendDismissed(response, entry->options.dialogSeq);
             AppendTiming(response, queueWaitMs, handlerMs);
             Scheduler().Complete(entry, std::move(response));
             ++processed;
@@ -716,6 +773,10 @@ void OnPluginLoadStartTransport() {
         Legacy::ResetCaches();
         Scheduler().Reset();
         Scheduler().SetNotifier([] { NotifyPump(); });
+        Scheduler().SetBusyDetailsProvider([] {
+            const std::string dialog = DialogWatch::CurrentDialogJson();
+            return dialog == "null" ? std::string() : ",\"modal_dialog\":" + dialog;
+        });
         gStartedAt = IsoUtcNow();
         if (!StartPump()) {
             Discovery::AppendLog("pump_failed", "the message-only main-thread pump window could not be created");
