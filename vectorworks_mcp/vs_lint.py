@@ -76,6 +76,14 @@ def _is_seq(node: ast.AST) -> bool:
     return isinstance(node, (ast.Tuple, ast.List))
 
 
+
+# Functions models reach for that do not exist in the 2024/2025 stub, with the
+# working replacement (seen in live Codex runs).
+_KNOWN_SUBSTITUTES = {
+    "GetExtrudeValues": "vs.Get3DInfo(h) -> (height, width, depth) or vw_read(what=\"object\", target=...) for extrude heights",
+    "GetExtrudeHeight": "vs.Get3DInfo(h) -> (height, width, depth)",
+}
+
 class _Linter(ast.NodeVisitor):
     def __init__(self) -> None:
         self.table = _load()
@@ -112,7 +120,9 @@ class _Linter(ast.NodeVisitor):
             return True
         hint = ""
         lowered = (_LOWER or {}).get(name.lower())
-        if lowered:
+        if name in _KNOWN_SUBSTITUTES:
+            hint = "; use " + _KNOWN_SUBSTITUTES[name]
+        elif lowered:
             hint = f"; did you mean vs.{lowered}? (names are case-sensitive)"
         else:
             import difflib  # only on the failure path
