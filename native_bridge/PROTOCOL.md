@@ -203,12 +203,14 @@ The bridge classifies the dialog that blocks the main UI thread with Win32
 only (`EnumThreadWindows` on the Vectorworks main thread, class names and
 `InternalGetWindowText`; never a cross-thread `SendMessage`, so it is safe on
 any thread) and reports it as `modal_dialog: {title, class, kind}` with
-`kind` `home` | `update_available` | `other` (`null` when none) in `ping` and
+`kind` `home` | `update_available` | `backup_prompt` | `other` (`null` when none) in `ping` and
 in `vectorworks_busy` / `timeout_not_started` details.
 
 **Automatic dismissal** (env `VW_MCP_AUTO_DISMISS_HOME`, default on; `0`
 disables): only kinds `home` (`PostMessage(WM_CLOSE)`; a retry 1.5 s later
 alternates with `WM_COMMAND IDCANCEL`) and `update_available`
+and `backup_prompt` (the autosave "name and save this untitled document now?" prompt:
+"No" via `WM_COMMAND`, which neither saves nor discards anything)
 ("Not Now" via `PostMessage(WM_COMMAND, BN_CLICKED)` with that button's id —
 `Download…` is never pressed) are ever touched, one dialog per attempt (update
 notice first), at most once per window per 1.5 s, and only if **no other

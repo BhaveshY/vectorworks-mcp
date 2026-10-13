@@ -102,7 +102,7 @@ def handle(args: dict, ctx, warnings: list) -> dict:
                 "Ask the user to save their work and restart Vectorworks. Native (non-script) tools still work; "
                 "do not call vw_script until then."))
         early = chosen.status.get("modal_dialog")
-        if (isinstance(early, dict) and early.get("kind") in {"home", "update_available"}
+        if (isinstance(early, dict) and early.get("kind") in {"home", "update_available", "backup_prompt"}
                 and chosen.status.get("auto_dismiss_dialogs", True) is not False):
             # Harmless startup dialogs: close them now so a status check right
             # after Vectorworks starts already reports ready (live 2026-10-11).
@@ -122,7 +122,8 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         dialog = chosen.status.get("modal_dialog")
         if isinstance(dialog, dict):
             kind = dialog.get("kind") or "other"
-            what = {"home": "The Vectorworks Home screen", "update_available": "The 'new Vectorworks version available' "
+            what = {"home": "The Vectorworks Home screen", "backup_prompt": "The autosave 'name and save this document' prompt",
+                    "update_available": "The 'new Vectorworks version available' "
                     "dialog"}.get(kind, f"A dialog ('{dialog.get('title') or 'untitled'}')")
             problems.append(_problem("modal_dialog", f"{what} is open and blocks Vectorworks.",
                                      modal_dialog_next_step(dialog) or ""))

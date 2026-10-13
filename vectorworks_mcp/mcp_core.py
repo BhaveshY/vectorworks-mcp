@@ -191,6 +191,7 @@ class MCPServer:
             spawn = self._idle_workers == 0 and self._workers < self._max_workers
             if spawn:
                 self._workers += 1
+            self._pending = getattr(self, "_pending", 0) + 1
         self._jobs.put(fn)
         if spawn:
             threading.Thread(target=self._worker_loop, name=f"mcp-worker-{self._workers}", daemon=True).start()
@@ -206,6 +207,19 @@ class MCPServer:
                 fn()
             except BaseException:  # noqa: BLE001 - a worker must never die
                 log.error("worker crashed: %s", traceback.format_exc())
+            finally:
+                with self._worker_lock:
+                    self._pending = max(0, getattr(self, "_pending", 1) - 1)
+
+    def _drain(self, timeout_s: float) -> None:
+        """After stdin EOF, let in-flight requests finish and send their replies
+        (one-shot clients close stdin right after their last request)."""
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            with self._worker_lock:
+                if not getattr(self, "_pending", 0):
+                    return
+            time.sleep(0.02)
 
     # ----- main loop ---------------------------------------------------
     def run_stdio(self) -> int:
@@ -234,6 +248,7 @@ class MCPServer:
                 self._handle_line(line)
             except BaseException:  # noqa: BLE001
                 log.error("dispatch failure: %s", traceback.format_exc())
+        self._drain(float(os.environ.get("VW_MCP_DRAIN_S", "190") or 190))
         for hook in self.on_shutdown:
             try:
                 hook()

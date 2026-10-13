@@ -107,6 +107,9 @@ struct ChildScan {
     bool availableText = false;
     HWND notNow = nullptr;
     int notNowId = 0;
+    bool backupText = false;  // autosave "name and save ... backup copy" prompt
+    HWND noButton = nullptr;
+    int noId = 0;
     int buttons = 0;
     HWND button = nullptr;
     int buttonId = 0;
@@ -123,6 +126,11 @@ BOOL CALLBACK ScanChild(HWND child, LPARAM param) {
         text.erase(std::remove(text.begin(), text.end(), '&'), text.end());
         const std::string lower = ToLower(TrimCopy(text));
         if (Contains(lower, "is available") || Contains(lower, "ist verf")) scan->availableText = true;
+        if (Contains(lower, "backup copy") || Contains(lower, "sicherungskopie")) scan->backupText = true;
+        if (cls == "button" && (lower == "no" || lower == "nein")) {
+            scan->noButton = child;
+            scan->noId = GetDlgCtrlID(child);
+        }
         if (cls == "button" && (lower == "not now" || lower == "nicht jetzt")) {
             scan->notNow = child;
             scan->notNowId = GetDlgCtrlID(child);
@@ -180,6 +188,12 @@ Candidate Classify(HWND window) {
     if (scan.hasWebView && EndsWith(lowerTitle, "home")) {
         candidate.kind = "home";
         candidate.dialogLike = true;
+    } else if (lowerClass == "#32770" && scan.backupText && scan.noButton && scan.noId > 0) {
+        // Autosave prompt for an untitled document (live 2026-10-13): "No"
+        // neither saves nor discards anything; Vectorworks asks again later.
+        candidate.kind = "backup_prompt";
+        candidate.notNowButton = scan.noButton;
+        candidate.notNowId = scan.noId;
     } else if (lowerClass == "#32770" && scan.availableText && scan.notNow && scan.notNowId > 0) {
         candidate.kind = "update_available";
         candidate.notNowButton = scan.notNow;
@@ -336,7 +350,7 @@ bool TryDismissKnown(const char* trigger, bool automatic) {
                 continue;
             }
             if (!candidate.enabled) return false;  // something modal sits on top of it
-            if (candidate.kind == "update_available" && !update) update = &candidate;
+            if ((candidate.kind == "update_available" || candidate.kind == "backup_prompt") && !update) update = &candidate;
             if (candidate.kind == "home" && !home) home = &candidate;
         }
         const Candidate* target = update ? update : home;
@@ -351,7 +365,7 @@ bool TryDismissKnown(const char* trigger, bool automatic) {
         if (last != gLastPost.end() && now - last->second.lastMs < kRepostIntervalMs) return false;
         const int attempt = last != gLastPost.end() ? last->second.attempts : 0;
         BOOL posted = FALSE;
-        if (target->kind == "update_available") {
+        if (target->kind == "update_available" || target->kind == "backup_prompt") {
             // "Not Now" exactly as a click would send it; never "Download...".
             posted = PostMessageW(
                 target->hwnd, WM_COMMAND,

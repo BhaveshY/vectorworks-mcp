@@ -39,7 +39,7 @@ V2_ONLY = {"list_documents", "activate_document", "new_document", "close_documen
            "dismiss_home"}
 
 # Dialog kinds the bridge may close by itself (Vectorworks Home screen, "new version available").
-AUTO_DISMISS_KINDS = {"home", "update_available"}
+AUTO_DISMISS_KINDS = {"home", "update_available", "backup_prompt"}
 
 
 def modal_dialog_next_step(dialog: Any) -> Optional[str]:

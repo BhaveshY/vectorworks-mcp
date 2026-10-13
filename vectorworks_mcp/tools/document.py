@@ -199,7 +199,7 @@ def _dismiss_home(host, a: dict, out: dict) -> dict:
     except VWError:
         pass
     dialog = result.get("modal_dialog")
-    if isinstance(dialog, dict) and dialog.get("kind") not in {"home", "update_available"}:
+    if isinstance(dialog, dict) and dialog.get("kind") not in {"home", "update_available", "backup_prompt"}:
         out["next_step"] = (f"Another dialog is open: ask the user to close '{dialog.get('title') or 'the dialog'}' in "
                             "Vectorworks, then continue.")
     elif result.get("still_shown"):
