@@ -137,6 +137,34 @@ if ($Client -in @("all", "codex")) {
 # ------------------------------------------------------------ Claude Code
 if ($Client -in @("all", "claude-code")) {
     $entry = [ordered]@{ config = $ClaudeConfig; ok = $true; method = $null; changes = @(); notes = @() }
+    # Claude desktop syncs the 'vectorworks' plugin from github.com/BhaveshY/vectorworks-claude-plugin
+    # (org marketplace). From 1.0 it starts this same launcher and ships the skill, so a user-scope
+    # server or the local skills plugin would only duplicate it: remove them in that case.
+    $syncedPlugin = $null
+    if (-not $customClaude -and $env:APPDATA) {
+        $sessions = Join-Path $env:APPDATA "Claude\local-agent-mode-sessions"
+        if (Test-Path -LiteralPath $sessions) {
+            foreach ($m in @(Get-ChildItem -LiteralPath $sessions -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                        Get-ChildItem -LiteralPath $_.FullName -Directory -ErrorAction SilentlyContinue } | ForEach-Object {
+                        Get-ChildItem -Path (Join-Path $_.FullName "rpm\*\.claude-plugin\plugin.json") -ErrorAction SilentlyContinue })) {
+                try {
+                    $j = Get-Content -Raw -LiteralPath $m.FullName | ConvertFrom-Json
+                    if ($j.name -eq "vectorworks") { $syncedPlugin = [pscustomobject]@{ version = [string]$j.version; path = $m.Directory.Parent.FullName }; break }
+                } catch { }
+            }
+        }
+    }
+    $syncedMajor = 0
+    if ($syncedPlugin) { [int]::TryParse(($syncedPlugin.version -split "\.")[0], [ref]$syncedMajor) | Out-Null }
+    $viaPlugin = (-not $Unregister) -and $syncedPlugin -and $syncedMajor -ge 1
+    $claudeUnregister = $Unregister -or $viaPlugin
+    if ($viaPlugin) {
+        $entry.via_synced_plugin = $syncedPlugin.version
+        $entry.notes += "Claude uses the synced plugin 'vectorworks' $($syncedPlugin.version) (server + skill); removing duplicate user-scope server and local skills plugin."
+        Write-Step "Claude: synced plugin vectorworks $($syncedPlugin.version) provides the server and skill" "ok"
+    } elseif ($syncedPlugin) {
+        $entry.notes += "Claude has the synced plugin 'vectorworks' $($syncedPlugin.version) (< 1.0); it updates from github.com/BhaveshY/vectorworks-claude-plugin after Claude restarts."
+    }
     $claude = Get-Command claude -ErrorAction SilentlyContinue
     $method = $ClaudeMethod
     if ($method -eq "auto") {
@@ -154,7 +182,7 @@ if ($Client -in @("all", "claude-code")) {
         if ($customClaude) { $envs["CLAUDE_CONFIG_DIR"] = (Split-Path -Parent $ClaudeConfig) }
         if ($DryRun) {
             $cmdExePath = Join-Path $env:SystemRoot "System32\cmd.exe"
-            if ($Unregister) { $planText = "would run: claude mcp remove -s user vectorworks" }
+            if ($claudeUnregister) { $planText = "would run: claude mcp remove -s user vectorworks" }
             else { $planText = 'would run: claude mcp add -s user vectorworks -- {0} /d /c "{1}"' -f $cmdExePath, $Launcher }
             $entry.changes += $planText
             Write-Step "Claude Code: $($entry.changes[-1])" "plan"
@@ -162,7 +190,7 @@ if ($Client -in @("all", "claude-code")) {
             $insp = Invoke-Helper @("inspect", "--codex-home", $CodexHome, "--claude-config", $ClaudeConfig, "--launcher", $Launcher)
             $current = $insp.claude.user
             $isOurs = $current -and $current.points_at_launcher
-            if ($Unregister) {
+            if ($claudeUnregister) {
                 if ($isOurs) {
                     $r = Invoke-Native -FilePath $claude.Source -Arguments @("mcp", "remove", "-s", "user", "vectorworks") -Environment $envs -TimeoutSec 60
                     $entry.changes += "claude mcp remove -s user vectorworks (exit $($r.ExitCode))"
@@ -195,7 +223,7 @@ if ($Client -in @("all", "claude-code")) {
         foreach ($c in $entry.changes) { Write-Step "Claude Code: $c" ($(if ($DryRun) { "plan" } else { "ok" })) }
     } else {
         $a = @("claude", "--config", $ClaudeConfig, "--launcher", $Launcher)
-        if ($Unregister) { $a += "--unregister" }
+        if ($claudeUnregister) { $a += "--unregister" }
         if ($DryRun) { $a += "--dry-run" }
         $res = Invoke-Helper $a
         $entry.ok = [bool]$res.ok
@@ -210,9 +238,9 @@ if ($Client -in @("all", "claude-code")) {
         if ($customClaude) { $envs["CLAUDE_CONFIG_DIR"] = (Split-Path -Parent $ClaudeConfig) }
         $mkJson = Join-Path $MarketplaceDir ".claude-plugin\marketplace.json"
         if ($DryRun) {
-            $entry.changes += $(if ($Unregister) { "would run: claude plugin uninstall vectorworks@vectorworks-mcp; claude plugin marketplace remove vectorworks-mcp" } else { "would run: claude plugin marketplace add `"$MarketplaceDir`"; claude plugin install vectorworks@vectorworks-mcp" })
+            $entry.changes += $(if ($claudeUnregister) { "would run: claude plugin uninstall vectorworks@vectorworks-mcp; claude plugin marketplace remove vectorworks-mcp" } else { "would run: claude plugin marketplace add `"$MarketplaceDir`"; claude plugin install vectorworks@vectorworks-mcp" })
             Write-Step "Claude Code: $($entry.changes[-1])" "plan"
-        } elseif ($Unregister) {
+        } elseif ($claudeUnregister) {
             $u = Invoke-Native -FilePath $claude.Source -Arguments @("plugin", "uninstall", "vectorworks@vectorworks-mcp") -Environment $envs -TimeoutSec 120
             $m = Invoke-Native -FilePath $claude.Source -Arguments @("plugin", "marketplace", "remove", "vectorworks-mcp") -Environment $envs -TimeoutSec 120
             $entry.changes += "skills plugin uninstalled (exit $($u.ExitCode)/$($m.ExitCode))"

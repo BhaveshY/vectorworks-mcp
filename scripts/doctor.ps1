@@ -176,11 +176,23 @@ else {
         }
     }
     $cl = $insp.claude
-    if (-not $cl.exists) { Add-Check "claude" "info" "Claude Code not configured ($($cl.config))" }
+    # Synced Claude plugin 'vectorworks' >= 1.0 (github.com/BhaveshY/vectorworks-claude-plugin)
+    # provides server + skill itself; then a user-scope server would be a duplicate.
+    $synced = @($insp.stale | Where-Object { $_.kind -eq "claude-desktop-org-plugin" }) | Select-Object -First 1
+    $syncedMajor = 0
+    if ($synced) { [int]::TryParse(([string]$synced.version -split "\.")[0], [ref]$syncedMajor) | Out-Null }
+    $viaPlugin = $synced -and $syncedMajor -ge 1
+    if (-not $cl.exists -and -not $viaPlugin) { Add-Check "claude" "info" "Claude Code not configured ($($cl.config))" }
+    elseif ($viaPlugin) {
+        if ($cl.user) { Add-Check "claude" "warn" "synced plugin vectorworks $($synced.version) AND a user-scope vectorworks server: two servers" $regFix; $needReg = $true }
+        else { Add-Check "claude" "ok" "synced plugin vectorworks $($synced.version) -> launcher (server + skill)" }
+    }
     elseif (-not $cl.user) { Add-Check "claude" "fail" "no user-scope vectorworks MCP server in Claude Code" $regFix; $needReg = $true }
     elseif (-not $cl.user.points_at_launcher) { Add-Check "claude" "fail" "user-scope vectorworks points elsewhere: $($cl.user.command) $(@($cl.user.args) -join ' ')" $regFix; $needReg = $true }
     else { Add-Check "claude" "ok" "user-scope vectorworks -> launcher" }
-    if ($cl.exists -and $cl.PSObject.Properties["skills_plugin_enabled"]) {
+    if ($viaPlugin) {
+        if ($cl.skills_plugin_enabled) { Add-Check "claude_skills" "warn" "local skills plugin vectorworks@vectorworks-mcp duplicates the synced plugin's skill" $regFix; $needReg = $true }
+    } elseif ($cl.exists -and $cl.PSObject.Properties["skills_plugin_enabled"]) {
         if ($cl.skills_plugin_enabled) { Add-Check "claude_skills" "ok" "skills plugin vectorworks@vectorworks-mcp enabled" }
         else { Add-Check "claude_skills" "warn" "skills plugin vectorworks@vectorworks-mcp not enabled in Claude Code" $regFix }
         foreach ($o in @($cl.other_vectorworks_plugins)) { Add-Check "claude_plugin" "warn" "other enabled vectorworks plugin: $o (0.x skills/server)" "claude plugin disable $o" }
@@ -191,8 +203,10 @@ else {
     foreach ($s in @($insp.stale)) {
         switch ($s.kind) {
             "claude-desktop-org-plugin" {
+                $maj = 0; [int]::TryParse(([string]$s.version -split "\.")[0], [ref]$maj) | Out-Null
+                if ($maj -ge 1) { continue }
                 $st = if ($s.defines_mcp_server) { "warn" } else { "info" }
-                Add-Check "stale_cowork" $st "Claude desktop org plugin 'vectorworks' $($s.version) (synced from claude.ai org; its skills reference 0.7 tools$(if ($s.defines_mcp_server) { ' and it starts a second vectorworks server' }))" "Org admin: replace the 'vectorworks' plugin in claude.ai > Organization settings > Plugins with dist\vectorworks-plugin-1.0.0.zip (scripts\package-release.ps1), or remove it. Local copies resync, so do not delete $($s.path)."
+                Add-Check "stale_cowork" $st "Claude desktop org plugin 'vectorworks' $($s.version) (synced from claude.ai org; its skills reference 0.7 tools$(if ($s.defines_mcp_server) { ' and it starts a second vectorworks server' }))" "Restart Claude so it re-syncs the plugin from github.com/BhaveshY/vectorworks-claude-plugin (now 1.0), then rerun install.ps1 (or scripts\register-clients.ps1)."
             }
             "claude-code-plugin-cache" { Add-Check "stale_plugin" "info" "Claude Code plugin cache vectorworks $($s.version): $($s.path)" "claude plugin update vectorworks (or /plugin in Claude Code)" }
             "old-git-clone" { Add-Check "stale_clone" "warn" "old clone used by 0.x resolvers: $($s.path)" "vectorworksctl doctor -Fix   (moves it to $Root\backups)" }

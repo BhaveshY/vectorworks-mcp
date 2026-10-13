@@ -105,9 +105,13 @@ then run step 1.3 there (`-Offline` forces wheel-only installs).
   (verified by reading `~/.claude.json` back; falls back to a JSON merge that
   keeps every other key). Skills: install the plugin from this repo's
   marketplace (`/plugin marketplace add <folder>` then `/plugin install vectorworks@vectorworks-mcp`).
-- **Claude desktop (Cowork)** plugins come from the claude.ai organisation;
-  an old `vectorworks` 0.3 org plugin must be replaced by the organisation
-  admin with `dist\vectorworks-plugin-<version>.zip` (doctor reports it).
+- **Claude desktop / Cowork plugin**: the `vectorworks` plugin from the org
+  marketplace (github.com/BhaveshY/vectorworks-claude-plugin, 1.0) starts this
+  same launcher and ships the skill. When Claude has synced it (1.0 or later),
+  the installer removes the user-scope server and the local skills plugin so
+  exactly one Vectorworks server runs; without it, the user-scope registration
+  above is used. Keep the plugin repo's skill in sync with
+  `plugins/vectorworks/skills/vectorworks`.
 
 Register again without reinstalling:
 
