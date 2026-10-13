@@ -156,7 +156,8 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         out["data"], out["page"] = _page(_list_from(data, "saved_views", "views"), offset, limit, fields)
         return out
     if what == "sheets":
-        if inst.supports("get_sheet_layers"):
+        if inst.supports("get_sheet_layers") and not (inst.v2 and inst.supports("layers")):
+            # native get_sheet_layers needs a saved-document binding; v2 lists sheets via `layers`
             params = {"offset": offset, "limit": limit}
             if not inst.v2:
                 params.update(rev5_read_binding(host.call(target, "get_document_info", {})))
@@ -166,14 +167,30 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         items = [l for l in _list_from(data, "layers") if not isinstance(l, dict) or l.get("kind", "sheet") == "sheet"]
         out["data"], out["page"] = _page(items, offset, limit, fields)
         return out
+    if what in {"viewports", "annotations"} and host.can_script(inst):
+        # script read: works for unsaved documents (native get_viewports needs a saved-file binding) and returns
+        # scale/view/render/layers/crop/centre per viewport
+        if what == "viewports":
+            sheet = C.text(a.get("target") or a.get("layer") or a.get("name"), "target", required=True)
+            args_ = {"action": "list", "sheet": sheet[5:] if sheet.startswith("name:") else sheet}
+        else:
+            args_ = {"action": "annotations", "target": norm_ref(a.get("target"), "target")}
+        data = host.script(target, "viewport", args_, label="Read viewports", kind="read", transaction=False) or {}
+        items = data.get("viewports") if what == "viewports" else data.get("annotations")
+        if what == "viewports":
+            from .organize import viewport_record
+            items = [viewport_record(r) for r in items or []]
+        out["data"], out["page"] = _page(items or [], offset, limit, fields)
+        out["via"] = "script"
+        return out
     if what in {"viewports", "annotations"}:
         params: dict = {"offset": offset, "limit": limit}
         if what == "viewports":
-            params["sheet_layer_uuid"] = _uuid(a.get("target") or a.get("layer"), "target", "sheet layer uuid")
+            params["sheet_layer_uuid"] = _sheet_uuid(host, target, a.get("target") or a.get("layer") or a.get("name"))
             action = "get_viewports"
         else:
             params["viewport_uuid"] = _uuid(a.get("target"), "target", "viewport uuid")
-            params["sheet_layer_uuid"] = _uuid(a.get("layer"), "layer", "sheet layer uuid")
+            params["sheet_layer_uuid"] = _sheet_uuid(host, target, a.get("layer"), field="layer")
             action = "get_viewport_annotations"
         if not inst.v2:
             params.update(rev5_read_binding(host.call(target, "get_document_info", {})))
@@ -265,6 +282,22 @@ def _uuid(value: Any, field: str, label: str) -> str:
     if not text:
         raise validation(f"{field} must be the {label} (from vw_read)", field, "1A2B3C4D-...")
     return text
+
+
+def _sheet_uuid(host, target, value: Any, field: str = "target") -> str:
+    """Sheet layer uuid, or its name (looked up in the layer list)."""
+    text = str(value or "").strip()
+    if text.startswith("uuid:") or re.fullmatch(r"\{?[0-9A-Fa-f-]{32,36}\}?", text):
+        return _uuid(text, field, "sheet layer uuid")
+    if not text:
+        raise validation(f"{field} must be the sheet layer name or uuid (vw_read(what='sheets'))", field, "A-101")
+    if target.inst.supports("layers"):
+        layers = _list_from(host.call(target, "layers", {"action": "list"}), "layers")
+        hit = next((l for l in layers if isinstance(l, dict) and l.get("name") == text), None)
+        if hit and hit.get("uuid"):
+            return str(hit["uuid"])
+    raise VWError("not_found", f"No sheet layer named {text!r}.", field=field,
+                  next_step="List sheets with vw_read(what='sheets') and pass the name or uuid.")
 
 
 def _native_page(out: dict, data: Any, offset: int, fields: list[str], key: str = "items") -> dict:
@@ -432,7 +465,8 @@ def _colname(col: int) -> str:
 
 
 def _resources(host, target, a: dict, fields: list[str], limit: int, offset: int, out: dict) -> dict:
-    rtype = str(a.get("resource_type") or "all").strip().lower().replace(" ", "_")
+    rtype = str(a.get("resource_type") or a.get("type") or "all").strip().lower().replace(" ", "_").replace("-", "_")
+    rtype = scripts_lib.RESOURCE_SYNONYMS.get(rtype, rtype)
     query = a.get("query") or a.get("name") or ""
     if rtype in {"all", "symbols", "worksheets", ""}:
         data = host.call(target, "resources", {"action": "list", "query": query})
@@ -448,12 +482,17 @@ def _resources(host, target, a: dict, fields: list[str], limit: int, offset: int
         except ValueError:
             raise validation(f"resource_type must be one of {', '.join(['all'] + sorted(scripts_lib.RESOURCE_TYPES))} "
                              "or a BuildResourceList number", "resource_type", "hatches") from None
-    data = host.script(target, "resource_list", {"resource_type": code, "query": query, "offset": offset, "limit": limit},
+    data = host.script(target, "resource_list", {"resource_type": code, "query": query, "offset": offset, "limit": limit,
+                                                 "library": True},
                        label="List resources", kind="read", transaction=False)
     out["data"] = _list_from(data, "items")
     out["page"] = {"cursor": str(offset) if offset else "", "returned": len(out["data"]),
-                   "next_cursor": data.get("next_cursor") if isinstance(data, dict) else None}
+                   "next_cursor": data.get("next_cursor") if isinstance(data, dict) else None,
+                   "total": data.get("total") if isinstance(data, dict) else None}
     out["via"] = "script"
+    if rtype in {"hatches", "line_types", "gradients", "image_fills", "tiles", "text_styles"}:
+        out["usage"] = ("Use the name in vw_edit set properties / vw_create objects (fill, line_style, text_style); "
+                        "source='library' names are imported into the document automatically on first use.")
     return out
 
 

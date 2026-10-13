@@ -31,6 +31,29 @@ def uuid_of(h):
         return ""
 
 
+_MM_PER_UNIT = []
+
+
+def U(mm):
+    """Millimetres -> document length units (vs.* coordinates are document units)."""
+    if not _MM_PER_UNIT:
+        try:
+            upi = float(vs.GetUnits()[3])
+        except Exception:
+            upi = 25.4
+        _MM_PER_UNIT.append(25.4 / upi if upi > 0 else 1.0)
+    return float(mm) / _MM_PER_UNIT[0]
+
+
+def MM(units):
+    U(0)
+    return float(units) * _MM_PER_UNIT[0]
+
+
+def PT(p):
+    return (U(p[0]), U(p[1]))
+
+
 def record_of(h):
     out = {"uuid": uuid_of(h), "type_id": vs.GetTypeN(h), "name": vs.GetName(h)}
     try:
@@ -38,7 +61,7 @@ def record_of(h):
     except Exception:
         pass
     try:
-        out["layer"] = vs.GetName(vs.GetLayer(h))
+        out["layer"] = vs.GetLName(vs.GetLayer(h))  # vs.GetName returns '' for layers
     except Exception:
         pass
     return out

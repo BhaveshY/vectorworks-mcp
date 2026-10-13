@@ -305,6 +305,15 @@ The 0.7 server is preserved verbatim as `legacy/server_v07.py`, reachable only w
   dry_run)` + composite `room` type (0.7 schematic/BIM floor-plan tools); `vw_document(action="info")`;
   `vw_organize(kind="resource", action="import")`. vw_status never fails: job/transaction lookup errors are reported
   inside `job` / `transaction` with `ok:true`.
+- **H, §2.3 drawing production / styles / massing (2026-10-13):** `vw_organize(kind="viewport", action=create|set|
+  update|delete)` (fields `sheet, target, layers, scale "1:100", view, render_mode, at, crop, classes, title,
+  annotations, confirm`), graphic-style keys on `vw_edit` op `set` and on `vw_create` objects (`fill, line_style, font,
+  text_size, text_style, align, valign, arrows, start_marker, end_marker`), `vw_create` types `extrude` and `column`,
+  and `vw_read(what="resources", type=...)` all run through vetted `run_script` snippets (`viewport.py`, `_style.py`
+  via `edit_engine.py`, `massing.py`, `resource_list.py`). The native `apply_documentation_operations` stays gated off.
+  A script part mixed with native creates/edits in one call is a second undo step (reported in `undo` + warning;
+  when the script part fails after the native part committed, `commit_state:"partial"`). On v2 `vw_read` sheets use
+  `layers` and viewports/annotations use the script (native documentation reads need a saved-file binding).
 - **H, §2.1 object by uuid:** the contract has no get-by-uuid read, so `vw_read(what="object")` scans `query_objects`
   pages (≤ 100 × 1000). Suggestion for N: a `uuid` filter on `query_objects`.
 - **H, §2.1 lost write replies:** resolved through `transaction_status` only for `apply_operations`-based tools

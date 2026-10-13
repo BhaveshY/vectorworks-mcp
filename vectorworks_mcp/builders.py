@@ -20,9 +20,12 @@ CREATE_SYNONYMS = {
     "poly": "polygon", "polygon2d": "polygon", "linear_dimension": "dimension", "dim": "dimension",
     "label": "text", "note": "text", "room_space": "space", "floor": "slab", "symbol_instance": "symbol",
     "plugin": "parametric", "pio": "parametric", "segment": "line", "schematic_room": "room",
+    "extrusion": "extrude", "mass": "extrude", "massing": "extrude", "block": "extrude", "volume": "extrude",
+    "pillar": "column", "post": "column",
 }
 CREATE_TYPES = ["line", "rect", "oval", "circle", "arc", "polygon", "polyline", "wall", "slab", "roof", "space",
-                "text", "dimension", "symbol", "door", "window", "parametric", "room"]
+                "text", "dimension", "symbol", "door", "window", "parametric", "room", "extrude", "column"]
+SCRIPT_CREATE_TYPES = {"extrude", "column"}  # created by the vetted `massing` run_script snippet
 
 DEFAULTS_MM = {"wall_height": 3000.0, "wall_thickness": 200.0, "slab_thickness": 200.0, "door_width": 900.0,
                "door_height": 2100.0, "window_width": 1200.0, "window_height": 1500.0, "window_sill": 900.0,
@@ -58,7 +61,159 @@ PROPERTY_SYNONYMS = {"name": "name", "class": "class", "class_name": "class", "f
                      "pen": "penColor", "stroke": "penColor", "line_color": "penColor", "fill_pattern": "fillPattern",
                      "fillpattern": "fillPattern", "line_weight": "lineWeight", "lineweight": "lineWeight",
                      "pen_weight": "lineWeight", "opacity": "opacity"}
-SCRIPT_EDIT_OPS = {"mirror", "layer", "group", "ungroup", "record"}
+SCRIPT_EDIT_OPS = {"mirror", "layer", "group", "ungroup", "record", "style"}
+
+# Graphic attributes the native set_properties lacks; applied + read back by the `_style` snippet helper.
+STYLE_SYNONYMS = {
+    "line_style": "line_style", "linestyle": "line_style", "line_type": "line_style", "linetype": "line_style",
+    "dash": "line_style", "dash_style": "line_style", "line_pattern": "line_style",
+    "fill": "fill", "fill_style": "fill", "hatch": "fill", "gradient": "fill", "image_fill": "fill", "tile": "fill",
+    "font": "font", "font_name": "font", "text_font": "font", "typeface": "font",
+    "text_size": "text_size", "font_size": "text_size", "size_pt": "text_size", "point_size": "text_size",
+    "text_style": "text_style", "font_style": "text_style", "face": "text_style", "bold": "text_style",
+    "italic": "text_style", "underline": "text_style", "text_style_name": "text_style_name",
+    "text_style_resource": "text_style_name",
+    "align": "align", "alignment": "align", "text_align": "align", "justify": "align", "justification": "align",
+    "horizontal_alignment": "align", "valign": "valign", "vertical_align": "valign", "vertical_alignment": "valign",
+    "start_marker": "start_marker", "begin_marker": "start_marker", "start_arrow": "start_marker",
+    "arrow_start": "start_marker", "end_marker": "end_marker", "end_arrow": "end_marker", "arrow_end": "end_marker",
+    "arrowhead": "end_marker", "arrows": "arrows", "arrowheads": "arrows", "markers": "arrows",
+}
+# Basic attributes, also accepted as style keys where the object is made or finished by a script (vw_create extras,
+# massing, viewport annotations).
+BASIC_STYLE = {"pen_color": "pen_color", "pen": "pen_color", "stroke": "pen_color", "line_color": "pen_color",
+               "fill_color": "fill_color", "line_weight": "line_weight", "pen_weight": "line_weight",
+               "opacity": "opacity", "class": "class", "class_name": "class", "name": "name"}
+TEXT_FACES = {"plain": 0, "normal": 0, "regular": 0, "none": 0, "bold": 1, "italic": 2, "underline": 4,
+              "outline": 8, "shadow": 16}
+ALIGN = {"left": 1, "center": 2, "centre": 2, "middle": 2, "right": 3, "justify": 4, "justified": 4}
+VALIGN = {"top": 1, "top_baseline": 2, "center": 3, "centre": 3, "middle": 3, "baseline": 4, "bottom_baseline": 4,
+          "bottom": 5}
+MARKER_PRESETS = ["arrow", "open_arrow", "dot", "circle", "slash", "tick", "cross"]
+FILL_KEYS = {"hatch": "hatch", "gradient": "gradient", "image_fill": "image", "image": "image", "tile": "tile"}
+
+
+def _marker(value: Any, field: str) -> dict:
+    value = C.parse_json_maybe(value)
+    if isinstance(value, bool) or (C.is_number(value) and value in (0, 1)):
+        return {"preset": "arrow", "visible": bool(value)}
+    if isinstance(value, str):
+        name = value.strip().lower().replace(" ", "_").replace("-", "_")
+        if name in {"none", "off", "no", "false", ""}:
+            return {"preset": "arrow", "visible": False}
+        if name == "true":
+            return {"preset": "arrow", "visible": True}
+        name = {"arrowhead": "arrow", "filled_arrow": "arrow", "open": "open_arrow", "oblique": "slash",
+                "architectural": "slash", "point": "dot", "x": "cross"}.get(name, name)
+        if name not in MARKER_PRESETS:
+            raise validation(f"{field} must be one of {MARKER_PRESETS} or none", field, "arrow")
+        return {"preset": name, "visible": True}
+    if isinstance(value, dict):
+        v = C.lower_keys(value)
+        out = _marker(v.get("style") or v.get("preset") or v.get("type") or "arrow", field)
+        if v.get("size") not in (None, ""):
+            out["size_in"] = C.number(v["size"], f"{field}.size") / 25.4  # page mm -> page inches
+        if v.get("visible") is not None:
+            out["visible"] = C.boolean(v["visible"], f"{field}.visible")
+        return out
+    raise validation(f"{field} must be a marker name like 'arrow', true/false or {{style, size}}", field, "arrow")
+
+
+def _is_color(value: Any) -> bool:
+    try:
+        C.color(value, "fill")
+        return True
+    except VWError:
+        return False
+
+
+def style_props(src: dict, field: str, *, basic: bool = False, skip: tuple = ()) -> dict:
+    """Friendly style keys of one object/properties dict -> normalised style for the `_style` snippet helper.
+
+    basic=True also takes pen/fill colour, line weight, opacity, class and name (for script-made objects)."""
+    out: dict[str, Any] = {}
+    faces: Optional[int] = None
+    for key, value in src.items():
+        k = str(key).lower().replace(" ", "_")
+        if k in skip:
+            continue
+        canonical = STYLE_SYNONYMS.get(k) or (BASIC_STYLE.get(k) if basic else None)
+        if canonical is None or value is None:
+            continue
+        label = f"{field}.{key}"
+        if canonical == "line_style":
+            if isinstance(value, bool):
+                raise validation(f"{label} must be a line type name or index", label, "Dash 1")
+            if C.is_number(value) or (isinstance(value, str) and re.fullmatch(r"-?\d+", value.strip())):
+                out["line_style"] = {"kind": "index", "value": int(float(value))}
+            elif str(value).strip().lower() in {"solid", "none"}:
+                out["line_style"] = {"kind": "index", "value": 2 if str(value).strip().lower() == "solid" else 0}
+            else:
+                out["line_style"] = {"kind": "name", "name": C.text(value, label, required=True, max_len=255)}
+        elif canonical == "fill":
+            kind_hint = FILL_KEYS.get(k)
+            value = C.parse_json_maybe(value)
+            if isinstance(value, dict):
+                v = C.lower_keys(value)
+                hit = next(((FILL_KEYS[n], v[n]) for n in FILL_KEYS if v.get(n)), None)
+                if hit is None:
+                    raise validation(f"{label} must be {{\"hatch\": name}} / gradient / image / tile", label,
+                                     {"hatch": "Brick"})
+                out["fill"] = {"kind": hit[0], "name": str(hit[1])}
+            elif value is False or str(value).strip().lower() in {"none", "no", "empty", "hollow", "transparent"}:
+                out["fill"] = {"kind": "none"}
+            elif value is True or str(value).strip().lower() == "solid":
+                out["fill"] = {"kind": "solid"}
+            else:
+                out["fill"] = {"kind": kind_hint or "auto", "name": C.text(value, label, required=True, max_len=255)}
+        elif canonical == "text_size":
+            raw = str(value).strip().lower().removesuffix("pt").strip() if isinstance(value, str) else value
+            size = C.number(raw, label)
+            if not 0 < size <= 2000:
+                raise validation(f"{label} must be a point size > 0", label, 12)
+            out["text_size"] = size
+        elif canonical == "text_style":
+            if k in {"bold", "italic", "underline"}:
+                faces = (faces or 0) | (TEXT_FACES[k] if C.boolean(value, label) else 0)
+                continue
+            if C.is_number(value):
+                faces = (faces or 0) | int(value)
+                continue
+            words = [w for w in re.split(r"[\s,+|/_-]+", str(value).strip().lower()) if w]
+            if words and all(w in TEXT_FACES for w in words):
+                faces = (faces or 0) | sum(TEXT_FACES[w] for w in set(words))
+            else:
+                out["text_style_name"] = C.text(value, label, required=True, max_len=255)
+        elif canonical == "text_style_name":
+            out["text_style_name"] = C.text(value, label, required=True, max_len=255)
+        elif canonical == "font":
+            out["font"] = C.text(value, label, required=True, max_len=255)
+        elif canonical in {"align", "valign"}:
+            table = ALIGN if canonical == "align" else VALIGN
+            if C.is_number(value):
+                out[canonical] = int(value)
+            else:
+                name = str(value).strip().lower().replace(" ", "_")
+                if name not in table:
+                    raise validation(f"{label} must be one of {sorted(table)}", label, "center")
+                out[canonical] = table[name]
+        elif canonical in {"start_marker", "end_marker"}:
+            out[canonical] = _marker(value, label)
+        elif canonical == "arrows":
+            where = str(value).strip().lower()
+            if where not in {"start", "end", "both", "none"}:
+                raise validation(f"{label} must be start, end, both or none", label, "end")
+            out["start_marker"] = {"preset": "arrow", "visible": where in {"start", "both"}}
+            out["end_marker"] = {"preset": "arrow", "visible": where in {"end", "both"}}
+        elif canonical in {"pen_color", "fill_color"}:
+            out[canonical] = [int(c) for c in C.color(value, label).split(",")]
+        elif canonical in {"line_weight", "opacity"}:
+            out[canonical] = C.integer(value, label)
+        elif canonical in {"class", "name"}:
+            out[canonical] = C.text(value, label, required=True, max_len=255)
+    if faces is not None:
+        out["text_style"] = faces
+    return out
 
 
 def _get(src: dict, *keys: str, default: Any = None) -> Any:
@@ -114,6 +269,8 @@ class CreatePlan:
         self.ids: list[str] = []
         self.wall_ids: set[str] = set()     # ids of walls declared anywhere in this call
         self.doc_mm_per_unit = 1.0
+        self.script_objects: list[dict] = []  # extrude / column -> `massing` snippet
+        self.styles: list[tuple[str, dict]] = []  # (local id, style) applied by script after the native create
 
 
 def wall_ids_of(objects: list[dict]) -> set[str]:
@@ -172,11 +329,79 @@ def compile_create(objects: list[dict], scale: float, *, descriptors: dict[str, 
             for sub in _room_objects(src, field, scale, local_id):
                 _append(plan, sub, sub.pop("_id"))
             continue
+        if kind in SCRIPT_CREATE_TYPES:
+            item = _massing_params(kind, src, field, scale)
+            item["id"] = local_id
+            style = style_props(src, field, basic=True)
+            if style:
+                item["style"] = style
+            plan.script_objects.append(item)
+            plan.ids.append(local_id)
+            continue
         params = _create_params(kind, src, field, scale, plan, descriptors, schemas)
         if kind == "wall":
             plan.local_walls[local_id] = params
         _append(plan, params, local_id)
+        style = style_props(src, field, basic=True, skip=("name", "class", "class_name"))
+        if style:
+            plan.styles.append((local_id, style))
     return plan
+
+
+COLUMN_PLUGIN = "Column2"  # universal name of the Vectorworks Architect Column tool (Plug-ins/Column2.vso)
+
+
+def _massing_params(kind: str, src: dict, field: str, scale: float) -> dict:
+    """extrude: profile points (or a rect footprint) + height + base elevation; column: Column plug-in."""
+    if kind == "extrude":
+        raw_pts = _get(src, "points", "profile", "outline", "boundary", "vertices")
+        if raw_pts is not None:
+            pts = C.points(raw_pts, f"{field}.points", scale, minimum=3)
+        else:
+            a = _pt(src, ("start", "corner", "p1", "min"), ("x1", "y1"), f"{field}.start", scale, required=False)
+            b = _pt(src, ("end", "opposite", "p2", "max"), ("x2", "y2"), f"{field}.end", scale, required=False)
+            if a is None or b is None:
+                w = _len(src, ("width", "w", "size_x"), f"{field}.width", scale, required=True, positive=True)
+                d = _len(src, ("depth", "length", "d", "size_y"), f"{field}.depth", scale, required=True, positive=True)
+                center = _pt(src, ("center", "centre"), ("cx", "cy"), f"{field}.center", scale, required=False)
+                origin = a or _pt(src, ("origin", "at", "position", "location"), ("x", "y"), f"{field}.origin", scale,
+                                  required=center is None)
+                if center is not None and origin is None:
+                    origin = [center[0] - w / 2, center[1] - d / 2]
+                a, b = origin, [origin[0] + w, origin[1] + d]
+            pts = [[a[0], a[1]], [b[0], a[1]], [b[0], b[1]], [a[0], b[1]]]
+        bottom = _len(src, ("elevation", "bottom", "base", "base_elevation", "z"), f"{field}.elevation", scale, 0.0)
+        top = _len(src, ("top",), f"{field}.top", scale)
+        height = _len(src, ("height", "extrude_height", "h", "thickness"), f"{field}.height", scale,
+                      required=top is None, positive=True)
+        top = bottom + height if height is not None else top
+        if top <= bottom:
+            raise validation(f"{field}: top must be above the base elevation", f"{field}.height", 3000)
+        return {"kind": "extrude", "points": pts, "bottom": bottom, "top": top}
+    at = _pt(src, ("at", "center", "centre", "position", "location", "origin"), ("x", "y"), f"{field}.at", scale)
+    lengths: dict[str, float] = {"OA Height": _len(src, ("height", "h"), f"{field}.height", scale, 3000.0, positive=True)}
+    fields: dict[str, str] = {"Use Capital": "False", "Use Base": "False"}
+    diameter = _len(src, ("diameter", "d"), f"{field}.diameter", scale, positive=True)
+    if diameter is not None:
+        fields.update({"ShaftType": "Round", "Shaft Type": "Round"})
+        lengths["Diameter"] = diameter
+    else:
+        lengths["Shaft Width"] = _len(src, ("width", "w", "size"), f"{field}.width", scale, 400.0, positive=True)
+        lengths["Shaft Depth"] = _len(src, ("depth", "length", "size"), f"{field}.depth", scale,
+                                      lengths["Shaft Width"], positive=True)
+    raw = C.parse_json_maybe(_get(src, "parameters", "params", "fields"))
+    if raw is not None:
+        if not isinstance(raw, dict):
+            raise validation(f"{field}.parameters must be an object {{field: value}}", f"{field}.parameters",
+                             {"Use Capital": True})
+        for key, value in raw.items():
+            if isinstance(value, bool):
+                value = "True" if value else "False"
+            fields[str(key)] = str(value)
+            lengths.pop(str(key), None)
+    plugin = str(_get(src, "plugin", "plugin_name", default=COLUMN_PLUGIN))
+    return {"kind": "column", "plugin": plugin, "at": at, "lengths": lengths, "fields": fields,
+            "rotation": C.number(_get(src, "rotation", "angle", default=0), f"{field}.rotation")}
 
 
 def _append(plan: CreatePlan, params: dict, local_id: str) -> None:
@@ -561,6 +786,8 @@ def _example(kind: str) -> dict:
         "window": {"type": "window", "wall": "$w1", "offset": 3000, "width": 1200, "sill": 900},
         "parametric": {"type": "parametric", "plugin": "Space", "at": [0, 0], "parameters": {"ParamId": "value"}},
         "room": {"type": "room", "origin": [0, 0], "width": 4000, "depth": 3000, "name": "Bedroom"},
+        "extrude": {"type": "extrude", "points": [[0, 0], [8000, 0], [8000, 6000], [0, 6000]], "height": 9000},
+        "column": {"type": "column", "at": [0, 0], "width": 400, "depth": 400, "height": 3000},
     }
     return examples.get(kind, examples["rect"])
 
@@ -628,17 +855,25 @@ def compile_edit(changes: list[dict], scale: float, *, schemas: dict[str, dict],
         if op == "set" or op == "class":
             props_src = _get(src, "properties", "props", "set", "values")
             props_src = C.parse_json_maybe(props_src) if props_src is not None else {
-                k: v for k, v in src.items() if k in PROPERTY_SYNONYMS}
+                k: v for k, v in src.items() if k in PROPERTY_SYNONYMS or k in STYLE_SYNONYMS}
             if op == "class":
                 props_src = {"class": _get(src, "class", "class_name", "value", "to")}
             if not isinstance(props_src, dict) or not props_src:
                 raise validation(f"{field}.properties is required", f"{field}.properties", {"fill_color": "#FF0000"})
             props: dict[str, str] = {}
+            style_src: dict[str, Any] = {}
             for key, value in props_src.items():
-                canonical = PROPERTY_SYNONYMS.get(str(key).lower().replace(" ", "_"))
+                k = str(key).lower().replace(" ", "_")
+                canonical = PROPERTY_SYNONYMS.get(k)
+                if k == "fill" and not _is_color(value):
+                    canonical = None  # fill: "none" | "solid" | hatch/gradient name -> style
                 if canonical is None:
+                    if k in STYLE_SYNONYMS:
+                        style_src[key] = value
+                        continue
                     raise validation(f"{field}.properties.{key} is not editable; use name, class, fill_color, pen_color, "
-                                     "fill_pattern, line_weight, opacity (or op='parametric' / 'record')",
+                                     "line_weight, opacity, fill (none|solid|hatch/gradient/image name), line_style, "
+                                     "font, text_size, text_style, align, start_marker/end_marker (or op='parametric')",
                                      f"{field}.properties", {"fill_color": "#FF0000"})
                 if canonical in {"fillColor", "penColor"}:
                     value = C.color(value, f"{field}.properties.{key}")
@@ -646,7 +881,13 @@ def compile_edit(changes: list[dict], scale: float, *, schemas: dict[str, dict],
                     value = str(C.integer(value, f"{field}.properties.{key}"))
                 props[canonical] = str(value)
             script_item["properties"] = props
-            native = [{"type": "set_properties", "params": {"edits": [{"ref": t, "properties": props} for t in targets]}}]
+            if props:
+                native = [{"type": "set_properties", "params": {"edits": [{"ref": t, "properties": props}
+                                                                          for t in targets]}}]
+            style = style_props(style_src, f"{field}.properties") if style_src else {}
+            if style:
+                plan.script_ops.append({"op": "style", "targets": targets, "style": style})
+                plan.needs_script = True
         elif op == "move":
             delta = _get(src, "by", "delta", "offset", "vector")
             if delta is not None:

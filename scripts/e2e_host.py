@@ -578,6 +578,107 @@ def phase_edge(python: str, state_dir: Path) -> None:
         shutil.rmtree(out_dir, ignore_errors=True)
 
 
+def phase_production(python: str, state_dir: Path) -> None:
+    """Drawing production (viewports + annotations), graphic attributes and 3D massing (script-backed)."""
+    print("\n== 3d. sheets/viewports, graphic attributes, massing (run_script snippets vs mock vs.*) ==")
+    prod_dir = state_dir / "prod"
+    prod_dir.mkdir(exist_ok=True)
+    (prod_dir / "auth-token").write_text(MOCK_TOKEN, encoding="utf-8")
+    mock, port = start_mock(python, prod_dir)
+    try:
+        c = Client(python, base_env(prod_dir), "prod")
+        c.initialize()
+        sc, _ = c.call("vw_create", {"objects": [
+            {"type": "rect", "id": "r", "origin": [0, 0], "width": 3000, "height": 2000},
+            {"type": "line", "id": "l", "start": [0, -1000], "end": [3000, -1000]},
+            {"type": "text", "id": "t", "at": [0, 2500], "text": "Plan"}]})
+        ids = sc.get("ids") or {}
+        check("setup objects", sc.get("ok") and len(ids) == 3, json.dumps(sc)[:300])
+        # -- viewports ------------------------------------------------------------------------------------
+        sc, _ = c.call("vw_organize", {
+            "kind": "viewport", "action": "create", "sheet": "A-101", "name": "GF Plan", "layers": ["Design Layer-1"],
+            "scale": "1:100", "view": "top_plan", "at": [0, 0], "crop": [[-500, -1500], [3500, 3000]],
+            "classes": {"Dimension": "hide"}, "title": "Ground floor",
+            "annotations": [{"type": "text", "at": [0, 2800], "text": "GF", "size": 14, "bold": True},
+                            {"type": "dimension", "start": [0, 0], "end": [3000, 0], "offset": -500},
+                            {"type": "line", "start": [0, -1200], "end": [3000, -1200], "arrows": "end"}]})
+        res = sc.get("result") or {}
+        vp = res.get("viewport") or {}
+        check("viewport create: sheet made, 1:100, top_plan, crop, class override, 3 annotations, one undo step",
+              sc.get("ok") and res.get("sheet_created") == "A-101" and vp.get("scale") == 100 and vp.get("view") == "top_plan"
+              and vp.get("crop") is True and "Dimension" in vp.get("hidden_classes", []) and vp.get("title") == "Ground floor"
+              and len(res.get("annotations_created") or []) == 3 and vp.get("layers") == ["Design Layer-1"]
+              and sc.get("undo") == "one undo step", json.dumps(sc)[:500])
+        vp_uuid = vp.get("uuid")
+        sc, _ = c.call("vw_read", {"what": "viewports", "target": "A-101"})
+        check("vw_read viewports by sheet NAME", sc.get("ok") and len(sc.get("data") or []) == 1, json.dumps(sc)[:300])
+        sc, _ = c.call("vw_organize", {"kind": "viewport", "action": "set", "target": vp_uuid, "scale": 50,
+                                       "view": "iso", "render_mode": "hidden_line", "at": [100, 50]})
+        vp = (sc.get("result") or {}).get("viewport") or {}
+        check("viewport set: scale/view/render/position read back", sc.get("ok") and vp.get("scale") == 50 and
+              vp.get("view") == "iso" and vp.get("render_mode") == "hidden_line" and vp.get("center") == [100, 50],
+              json.dumps(sc)[:400])
+        sc, _ = c.call("vw_organize", {"kind": "viewport", "action": "update", "sheet": "A-101"})
+        check("viewport update (all on sheet) regenerates", sc.get("ok") and (sc.get("result") or {}).get("updated") == [vp_uuid],
+              json.dumps(sc)[:300])
+        sc, _ = c.call("vw_organize", {"kind": "viewport", "action": "create", "sheet": "A-101", "layers": ["Nope"]})
+        check("viewport create with unknown layer -> not_found, rolled back", err_code(sc) == "not_found" and
+              "Nope" in json.dumps(sc), json.dumps(sc)[:300])
+        sc, _ = c.call("vw_read", {"what": "viewports", "target": "A-101"})
+        check("rolled back: still one viewport", len(sc.get("data") or []) == 1, json.dumps(sc)[:300])
+        sc, _ = c.call("vw_organize", {"kind": "viewport", "action": "delete", "target": "GF Plan"})
+        check("viewport delete needs confirm", err_code(sc) == "confirmation_required", json.dumps(sc)[:300])
+        sc, _ = c.call("vw_organize", {"kind": "viewport", "action": "delete", "target": "GF Plan", "confirm": True})
+        check("viewport delete with confirm", sc.get("ok") and (sc.get("result") or {}).get("deleted", {}).get("uuid") == vp_uuid,
+              json.dumps(sc)[:300])
+        sc, _ = c.call("vw_organize", {"kind": "viewport", "action": "set", "target": "x", "scale": "1:x"})
+        check("viewport scale '1:x' -> validation_error", err_code(sc) == "validation_error", json.dumps(sc)[:200])
+        # -- graphic attributes ---------------------------------------------------------------------------
+        sc, _ = c.call("vw_read", {"what": "resources", "type": "hatch"})
+        names = {i.get("name"): i.get("source") for i in sc.get("data") or []}
+        check("resources type=hatch lists document + library names", sc.get("ok") and names.get("Hatch A") == "document"
+              and names.get("Aluminum HF") == "library", json.dumps(sc)[:300])
+        sc, _ = c.call("vw_edit", {"changes": [
+            {"op": "set", "target": ids.get("r"), "properties": {"fill": "Aluminum HF", "line_style": "Clouds",
+                                                                 "pen_color": "#FF0000"}},
+            {"op": "set", "target": ids.get("t"), "properties": {"font": "Times New Roman", "text_size": "14pt",
+                                                                 "text_style": "bold italic", "align": "center"}},
+            {"op": "set", "target": ids.get("l"), "properties": {"arrows": "both", "line_type": "Dash"}}]})
+        check("vw_edit styles: library hatch + line type imported, text font/size/style/align, arrows",
+              sc.get("ok") and sc.get("applied", 0) >= 4 and len(sc.get("imported_resources") or []) == 2,
+              json.dumps(sc)[:500])
+        sc, _ = c.call("vw_edit", {"changes": [{"op": "set", "target": ids.get("r"), "properties": {"fill": "No Such Hatch"}}]})
+        check("unknown hatch -> not_found naming vw_read resources", err_code(sc) == "not_found" and
+              "resources" in json.dumps(sc), json.dumps(sc)[:300])
+        sc, _ = c.call("vw_edit", {"changes": [{"op": "set", "target": ids.get("r"), "properties": {"font": "Arial"}}]})
+        check("font on a rectangle -> rejected (rolled back)", err_code(sc) == "native_rejected", json.dumps(sc)[:300])
+        sc, _ = c.call("vw_edit", {"changes": [{"op": "set", "target": ids.get("r"), "properties": {"fill": "solid", "fill_color": "blue"}}]})
+        check("fill solid + colour (native + script, two steps warned)", sc.get("ok") and
+              any("two undo steps" in w for w in sc.get("warnings") or []), json.dumps(sc)[:300])
+        # -- massing --------------------------------------------------------------------------------------
+        sc, _ = c.call("vw_create", {"objects": [
+            {"type": "extrude", "id": "m1", "points": [[0, 0], [8000, 0], [8000, 6000], [0, 6000]], "height": "9m",
+             "elevation": 300, "fill": "Brick HF"},
+            {"type": "column", "id": "c1", "at": [1000, 1000], "width": 400, "height": 3500},
+            {"type": "wall", "id": "w", "start": [0, 0], "end": [8000, 0], "line_style": "Dash"}]})
+        check("vw_create extrude + column + wall style: both receipts, two undo steps warned",
+              sc.get("ok") and {"m1", "c1", "w"} <= set(sc.get("ids") or {}) and sc.get("undo") == "two undo steps"
+              and len(sc.get("styled") or []) == 1 and any("separate undo" in w for w in sc.get("warnings") or []),
+              json.dumps(sc)[:500])
+        sc, _ = c.call("vw_create", {"objects": [{"type": "massing", "origin": [0, 0], "width": 5000, "depth": 4000,
+                                                  "height": 3000}]})
+        check("script-only create (extrude rect footprint) = one undo step", sc.get("ok") and sc.get("undo") == "one undo step"
+              and (sc.get("created") or [{}])[0].get("type") == "extrude", json.dumps(sc)[:300])
+        sc, _ = c.call("vw_create", {"objects": [{"type": "column", "at": [0, 0], "diameter": 300}], "dry_run": True})
+        check("dry_run lists script objects", sc.get("ok") and (sc.get("script_objects") or [{}])[0].get("kind") == "column",
+              json.dumps(sc)[:300])
+        sc, _ = c.call("vw_create", {"objects": [{"type": "extrude", "points": [[0, 0], [1, 0], [1, 1]]}]})
+        check("extrude without height -> validation_error", err_code(sc) == "validation_error", json.dumps(sc)[:200])
+        c.close()
+    finally:
+        mock.kill()
+
+
 def phase_weak_model(python: str, state_dir: Path) -> None:
     """Regressions from a real weak-model Codex run (test-artifacts/codex-e2e/luna_room.jsonl)."""
     print("\n== 3c. weak-model room recipe: one-call room, door queries, forgiving vw_apply, Home screen ==")
@@ -715,7 +816,7 @@ def main() -> int:
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--real", action="store_true", help="also run READ-ONLY checks against Vectorworks on 9877")
     parser.add_argument("--keep", action="store_true")
-    parser.add_argument("--only", default="", help="comma list: startup,absent,mock,edge,weak,legacy,real")
+    parser.add_argument("--only", default="", help="comma list: startup,absent,mock,edge,weak,production,legacy,real")
     args = parser.parse_args()
     only = set(filter(None, args.only.split(",")))
     state_dir = Path(tempfile.mkdtemp(prefix="vwmcp-state-"))
@@ -730,6 +831,8 @@ def main() -> int:
             phase_edge(args.python, state_dir)
         if not only or "edge" in only or "weak" in only:
             phase_weak_model(args.python, state_dir)
+        if not only or "production" in only:
+            phase_production(args.python, state_dir)
         if not only or "legacy" in only:
             phase_legacy_mock(args.python, state_dir)
         if args.real or "real" in only:

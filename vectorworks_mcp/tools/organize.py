@@ -1,5 +1,5 @@
 """vw_organize: layers, classes, stories, saved views, worksheet cells,
-resource import."""
+resource import, sheet viewports (script-backed, see scripts_lib/viewport.py)."""
 
 from __future__ import annotations
 
@@ -10,14 +10,16 @@ from .. import scripts_lib
 from ..errors import VWError, validation
 from ..host import doc_brief, get_host
 
-KINDS = ["layer", "class", "story", "saved_view", "worksheet", "resource"]
-ACTIONS = ["create", "set", "delete", "write", "import"]
+KINDS = ["layer", "class", "story", "saved_view", "worksheet", "resource", "viewport"]
+ACTIONS = ["create", "set", "delete", "write", "import", "update"]
 KIND_SYN = {"layers": "layer", "design_layer": "layer", "sheet": "layer", "sheet_layer": "layer", "classes": "class",
             "stories": "story", "level": "story", "view": "saved_view", "saved_views": "saved_view",
-            "worksheets": "worksheet", "cell": "worksheet", "resources": "resource", "symbol": "resource"}
+            "worksheets": "worksheet", "cell": "worksheet", "resources": "resource", "symbol": "resource",
+            "viewports": "viewport", "vp": "viewport", "drawing": "viewport", "sheet_viewport": "viewport"}
 ACTION_SYN = {"add": "create", "new": "create", "make": "create", "update": "set", "edit": "set", "modify": "set",
               "rename": "set", "show": "set", "hide": "set", "activate": "set", "remove": "delete", "del": "delete",
-              "put": "write", "set_cell": "write", "load": "import"}
+              "put": "write", "set_cell": "write", "load": "import", "regenerate": "update", "refresh": "update",
+              "redraw": "update"}
 
 
 def _cell(ref: str) -> tuple[int, int]:
@@ -33,7 +35,11 @@ def _cell(ref: str) -> tuple[int, int]:
 def handle(args: dict, ctx, warnings: list) -> dict:
     a = C.lower_keys(args)
     kind = C.choice(a.get("kind") or a.get("type") or a.get("what"), "kind", KINDS, KIND_SYN)
-    action = C.choice(a.get("action") or a.get("op"), "action", ACTIONS, ACTION_SYN)
+    raw_action = str(a.get("action") or a.get("op") or "").strip().lower()
+    synonyms = {k: v for k, v in ACTION_SYN.items() if k != "update"} if kind == "viewport" else ACTION_SYN
+    action = C.choice(a.get("action") or a.get("op"), "action", ACTIONS, synonyms)
+    if kind != "viewport" and raw_action in {"update", "regenerate", "refresh", "redraw"}:
+        action = "set"
     host = get_host()
     target = host.session.target(a.get("document"), write=True)
     inst = target.inst
@@ -42,6 +48,9 @@ def handle(args: dict, ctx, warnings: list) -> dict:
     if target.document:
         out["document"] = doc_brief(target.document)
     scale = C.scale_for(C.units_name(a.get("units")))
+
+    if kind == "viewport":
+        return _viewport(host, target, a, action, scale, out)
 
     if kind == "layer":
         if not inst.supports("layers"):
@@ -63,7 +72,7 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         if a.get("active") not in (None, ""):
             params["active"] = C.boolean(a["active"], "active")
         if a.get("scale") not in (None, ""):
-            params["scale"] = C.number(a["scale"], "scale")
+            params["scale"] = _scale(a["scale"])
         if a.get("elevation") not in (None, ""):
             params["elevation"] = C.length(a["elevation"], "elevation", scale)
         if a.get("opacity") not in (None, ""):
@@ -165,6 +174,158 @@ def handle(args: dict, ctx, warnings: list) -> dict:
                                                              "name": C.text(name, "name", required=True)},
                                 label="MCP import resource")
     out["via"] = "script"
+    return out
+
+
+def _scale(value) -> float:
+    """100 | "1:100" | "1/100" -> 100."""
+    text = str(value).strip().replace(" ", "")
+    match = re.fullmatch(r"1[:/](\d+(?:\.\d+)?)", text)
+    number = float(match.group(1)) if match else C.number(value, "scale", example="1:100")
+    if number <= 0:
+        raise validation("scale must be > 0 (100 or '1:100')", "scale", "1:100")
+    return number
+
+
+_VIS = {"show": 0, "visible": 0, "on": 0, "hide": -1, "hidden": -1, "off": -1, "invisible": -1, "gray": 2,
+        "grey": 2, "grayed": 2}
+_ANNOTATION_TYPES = ["text", "line", "rect", "polygon", "dimension"]
+_ANNOTATION_SYN = {"label": "text", "note": "text", "rectangle": "rect", "box": "rect", "dim": "dimension",
+                   "linear_dimension": "dimension", "polyline": "polygon", "segment": "line"}
+
+
+def _annotations(raw, scale: float) -> list[dict]:
+    from .. import builders as B
+    out = []
+    for i, item in enumerate(C.obj_list(raw, "annotations", example=[{"type": "text", "at": [0, 0], "text": "A"}], maximum=200)):
+        src = C.lower_keys(item)
+        field = f"annotations[{i}]"
+        kind = C.choice(src.get("type") or src.get("kind"), f"{field}.type", _ANNOTATION_TYPES, _ANNOTATION_SYN)
+        row: dict = {"type": kind}
+        if kind == "text":
+            row["at"] = C.point(src.get("at") or src.get("position") or src.get("origin"), f"{field}.at", scale)
+            row["text"] = C.text(src.get("text") or src.get("value"), f"{field}.text", required=True)
+            if src.get("size") not in (None, ""):
+                src.setdefault("text_size", src["size"])
+        elif kind in {"line", "dimension"}:
+            row["start"] = C.point(src.get("start") or src.get("from"), f"{field}.start", scale)
+            row["end"] = C.point(src.get("end") or src.get("to"), f"{field}.end", scale)
+            if kind == "dimension":
+                row["offset"] = C.length(src.get("offset", 300), f"{field}.offset", scale)
+        elif kind == "rect":
+            start = src.get("start") or src.get("corner")
+            if start is not None and src.get("end") is not None:
+                row["start"] = C.point(start, f"{field}.start", scale)
+                row["end"] = C.point(src["end"], f"{field}.end", scale)
+            else:
+                o = C.point(src.get("origin") or src.get("at") or start, f"{field}.origin", scale)
+                w = C.length(src.get("width"), f"{field}.width", scale)
+                h = C.length(src.get("height") or src.get("depth"), f"{field}.height", scale)
+                row["start"], row["end"] = o, [o[0] + w, o[1] + h]
+        else:
+            row["points"] = C.points(src.get("points"), f"{field}.points", scale, minimum=2)
+        style = B.style_props(src, field, basic=True)
+        if style:
+            row["style"] = style
+        out.append(row)
+    return out
+
+
+def viewport_record(record: dict) -> dict:
+    """Snippet viewport readback -> names (view, render_mode), rounded mm."""
+    from .capture import RENDER_CODES, STANDARD_VIEW_CODES
+    record = dict(record)
+    codes = record.pop("view_code", None)
+    record["view"] = next((n for n, c in STANDARD_VIEW_CODES.items() if codes and list(c) == list(codes)), codes)
+    rcode = record.pop("render_code", None)
+    record["render_mode"] = next((n for n, c in RENDER_CODES.items() if c == rcode), rcode)
+    record["center"] = [round(v, 3) for v in record.get("center") or []]
+    record["size"] = [round(v, 3) for v in record.get("size") or []]
+    return record
+
+
+def _viewport(host, target, a: dict, action: str, scale: float, out: dict) -> dict:
+    """kind=viewport through the vetted `viewport` run_script snippet (one undo step, rolled back on error)."""
+    from .. import builders as B
+    from .capture import RENDER_CODES, RENDER_SYNONYMS, STANDARD_VIEW_CODES, VIEW_SYNONYMS
+    from ..catalog import RENDER_MODES, STANDARD_VIEWS
+    if action not in {"create", "set", "update", "delete"}:
+        raise validation("kind=viewport supports create, set, update (regenerate), delete", "action", "create")
+    if not host.can_script(target.inst):
+        raise host.bridge.missing_action(target.inst, "run_script")
+    args: dict = {"action": action}
+    ref = a.get("target") or (a.get("name") if action != "create" else None)
+    if ref not in (None, ""):
+        args["target"] = B.norm_ref(ref, "target")
+    if a.get("sheet") not in (None, ""):
+        args["sheet"] = C.text(a["sheet"], "sheet", max_len=255)
+    if action == "create" and not args.get("sheet"):
+        raise validation("sheet (sheet layer name; created when missing) is required to create a viewport", "sheet",
+                         "A-101")
+    if action in {"set", "delete"} and not args.get("target"):
+        raise validation(f"target (viewport uuid or name) is required for action={action}", "target", "GF Plan")
+    if action == "update" and not (args.get("target") or args.get("sheet")):
+        raise validation("target (viewport) or sheet (all viewports on it) is required", "target", "GF Plan")
+    if action == "delete" and not C.boolean(a.get("confirm", False), "confirm"):
+        raise VWError("confirmation_required", "Deleting a viewport also deletes its annotations. Ask the user, then "
+                      "repeat with confirm=true.", field="confirm", example=True)
+    if action == "create" and a.get("name"):
+        args["name"] = C.text(a["name"], "name", max_len=255)
+    if a.get("new_name"):
+        args["new_name"] = C.text(a["new_name"], "new_name", max_len=255)
+    if a.get("layers") not in (None, ""):
+        args["layers"] = {"show": C.str_list(a["layers"], "layers")}
+    if a.get("scale") not in (None, ""):
+        args["scale"] = _scale(a["scale"])
+    view = a.get("view") or a.get("standard_view")
+    if view not in (None, ""):
+        args["view"] = list(STANDARD_VIEW_CODES[C.choice(view, "view", STANDARD_VIEWS, VIEW_SYNONYMS)])
+    if a.get("render_mode") not in (None, ""):
+        args["render"] = RENDER_CODES[C.choice(a["render_mode"], "render_mode", RENDER_MODES, RENDER_SYNONYMS)]
+    if a.get("at") not in (None, ""):
+        args["at"] = C.point(a["at"], "at", 1.0)  # sheet (paper) millimetres
+    crop = C.parse_json_maybe(a.get("crop"))
+    if crop is False or (isinstance(crop, (str, list)) and (crop == [] or str(crop).strip().lower() in {"none", "clear", "off", "false"})):
+        args["crop"] = "clear"
+    elif crop not in (None, ""):
+        if isinstance(crop, dict):
+            c = C.lower_keys(crop)
+            o = C.point(c.get("origin") or c.get("at"), "crop.origin", scale)
+            crop = [o, [o[0] + C.length(c.get("width"), "crop.width", scale), o[1] + C.length(c.get("height") or c.get("depth"), "crop.height", scale)]]
+            args["crop"] = crop
+        else:
+            pts = C.points(crop, "crop", scale, minimum=2)
+            if len(pts) == 2 and (pts[0][0] == pts[1][0] or pts[0][1] == pts[1][1]):
+                raise validation("crop rectangle needs two opposite corners [[x1,y1],[x2,y2]]", "crop", [[0, 0], [10000, 8000]])
+            args["crop"] = pts
+    classes = C.parse_json_maybe(a.get("classes"))
+    if classes not in (None, "", {}):
+        if not isinstance(classes, dict):
+            raise validation("classes must be {class name: show|hide|gray}", "classes", {"A-Furniture": "hide"})
+        args["classes"] = {}
+        for name, vis in classes.items():
+            key = str(vis).strip().lower() if not isinstance(vis, bool) else ("show" if vis else "hide")
+            if key not in _VIS:
+                raise validation(f"classes.{name} must be show, hide or gray", "classes", {name: "hide"})
+            args["classes"][str(name)] = _VIS[key]
+    if a.get("title") is not None:
+        args["title"] = str(a["title"])
+    if a.get("annotations") not in (None, "", []):
+        if action not in {"create", "set"}:
+            raise validation("annotations are added with action=create or set", "action", "set")
+        args["annotations"] = _annotations(a["annotations"], scale)
+    if action == "set" and len([k for k in args if k not in {"action", "target", "sheet"}]) == 0:
+        raise validation("action=set needs at least one change (layers, scale, view, render_mode, at, crop, classes, "
+                         "title, new_name, annotations)", "scale", "1:50")
+    result = host.script(target, "viewport", args, label=f"MCP viewport {action}") or {}
+    if isinstance(result.get("viewport"), dict):
+        result["viewport"] = viewport_record(result["viewport"])
+    out["result"] = result
+    out["via"] = "script"
+    out["undo"] = "one undo step"
+    if action in {"create", "set"}:
+        out["next_step"] = ("Done: the viewport readback above is authoritative. vw_capture(view='sheet', sheet=<sheet>) "
+                            "once if you want to look at it.")
     return out
 
 

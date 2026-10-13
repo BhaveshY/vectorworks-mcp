@@ -1,6 +1,6 @@
 ---
 name: vectorworks
-description: Drive Vectorworks 2024/2025 through the vectorworks MCP tools (vw_status, vw_read, vw_capture, vw_create, vw_edit, vw_apply, vw_view, vw_organize, vw_document, vw_script). Use for any Vectorworks request - draw or model floor plans, walls, doors, windows, slabs, roofs, spaces, rooms, text, dimensions or symbols; inspect, count, edit, move or delete objects; layers, classes, stories, saved views, worksheets, records; screenshots and visual checks; sheets, PDF/DWG/IFC export and import; open/save/switch documents; connection problems, setup, "connector unavailable", installing or repairing the Vectorworks MCP.
+description: Drive Vectorworks 2024/2025 through the vectorworks MCP tools (vw_status, vw_read, vw_capture, vw_create, vw_edit, vw_apply, vw_view, vw_organize, vw_document, vw_script). Use for any Vectorworks request - draw or model floor plans, walls, doors, windows, slabs, roofs, spaces, rooms, text, dimensions or symbols; inspect, count, edit, move or delete objects; line types, hatches, gradients, fonts, text styles, arrowheads; 3D massing (extrudes, columns); layers, classes, stories, saved views, worksheets, records; screenshots and visual checks; sheets, viewports, viewport annotations and dimensions, PDF/DWG/IFC export and import; open/save/switch documents; connection problems, setup, "connector unavailable", installing or repairing the Vectorworks MCP.
 ---
 
 # Vectorworks
@@ -45,7 +45,7 @@ working in Vectorworks at the same time. Follow these rules exactly.
 | `vw_edit` | change existing objects (one undo step) | yes |
 | `vw_apply` | raw 0.7 transaction grammar (power users, mixed create+edit) | yes |
 | `vw_view` | standard view, projection, render mode, fit/zoom/center, saved view restore/create, active layer | view only |
-| `vw_organize` | layers, classes, stories, saved views, worksheet cells, resource import | yes |
+| `vw_organize` | layers, classes, stories, saved views, worksheet cells, resource import, sheet viewports (+ annotations) | yes |
 | `vw_document` | list/info/activate/new/open/save/save_as/close, export pdf/dwg/dxf/ifc/png/jpg/vwx, import | yes |
 | `vw_script` | Python (`vs.*`) or VectorScript inside Vectorworks, one undo step, rolled back on error | yes |
 
@@ -69,6 +69,9 @@ vw_capture()                                         # whole drawing, top view
 vw_capture(view="objects", objects=["<uuid>"], standard_view="iso", render_mode="opengl")
 vw_create(objects=[{"type":"wall","id":"w1","start":[0,0],"end":[5000,0]},{"type":"door","wall":"$w1","offset":1500}])
 vw_edit(changes=[{"op":"move","target":"<uuid>","by":[1000,0]}])
+vw_edit(changes=[{"op":"set","target":"<uuid>","properties":{"fill":"Brick HF","line_style":"ISO-02 Dashed"}}])
+vw_create(objects=[{"type":"extrude","points":[[0,0],[8000,0],[8000,6000],[0,6000]],"height":9000}])
+vw_organize(kind="viewport", action="create", sheet="A-101", layers=["Ground Floor"], scale="1:100", view="top_plan")
 vw_view(standard_view="top_plan", fit="drawing")
 vw_organize(kind="layer", action="create", name="Furniture", scale=50)
 vw_document(action="export", path="C:\\Out\\plans.pdf", range="all_pages")
@@ -197,7 +200,8 @@ vw_edit(units="mm", changes=[
 ```
 
 `set` properties: name, class, fill_color, pen_color, fill_pattern, line_weight,
-opacity. Other ops: scale (`factor`), mirror (`axis` "x"/"y" + `center`),
+opacity, plus graphic styles (recipe I): fill, line_style, font, text_size,
+text_style, align, valign, start_marker / end_marker / arrows. Other ops: scale (`factor`), mirror (`axis` "x"/"y" + `center`),
 class (`class`), group, ungroup, select / deselect (`targets` or `criteria`).
 Prefer `reshape` / `parametric` over delete-and-recreate. `dry_run=true`
 validates without changing anything.
@@ -255,12 +259,81 @@ validates without changing anything.
   `vw_read(what="worksheet", target="Door Schedule", range="A1:D20")`; write
   `vw_organize(kind="worksheet", action="write", name="Door Schedule", cell="B3", value="12")`.
 - Records: `vw_read(what="records")`; attach/set with `vw_edit` op `record`.
-- Resources: `vw_read(what="resources", resource_type="symbols")`; import from a file
+- Resources: `vw_read(what="resources", type="hatch")` (also line_type, text_style, gradient,
+  image_fill, tile, wall_style, slab_style, symbols ...; `source` = document or library); import from a file
   `vw_organize(kind="resource", action="import", source="C:\\Lib\\furniture.vwx", name="Chair", resource_type="symbols")`.
 - Sheets / viewports / annotations: `vw_read(what="sheets")`,
-  `vw_read(what="viewports", target="A-101")`, `vw_read(what="annotations", target="A-101")`.
+  `vw_read(what="viewports", target="A-101")` (sheet name or uuid),
+  `vw_read(what="annotations", target="Ground floor plan")` (viewport name or uuid). Writing them: recipe J.
 - Plan checks (overlaps, gaps, unhosted openings): `vw_read(what="plan_quality")`.
 - What this Vectorworks bridge supports: `vw_read(what="capabilities")`.
+
+### I. Graphic attributes (line types, hatches, text, arrowheads)
+
+- Names: `vw_read(what="resources", type="hatch")` / `type="line_type"` / `type="text_style"` /
+  `type="gradient"`. Library names (`source: "library"`) are imported into the document on first use.
+- Change existing objects (one `vw_edit`; read back, rolled back on any mismatch):
+
+```text
+vw_edit(changes=[
+  {"op": "set", "target": "<slab>", "properties": {"fill": "Concrete HF"}},        # hatch by name
+  {"op": "set", "target": "<rect>", "properties": {"fill": {"gradient": "Brown-Yellow GR"}}},
+  {"op": "set", "target": "<rect2>", "properties": {"fill": "none", "pen_color": "#0000FF", "line_weight": 50}},
+  {"op": "set", "target": "<line>", "properties": {"line_style": "ISO-02 Dashed", "arrows": "end"}},
+  {"op": "set", "target": "<text>", "properties": {"font": "Arial", "text_size": 14, "text_style": "bold italic", "align": "center"}},
+  {"op": "set", "target": "<note>", "properties": {"text_style": "Callouts 12 pt"}}                 # text style resource
+])
+```
+
+- `fill`: `"none"`, `"solid"`, a hatch/gradient/image/tile name, or `{"hatch"|"gradient"|"image"|"tile": name}`.
+  `line_style`: a line type name, `"solid"`, or a dash index. Markers: `arrows` = start|end|both|none, or
+  `start_marker` / `end_marker` = arrow | open_arrow | dot | circle | slash | cross | none (or `{style, size}` in page mm).
+  Text: `font`, `text_size` (pt), `text_style` (bold/italic/underline or a text style name), `align`
+  left|center|right|justify, `valign` top|center|bottom|baseline.
+- The same keys work on any object in `vw_create` (plus pen_color, fill_color, line_weight, opacity).
+  They are applied by a script after the native create: the result says `undo: "two undo steps"`.
+
+### J. Sheets, viewports and annotations (drawing production)
+
+```text
+vw_organize(kind="viewport", action="create", sheet="A-101", name="GF plan",
+            layers=["Ground Floor"], scale="1:100", view="top_plan", at=[0, 0],
+            crop=[[-1000,-1000],[21000,15000]], classes={"A-Furniture": "hide"}, title="Ground floor",
+            annotations=[{"type":"text","at":[0,15500],"text":"GROUND FLOOR","text_size":14,"bold":true},
+                         {"type":"dimension","start":[0,0],"end":[20000,0],"offset":-1500},
+                         {"type":"line","start":[0,-500],"end":[3000,-500],"arrows":"end"}])
+vw_organize(kind="viewport", action="set", target="GF plan", scale="1:50", render_mode="hidden_line", at=[150, 0])
+vw_organize(kind="viewport", action="update", sheet="A-101")        # regenerate all viewports on the sheet
+vw_organize(kind="viewport", action="delete", target="GF plan", confirm=true)   # ask the user first
+vw_capture(view="sheet", sheet="A-101")
+```
+
+- The sheet layer is created when missing. `layers` = the design layers shown (all others hidden; default:
+  the visible ones). `scale` 100 or "1:100". `view` = top_plan, top, front, back, left, right, iso, ...;
+  `render_mode` = wireframe, hidden_line, opengl, ...
+- `at` = centre of the viewport on the sheet in paper mm (sheet origin = page centre). Without `at`, `set`
+  keeps the viewport where it is.
+- `crop` and `annotations` use MODEL coordinates (the same numbers as the drawing; plan views). Annotations:
+  text (at, text), line, rect, polygon, dimension (horizontal/vertical, offset); every style key of recipe I works.
+- The readback in `result.viewport` (scale, view, render_mode, layers, hidden_classes, centre, size, crop,
+  annotation count) is authoritative. One undo step per call; any error rolls everything back.
+- Then export with recipe E.
+
+### K. 3D massing
+
+```text
+vw_create(objects=[
+  {"type":"extrude","id":"block","points":[[0,0],[24000,0],[24000,12000],[0,12000]],"height":"18m","elevation":0},
+  {"type":"extrude","origin":[30000,0],"width":8000,"depth":8000,"height":30000,"fill":"none"},
+  {"type":"column","at":[2000,2000],"width":400,"depth":400,"height":3500},
+  {"type":"column","at":[6000,2000],"diameter":350}])
+vw_capture(view="objects", objects=["<uuid>"], standard_view="iso", render_mode="opengl")
+```
+
+- `extrude`: profile `points` (or `origin`+`width`+`depth`), `height` (or `top`), base `elevation`.
+  `column`: the Vectorworks Column plug-in (plain shaft; `parameters` for capital/base/other fields).
+- Extrudes/columns are made by a script: alone they are one undo step; mixed with walls etc. in one call they
+  are two (`undo` in the result says which). Floors: `type="slab"`.
 
 ### H. Escape hatch: `vw_script`
 

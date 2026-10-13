@@ -62,6 +62,8 @@ def handle(args: dict, ctx, warnings: list) -> dict:
             plan.hosted += fplan.hosted
             plan.ids += fplan.ids
             plan.warnings += fplan.warnings
+            plan.script_objects += fplan.script_objects
+            plan.styles += fplan.styles
         return plan
 
     plan = compile_all({}, {})  # validate everything before touching Vectorworks
@@ -73,10 +75,17 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         if needed:
             descriptors, schemas = _tx.load_schemas(host, target, needed)
             plan = compile_all(descriptors, schemas, _tx.doc_mm_per_unit(target))
+        if (plan.script_objects or plan.styles) and not host.can_script(target.inst):
+            raise host.bridge.missing_action(target.inst, "run_script")
     warnings.extend(dict.fromkeys(plan.warnings))
     if dry_run:
         out = {"ok": True, "dry_run": True, "units": units, "native_units": "mm",
-               "operations": plan.primary + plan.hosted, "count": len(plan.primary) + len(plan.hosted)}
+               "operations": plan.primary + plan.hosted,
+               "count": len(plan.primary) + len(plan.hosted) + len(plan.script_objects)}
+        if plan.script_objects:
+            out["script_objects"] = plan.script_objects
+        if plan.styles:
+            out["styles"] = [{"id": i, "style": st} for i, st in plan.styles]
         if join_walls is not None:
             out["join_walls"] = join_walls
         if fp_counts:
@@ -89,13 +98,18 @@ def handle(args: dict, ctx, warnings: list) -> dict:
     created_ids: dict[str, str] = {}
     receipts: list = []
     wall_joins: list = []
-    if plan.hosted and inst.v2:
+    steps = 0
+    if not (plan.primary or plan.hosted):
+        pass  # script-only plan (extrudes / columns)
+    elif plan.hosted and inst.v2:
         # v2: native resolves "$wall" refs inside one transaction (contract 2.3 vw_create).
+        steps = 1
         summary = _tx.run_general(host, target, plan.primary + plan.hosted, key, ctx, join_walls=join_walls)
         created_ids.update(_tx.ids_from(summary))
         receipts += summary["receipts"]
         wall_joins += summary.get("wall_joins") or []
     else:
+        steps = 1
         summary = _tx.run_general(host, target, plan.primary, key, ctx, join_walls=join_walls)
         created_ids.update(_tx.ids_from(summary))
         receipts += summary["receipts"]
@@ -109,10 +123,32 @@ def handle(args: dict, ctx, warnings: list) -> dict:
                                   "were not placed.", commit_state="committed", details={"created": created_ids})
                 op["params"]["wall_uuid"] = uuid
             warnings.append("Pre-1.0 bridge: walls and their doors/windows were created in two undo steps.")
+            steps = 2
             target2 = host.session.target(a.get("document"), write=True, bind_apply=True)
             summary2 = _tx.run_general(host, target2, plan.hosted, key + "-h", ctx)
             created_ids.update(_tx.ids_from(summary2))
             receipts += summary2["receipts"]
+    script_result: dict = {}
+    restyle = [{"id": i, "uuid": created_ids[i], "style": st} for i, st in plan.styles if created_ids.get(i)]
+    if plan.script_objects or restyle:
+        if steps:
+            target = host.session.target(a.get("document"), write=True)
+        try:
+            script_result = host.script(target, "massing", {"objects": plan.script_objects, "restyle": restyle},
+                                        label="MCP create", ctx=ctx) or {}
+        except VWError as exc:
+            if steps:
+                exc.message = (f"{exc.message} (the native objects of this call WERE created: "
+                               f"{sorted(created_ids)}; only the script part was rolled back)")
+                exc.commit_state = "partial"
+                exc.next_step = ("The native objects listed in the message exist (one undo step). Fix the named "
+                                 "problem and create only the extrudes/columns (or apply the styles with vw_edit) "
+                                 "again; do not resend the whole call.")
+            raise
+        steps += 1
+        for row in script_result.get("created") or []:
+            receipts.append({"operation_id": row["id"], "uuid": row["uuid"], "type": row["type"]})
+            created_ids[row["id"]] = row["uuid"]
     created = []
     for r in receipts:
         entry = {"id": r.get("operation_id") or r.get("local_ref"), "uuid": r.get("uuid"), "type": r.get("type")}
@@ -120,7 +156,14 @@ def handle(args: dict, ctx, warnings: list) -> dict:
             entry["wall"] = r["parent_uuid"]
         created.append({k: v for k, v in entry.items() if v})
     out = {"ok": True, "created": created, "ids": created_ids, "count": len(created), "idempotency_key": key,
-           "undo": "one undo step" if not (plan.hosted and not inst.v2) else "two undo steps"}
+           "undo": {1: "one undo step", 2: "two undo steps"}.get(steps, f"{steps} undo steps")}
+    if script_result.get("styled"):
+        out["styled"] = script_result["styled"]
+    if script_result.get("imported_resources"):
+        out["imported_resources"] = script_result["imported_resources"]
+    if steps > 1 and (plan.script_objects or restyle):
+        warnings.append("Native objects and the script-made part (extrudes/columns/graphic styles) are separate "
+                        "undo steps (native apply_operations and run_script cannot share one undo event).")
     if wall_joins:
         out["wall_joins"] = wall_joins
     if fp_counts:

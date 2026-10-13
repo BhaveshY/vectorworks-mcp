@@ -5,8 +5,8 @@ Every capability of the 0.7 host (47-tool `compat` profile and 9-tool `fast-nati
 (`legacy/server_v07.py`).
 
 "Native" = a native bridge action; "script" = a vetted snippet from `vectorworks_mcp/scripts_lib/` run through native
-`run_script` (needs the 1.0 bridge; listed under `script_features` in `vw_read(what="capabilities")`, not yet
-live-tested in Vectorworks). "rev5" = works on the currently deployed pre-1.0 bridge (capability revision 5).
+`run_script` (needs the 1.0 bridge; listed under `script_features` in `vw_read(what="capabilities")`; the
+viewport, graphic-style, resource-list and massing snippets were live-tested in Vectorworks 2024 on 2026-10-13). "rev5" = works on the currently deployed pre-1.0 bridge (capability revision 5).
 
 ## fast-native profile (0.7 default)
 
@@ -20,10 +20,11 @@ live-tested in Vectorworks). "rev5" = works on the currently deployed pre-1.0 br
 | `vw_read(action=summary)` | `vw_read(what="summary", layer, type)` | rev5 ✓ |
 | `vw_read(action=query, criteria, layer, object_type, fields, cursor)` | `vw_read(what="query", criteria, layer, type, class, name, fields, cursor)` | rev5 ✓ |
 | `vw_read(action=selection)` | `vw_read(what="selection")` | rev5 ✓ |
-| `vw_read(action=sheet_layers / viewports / viewport_annotations)` | `vw_read(what="sheets" / "viewports" / "annotations")` | rev5 ✓ (saved documents) |
+| `vw_read(action=sheet_layers / viewports / viewport_annotations)` | `vw_read(what="sheets" / "viewports" / "annotations")` | rev5 ✓ (saved documents); v2: sheets via `layers`, viewports/annotations via script (also unsaved documents; `target` = sheet / viewport name or uuid) |
+| `vw_apply` sheet layer / viewport / annotation lifecycle ops (`apply_documentation_operations`, gated off since 0.7) | `vw_organize(kind="layer", layer_kind="sheet")`, `vw_organize(kind="viewport", action=create/set/update/delete, annotations=[...])` | script `viewport` (one undo step, readback, rollback); the native gated transaction stays disabled |
 | `vw_read(action=plan_quality, plan)` | `vw_read(what="plan_quality", plan)` | host-only, lazy import |
 | `vw_catalog(capabilities)` | `vw_read(what="capabilities")` | + tool annotations, script features |
-| `vw_catalog(classes / symbols / worksheets / resources)` | `vw_read(what="classes" / "symbols" / "worksheets" / "resources")` | rev5 ✓; other resource types (hatches, line types, text/wall/slab styles …) via script |
+| `vw_catalog(classes / symbols / worksheets / resources)` | `vw_read(what="classes" / "symbols" / "worksheets" / "resources")` | rev5 ✓; other types (`type=hatch / line_type / text_style / gradient / image_fill / tile / wall_style …`) via script, document + Vectorworks library names |
 | `vw_catalog(parametric_schemas, query)` | `vw_read(what="parametric_schema", target)` | rev5 ✓ |
 | `vw_apply(operations, idempotency_key, coordinate_units, target_binding)` | `vw_apply(operations, coordinate_units, idempotency_key?, document?)` | grammar unchanged; key optional; binding automatic; `op`/`type`, numeric strings, flat params accepted; door/window descriptor auto-filled |
 | `vw_execute_operations` | `vw_apply` | same engine |
@@ -63,7 +64,7 @@ live-tested in Vectorworks). "rev5" = works on the currently deployed pre-1.0 br
 | `vw_create_schematic_floor_plan` | `vw_create(floor_plan={style:"schematic", ...})` | |
 | `vw_plan_schematic_floor_plan` | `vw_create(floor_plan=..., dry_run=true)` | no Vectorworks call |
 | `vw_create_bim_floor_plan` | `vw_create(floor_plan={rooms, walls, doors, windows, label_rooms, dimension_rooms, spaces})` | now also places hosted doors/windows on the nearest wall |
-| `vw_set_object_property`, `vw_batch_set_object_properties` | `vw_edit(changes=[{op:"set", target(s), properties}])` | name, class, fill/pen colour (hex, rgb, names), fill pattern, line weight, opacity |
+| `vw_set_object_property`, `vw_batch_set_object_properties` | `vw_edit(changes=[{op:"set", target(s), properties}])` | native: name, class, fill/pen colour (hex, rgb, names), fill pattern, line weight, opacity; script (read back): fill none/solid/hatch/gradient/image/tile, line type, font, text size/style/alignment, markers |
 | `vw_selection(get)` | `vw_read(what="selection")` | |
 | `vw_selection(select, criteria)` / `(clear)` | `vw_edit(changes=[{op:"select", criteria or targets}])` / `{op:"deselect"}` | select by uuid needs v2 |
 | `vw_selection(delete / move / duplicate)` | `vw_edit(changes=[{op:"delete"/"move"/"duplicate", target:"selection"}])` | |
@@ -76,7 +77,10 @@ live-tested in Vectorworks). "rev5" = works on the currently deployed pre-1.0 br
 | `vw_tool_safety` | annotations | |
 
 ## New in 1.0 (not in 0.7)
-Multi-document (`documents`, `document=` on every tool, `vw_document` list/activate/new/close), instance pinning,
+Sheet viewports with layer/class visibility, scale, view, render mode, crop, position, title and annotations
+(text/line/rect/polygon/dimension); graphic styles (line types, hatches, gradients, fonts, text styles,
+arrowheads) on `vw_edit` and at creation; 3D massing (`vw_create` types `extrude`, `column`);
+multi-document (`documents`, `document=` on every tool, `vw_document` list/activate/new/close), instance pinning,
 async jobs with progress (`vw_status(job_id)`), layers create/set/delete, stories, saved views (list/restore/create/
 delete), class attributes, IFC import/export, PDF page ranges, transforms rotate/scale/mirror, move to layer,
 group/ungroup, record formats (list/attach/set/detach/read), resource import from another file, composite `room`

@@ -1,5 +1,6 @@
 """vw_edit: change existing objects (native apply_operations; mirror / layer /
-group / ungroup / record through the vetted run_script edit engine)."""
+group / ungroup / record and graphic styles (line type, hatch/gradient fill, text
+font/size/style/alignment, markers) through the vetted run_script edit engine)."""
 
 from __future__ import annotations
 
@@ -88,6 +89,8 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         if isinstance(result, dict):
             out["applied"] += int(result.get("applied") or 0)
             out["receipts"] += result.get("receipts") or []
+            if result.get("imported_resources"):
+                out["imported_resources"] = result["imported_resources"]
         steps += 1
     for sel in plan.selection_ops:
         if sel["op"] == "deselect":

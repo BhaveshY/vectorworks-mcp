@@ -41,8 +41,8 @@ Arguments: `what` (required), `type`, `layer`, `class`, `name`, `criteria`,
 | `selection` | selected objects (`fields`) |
 | `view` | current view, zoom, render mode, active layer |
 | `saved_views` | saved views |
-| `sheets` / `viewports` / `annotations` | sheet layers / viewports of a sheet (`target`) / viewport annotations |
-| `symbols` / `resources` | symbol definitions / resources (`resource_type`) |
+| `sheets` / `viewports` / `annotations` | sheet layers / viewports of a sheet (`target` = sheet name or uuid: scale, view, render_mode, layers, hidden_classes, centre, size, crop) / annotations of a viewport (`target` = viewport name or uuid) |
+| `symbols` / `resources` | symbol definitions / resources (`type` or `resource_type`: hatch, line_type, text_style, gradient, image_fill, tile, wall_style, slab_style, roof_style, material, symbols, ...; each item has `source` document or library) |
 | `worksheets` / `worksheet` | worksheet list / cells of one worksheet (`target`, `range` like `"A1:D20"`) |
 | `records` | record formats and fields |
 | `parametric_schema` | parameter ids, types and defaults of a plug-in object (`target` = "Door", "Window", "Space", "Stair", ...) |
@@ -82,6 +82,13 @@ the same call as `"$id"`), `name`, `class`.
 | `door` / `window` | `wall` (`"$id"` or uuid), `offset` (same-call wall) or `at`, `width`, `height`; window `sill`; `parameters` |
 | `parametric` | `plugin`, `at`, `rotation`, `parameters` `{"ParamId": value}` |
 | `room` | `origin`, `width`, `depth`, `name` (+ `space`, `dimensions`): 4 real walls + label |
+| `extrude` | `points` (profile) or `origin` + `width` + `depth`; `height` (or `top`), `elevation` (base, 0) |
+| `column` | `at`, `width` + `depth` (400) or `diameter`, `height` (3000), `rotation`, `parameters` (Column plug-in fields) |
+
+Style keys on any object (applied by a script after the native create, so the result says two undo steps):
+`fill`, `line_style`, `pen_color`, `fill_color`, `line_weight`, `opacity`, text `font` / `text_size` /
+`text_style` / `align` / `valign`, `arrows` / `start_marker` / `end_marker` (values as in vw_edit `set`).
+Extrudes and columns alone are one undo step.
 
 `floor_plan` = `{"rooms": [{name, origin, width, depth}], "walls": [...],
 "doors": [{at, width}], "windows": [{at, width}], "wall_thickness",
@@ -95,7 +102,7 @@ Arguments: `changes` (required), `units`, `dry_run`, `document`,
 
 | `op` | Fields |
 |---|---|
-| `set` | `properties`: name, class, fill_color, pen_color, fill_pattern, line_weight, opacity |
+| `set` | `properties`: name, class, fill_color, pen_color, fill_pattern, line_weight, opacity; `fill` none / solid / hatch, gradient, image or tile name (or `{"hatch": name}`); `line_style` line type name / "solid" / index; `font`; `text_size` (pt); `text_style` bold, italic, underline or a text style name; `align` left / center / right / justify; `valign`; `arrows` start / end / both / none; `start_marker` / `end_marker` arrow, open_arrow, dot, circle, slash, cross, none or `{style, size}` (page mm). Library resources are imported on first use; every value is read back. |
 | `move` | `by` `[dx, dy]` |
 | `rotate` | `angle` (degrees), `center` |
 | `scale` | `factor` |
@@ -129,13 +136,22 @@ report the current view.
 
 ## vw_organize (write)
 
-`kind` (layer, class, story, saved_view, worksheet, resource) + `action`
-(create, set, delete, write, import). Fields: `name`, `new_name`,
+`kind` (layer, class, story, saved_view, worksheet, resource, viewport) + `action`
+(create, set, delete, write, import, update). Fields: `name`, `new_name`,
 `visibility` (show / gray / hide), `active`, `scale`, `elevation`, `opacity`,
 `fill_color`, `pen_color`, `line_weight`, `use_at_creation`, `layer_kind`
 (design / sheet), `title`, `cell` + `value` (worksheet write), `source` +
 `resource_type` (resource import), `force` (delete non-empty layer), `units`,
 `document`. Saved views: create, set (= restore), delete. Stories: create, set.
+
+`kind="viewport"` (one undo step, rolled back on error, readback in `result.viewport`):
+`action` create (`sheet` required; sheet layer created if missing) / set (`target` = viewport name or uuid)
+/ update (regenerate `target`, or every viewport on `sheet`) / delete (`target`, `confirm=true`).
+Fields: `name`, `new_name`, `layers` (design layers shown, others hidden), `scale` (100 or "1:100"),
+`view` (top_plan, top, front, ..., iso), `render_mode`, `at` [x, y] (viewport centre on the sheet, paper mm),
+`crop` [[x1, y1], [x2, y2]] or a polygon in model coordinates (`"none"` removes it), `classes`
+`{name: show|hide|gray}`, `title` (drawing title), `annotations` `[{type text|line|rect|polygon|dimension,
+... model coordinates, + style keys}]`, `units` (model lengths).
 
 ## vw_document (write, destructive)
 

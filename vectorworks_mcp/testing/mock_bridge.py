@@ -40,6 +40,9 @@ MAIN_ACTIONS = {"get_document_info", "list_documents", "activate_document", "new
                 "describe_parametric_schema", "get_view", "set_view", "capture_view", "saved_views", "stories", "symbol",
                 "worksheet", "resources", "get_sheet_layers", "get_viewports", "get_viewport_annotations", "run_script"}
 NO_DOC_ACTIONS = {"list_documents", "new_document", "open_document"}
+MOCK_LIBRARY = {66: ["Aluminum HF", "Brick HF"], 96: ["Clouds", "Dash 2"], 109: ["Callouts 12 pt"],
+                120: ["Brown-Yellow GR"]}
+MOCK_FONTS = ["Arial", "Times New Roman"]
 ASYNC_ACTIONS = {"export_pdf", "export_dwg", "import_dwg", "export_ifc", "import_ifc", "open_document",
                  "export_vectorworks_document", "run_script", "capture_view"}
 LEGACY_MISSING = {"list_documents", "activate_document", "new_document", "close_document", "layers", "saved_views",
@@ -76,6 +79,7 @@ class Doc:
         self.records: dict[str, list[str]] = {"Costs": ["Cost", "Supplier"]}
         self.worksheets = {"Room Schedule": {"rows": 5, "columns": 3, "cells": {(1, 1): "Room", (1, 2): "Area"}}}
         self.symbols = ["Chair", "Table"]
+        self.resources: dict[int, list[str]] = {66: ["Hatch A", "Hatch B"], 96: ["Dash"]}
         self.view = {"standard_view": 7, "projection": 6, "render_mode": 0, "zoom": 1.0, "center": [0.0, 0.0]}
 
     def info(self, session: str) -> dict:
@@ -221,6 +225,7 @@ class FakeVS:
     def __init__(self, model: Model) -> None:
         self._m = model
         self._lists: dict[int, list[str]] = {}
+        self._list_types: dict[int, int] = {}
         self.calls: list[str] = []
 
     @property
@@ -247,7 +252,7 @@ class FakeVS:
             return self._d.objects[h]["type_id"]
         if any(l["uuid"] == h for l in self._d.layers):
             return 31
-        if h in self._d.records or h.startswith(("view:", "story:", "pio:")):
+        if h in self._d.records or h.startswith(("view:", "story:", "pio:", "res:")):
             return 47
         return 0
 
@@ -361,10 +366,11 @@ class FakeVS:
         self._d.objects[h]["records"].pop(rec, None)
 
     def BuildResourceList(self, rtype, folder, sub):
-        names = {47: list(self._d.records), 103: list(self._d.saved_views), 16: list(self._d.symbols),
-                 66: ["Hatch A", "Hatch B"], 97: ["Dash"]}.get(int(rtype), [])
+        names = {47: list(self._d.records), 16: list(self._d.symbols)}.get(int(rtype)) or \
+            list(self._d.resources.get(int(rtype), []))
         list_id = len(self._lists) + 1
         self._lists[list_id] = names
+        self._list_types[list_id] = int(rtype)
         return list_id, len(names)
 
     def BuildResourceListN(self, rtype, path):
@@ -387,15 +393,6 @@ class FakeVS:
         if name in self._d.saved_views:
             self._d.saved_views.remove(name)
 
-    def DelObject(self, h):
-        if isinstance(h, str) and h.startswith("view:"):
-            self._d.saved_views.remove(h[5:])
-        elif h in self._d.objects:
-            del self._d.objects[h]
-
-    def GetBBox(self, h):
-        b = self._d.objects[h].get("bounds") or {"top_left": [0, 0], "bottom_right": [0, 0]}
-        return tuple(b["top_left"]), tuple(b["bottom_right"])
 
     def GetParametricRecord(self, h):
         return "pio:" + self._d.objects[h].get("plugin_name", self._d.objects[h]["type"].title())
@@ -428,6 +425,365 @@ class FakeVS:
 
     def ImportImageFile(self, path, at):
         return self._d.add("image", name=os.path.basename(path), x1=at[0], y1=at[1])["uuid"]
+
+    # ----- units / layers (viewport + massing snippets) -------------------------
+    def GetUnits(self):
+        return (1, 0, 0, 25.4, "mm", " sq m")
+
+    def GetLName(self, h):
+        return next((l["name"] for l in self._d.layers if l["uuid"] == h), "")
+
+    def GetLayerByName(self, name):
+        return next((l["uuid"] for l in self._d.layers if l["name"] == name), None)
+
+    def ActLayer(self):
+        return self.GetLayerByName(self._d.active_layer)
+
+    def Layer(self, name):
+        if self.GetLayerByName(name) is None:
+            self._d.layers.append({"uuid": _uuid(), "name": name, "kind": "design", "visible": "show", "scale": 50.0,
+                                   "elevation": 0.0, "opacity": 100})
+        self._d.active_layer = name
+
+    def CreateLayer(self, name, kind):
+        layer = {"uuid": _uuid(), "name": name, "kind": "sheet" if int(kind) == 2 else "design", "visible": "show",
+                 "scale": 1.0 if int(kind) == 2 else 50.0, "elevation": 0.0, "opacity": 100}
+        self._d.layers.append(layer)
+        self._d.active_layer = name
+        return layer["uuid"]
+
+    def _layer(self, h):
+        return next((l for l in self._d.layers if l["uuid"] == h), None)
+
+    def GetLVis(self, h):
+        return {"show": 0, "gray": 2, "hide": -1}.get(self._layer(h).get("visible"), 0)
+
+    def GetLScale(self, h):
+        return float(self._layer(h).get("scale") or 1.0)
+
+    def FInLayer(self, h):
+        name = self.GetLName(h)
+        items = [u for u in self._d.order if u in self._d.objects and self._d.objects[u]["layer"] == name
+                 and not self._d.objects[u].get("in_group")]
+        self._iter = items
+        return items[0] if items else None
+
+    def NextObj(self, h):
+        items = getattr(self, "_iter", [])
+        i = items.index(h) if h in items else len(items)
+        return items[i + 1] if i + 1 < len(items) else None
+
+    def FInGroup(self, g):
+        items = list(self._d.objects[g].get("members") or []) if g in self._d.objects else []
+        self._iter = items
+        return items[0] if items else None
+
+    def ClassNum(self):
+        return len(self._d.classes)
+
+    def ClassList(self, i):
+        return list(self._d.classes)[int(i) - 1]
+
+    def GetCVis(self, name):
+        return {"show": 0, "gray": 2, "hide": -1}.get(self._d.classes.get(name, {}).get("visibility"), 0)
+
+    # ----- object variables + geometry ---------------------------------------------
+    def _ov(self, h):
+        return self._d.objects[h].setdefault("ov", {})
+
+    def GetObjectVariableInt(self, h, index):
+        layer = self._layer(h)
+        if layer is not None and int(index) == 154:
+            return 2 if layer["kind"] == "sheet" else 1
+        return int(self._ov(h).get(int(index), 0))
+
+    GetObjectVariableLongInt = GetObjectVariableInt
+
+    def GetObjectVariableReal(self, h, index):
+        return float(self._ov(h).get(int(index), 0.0))
+
+    def GetObjectVariableBoolean(self, h, index):
+        return bool(self._ov(h).get(int(index), False))
+
+    def GetObjectVariableString(self, h, index):
+        return str(self._ov(h).get(int(index), ""))
+
+    def _set_ov(self, h, index, value):
+        self._ov(h)[int(index)] = value
+
+    SetObjectVariableInt = SetObjectVariableLongInt = SetObjectVariableReal = _set_ov
+    SetObjectVariableBoolean = SetObjectVariableString = _set_ov
+
+    def _new(self, otype, **fields):
+        obj = self._d.add(otype, **fields)
+        obj["type_id"] = {"extrude": 24, "viewport": 122, "group": 11, "column": 86}.get(otype, obj["type_id"])
+        self._last = obj["uuid"]
+        return obj
+
+    def LNewObj(self):
+        return getattr(self, "_last", None)
+
+    def Rect(self, *args):
+        flat = [c for a in args for c in (a if isinstance(a, (tuple, list)) else (a,))]  # POINTs or x1, y1, x2, y2
+        self._new("rect", x1=float(flat[0]), y1=float(flat[1]), x2=float(flat[2]), y2=float(flat[3]))
+
+    def BeginPoly(self):
+        self._poly = []
+
+    def AddPoint(self, p):
+        self._poly.append([float(p[0]), float(p[1])])
+
+    def EndPoly(self):
+        self._new("polygon", points=self._poly, closed=True)
+
+    def MoveTo(self, p):
+        self._pen = [float(p[0]), float(p[1])]
+
+    def LineTo(self, p):
+        self._new("line", x1=self._pen[0], y1=self._pen[1], x2=float(p[0]), y2=float(p[1]))
+
+    def TextOrigin(self, p):
+        self._text_at = [float(p[0]), float(p[1])]
+
+    def CreateText(self, text):
+        at = getattr(self, "_text_at", [0.0, 0.0])
+        self._new("text", text=text, x1=at[0], y1=at[1], text_size=10.0)
+
+    def GetText(self, h):
+        return self._d.objects[h].get("text", "")
+
+    def LinearDim(self, a, b, offset, dim_type, arrow, text_flag, text_offset):
+        self._new("linear_dimension", start_x=float(a[0]), start_y=float(a[1]), end_x=float(b[0]), end_y=float(b[1]),
+                  offset=float(offset))
+
+    def HExtrude(self, profile, bottom, top):
+        prof = self._d.objects.pop(profile)
+        self._d.order.remove(profile)
+        return self._new("extrude", points=prof["points"], bottom=float(bottom), top=float(top))["uuid"]
+
+    def Get3DInfo(self, h):
+        o = self._d.objects[h]
+        return (0.0, 0.0, o.get("top", 0.0) - o.get("bottom", 0.0))
+
+    def CreateCustomObjectN(self, name, p, rotation, show_pref):
+        if name != "Column2":
+            return None
+        obj = self._new("column", plugin_name=name, x1=float(p[0]), y1=float(p[1]), rotation=float(rotation))
+        self._d.records.setdefault(name, ["OA Height", "Shaft Width", "Shaft Depth", "Diameter", "Use Capital",
+                                          "Use Base", "ShaftType", "Shaft Type"])
+        obj["records"][name] = {}
+        return obj["uuid"]
+
+    def GetBBox(self, h):
+        o = self._d.objects[h]
+        if o["type"] == "viewport":
+            x, y = o["ov"].get(1024, 0.0), o["ov"].get(1025, 0.0)
+            return (x - 50.0, y + 40.0), (x + 50.0, y - 40.0)
+        b = o.get("bounds") or {"top_left": [0, 0], "bottom_right": [0, 0]}
+        return tuple(b["top_left"]), tuple(b["bottom_right"])
+
+    def HMove(self, h, dx, dy):
+        o = self._d.objects[h]
+        if o["type"] == "viewport":
+            o["ov"][1024] = o["ov"].get(1024, 0.0) + float(dx)
+            o["ov"][1025] = o["ov"].get(1025, 0.0) + float(dy)
+
+    # ----- graphic attributes ---------------------------------------------------------
+    def _attr(self, h):
+        return self._d.objects[h].setdefault("attrs", {})
+
+    def SetClass(self, h, name):
+        self._d.objects[h]["class"] = name
+
+    def SetPenFore(self, h, color):
+        self._attr(h)["pen"] = list(color)
+
+    def SetFillFore(self, h, color):
+        self._attr(h)["fill_color"] = list(color)
+
+    def SetLW(self, h, lw):
+        self._attr(h)["lw"] = int(lw)
+
+    def SetOpacityN(self, h, pen, fill):
+        self._attr(h)["opacity"] = int(fill)
+        return True
+
+    def SetLSN(self, h, value):
+        self._attr(h)["ls"] = int(value)
+
+    def GetLSN(self, h):
+        return self._attr(h).get("ls", 2)
+
+    def SetFPat(self, h, value):
+        self._attr(h)["fpat"] = int(value)
+        self._attr(h).pop("hatch", None)
+
+    def GetFPat(self, h):
+        return self._attr(h).get("fpat", 1)
+
+    def SetVectorFill(self, h, name):
+        if name not in self._d.resources.get(66, []):
+            return False
+        self._attr(h)["hatch"] = name
+        return True
+
+    def GetVectorFill(self, h):
+        name = self._attr(h).get("hatch")
+        return (name is not None, name or "")
+
+    def Name2Index(self, name):
+        for rtype, names in self._d.resources.items():
+            if name in names:
+                return 1000 + rtype * 10 + names.index(name)
+        return 0
+
+    def BuildResourceList2(self, rtype, folder, sub, default_content):
+        names = list(self._d.resources.get(int(rtype), []))
+        if folder:
+            names += [n for n in MOCK_LIBRARY.get(int(rtype), []) if n not in names]
+        list_id = len(self._lists) + 1
+        self._lists[list_id] = names
+        self._list_types[list_id] = int(rtype)
+        return list_id, len(names)
+
+    def ImportResToCurFileN(self, list_id, index, cb):
+        name = self._lists[list_id][int(index) - 1]
+        bucket = self._d.resources.setdefault(self._list_types.get(list_id, 0), [])
+        if name not in bucket:
+            bucket.append(name)
+        return "res:" + name
+
+    def SetTextStyleRef(self, h, ref):
+        self._attr(h)["text_style_ref"] = int(ref)
+
+    def GetTextStyleRef(self, h):
+        return self._attr(h).get("text_style_ref", 0)
+
+    def GetFontID(self, name):
+        return MOCK_FONTS.index(name) + 1 if name in MOCK_FONTS else 1
+
+    def GetFontName(self, fid):
+        return MOCK_FONTS[int(fid) - 1]
+
+    def SetTextFont(self, h, start, count, fid):
+        self._attr(h)["font"] = int(fid)
+
+    def GetTextFont(self, h, pos):
+        return self._attr(h).get("font", 1)
+
+    def SetTextSize(self, h, start, count, size):
+        self._d.objects[h]["text_size"] = float(size)
+
+    def GetTextSize(self, h, pos):
+        return float(self._d.objects[h].get("text_size", 10.0))
+
+    def SetTextStyle(self, h, start, count, style):
+        # Like Vectorworks 2024: 0 clears the face, any other value toggles those bits.
+        self._attr(h)["face"] = 0 if int(style) == 0 else self._attr(h).get("face", 0) ^ int(style)
+
+    def GetTextStyle(self, h, pos):
+        return self._attr(h).get("face", 0)
+
+    def SetTextJust(self, h, value):
+        self._attr(h)["just"] = int(value)
+
+    def GetTextJust(self, h):
+        return self._attr(h).get("just", 1)
+
+    def SetTextVerticalAlign(self, h, value):
+        self._attr(h)["valign"] = int(value)
+
+    def GetTextVerticalAlign(self, h):
+        return self._attr(h).get("valign", 1)
+
+    def _set_marker(self, key, h, style, angle, size, width, basis, thickness, visible):
+        if self._d.objects[h]["type"] not in {"line", "polygon", "arc", "wall"}:
+            return False
+        self._attr(h)[key] = (int(style), bool(visible))
+        return True
+
+    def SetObjBeginningMarker(self, h, *args):
+        return self._set_marker("m0", h, *args)
+
+    def SetObjEndMarker(self, h, *args):
+        return self._set_marker("m1", h, *args)
+
+    def GetObjBeginningMarker(self, h):
+        style, vis = self._attr(h).get("m0", (0, False))
+        return (True, style, 15, 0.125, 0.0, 0, 0.0, vis)
+
+    def GetObjEndMarker(self, h):
+        style, vis = self._attr(h).get("m1", (0, False))
+        return (True, style, 15, 0.125, 0.0, 0, 0.0, vis)
+
+    # ----- viewports ------------------------------------------------------------------
+    def CreateVP(self, sheet):
+        layer = self._layer(sheet)
+        if layer is None or layer["kind"] != "sheet":
+            return None
+        obj = self._new("viewport", vp_layers={}, vp_classes={}, crop=None, annotations=[])
+        obj["layer"] = layer["name"]
+        obj["ov"] = {1003: 1.0, 1007: 0, 1000: 0, 1001: 0, 1024: 0.0, 1025: 0.0}
+        return obj["uuid"]
+
+    def SetVPLayerVisibility(self, vp, layer, vis):
+        self._d.objects[vp]["vp_layers"][self.GetLName(layer)] = int(vis)
+        return True
+
+    def GetVPLayerVisibility(self, vp, layer):
+        return (True, self._d.objects[vp]["vp_layers"].get(self.GetLName(layer), -1))
+
+    def SetVPClassVisibility(self, vp, name, vis):
+        self._d.objects[vp]["vp_classes"][name] = int(vis)
+        return True
+
+    def GetVPClassVisibility(self, vp, name):
+        return (True, self._d.objects[vp]["vp_classes"].get(name, -1))
+
+    def UpdateVP(self, vp):
+        self._d.objects[vp]["ov"][1004] = False
+
+    def SetVPCropObject(self, vp, crop):
+        self._d.objects[vp]["crop"] = crop
+        self._d.objects[crop]["in_group"] = vp
+        return True
+
+    def GetVPCropObject(self, vp):
+        return self._d.objects[vp].get("crop")
+
+    def VPHasCropObject(self, vp):
+        return bool(self._d.objects[vp].get("crop"))
+
+    def AddVPAnnotationObject(self, vp, h):
+        self._d.objects[vp]["annotations"].append(h)
+        self._d.objects[h]["in_group"] = vp
+        return True
+
+    def IsVPGroupContainedObject(self, h, kind):
+        return bool(self._d.objects[h].get("in_group"))
+
+    def GetVPGroup(self, vp, kind):
+        key = "group%d" % int(kind)
+        o = self._d.objects[vp]
+        if key not in o:
+            o[key] = self._d.add("group", name="")["uuid"]
+            self._d.objects[o[key]]["in_group"] = vp
+        self._d.objects[o[key]]["members"] = list(o["annotations"]) if int(kind) == 2 else []
+        return o[key]
+
+    def DelObject(self, h):
+        if isinstance(h, str) and h.startswith("view:"):
+            self._d.saved_views.remove(h[5:])
+            return
+        obj = self._d.objects.pop(h, None)
+        if obj is None:
+            return
+        for vp in self._d.objects.values():
+            if vp.get("crop") == h:
+                vp["crop"] = None
+        if obj["type"] == "viewport":
+            for u in obj.get("annotations", []) + [obj.get("crop")]:
+                self._d.objects.pop(u, None)
 
     def ResetObject(self, h):
         pass
@@ -982,7 +1338,13 @@ class Handler:
         return {"items": items, "next_cursor": None, "binding": d.info(self.m.session)["binding"]}
 
     def a_get_viewports(self, p):
-        return {"items": [], "next_cursor": None}
+        d = self.m.doc
+        sheet = next((l["name"] for l in d.layers if l["uuid"] == p.get("sheet_layer_uuid")), None)
+        if sheet is None:
+            raise BridgeError("sheet layer not found", "not_found")
+        items = [{"uuid": o["uuid"], "name": o["name"], "scale": o["ov"].get(1003)} for o in d.objects.values()
+                 if o["type"] == "viewport" and o["layer"] == sheet]
+        return {"items": items, "next_cursor": None}
 
     def a_get_viewport_annotations(self, p):
         return {"items": [], "next_cursor": None}

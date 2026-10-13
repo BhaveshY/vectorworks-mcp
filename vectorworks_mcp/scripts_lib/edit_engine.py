@@ -58,7 +58,12 @@ for item in ARGS["ops"]:
                 vs.SetRField(h, rec, field, "" if value is None else str(value))
             vs.ResetObject(h)
             done.append({"op": op, "uuid": uuid_of(h), "record": rec, "fields": list(item["fields"].keys())})
+    elif op == "style":
+        for h in handles:
+            done.append({"op": op, "uuid": uuid_of(h), "set": apply_style(h, item["style"])})
     else:
         raise ValueError("unsupported script edit op: " + op)
 
 result = {"applied": len(done), "receipts": done}
+if IMPORTED:
+    result["imported_resources"] = IMPORTED

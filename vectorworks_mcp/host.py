@@ -85,11 +85,20 @@ def script_result(reply: Any) -> Any:
     if reply.get("ok") is False or reply.get("error"):
         message = str(reply.get("error") or "script failed")
         code = "script_error"
-        for prefix in ("stale_reference", "not_found"):
-            if message.startswith(prefix + ":") or (prefix + ":") in message:
-                code = prefix
+        details = {"stderr": str(reply.get("stderr") or "")[-1500:]} if reply.get("stderr") else None
+        # Vetted snippets raise ValueError("<prefix>: ...") -> that error code; the document was rolled back.
+        for prefix, mapped in (("stale_reference", "stale_reference"), ("not_found", "not_found"),
+                               ("validation", "native_rejected"), ("native_rejected", "native_rejected"),
+                               ("readback_mismatch", "native_rejected"), ("already_exists", "native_rejected")):
+            line = next((ln for ln in reversed(message.splitlines()) if (prefix + ":") in ln), None)
+            if line is not None:
+                code = mapped
+                if "Traceback" in message:
+                    details = dict(details or {}, traceback=message[-1500:])
+                message = line[line.index(prefix + ":"):]
+                break
         raise VWError(code, message[:1500], commit_state="rolled_back" if reply.get("rolled_back", True) else "unknown",
-                      details={"stderr": str(reply.get("stderr") or "")[-1500:]} if reply.get("stderr") else None)
+                      details=details)
     return reply.get("result")
 
 

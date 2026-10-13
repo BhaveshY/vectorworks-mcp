@@ -22,7 +22,7 @@ READ_WHAT = ["document", "documents", "layers", "classes", "summary", "query", "
              "saved_views", "sheets", "viewports", "annotations", "symbols", "worksheets", "worksheet", "resources",
              "records", "parametric_schema", "capabilities", "plan_quality"]
 CREATE_TYPES = ["line", "rect", "oval", "circle", "arc", "polygon", "polyline", "wall", "slab", "roof", "space", "text",
-                "dimension", "symbol", "door", "window", "parametric", "room"]
+                "dimension", "symbol", "door", "window", "parametric", "room", "extrude", "column"]
 EDIT_OPS = ["set", "move", "rotate", "scale", "mirror", "reshape", "duplicate", "delete", "parametric", "class", "layer",
             "group", "ungroup", "record", "select", "deselect"]
 
@@ -64,12 +64,12 @@ TOOLS: list[dict] = [
         "name": "vw_read",
         "title": "Read drawing data",
         "description": (
-            "Read-only. what=document|documents|layers|classes|summary (counts by type/layer/class)|query (objects; "
-            "filter type (wall, door, window, space, stair, ...; doors/windows in walls come with wall+width)/layer/"
-            "class/name/criteria, paged by cursor)|object (target)|selection|view|saved_views|sheets|"
-            "viewports (target=sheet)|annotations|symbols|worksheets|worksheet (target, range 'A1:D20')|resources "
-            "(resource_type)|records|parametric_schema (target='Door')|capabilities|plan_quality (plan). Lengths in mm; "
-            "use the returned uuid in later calls. Example: vw_read(what=\"query\", type=\"wall\", limit=50)."),
+            "Read-only. what=document|documents|layers|classes|summary (counts)|query (objects; filter type (wall, "
+            "door, window, space, stair, ...; doors/windows come with wall+width)/layer/class/name/criteria, paged by "
+            "cursor)|object (target)|selection|view|saved_views|sheets|viewports (target=sheet)|annotations|symbols|"
+            "worksheets|worksheet (target, range 'A1:D20')|resources (type=hatch|line_type|text_style|gradient|"
+            "image_fill|tile|wall_style...)|records|parametric_schema (target='Door')|capabilities|plan_quality. "
+            "Lengths in mm. Example: vw_read(what=\"query\", type=\"wall\", limit=50)."),
         "input": obj({"what": {"type": "string", "enum": READ_WHAT}, "document": DOC, "target": S, "type": S, "layer": S,
                       "class": S, "name": S, "criteria": S, "query": S, "resource_type": S, "fields": STRS, "range": S,
                       "limit": I, "cursor": S, "plan": {"type": "object"}}, ("what",)),
@@ -97,19 +97,20 @@ TOOLS: list[dict] = [
         "name": "vw_create",
         "title": "Create objects",
         "description": (
-            "Create many objects in ONE call (one undo step); the receipt (ids->uuids) is authoritative. Room in ONE "
-            "call: walls with ids + {type:door|window, wall:\"$<wall id>\", at:[x,y], width} + space points; touching "
-            "walls are joined (join_walls). mm unless units. Types: line start,end | rect origin,width,height | circle "
-            "center,radius | polygon/slab/roof/space points | wall start,end,thickness,height | text at,text | dimension "
-            "| symbol | door/window | parametric plugin,parameters | room. Example: objects=[{\"type\":\"wall\",\"id\":"
-            "\"w1\",\"start\":[0,0],\"end\":[5000,0]},{\"type\":\"door\",\"wall\":\"$w1\",\"at\":[1500,0]}]."),
+            "Create many objects in ONE call; the receipt (ids->uuids) is final. mm unless units. wall start,"
+            "end,thickness,height | door/window wall:\"$<wall id>\",at,width | line | rect origin,width,height | "
+            "circle | polygon/slab/roof/space points | text at,text | dimension | symbol | parametric | room | extrude "
+            "points,height,elevation | column at,width|diameter,height. Style keys: line_style, fill "
+            "(none|solid|hatch name), pen_color, line_weight; text font,text_size,text_style; arrows. Example: "
+            "objects=[{\"type\":\"wall\",\"id\":\"w1\",\"start\":[0,0],\"end\":[5000,0]},{\"type\":\"door\","
+            "\"wall\":\"$w1\",\"at\":[1500,0]}]."),
         "input": obj({
             "objects": {"type": "array", "items": {"type": "object", "properties": {
                 "type": {"type": "string", "enum": CREATE_TYPES}, "id": S, "name": S, "class": S,
                 "start": PT, "end": PT, "at": PT, "center": PT, "origin": PT, "points": {"type": ["array", "string"]},
                 "width": LEN, "height": LEN, "depth": LEN, "radius": LEN, "thickness": LEN, "offset": LEN, "sill": LEN,
                 "elevation": LEN, "rotation": N, "text": S, "size": N, "symbol": S, "plugin": S, "wall": S, "style": S,
-                "parameters": {"type": "object"}, "join_walls": B}, "required": ["type"]}},
+                "parameters": {"type": "object"}, "join_walls": B, "fill": {}, "line_style": S}, "required": ["type"]}},
             "floor_plan": {"type": "object"}, "units": UNITS, "join_walls": B, "dry_run": B, "document": DOC,
             "idempotency_key": IDEM}),
         "output": out_schema(created={"type": "array"}, ids={"type": "object"}, document={"type": "object"}),
@@ -119,12 +120,12 @@ TOOLS: list[dict] = [
         "name": "vw_edit",
         "title": "Edit objects",
         "description": (
-            "Change existing objects in one undo step. changes=[{op, target|targets, ...}]; target = uuid, name, or "
-            "\"selection\". ops: set properties{name,class,fill_color,pen_color,line_weight,opacity,fill_pattern} | move "
-            "by=[dx,dy] | rotate angle,center? | scale factor | mirror axis x/y | reshape start,end | duplicate by,count | "
-            "delete | parametric plugin,parameters | class | layer | group | ungroup | record record,fields | select | "
-            "deselect. Example: changes=[{\"op\":\"move\",\"target\":\"<uuid>\",\"by\":[1000,0]},{\"op\":\"set\","
-            "\"target\":\"<uuid>\",\"properties\":{\"fill_color\":\"#FF0000\"}}]."),
+            "Change existing objects. changes=[{op, target|targets, ...}]; target = uuid, name or \"selection\". ops: "
+            "set properties{name, class, fill_color, pen_color, line_weight, opacity, fill (none|solid|hatch/gradient "
+            "name), line_style (line type name), font, text_size, text_style (bold italic), align, arrows} | move "
+            "by=[dx,dy] | rotate angle | scale factor | mirror axis | reshape start,end | duplicate by,count | delete | "
+            "parametric plugin,parameters | class | layer | group | ungroup | record | select | deselect. Example: "
+            "changes=[{\"op\":\"set\",\"target\":\"<uuid>\",\"properties\":{\"fill\":\"Brick HF\"}}]."),
         "input": obj({
             "changes": {"type": "array", "items": {"type": "object", "properties": {
                 "op": {"type": "string", "enum": EDIT_OPS}, "target": S, "targets": STRS, "properties": {"type": "object"},
@@ -169,17 +170,22 @@ TOOLS: list[dict] = [
     },
     {
         "name": "vw_organize",
-        "title": "Layers, classes, stories",
+        "title": "Layers, classes, sheets, viewports",
         "description": (
-            "Manage document structure. kind=layer|class|story|saved_view|worksheet|resource with action=create|set|"
-            "delete|write|import. Fields: name, new_name, visibility show|gray|hide, active, scale, elevation, opacity, "
-            "fill_color, pen_color, line_weight, layer_kind design|sheet, cell 'B3' + value (worksheet write), source "
-            "path + resource_type (resource import). Deleting non-empty layers needs force=true. Example: vw_organize("
-            "kind=\"layer\", action=\"create\", name=\"Furniture\", scale=50)."),
-        "input": obj({"kind": {"type": "string", "enum": ["layer", "class", "story", "saved_view", "worksheet", "resource"]},
-                      "action": {"type": "string", "enum": ["create", "set", "delete", "write", "import"]},
+            "Document structure. kind=layer|class|story|saved_view|worksheet (cell+value)|resource (import: source, "
+            "resource_type)|viewport; action=create|set|delete|write|import|update. Layer/class: name, new_name, "
+            "visibility, scale, elevation, colours, layer_kind=sheet. viewport: sheet, name, layers (others hidden), "
+            "scale '1:100', view, render_mode, at [x,y] sheet mm, crop [[x1,y1],[x2,y2]], classes {name: hide}, title, "
+            "annotations [{type text|line|dimension}]; update regenerates; delete needs confirm. Example: "
+            "vw_organize(kind=\"viewport\", action=\"create\", sheet=\"A-101\", layers=[\"GF\"], scale=\"1:100\")."),
+        "input": obj({"kind": {"type": "string", "enum": ["layer", "class", "story", "saved_view", "worksheet", "resource",
+                                                           "viewport"]},
+                      "action": {"type": "string", "enum": ["create", "set", "delete", "write", "import", "update"]},
                       "name": S, "new_name": S, "visibility": {"type": "string", "enum": ["show", "gray", "hide"]},
-                      "active": B, "scale": N, "elevation": LEN, "opacity": N, "fill_color": S, "pen_color": S,
+                      "target": S, "sheet": S, "layers": STRS, "view": {"type": "string", "enum": STANDARD_VIEWS},
+                      "render_mode": {"type": "string", "enum": RENDER_MODES}, "at": PT, "crop": {},
+                      "classes": {"type": "object"}, "annotations": {"type": "array"}, "confirm": B,
+                      "active": B, "scale": {"type": ["number", "string"]}, "elevation": LEN, "opacity": N, "fill_color": S, "pen_color": S,
                       "line_weight": N, "use_at_creation": B, "layer_kind": {"type": "string", "enum": ["design", "sheet"]},
                       "title": S, "cell": S, "value": S, "source": S, "resource_type": S, "force": B, "units": UNITS,
                       "document": DOC}, ("kind", "action")),
