@@ -53,6 +53,19 @@ SCENARIOS: dict[str, tuple[str, str]] = {
         "count all walls in the document and return the count as `result`. Then run a script that creates a "
         "rectangle and then raises an error, and verify with vw_read that the rectangle was rolled back. "
         "Report both results."),
+    "luna_sheet": ("gpt-5.6-luna", SAFETY +
+        "In the new document draw an 8 m x 5 m room (200 mm walls, 2700 mm high) with one 1000 mm door in the "
+        "south wall and a Space named 'Studio'. Then create a sheet layer 'A-101' with a viewport of the design "
+        "layer at scale 1:50 in top/plan view, titled 'GROUND FLOOR 1:50'. Capture the sheet, look at the image "
+        "and report: sheet name, viewport scale read back with vw_read, and one sentence describing the image."),
+    "astra_production": ("gpt-6-astra", SAFETY +
+        "In the new document: (1) draw three 3 x 2 m rectangles side by side filled with a cross hatch, a "
+        "gradient and no fill, with a dashed outline on the third; (2) add a bold 14 pt Arial text 'SITE "
+        "PLAN' above them; (3) build a massing model: an extrude 12 x 8 m, 9 m high, and a second extrude "
+        "6 x 6 m, 15 m high next to it, plus four 400 mm square columns at the corners of the first; "
+        "(4) capture the massing in right isometric view with a shaded render mode; (5) put the design layer "
+        "on a sheet 'A-001' at 1:200 and export that sheet to PDF in %TEMP%\\vw-codex-e2e as A-001.pdf. "
+        "Report what vw_read returns for the objects, the PDF size, and describe the isometric image."),
     "luna_offline": ("gpt-5.6-luna",
         "Use only the vectorworks MCP tools. Check whether Vectorworks is connected and tell me in one sentence "
         "what the user must do if it is not. Do not retry more than once."),
