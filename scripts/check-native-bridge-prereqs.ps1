@@ -374,7 +374,7 @@ $Checks += New-CheckResult `
     -Required $true `
     -Ok ([bool]$SdkPath) `
     -Detail $(if ($SdkPath) { $SdkPath } elseif ($SdkArchiveCandidates.Count -gt 0) { "SDK layout not found, but archive candidate found: $($SdkArchiveCandidates[0].path)" } else { "not found. Checked VECTORWORKS_SDK_DIR, third_party\VectorworksSDK\$VectorworksVersion, and Downloads." }) `
-    -Fix $(if ($SdkArchiveCandidates.Count -gt 0) { "Extract the detected SDK archive with scripts\bootstrap-native-bridge.ps1 -SdkArchivePath `"$($SdkArchiveCandidates[0].path)`", then rerun with -SdkDir or set VECTORWORKS_SDK_DIR." } else { "Download the SDK from $OfficialSdkPage, extract it, then rerun with -SdkDir or set VECTORWORKS_SDK_DIR." })
+    -Fix $(if ($SdkArchiveCandidates.Count -gt 0) { "Extract the detected SDK archive `"$($SdkArchiveCandidates[0].path)`" into third_party\VectorworksSDKExamples\VectorworksSDK, then rerun with -SdkDir or set VECTORWORKS_SDK_DIR." } else { "Download the SDK from $OfficialSdkPage, extract it, then rerun with -SdkDir or set VECTORWORKS_SDK_DIR." })
 
 $Checks += New-CheckResult `
     -Name "Visual Studio C++ tools for Vectorworks $VectorworksVersion" `

@@ -35,7 +35,6 @@ To *use* Vectorworks from an agent, read the skill
 | `plugins/vectorworks/` | the one plugin for Codex (`.codex-plugin/`) and Claude (`.claude-plugin/`): skills only |
 | `.agents/plugins/marketplace.json`, `.claude-plugin/marketplace.json` | one marketplace per client (version 1.0.0) |
 | `docs/PARITY.md` | every 0.7 tool/action -> 1.0 call |
-| `docs/archive/` | outdated 0.x documents (do not follow) |
 
 Installed layout and client changes: [INSTALL.md](INSTALL.md).
 

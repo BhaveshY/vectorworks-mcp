@@ -321,7 +321,7 @@ The 0.7 server is preserved verbatim as `legacy/server_v07.py`, reachable only w
 - **H, §2.1 pre-1.0 capture:** on revision ≤ 5 `vw_capture` exports the current view as-is (the old fit used
   select-all / menu fit and changed the user's selection); fit/standard view/render mode need revision 6.
 - **H, files:** `plan_quality.py`/`plan_geometry.py` moved to `vectorworks_mcp/analysis/` (lazy import);
-  `vw_listener.py` and `production_apartment.py` moved to `legacy/`; `legacy/server_v07.py` is the 0.7 server with only
+  `vw_listener.py` moved to `legacy/` (`production_apartment.py` removed 2026-10-13 with its one-off test); `legacy/server_v07.py` is the 0.7 server with only
   its `plan_quality` import path changed. The generated per-user `vw_load_listener_2024.py` /
   `vw_start_listener_2024.py` (git-ignored) were left in place.
 - **H, errors:** extra codes beyond the contract list: `path_error`, `confirmation_required`, `script_error`,

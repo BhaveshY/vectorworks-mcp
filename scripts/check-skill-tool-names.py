@@ -5,7 +5,7 @@ Sources of truth:
   * the live tools/list (--live [--launcher CMD]) or a saved one (--tools-json FILE).
 
 Checked files: plugins/**/*.md, top-level *.md, docs/*.md (except the contract,
-docs/PARITY.md and docs/archive/). Text between
+docs/PARITY.md). Text between
 <!-- tool-check: legacy-begin --> and <!-- tool-check: legacy-end --> may name
 removed 0.7 tools (old -> new maps).
 
