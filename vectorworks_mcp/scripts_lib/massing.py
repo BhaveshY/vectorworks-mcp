@@ -4,6 +4,7 @@
 #         "restyle": [{"id", "uuid", "style": {}}]}  (styles for objects the native create just made)
 created = []
 styled = []
+PIO_EXPECT = []
 for item in ARGS.get("objects") or []:
     kind = item["kind"]
     if kind == "extrude":
@@ -14,13 +15,25 @@ for item in ARGS.get("objects") or []:
         profile = vs.LNewObj()
         if _nil(profile):
             raise ValueError("native_rejected: the extrude profile polygon was not created")
+        # BeginPoly/EndPoly makes an OPEN polygon: extruded it gives side walls without top/bottom faces (live 2024)
+        vs.SetPolyClosed(profile, True)
         h = vs.HExtrude(profile, U(item["bottom"]), U(item["top"]))
         if _nil(h) or vs.GetTypeN(h) != 24:
             raise ValueError("native_rejected: Vectorworks did not create the extrude")
+        if not vs.IsPolyClosed(vs.FInGroup(h)):
+            raise ValueError("readback_mismatch: the extrude profile is not closed")
         height = MM(vs.Get3DInfo(h)[2])
         want = float(item["top"]) - float(item["bottom"])
         if abs(height - want) > 0.5:
             raise ValueError("readback_mismatch: extrude height is %.1f mm, expected %.1f mm" % (height, want))
+    elif kind == "pio":
+        h = vs.CreateCustomObjectN(item["plugin"], PT(item["at"]), float(item.get("rotation") or 0.0), False)
+        if _nil(h):
+            raise ValueError("not_found: the %s plug-in object could not be created (not installed?)" % item["plugin"])
+        if item.get("parameters"):
+            PIO_EXPECT.append({"uuid": uuid_of(h), "expect": pio_set(h, item["parameters"], item.get("scale_mm", 1.0))})
+        else:
+            vs.ResetObject(h)
     elif kind == "column":
         h = vs.CreateCustomObjectN(item["plugin"], PT(item["at"]), float(item.get("rotation") or 0.0), False)
         if _nil(h):
@@ -44,11 +57,16 @@ for item in ARGS.get("objects") or []:
         raise ValueError("unsupported massing kind: " + kind)
     if item.get("style"):
         apply_style(h, item["style"])
-    created.append({"id": item["id"], "uuid": uuid_of(h), "type": kind})
+    created.append({"id": item["id"], "uuid": uuid_of(h),
+                    "type": item.get("type_label") or ("parametric" if kind == "pio" else kind)})
 
 for item in ARGS.get("restyle") or []:
     styled.append({"id": item["id"], "uuid": item["uuid"], "set": apply_style(resolve("uuid:" + item["uuid"]), item["style"])})
 
 result = {"created": created, "styled": styled}
+if PIO_EXPECT:
+    result["pio_expect"] = PIO_EXPECT
 if IMPORTED:
     result["imported_resources"] = IMPORTED
+if WARNINGS:
+    result["warnings"] = WARNINGS

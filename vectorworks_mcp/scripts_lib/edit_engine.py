@@ -58,6 +58,11 @@ for item in ARGS["ops"]:
                 vs.SetRField(h, rec, field, "" if value is None else str(value))
             vs.ResetObject(h)
             done.append({"op": op, "uuid": uuid_of(h), "record": rec, "fields": list(item["fields"].keys())})
+    elif op == "pio":
+        for h in handles:
+            expect = pio_set(h, item["parameters"], item.get("scale_mm", 1.0))
+            done.append({"op": op, "uuid": uuid_of(h), "set": sorted(expect), "expect": expect,
+                         "via": "parametric_record"})
     elif op == "style":
         for h in handles:
             done.append({"op": op, "uuid": uuid_of(h), "set": apply_style(h, item["style"])})
@@ -67,3 +72,5 @@ for item in ARGS["ops"]:
 result = {"applied": len(done), "receipts": done}
 if IMPORTED:
     result["imported_resources"] = IMPORTED
+if WARNINGS:
+    result["warnings"] = WARNINGS

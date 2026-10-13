@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 from .. import coerce as C
 from .. import scripts_lib
-from ..builders import norm_ref
+from ..builders import is_uuid as builders_is_uuid, norm_ref
 from ..catalog import READ_WHAT, TOOLS
 from ..documents import normalise_doc, rev5_read_binding
 from ..errors import VWError, validation
@@ -221,7 +221,21 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         return out
     if what == "parametric_schema":
         plugin = C.text(a.get("target") or a.get("name") or a.get("query"), "target", required=True)
-        out["data"] = _clean(host.schema(inst, plugin), [])
+        if builders_is_uuid(plugin) or plugin.startswith("uuid:"):
+            # parameters of one placed plug-in object (parametric record values)
+            out["data"] = host.script(target, "pio_schema", {"target": norm_ref(plugin, "target")},
+                                      label="Read parameters", kind="read", transaction=False)
+            out["via"] = "script"
+            return out
+        schema = host.schema(inst, plugin)
+        if schema.get("script_only"):
+            out["data"] = host.script(target, "pio_schema", {"plugin": plugin}, label="Read parameters", kind="read",
+                                      transaction=False)
+            out["via"] = "script"
+            warnings.append(f"{plugin} has no native schema provider: parameters come from its parametric record "
+                            "(field types + current defaults); vw_edit op='parametric' sets them the same way.")
+            return out
+        out["data"] = _clean(schema, [])
         return out
     if what == "capabilities":
         return _capabilities(host, inst, out)

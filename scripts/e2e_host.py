@@ -661,8 +661,8 @@ def phase_production(python: str, state_dir: Path) -> None:
              "elevation": 300, "fill": "Brick HF"},
             {"type": "column", "id": "c1", "at": [1000, 1000], "width": 400, "height": 3500},
             {"type": "wall", "id": "w", "start": [0, 0], "end": [8000, 0], "line_style": "Dash"}]})
-        check("vw_create extrude + column + wall style: both receipts, two undo steps warned",
-              sc.get("ok") and {"m1", "c1", "w"} <= set(sc.get("ids") or {}) and sc.get("undo") == "two undo steps"
+        check("vw_create extrude + column + wall style: all receipts, 3 undo steps (native, script, plug-in params) warned",
+              sc.get("ok") and {"m1", "c1", "w"} <= set(sc.get("ids") or {}) and sc.get("undo") == "3 undo steps"
               and len(sc.get("styled") or []) == 1 and any("separate undo" in w for w in sc.get("warnings") or []),
               json.dumps(sc)[:500])
         sc, _ = c.call("vw_create", {"objects": [{"type": "massing", "origin": [0, 0], "width": 5000, "depth": 4000,
@@ -674,6 +674,37 @@ def phase_production(python: str, state_dir: Path) -> None:
               json.dumps(sc)[:300])
         sc, _ = c.call("vw_create", {"objects": [{"type": "extrude", "points": [[0, 0], [1, 0], [1, 1]]}]})
         check("extrude without height -> validation_error", err_code(sc) == "validation_error", json.dumps(sc)[:200])
+        # -- Codex-run regressions (luna_sheet / astra_production) ---------------------------------------
+        sc, _ = c.call("vw_organize", {"kind": "viewport", "action": "create", "sheet": "A-102", "view": "top_plan",
+                                       "render_mode": "hidden_line", "scale": "1:50"})
+        vp = (sc.get("result") or {}).get("viewport") or {}
+        check("rendered top_plan viewport accepted as Top/orthogonal with a warning", sc.get("ok") and
+              vp.get("projection") == "orthogonal" and any("Top/Plan" in w for w in sc.get("warnings") or []),
+              json.dumps(sc)[:400])
+        before = (c.call("vw_read", {"what": "summary"})[0].get("data") or {}).get("total_objects")
+        sc, _ = c.call("vw_create", {"objects": [{"type": "rect", "origin": [0, 0], "width": 100, "height": 100},
+                                                 {"type": "extrude", "origin": [0, 0], "width": 100, "depth": 100,
+                                                  "height": 100, "fill": "No Such Hatch"}]})
+        after = (c.call("vw_read", {"what": "summary"})[0].get("data") or {}).get("total_objects")
+        check("mixed create, script part fails -> native part deleted again, commit_state rolled_back",
+              err_code(sc) == "not_found" and (sc.get("error") or {}).get("commit_state") == "rolled_back"
+              and before == after, f"{before} -> {after} {json.dumps(sc)[:300]}")
+        sc, _ = c.call("vw_create", {"objects": [{"type": "extrude", "id": "x", "origin": [0, 0], "width": 100,
+                                                  "depth": 100, "height": 100, "fill": "solid"}]})
+        check("extrude fill solid lands on the profile", sc.get("ok"), json.dumps(sc)[:300])
+        sc, _ = c.call("vw_read", {"what": "parametric_schema", "target": "Column2"})
+        params = {p.get("id"): p for p in (sc.get("data") or {}).get("parameters") or []}
+        check("parametric_schema Column2 (no native provider) via parametric record", sc.get("ok") and
+              sc.get("via") == "script" and params.get("OA Height", {}).get("type") == "length", json.dumps(sc)[:300])
+        col = ((c.call("vw_create", {"objects": [{"type": "column", "id": "k", "at": [0, 0]}]})[0]).get("ids") or {}).get("k")
+        sc, _ = c.call("vw_edit", {"changes": [{"op": "parametric", "target": col, "plugin": "Column2",
+                                                "parameters": {"OA Height": "9m", "Use Capital": True, "Shaft Width": 450}}]})
+        check("vw_edit parametric Column2 via parametric record (units, bool), read back", sc.get("ok") and
+              sc.get("applied") == 1, json.dumps(sc)[:300])
+        sc, _ = c.call("vw_create", {"objects": [{"type": "parametric", "plugin": "Column2", "at": [500, 0],
+                                                  "parameters": {"OA Height": 2800}}]})
+        check("vw_create parametric Column2 via parametric record", sc.get("ok") and
+              (sc.get("created") or [{}])[0].get("type") == "parametric", json.dumps(sc)[:300])
         c.close()
     finally:
         mock.kill()

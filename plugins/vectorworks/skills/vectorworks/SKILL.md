@@ -310,7 +310,8 @@ vw_capture(view="sheet", sheet="A-101")
 
 - The sheet layer is created when missing. `layers` = the design layers shown (all others hidden; default:
   the visible ones). `scale` 100 or "1:100". `view` = top_plan, top, front, back, left, right, iso, ...;
-  `render_mode` = wireframe, hidden_line, opengl, ...
+  `render_mode` = wireframe, hidden_line, opengl, ... (a rendered top_plan viewport becomes `view: "top"`,
+  projection orthogonal - Vectorworks does that; a warning says so).
 - `at` = centre of the viewport on the sheet in paper mm (sheet origin = page centre). Without `at`, `set`
   keeps the viewport where it is.
 - `crop` and `annotations` use MODEL coordinates (the same numbers as the drawing; plan views). Annotations:
@@ -332,8 +333,12 @@ vw_capture(view="objects", objects=["<uuid>"], standard_view="iso", render_mode=
 
 - `extrude`: profile `points` (or `origin`+`width`+`depth`), `height` (or `top`), base `elevation`.
   `column`: the Vectorworks Column plug-in (plain shaft; `parameters` for capital/base/other fields).
-- Extrudes/columns are made by a script: alone they are one undo step; mixed with walls etc. in one call they
-  are two (`undo` in the result says which). Floors: `type="slab"`.
+- Extrudes/columns are made by a script: extrudes alone are one undo step; plug-in parameters (columns) add one,
+  native objects in the same call add one (`undo` in the result says how many). If the script part fails, the
+  native objects of that call are deleted again (`commit_state: "rolled_back"`). Floors: `type="slab"`.
+- Plug-ins without a native schema (e.g. `Column2`): `vw_read(what="parametric_schema", target="Column2")` (or the
+  object's uuid) and `vw_edit` op `parametric` work through the parametric record; values the plug-in recomputes
+  after regenerating are listed in `not_kept` / warnings - follow that warning.
 
 ### H. Escape hatch: `vw_script`
 

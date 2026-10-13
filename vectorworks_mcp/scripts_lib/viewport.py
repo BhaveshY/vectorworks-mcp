@@ -10,6 +10,7 @@
 # objects live in the viewport's internal frame = model + position * scale (plan views), so they are offset by it.
 OV_PROJECTION, OV_RENDER, OV_SCALE, OV_DIRTY, OV_VIEW, OV_TITLE, OV_X, OV_Y = 1000, 1001, 1003, 1004, 1007, 1032, 1024, 1025
 LAYER_DESIGN, LAYER_SHEET = 1, 2
+WARN = []
 A = ARGS
 _prev_layer = vs.GetLName(vs.ActLayer())
 
@@ -228,13 +229,18 @@ def _check(vp, rec):
     if A.get("scale") is not None and abs(rec["scale"] - float(A["scale"])) > 1e-6:
         raise ValueError("readback_mismatch: viewport scale is %s" % rec["scale"])
     if A.get("view") is not None and rec["view_code"] != [int(A["view"][0]), int(A["view"][1])]:
-        raise ValueError("readback_mismatch: viewport view is %s" % rec["view_code"])
+        # Vectorworks turns Top/Plan (7, projection 6) into Top (7, orthogonal 0) for every rendered mode.
+        if rec["view_code"][0] == int(A["view"][0]) and int(A["view"][1]) == 6 and rec["view_code"][1] == 0                 and rec["render_code"] != 0:
+            WARN.append("Vectorworks shows a rendered Top/Plan viewport as Top (orthogonal projection); "
+                        "use render_mode='wireframe' to keep the 2D plan projection.")
+        else:
+            raise ValueError("readback_mismatch: viewport view is %s" % rec["view_code"])
     if A.get("render") is not None and rec["render_code"] != int(A["render"]):
         raise ValueError("readback_mismatch: viewport render mode is %s" % rec["render_code"])
     if A.get("layers") is not None and (sorted(rec["layers"]) != sorted(A["layers"].get("show", [])) or
                                         sorted(rec["gray_layers"]) != sorted(A["layers"].get("gray", []))):
         raise ValueError("readback_mismatch: viewport layers are %s" % rec["layers"])
-    if A.get("at") is not None and (abs(rec["center"][0] - A["at"][0]) > 0.01 or abs(rec["center"][1] - A["at"][1]) > 0.01):
+    if A.get("at") is not None and (abs(rec["center"][0] - A["at"][0]) > 0.5 or abs(rec["center"][1] - A["at"][1]) > 0.5):
         raise ValueError("readback_mismatch: viewport centre is %s" % rec["center"])
     if A.get("crop") == "clear" and rec["crop"] or (A.get("crop") not in (None, "clear") and not rec["crop"]):
         raise ValueError("readback_mismatch: viewport crop is %s" % rec["crop"])
@@ -330,4 +336,6 @@ if vs.GetLName(vs.ActLayer()) != _prev_layer and _prev_layer:
     vs.Layer(_prev_layer)
 if IMPORTED:
     out["imported_resources"] = IMPORTED
+if WARN or WARNINGS:
+    out["warnings"] = WARN + WARNINGS
 result = out

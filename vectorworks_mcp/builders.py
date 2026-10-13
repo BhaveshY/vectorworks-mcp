@@ -61,7 +61,7 @@ PROPERTY_SYNONYMS = {"name": "name", "class": "class", "class_name": "class", "f
                      "pen": "penColor", "stroke": "penColor", "line_color": "penColor", "fill_pattern": "fillPattern",
                      "fillpattern": "fillPattern", "line_weight": "lineWeight", "lineweight": "lineWeight",
                      "pen_weight": "lineWeight", "opacity": "opacity"}
-SCRIPT_EDIT_OPS = {"mirror", "layer", "group", "ungroup", "record", "style"}
+SCRIPT_EDIT_OPS = {"mirror", "layer", "group", "ungroup", "record", "style", "pio"}
 
 # Graphic attributes the native set_properties lacks; applied + read back by the `_style` snippet helper.
 STYLE_SYNONYMS = {
@@ -117,6 +117,26 @@ def _marker(value: Any, field: str) -> dict:
             out["visible"] = C.boolean(v["visible"], f"{field}.visible")
         return out
     raise validation(f"{field} must be a marker name like 'arrow', true/false or {{style, size}}", field, "arrow")
+
+
+_UNIT_RE = re.compile(r"^\s*-?\d+(?:\.\d+)?\s*(mm|cm|m|in|ft|\"|')\s*$", re.I)
+
+
+def pio_parameters(raw: Any, field: str) -> list[dict]:
+    """{field: value} for the parametric-record fallback. Numbers are in `units` (the snippet converts them for
+    length fields); strings with a unit ("9m") are converted to mm here; everything else is sent as text."""
+    raw = C.parse_json_maybe(raw)
+    if isinstance(raw, list):
+        raw = {str(e.get("id")): e.get("value") for e in raw if isinstance(e, dict) and "id" in e}
+    if not isinstance(raw, dict) or not raw:
+        raise validation(f"{field} must be an object {{\"Field\": value}}", field, {"OA Height": 3000})
+    out = []
+    for key, value in raw.items():
+        if isinstance(value, str) and _UNIT_RE.match(value):
+            out.append({"id": str(key), "value": C.length(value, f"{field}.{key}", 1.0), "mm": True})
+        else:
+            out.append({"id": str(key), "value": value})
+    return out
 
 
 def _is_color(value: Any) -> bool:
@@ -328,6 +348,22 @@ def compile_create(objects: list[dict], scale: float, *, descriptors: dict[str, 
         if kind == "room":
             for sub in _room_objects(src, field, scale, local_id):
                 _append(plan, sub, sub.pop("_id"))
+            continue
+        plugin_name = str(_get(src, "plugin", "plugin_name", "object", "pio", default="")).strip()
+        if kind == "parametric" and (schemas.get(plugin_name) or {}).get("script_only"):
+            at = _pt(src, ("at", "position", "location", "point", "center"), ("x", "y"), f"{field}.at", scale,
+                     required=False) or [0.0, 0.0]
+            raw = _get(src, "parameters", "params", "values", "fields")
+            item = {"kind": "pio", "plugin": plugin_name, "at": at, "id": local_id, "scale_mm": scale,
+                    "rotation": C.number(_get(src, "rotation", "angle", default=0), f"{field}.rotation"),
+                    "parameters": pio_parameters(raw, f"{field}.parameters") if raw not in (None, "", {}) else []}
+            style = style_props(src, field, basic=True)
+            if style:
+                item["style"] = style
+            plan.script_objects.append(item)
+            plan.ids.append(local_id)
+            plan.warnings.append(f"{field}: {plugin_name} has no native schema provider; created through its "
+                                 "parametric record (script).")
             continue
         if kind in SCRIPT_CREATE_TYPES:
             item = _massing_params(kind, src, field, scale)
@@ -965,6 +1001,14 @@ def compile_edit(changes: list[dict], scale: float, *, schemas: dict[str, dict],
                 raise validation(f"{field} needs plugin (e.g. 'Door') and parameters {{id: value}}", f"{field}.parameters",
                                  {"op": "parametric", "target": "uuid:...", "plugin": "Door", "parameters": {"OpenAngle": 45}})
             plugin = str(plugin)
+            if (schemas.get(plugin) or {}).get("script_only"):
+                # no native schema provider (e.g. Column2): set the parametric record fields by script
+                plan.script_ops.append({"op": "pio", "targets": targets, "plugin": plugin, "scale_mm": scale,
+                                        "parameters": pio_parameters(params_src, f"{field}.parameters")})
+                plan.needs_script = True
+                plan.warnings.append(f"{plugin} has no native schema provider; parameters were set through its "
+                                     "parametric record (script).")
+                continue
             parameters = parametric_parameters(C.parse_json_maybe(params_src), f"{field}.parameters", scale, schemas.get(plugin),
                                                warnings=plan.warnings)
             if not parameters:

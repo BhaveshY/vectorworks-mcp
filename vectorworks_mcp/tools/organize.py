@@ -237,6 +237,8 @@ def viewport_record(record: dict) -> dict:
     record = dict(record)
     codes = record.pop("view_code", None)
     record["view"] = next((n for n, c in STANDARD_VIEW_CODES.items() if codes and list(c) == list(codes)), codes)
+    if codes:
+        record["projection"] = {0: "orthogonal", 1: "perspective", 6: "plan"}.get(codes[1], codes[1])
     rcode = record.pop("render_code", None)
     record["render_mode"] = next((n for n, c in RENDER_CODES.items() if c == rcode), rcode)
     record["center"] = [round(v, 3) for v in record.get("center") or []]
@@ -320,6 +322,8 @@ def _viewport(host, target, a: dict, action: str, scale: float, out: dict) -> di
     result = host.script(target, "viewport", args, label=f"MCP viewport {action}") or {}
     if isinstance(result.get("viewport"), dict):
         result["viewport"] = viewport_record(result["viewport"])
+    if result.get("warnings"):
+        out["warnings"] = result.pop("warnings")
     out["result"] = result
     out["via"] = "script"
     out["undo"] = "one undo step"

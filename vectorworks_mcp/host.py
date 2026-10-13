@@ -70,7 +70,14 @@ class Host:
         key = (inst.key, session_id, plugin)
         cached = self.schema_cache.get(key)
         if cached is None:
-            cached = self.bridge.call(inst, "describe_parametric_schema", {"plugin_name": plugin}, kind="read")
+            try:
+                cached = self.bridge.call(inst, "describe_parametric_schema", {"plugin_name": plugin}, kind="read")
+            except VWError as exc:
+                # e.g. Column2: installed, but without an SDK schema provider -> parametric-record fallback
+                # (scripts_lib/_pio.py) when run_script is available.
+                if "schema provider" not in exc.message or not self.can_script(inst):
+                    raise
+                cached = {"script_only": True, "plugin_name": plugin}
             if not isinstance(cached, dict):
                 cached = {}
             self.schema_cache[key] = cached

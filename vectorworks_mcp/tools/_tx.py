@@ -73,6 +73,25 @@ def run_documentation(host: Host, target: Target, normalised: list[dict], key: s
     return ops.summarise_transaction(result, len(wire))
 
 
+def verify_pio(host: Host, target: Target, items: list[dict], warnings: list) -> list[str]:
+    """Plug-ins regenerate after the script returns: re-read the parametric-record fields set through the fallback
+    and report values the plug-in changed back (the edit itself is committed)."""
+    if not items:
+        return []
+    try:
+        data = host.script(target, "pio_schema", {"verify": items}, label="Verify parameters", kind="read",
+                           transaction=False) or {}
+    except VWError as exc:
+        warnings.append(f"Could not re-check the plug-in parameters after regeneration: {exc.message}")
+        return []
+    problems = list(data.get("problems") or [])
+    if problems:
+        warnings.append("The plug-in regenerated and did NOT keep: " + "; ".join(problems) +
+                        ". It recomputes these from other parameters; set those instead, or delete the object and "
+                        "create it again with the values (creation-time values are kept).")
+    return problems
+
+
 def doc_mm_per_unit(target: Optional[Target]) -> float:
     """Millimetres per document length unit, when the bridge reports it (document record `mm_per_unit`)."""
     if target is None:

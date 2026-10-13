@@ -29,6 +29,47 @@ def _plugins_needed(objects: list[dict]) -> set[str]:
     return needed
 
 
+def _split_pio(items: list[dict]) -> tuple[list[dict], list[tuple[str, list, float]]]:
+    """Plug-in objects (column, parametric fallback): their parameters are set while placing them (some, e.g.
+    Column2 'OA Height', are only accepted before the object's first regeneration) AND again in a second script
+    after it (the first regeneration re-initialises the others, e.g. shaft size, capital, base)."""
+    deferred = []
+    for item in items:
+        if item["kind"] == "column":
+            params = [{"id": k, "value": v, "mm": True} for k, v in item["lengths"].items()]
+            params += [{"id": k, "value": v} for k, v in item["fields"].items()]
+            deferred.append((item["id"], params, 1.0))
+        elif item["kind"] == "pio" and item.get("parameters"):
+            deferred.append((item["id"], list(item["parameters"]), item.get("scale_mm", 1.0)))
+    return items, deferred
+
+
+def _compensate(host, document, plan, created_ids: dict, exc: VWError, ctx, native_key: str) -> None:
+    """The script part failed after the native part committed: delete the native objects again (all-or-nothing for
+    the model). Doors/windows first (deleting a wall would cascade them). Only if that fails: commit_state partial."""
+    hosted = {op["operation_id"] for op in plan.hosted}
+    uuids = [created_ids[i] for i in created_ids if i in hosted] +             [created_ids[i] for i in created_ids if i not in hosted]
+    try:
+        target = host.session.target(document, write=True, bind_apply=True)
+        ops = builders.normalise_edit_ops([{"type": "delete", "params": {"target": f"uuid:{u}"}} for u in uuids])
+        key = host.session.idempotency_key(None, ops, target)
+        _tx.run_general(host, target, ops, key, ctx)
+    except VWError as comp:
+        exc.message = (f"{exc.message} (the native objects of this call WERE created: {sorted(created_ids)}; the "
+                       f"script part was rolled back and removing the native objects failed: {comp.message})")
+        exc.commit_state = "partial"
+        exc.next_step = ("The native objects listed in the message exist. Fix the named problem and create only the "
+                         "extrudes/columns (or apply the styles with vw_edit) again; do not resend the whole call.")
+        return
+    exc.message = (f"{exc.message} (nothing from this call remains: the script part was rolled back and the "
+                   f"{len(uuids)} native object(s) created first were deleted again)")
+    exc.commit_state = "rolled_back"
+    host.session.burn(native_key)
+    exc.details = dict(exc.details or {}, compensated_uuids=uuids)
+    exc.next_step = ("The document is unchanged (the compensating delete is one extra undo step). Fix the named "
+                     "problem and send the whole call again (with a NEW idempotency_key if you passed one).")
+
+
 def handle(args: dict, ctx, warnings: list) -> dict:
     a = C.lower_keys(args)
     units = C.units_name(a.get("units") or a.get("coordinate_units"))
@@ -130,25 +171,38 @@ def handle(args: dict, ctx, warnings: list) -> dict:
             receipts += summary2["receipts"]
     script_result: dict = {}
     restyle = [{"id": i, "uuid": created_ids[i], "style": st} for i, st in plan.styles if created_ids.get(i)]
-    if plan.script_objects or restyle:
+    objects, deferred = _split_pio(plan.script_objects)
+    if objects or restyle:
         if steps:
             target = host.session.target(a.get("document"), write=True)
         try:
-            script_result = host.script(target, "massing", {"objects": plan.script_objects, "restyle": restyle},
+            script_result = host.script(target, "massing", {"objects": objects, "restyle": restyle},
                                         label="MCP create", ctx=ctx) or {}
         except VWError as exc:
-            if steps:
-                exc.message = (f"{exc.message} (the native objects of this call WERE created: "
-                               f"{sorted(created_ids)}; only the script part was rolled back)")
-                exc.commit_state = "partial"
-                exc.next_step = ("The native objects listed in the message exist (one undo step). Fix the named "
-                                 "problem and create only the extrudes/columns (or apply the styles with vw_edit) "
-                                 "again; do not resend the whole call.")
+            if steps and exc.commit_state != "unknown":
+                _compensate(host, a.get("document"), plan, created_ids, exc, ctx, key)
             raise
+        warnings.extend(script_result.get("warnings") or [])
         steps += 1
         for row in script_result.get("created") or []:
             receipts.append({"operation_id": row["id"], "uuid": row["uuid"], "type": row["type"]})
             created_ids[row["id"]] = row["uuid"]
+    if deferred:
+        # Live (VW 2024, Column2): a new plug-in object initialises its record fields on its FIRST regeneration,
+        # which runs only after the creating script returned, overwriting most values set in that script (but it
+        # takes e.g. 'OA Height' from them). So the parameters are set again in a second script (+1 undo step).
+        ops = [{"op": "pio", "targets": [f"uuid:{created_ids[i]}"], "parameters": params, "scale_mm": scale_mm}
+               for i, params, scale_mm in deferred if created_ids.get(i)]
+        target = host.session.target(a.get("document"), write=True)
+        try:
+            res = host.script(target, "edit_engine", {"ops": ops}, label="MCP create parameters", ctx=ctx) or {}
+        except VWError as exc:
+            if exc.commit_state != "unknown":
+                _compensate(host, a.get("document"), plan, created_ids, exc, ctx, key)
+            raise
+        steps += 1
+        checks = [{"uuid": r["uuid"], "expect": r["expect"]} for r in res.get("receipts") or [] if r.get("expect")]
+        _tx.verify_pio(host, target, checks, warnings)
     created = []
     for r in receipts:
         entry = {"id": r.get("operation_id") or r.get("local_ref"), "uuid": r.get("uuid"), "type": r.get("type")}

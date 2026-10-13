@@ -185,7 +185,17 @@ class Session:
         fp = (target.document or {}).get("fingerprint") or ""
         bucket = int(time.time() // 60)
         digest = hashlib.sha256(json.dumps([plan, fp, bucket], sort_keys=True, default=str).encode()).hexdigest()
-        return "auto-" + digest[:24]
+        key = "auto-" + digest[:24]
+        burned = getattr(self, "_burned", set())
+        while key in burned:  # its transaction was compensated (deleted again): a resend must not replay it
+            key = "auto-" + hashlib.sha256((key + "+").encode()).hexdigest()[:24]
+        return key
+
+    def burn(self, key: str) -> None:
+        """Never derive this auto key again (its committed objects were deleted by a compensating transaction)."""
+        if not hasattr(self, "_burned"):
+            self._burned: set[str] = set()
+        self._burned.add(key)
 
     def check_plan(self, key: str, plan_hash: str) -> None:
         with self._lock:

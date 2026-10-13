@@ -91,6 +91,12 @@ def handle(args: dict, ctx, warnings: list) -> dict:
             out["receipts"] += result.get("receipts") or []
             if result.get("imported_resources"):
                 out["imported_resources"] = result["imported_resources"]
+            warnings.extend(result.get("warnings") or [])
+            checks = [{"uuid": r["uuid"], "expect": r.pop("expect")} for r in out["receipts"]
+                      if isinstance(r, dict) and r.get("op") == "pio" and r.get("expect")]
+            not_kept = _tx.verify_pio(host, target, checks, warnings)
+            if not_kept:
+                out["not_kept"] = not_kept
         steps += 1
     for sel in plan.selection_ops:
         if sel["op"] == "deselect":

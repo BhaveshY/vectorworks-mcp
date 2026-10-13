@@ -24,7 +24,8 @@ SNIPPETS = {
                    "fill, font/size/style/alignment, markers)",
     "viewport": "sheet viewports: create / set / update / delete (layers, scale, view, render, crop, classes, "
                 "annotations)",
-    "massing": "3D massing: extrudes, Column plug-in",
+    "massing": "3D massing: extrudes, Column plug-in, plug-in objects without a native schema provider",
+    "pio_schema": "parameters of a plug-in object read from its parametric record (no native schema provider)",
     "records": "list record formats, read an object's records",
     "saved_views": "list / restore / create / delete saved views (fallback when the bridge lacks saved_views)",
     "stories": "list / create / set stories (fallback when the bridge lacks stories)",
@@ -50,7 +51,8 @@ RESOURCE_SYNONYMS = {"hatch": "hatches", "line_type": "line_types", "linetype": 
                      "texture": "textures", "symbol": "symbols", "worksheet": "worksheets", "record": "records",
                      "viewport_style": "viewport_styles", "fill": "hatches", "fills": "hatches"}
 # Snippets that need shared helper files (prepended after the prelude).
-INCLUDES = {"edit_engine": ["_style"], "massing": ["_style"], "viewport": ["_style"], "resource_list": ["_style"]}
+INCLUDES = {"edit_engine": ["_style", "_pio"], "massing": ["_style", "_pio"], "viewport": ["_style"],
+            "resource_list": ["_style"], "pio_schema": ["_pio"]}
 
 
 def load(name: str) -> str:

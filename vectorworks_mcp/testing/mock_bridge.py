@@ -43,6 +43,9 @@ NO_DOC_ACTIONS = {"list_documents", "new_document", "open_document"}
 MOCK_LIBRARY = {66: ["Aluminum HF", "Brick HF"], 96: ["Clouds", "Dash 2"], 109: ["Callouts 12 pt"],
                 120: ["Brown-Yellow GR"]}
 MOCK_FONTS = ["Arial", "Times New Roman"]
+MOCK_PIO_LENGTHS = {"OA Height", "Shaft Width", "Shaft Depth", "Diameter"}
+MOCK_PIO_DEFAULTS = {"OA Height": "3e03", "Shaft Width": "5e02", "Shaft Depth": "5e02", "Diameter": "5e02",
+                     "Use Capital": "True", "Use Base": "True", "ShaftType": "Rectangular", "Shaft Type": "Square"}
 ASYNC_ACTIONS = {"export_pdf", "export_dwg", "import_dwg", "export_ifc", "import_ifc", "open_document",
                  "export_vectorworks_document", "run_script", "capture_view"}
 LEGACY_MISSING = {"list_documents", "activate_document", "new_document", "close_document", "layers", "saved_views",
@@ -341,13 +344,20 @@ class FakeVS:
         return list(self._d.objects[h]["records"])[i - 1]
 
     def NumFields(self, rh):
-        return len(self._d.records.get(rh, []))
+        return len(self._d.records.get(str(rh).removeprefix("pio:"), []))
 
     def GetFldName(self, rh, i):
-        return self._d.records[rh][i - 1]
+        return self._d.records[str(rh).removeprefix("pio:")][i - 1]
 
     def GetRField(self, h, rec, field):
-        return self._d.objects[h]["records"].get(rec, {}).get(field, "")
+        if h in self._d.records:  # record format: default value
+            return MOCK_PIO_DEFAULTS.get(field, "")
+        stored = self._d.objects[h]["records"].get(rec, {})
+        return stored.get(field, MOCK_PIO_DEFAULTS.get(field, "") if rec == "Column2" else "")
+
+    def GetFldType(self, rh, i):
+        name = self._d.records[str(rh).removeprefix("pio:")][int(i) - 1]
+        return 2 if name.startswith("Use ") else 7 if name in MOCK_PIO_LENGTHS else 8 if "Type" in name else 4
 
     def SetRecord(self, h, rec):
         self._d.objects[h]["records"].setdefault(rec, {})
@@ -557,9 +567,22 @@ class FakeVS:
                   offset=float(offset))
 
     def HExtrude(self, profile, bottom, top):
-        prof = self._d.objects.pop(profile)
-        self._d.order.remove(profile)
-        return self._new("extrude", points=prof["points"], bottom=float(bottom), top=float(top))["uuid"]
+        prof = self._d.objects[profile]
+        ex = self._new("extrude", points=prof["points"], bottom=float(bottom), top=float(top))
+        ex["members"] = [profile]
+        prof["in_group"] = ex["uuid"]
+        return ex["uuid"]
+
+    def SetPolyClosed(self, h, closed):
+        self._d.objects[h]["closed"] = bool(closed)
+
+    def IsPolyClosed(self, h):
+        return bool(self._d.objects[h].get("closed"))
+
+    def GetFPat(self, h):
+        if self._d.objects[h]["type"] == "extrude":
+            return 0  # like Vectorworks: an extrude keeps its fill on the profile
+        return self._attr(h).get("fpat", 1)
 
     def Get3DInfo(self, h):
         o = self._d.objects[h]
@@ -618,8 +641,6 @@ class FakeVS:
         self._attr(h)["fpat"] = int(value)
         self._attr(h).pop("hatch", None)
 
-    def GetFPat(self, h):
-        return self._attr(h).get("fpat", 1)
 
     def SetVectorFill(self, h, name):
         if name not in self._d.resources.get(66, []):
@@ -741,7 +762,10 @@ class FakeVS:
         return (True, self._d.objects[vp]["vp_classes"].get(name, -1))
 
     def UpdateVP(self, vp):
-        self._d.objects[vp]["ov"][1004] = False
+        ov = self._d.objects[vp]["ov"]
+        ov[1004] = False
+        if ov.get(1007) == 7 and ov.get(1000) == 6 and ov.get(1001, 0) != 0:
+            ov[1000] = 0  # like Vectorworks: rendered Top/Plan becomes Top (orthogonal)
 
     def SetVPCropObject(self, vp, crop):
         self._d.objects[vp]["crop"] = crop
@@ -1273,6 +1297,9 @@ class Handler:
                   "Stair": [{"id": "TotalRise", "display_name": "Total Rise", "field_style": 7, "value": "3000"},
                             {"id": "NumRisers", "display_name": "Number of Risers", "field_style": 1, "value": "17"},
                             {"id": "StairType", "display_name": "Stair Type", "field_style": 8, "value": "Straight"}]}.get(name)
+        if name == "Column2":  # like Vectorworks 2024: installed, no SDK schema provider
+            raise BridgeError("installed parametric plugin does not expose an SDK parameter schema provider: Column2",
+                              "handler_failed")
         if params is None:
             raise BridgeError(f"plug-in not found: {name}", "not_found")
         return {"universal_plugin_name": name, "descriptor_fingerprint": "fp-" + name.lower(), "parameters": params}

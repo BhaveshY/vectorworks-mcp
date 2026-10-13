@@ -38,6 +38,10 @@ def find_resource(rtype, name, required=True):
 
 
 IMPORTED = []
+WARNINGS = []
+# Plain 2D (+ wall / plug-in) types: a failed readback rolls the call back. On other (3D) objects an attribute that
+# does not stick is skipped with a warning instead.
+STRICT_TYPES = (2, 3, 4, 5, 6, 10, 12, 21, 63, 68, 86)
 MARKERS = {"arrow": (0, 15, 0.125, 0.0), "open_arrow": (1280, 15, 0.125, 0.0), "dot": (2, 0, 0.0625, 0.0625),
            "circle": (258, 0, 0.125, 0.125), "slash": (259, 45, 0.125, 0.0), "tick": (259, 45, 0.125, 0.0),
            "cross": (260, 45, 0.125, 0.0)}
@@ -55,18 +59,32 @@ def _fail(what, want, got):
 def apply_style(h, st):
     """st: host-normalised style dict (see builders.style_props). Sets + reads back every attribute."""
     done = {}
+    t = vs.GetTypeN(h)
+    soft = t not in STRICT_TYPES
     if "class" in st:
         vs.SetClass(h, st["class"])
     if "name" in st:
         vs.SetName(h, st["name"])
     if "pen_color" in st:
         vs.SetPenFore(h, tuple(int(c) for c in st["pen_color"]))
-    if "fill_color" in st:
-        vs.SetFillFore(h, tuple(int(c) for c in st["fill_color"]))
     if "line_weight" in st:
         vs.SetLW(h, int(st["line_weight"]))
     if "opacity" in st:
         vs.SetOpacityN(h, int(st["opacity"]), int(st["opacity"]))
+    fill_h = h
+    if t == 24 and not _nil(vs.FInGroup(h)):
+        fill_h = vs.FInGroup(h)  # an extrude keeps its fill on the profile (vs.SetFPat on the extrude reads back 0)
+    for part, target in ((_apply_line_style, h), (_apply_fill, fill_h)):
+        try:
+            part(target, st, done)
+        except ValueError as exc:
+            if not (soft and ("readback_mismatch" in str(exc) or "native_rejected" in str(exc))):
+                raise
+            WARNINGS.append("%s (type_id %s): %s - skipped" % (uuid_of(h), t, str(exc).split(":", 1)[1].strip()))
+    return _apply_rest(h, st, done)
+
+
+def _apply_line_style(h, st, done):
     ls = st.get("line_style")
     if ls is not None:
         value = ls["value"] if ls["kind"] == "index" else -find_resource(96, ls["name"])
@@ -75,6 +93,11 @@ def apply_style(h, st):
         if got != int(value):
             _fail("line_style", ls, got)
         done["line_style"] = ls.get("name", value)
+
+
+def _apply_fill(h, st, done):
+    if "fill_color" in st:
+        vs.SetFillFore(h, tuple(int(c) for c in st["fill_color"]))
     fill = st.get("fill")
     if fill is not None:
         kind = fill["kind"]
@@ -101,6 +124,10 @@ def apply_style(h, st):
                 if got != -index:
                     _fail("fill " + kind, fill["name"], got)
             done["fill"] = {kind: fill["name"]}
+
+
+
+def _apply_rest(h, st, done):
     text_keys = [k for k in ("text_style_name", "font", "text_size", "text_style", "align", "valign") if k in st]
     if text_keys:
         if vs.GetTypeN(h) != 10:
