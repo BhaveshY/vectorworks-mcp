@@ -111,14 +111,12 @@ class DialogDriver(threading.Thread):
                 if _is_file_dialog(dlg):
                     if saved:
                         continue
-                    edit = _file_name_edit(dlg)
-                    if edit:
-                        text = ctypes.create_unicode_buffer(self.path)
-                        user32.SendMessageW(edit, WM_SETTEXT, 0, ctypes.addressof(text))
-                        time.sleep(0.2)
-                        _click(dlg, 1)
-                        saved = True
-                        self.log.append("save dialog: file name set, Save pressed")
+                    # Pressing Export already stored the document's IFC export settings; the file itself is
+                    # written afterwards without UI (a dialog-written export was followed by a Vectorworks
+                    # crash on the next document, live 2026-10-14).
+                    _click(dlg, 2)
+                    saved = True
+                    self.log.append("save dialog: cancelled (settings initialised)")
                 elif _is_export_dialog(dlg) and "Report" not in _text(dlg):
                     presses = pressed_export.get(dlg, 0)
                     if presses >= 2:
@@ -154,5 +152,5 @@ def export_with_dialog(host, target, path: str, ctx=None) -> dict:
     finally:
         driver.stop.set()
         driver.join(5)
-    ok = os.path.exists(path) and os.path.getsize(path) > 0
+    ok = any("settings initialised" in line for line in driver.log)
     return {"ok": ok, "log": driver.log, "error": error, "needs_stories": driver.stuck_on_story_mapping}

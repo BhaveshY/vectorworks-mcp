@@ -189,9 +189,10 @@ def handle(args: dict, ctx, warnings: list) -> dict:
                                      "Floor', elevation=0, layers=['<design layer>']) and export again.")
                 exc.details = {"dialog_export": first}
                 raise
-            result = {"operation": "export_ifc", "path": path, "method": "export_dialog_first_run",
-                      "note": "first IFC export of this document ran through Vectorworks' export dialog "
-                              "(settings now stored; next exports run without it)"}
+            result = host.call(target, native, params, kind="long", ctx=ctx)
+            if isinstance(result, dict):
+                result["first_run"] = ("this document's IFC export settings were initialised once through "
+                                       "Vectorworks' export dialog")
         out["result"] = compact_io(result, C.boolean(a.get("detail", False), "detail"))
         if fmt == "ifc" and isinstance(out["result"], dict):
             out["result"].pop("setup", None)

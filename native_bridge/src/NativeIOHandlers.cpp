@@ -967,8 +967,11 @@ Result ExportIFC(const IFCRequest& request) {
                 if (!usedMethod.empty()) break;
                 (void) schema;
                 const std::string common;
-                // 1) ExportFile without UI.
-                {
+                // 1) ExportFile without UI: disabled. Live 2026-10-14 a successful
+                //    ExportFile was followed by a Vectorworks crash (0xC0000005) at the
+                //    next IFC export in another document; IFC_ExportNoUI below writes
+                //    the same file.
+                if (method == "exportfile") {
                     clearStaged();
                     const std::uint64_t seq = DialogWatch::DismissSequence();
                     const std::int64_t started = IfcNowMs();
