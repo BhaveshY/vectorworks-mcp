@@ -74,6 +74,8 @@ struct IFCRequest {
     // vs.IFC_ImportNoUI through the internal Python engine if the SDK call
     // produced no file / no document change. "sdk" or "script" force one path.
     std::string method;
+    // export only: "auto" (IFC2x3, then IFC4), "ifc2x3" or "ifc4".
+    std::string schema;
 };
 
 struct VectorworksExportRequest {

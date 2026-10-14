@@ -82,6 +82,11 @@ struct BuiltInOpeningReceipt {
     double windowSillHeight = 0.0;
     bool wallHostVerified = false;
     bool semanticReadbackVerified = false;
+    // A kSymbolBreak of the wall references the opening (what keeps it in the
+    // wall when Vectorworks regenerates the wall), and its offset along the wall.
+    bool wallBreakRegistered = false;
+    double wallOffset = 0.0;
+    std::vector<std::string> warnings;
 };
 
 ParametricDescriptor DescribeParametricObject(MCObjectHandle object);
@@ -99,7 +104,11 @@ void VerifyBuiltInOpeningReceipt(
 
 // These functions deliberately do not open or commit an undo event. The native
 // transaction executor owns undo scope so a mixed plan remains one atomic event.
-MCObjectHandle CreateVerifiedParametricObject(const ParametricCreateSpec& spec);
+// `warnings` (optional) receives non-fatal notes, e.g. a hosted object whose
+// wall break could not be registered.
+MCObjectHandle CreateVerifiedParametricObject(
+    const ParametricCreateSpec& spec,
+    std::vector<std::string>* warnings = nullptr);
 void UpdateVerifiedParametricObject(
     MCObjectHandle object,
     const std::string& expectedUniversalPluginName,
@@ -107,5 +116,8 @@ void UpdateVerifiedParametricObject(
     const std::vector<ParametricValue>& parameters);
 
 bool IsObjectHostedByWall(MCObjectHandle object, MCObjectHandle expectedWall);
+// True when a kSymbolBreak of `wall` references `object` (offset along the
+// wall in *offset when given).
+bool HasWallSymbolBreak(MCObjectHandle wall, MCObjectHandle object, double* offset = nullptr);
 
 }  // namespace VectorworksMCP

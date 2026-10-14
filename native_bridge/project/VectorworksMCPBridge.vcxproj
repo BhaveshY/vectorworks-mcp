@@ -141,6 +141,9 @@ set VWR_7ZCMD=$(VWSDKRoot)\SDKLib\ToolsWin\BuildVWR\7z
     <ClCompile Include="..\src\Discovery.cpp" />
     <ClCompile Include="..\src\DocumentRegistry.cpp" />
     <ClCompile Include="..\src\DocumentationHandlers.cpp" />
+    <ClCompile Include="..\src\GridReader.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="..\src\ImageTranscode.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -164,6 +167,7 @@ set VWR_7ZCMD=$(VWSDKRoot)\SDKLib\ToolsWin\BuildVWR\7z
     <ClInclude Include="Source\Prefix\StdAfx.h" />
     <ClInclude Include="Source\Prefix\CommonPrefix.h" />
     <ClInclude Include="..\src\BimObjectHandlers.hpp" />
+    <ClInclude Include="..\src\GridReader.hpp" />
     <ClInclude Include="..\src\ImageTranscode.hpp" />
     <ClInclude Include="..\src\BridgeProtocol.hpp" />
     <ClInclude Include="..\src\CapabilityRegistry.hpp" />

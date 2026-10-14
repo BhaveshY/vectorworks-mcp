@@ -518,6 +518,32 @@ Isolation ApplyIsolation(const std::vector<MCObjectHandle>& layers) {
     return isolation;
 }
 
+// Drawing / selection captures: Layer Options "Gray Others" (the default of
+// the 2024 Blank template is 6 = Gray/Snap Others) make ExportImage draw every
+// non-active layer as light gray outlines without fills (live 2026-10-14).
+// Show them normally for the capture; reverted like an isolation.
+Isolation UngrayOthers() {
+    Isolation isolation;
+    isolation.layerOptionsBefore = ReadShortProgramVariable(varLayerOptions, 0);
+    isolation.classOptionsBefore = ReadShortProgramVariable(varClassOptions, 0);
+    const bool grayLayers = isolation.layerOptionsBefore == kLayersGrayOthers ||
+        isolation.layerOptionsBefore == kLayersGraySnapOthers;
+    const bool grayClasses = isolation.classOptionsBefore == kClassesGrayOthers ||
+        isolation.classOptionsBefore == kClassesGraySnapOthers;
+    if (!grayLayers && !grayClasses) return isolation;
+    isolation.applied = true;
+    isolation.mode = "ungray_others";
+    if (grayLayers) {
+        isolation.layerOptionsChanged = WriteShortProgramVariable(varLayerOptions, kLayersShowSnapModifyOthers);
+    }
+    if (grayClasses) {
+        isolation.classOptionsChanged = WriteShortProgramVariable(varClassOptions, kClassesShowSnapModifyOthers);
+    }
+    isolation.layerOptionsUsed = ReadShortProgramVariable(varLayerOptions, isolation.layerOptionsBefore);
+    isolation.classOptionsUsed = ReadShortProgramVariable(varClassOptions, isolation.classOptionsBefore);
+    return isolation;
+}
+
 void RevertIsolation(const Isolation& isolation) {
     if (!isolation.applied) return;
     for (auto it = isolation.changedVisibilities.rbegin(); it != isolation.changedVisibilities.rend(); ++it) {
@@ -813,6 +839,279 @@ std::string FitJson(const FitResult& fit) {
     return json + "}";
 }
 
+// ---- capture resolution (temporary layer-scale boost) ------------------------
+//
+// ISDK::ExportImage ignores the screen zoom and the size of fExportRect: it
+// renders the exported region at 72 dpi of PAGE size, i.e. at the layer scale
+// (live 2026-10-14: a 2000x1000 mm rect on a 1:50 layer gave 126x63 px at
+// zoom 1, 4, 16 and with fit; the same capture with the layer at 1:2.5 gave
+// 2497x1249 px). Measured relation (plan and 3D, 0.2 % error):
+//     exported px = region px on screen * 72 / (screen dpi * zoom factor)
+// So the capture temporarily divides the scale of the design layers it shows
+// by k (and the zoom by k, so the same world region stays on screen), exports
+// and restores the exact scales. Text and line weights are page based and
+// keep their pixel size. Sheet layers are never changed.
+
+int ActiveDirtyState() {
+#if SDK_VERSION >= 3000
+    return -1;
+#else
+    return gSDK->IsActiveFileChangedAfterLastSave() ? 1 : 0;
+#endif
+}
+
+struct ScaleBoost {
+    bool enabled = true;
+    int targetPx = 1600;
+    double estimatedPx = 0.0;   // long edge expected without the boost
+    double factor = 1.0;        // total factor applied (1 = none)
+    int passes = 0;
+    std::string skipped;        // reason when not applied
+    std::vector<std::pair<MCObjectHandle, double>> layers;  // original scales (cleared by RestoreScales)
+    std::vector<std::pair<std::string, double>> report;     // layer name, original scale
+    double zoomBefore = 0.0;    // zoom / centre before the boost
+    WorldPt centerBefore;
+    bool zoomKnown = false;
+    int dirtyBefore = -1;
+    int dirtyAfter = -1;
+    bool restored = true;
+    std::vector<std::string> restoreErrors;
+
+    bool Active() const { return !layers.empty(); }
+
+    // Exact original scales back (idempotent; also run from the destructor).
+    void RestoreScales() {
+        if (layers.empty()) return;
+        bool ok = true;
+        for (auto it = layers.rbegin(); it != layers.rend(); ++it) {
+            try {
+                gSDK->SetLayerScaleN(it->first, it->second);
+                double_gs readBack = 0.0;
+                gSDK->GetLayerScaleN(it->first, readBack);
+                if (std::abs(readBack - it->second) > std::max(1e-9, std::abs(it->second) * 1e-9)) {
+                    ok = false;
+                    restoreErrors.push_back(LayerName(it->first) + ": scale " + JsonNumber(readBack) +
+                                            " != " + JsonNumber(it->second));
+                }
+            } catch (...) {
+                ok = false;
+                restoreErrors.push_back(LayerName(it->first) + ": exception");
+            }
+        }
+        restored = ok;
+        layers.clear();
+    }
+
+    ~ScaleBoost() {
+        try {
+            RestoreScales();
+        } catch (...) {
+        }
+    }
+};
+
+// Long edge in exported pixels of `region` (view pixels) for the current view.
+double ExpectedExportPx(const FullView& view, const ViewRect& region) {
+    const double zoom = view.zoomKnown && view.zoom > 0.0 ? view.zoom : 1.0;
+    const double dpi = view.dpi > 0 ? static_cast<double>(view.dpi) : 72.0;
+    const double longEdge = std::max(std::abs(static_cast<double>(region.Width())),
+                                     std::abs(static_cast<double>(region.Height())));
+    return longEdge * 72.0 / (dpi * zoom);
+}
+
+// The design layers whose content the export shows.
+std::vector<MCObjectHandle> BoostLayers(const FullView& view, bool activeOnly) {
+    std::vector<MCObjectHandle> layers;
+    if (!view.layer || LayerKind(view.layer) != kLayerDesign) return layers;
+    if (activeOnly || ReadShortProgramVariable(varLayerOptions, 0) == kLayersActive) {
+        layers.push_back(view.layer);
+        return layers;
+    }
+    for (MCObjectHandle layer : AllLayers()) {
+        if (LayerKind(layer) != kLayerDesign) continue;
+        if (layer != view.layer && LayerVisibility(layer) == -1) continue;
+        layers.push_back(layer);
+    }
+    return layers;
+}
+
+// Divides the scales of `layers` by `factor` (on top of any earlier boost)
+// and keeps the same world region on screen. Returns false when nothing
+// could be changed.
+bool ApplyScaleBoost(ScaleBoost& boost, const std::vector<MCObjectHandle>& layers, double factor) {
+    if (factor <= 1.0001) return false;
+    const bool first = boost.layers.empty();
+    if (first) {
+        if (layers.empty()) return false;
+        for (MCObjectHandle layer : layers) {
+            double_gs scale = 0.0;
+            gSDK->GetLayerScaleN(layer, scale);
+            if (std::isfinite(scale) && scale > 0.0) {
+                boost.layers.emplace_back(layer, scale);
+                boost.report.emplace_back(LayerName(layer), scale);
+            }
+        }
+        if (boost.layers.empty()) return false;
+    }
+    double zoom = 0.0;
+    const bool zoomKnown = gSDK->GetProgramVariable(varWindowZoomFactor, &zoom) && std::isfinite(zoom) && zoom > 0.0;
+    WorldPt center;
+    gSDK->GetViewCenter(center);
+    if (first) {
+        boost.zoomBefore = zoom;
+        boost.zoomKnown = zoomKnown;
+        boost.centerBefore = center;
+    }
+    for (const auto& entry : boost.layers) {
+        const double current = entry.second / boost.factor;
+        gSDK->SetLayerScaleN(entry.first, current / factor);
+    }
+    boost.factor *= factor;
+    if (zoomKnown) gSDK->SetZoomFactorN(zoom / factor);
+    gSDK->SetViewCenter(center);
+    gSDK->DrawScreen();
+    return true;
+}
+
+std::string ScaleBoostJson(const ScaleBoost& boost) {
+    const bool applied = boost.factor > 1.0001;
+    std::string json = "{\"applied\":";
+    json += applied ? "true" : "false";
+    json += ",\"factor\":" + JsonNumber(std::round(boost.factor * 1000.0) / 1000.0);
+    json += ",\"target_px\":" + std::to_string(boost.targetPx);
+    json += ",\"estimated_px\":" + JsonNumber(std::round(boost.estimatedPx * 10.0) / 10.0);
+    json += ",\"passes\":" + std::to_string(boost.passes);
+    if (!boost.skipped.empty()) json += ",\"skipped\":" + JsonString(boost.skipped);
+    json += ",\"layers\":[";
+    for (std::size_t index = 0; index < boost.report.size(); ++index) {
+        if (index) json += ",";
+        json += "{\"name\":" + JsonString(boost.report[index].first) +
+            ",\"scale\":" + JsonNumber(boost.report[index].second) +
+            ",\"boosted_scale\":" + JsonNumber(boost.report[index].second / boost.factor) + "}";
+    }
+    json += "]";
+    if (applied) {
+        json += ",\"scales_restored\":";
+        json += boost.restored ? "true" : "false";
+        if (!boost.restoreErrors.empty()) json += ",\"restore_errors\":" + JsonStringArray(boost.restoreErrors);
+        json += ",\"dirty_before\":";
+        json += boost.dirtyBefore < 0 ? "null" : (boost.dirtyBefore ? "true" : "false");
+        json += ",\"dirty_after\":";
+        json += boost.dirtyAfter < 0 ? "null" : (boost.dirtyAfter ? "true" : "false");
+        json += ",\"marked_dirty\":";
+        json += boost.dirtyBefore == 0 && boost.dirtyAfter == 1 ? "true" : "false";
+    }
+    return json + "}";
+}
+
+ScaleBoost ParseScaleBoost(const Params& params) {
+    ScaleBoost boost;
+    boost.enabled = GetLenientBoolParam(params, "scale_boost", true);
+    if (HasParam(params, "max_px") && params.at("max_px").type != ParamValue::Type::Null) {
+        const int requested = GetClampedIntParam(params, "max_px", 1600, 0, 100000);
+        if (requested <= 0) {
+            boost.enabled = false;
+        } else {
+            boost.targetPx = std::clamp(requested, 400, 4000);
+        }
+    }
+    if (!boost.enabled) boost.skipped = "disabled";
+    return boost;
+}
+
+// Before the export: estimate the image size of `region` and boost when it
+// is below the target (factor clamped to 1..50).
+void PlanScaleBoost(ScaleBoost& boost, const FullView& view, const ViewRect& region, bool activeOnly) {
+    boost.estimatedPx = ExpectedExportPx(view, region);
+    if (!boost.enabled) return;
+    if (view.sheet) {
+        boost.skipped = "sheet_layer";
+        return;
+    }
+    if (!std::isfinite(boost.estimatedPx) || boost.estimatedPx <= 0.0) {
+        boost.skipped = "estimate_unavailable";
+        return;
+    }
+    const double factor = std::clamp(boost.targetPx / boost.estimatedPx, 1.0, 50.0);
+    if (factor <= 1.05) {
+        boost.skipped = "already_large_enough";
+        return;
+    }
+    boost.dirtyBefore = ActiveDirtyState();
+    if (ApplyScaleBoost(boost, BoostLayers(view, activeOnly), factor)) {
+        ++boost.passes;
+    } else {
+        boost.skipped = "no_scalable_layer";
+    }
+}
+
+// After an export: when the image is still far below the target (the screen
+// DPI estimate can be off on scaled displays), one corrective pass. Only for
+// fast render modes; the caller re-exports when this returns true.
+bool CorrectScaleBoost(ScaleBoost& boost, const FullView& view, int width, int height, bool activeOnly) {
+    if (!boost.enabled || view.sheet || !IsFastRenderMode(view.renderMode) || boost.passes >= 2) return false;
+    const int longEdge = std::max(width, height);
+    if (longEdge <= 0 || longEdge >= static_cast<int>(0.6 * boost.targetPx)) return false;
+    const double extra = std::min(static_cast<double>(boost.targetPx) / longEdge, 50.0 / boost.factor);
+    if (extra <= 1.05) return false;
+    if (boost.dirtyBefore < 0 && boost.layers.empty()) boost.dirtyBefore = ActiveDirtyState();
+    if (!ApplyScaleBoost(boost, boost.layers.empty() ? BoostLayers(view, activeOnly) : std::vector<MCObjectHandle>{},
+                         extra)) {
+        return false;
+    }
+    ++boost.passes;
+    boost.skipped.clear();
+    return true;
+}
+
+// ---- image -> world mapping (plan captures) -----------------------------------
+//
+// ExportImage renders exactly the exported view region (fExportRect, or the
+// whole drawing pane when it is empty): live 2026-10-14 the image size was
+// region px * 72 / (dpi * zoom) rounded up, e.g. drawing pane 1426x924 at
+// zoom 4 -> 268x174, and crops kept the cropped objects centred. So the
+// world rectangle of the image is the region's corners converted with
+// ViewPt2WorldPt, and image pixel (u, v) maps to
+//     x = left + u / px_per_mm,   y = top - v / px_per_mm.
+// Only meaningful in plan projection (3D views have no single world plane).
+struct ImageMapping {
+    bool valid = false;
+    double left = 0.0, bottom = 0.0, right = 0.0, top = 0.0;
+    double pxPerMmX = 0.0, pxPerMmY = 0.0;
+};
+
+ImageMapping MapImageToWorld(const FullView& view, const ViewRect& region, int width, int height) {
+    ImageMapping mapping;
+    if (!IsPlanView(view) || width <= 0 || height <= 0 || region.IsEmpty()) return mapping;
+    WorldPt a, b;
+    gSDK->ViewPt2WorldPt(ViewPt(region.Left(), region.Top()), a);
+    gSDK->ViewPt2WorldPt(ViewPt(region.Right(), region.Bottom()), b);
+    mapping.left = std::min(a.x, b.x);
+    mapping.right = std::max(a.x, b.x);
+    mapping.bottom = std::min(a.y, b.y);
+    mapping.top = std::max(a.y, b.y);
+    const double worldWidth = mapping.right - mapping.left;
+    const double worldHeight = mapping.top - mapping.bottom;
+    if (!(worldWidth > 0.0) || !(worldHeight > 0.0) || !std::isfinite(worldWidth) || !std::isfinite(worldHeight)) {
+        return mapping;
+    }
+    mapping.pxPerMmX = width / worldWidth;
+    mapping.pxPerMmY = height / worldHeight;
+    mapping.valid = std::isfinite(mapping.pxPerMmX) && std::isfinite(mapping.pxPerMmY);
+    return mapping;
+}
+
+std::string ImageMappingJson(const ImageMapping& mapping) {
+    if (!mapping.valid) return ",\"world_bounds\":null,\"px_per_mm\":null";
+    const auto round6 = [](double value) { return std::round(value * 1e6) / 1e6; };
+    return ",\"world_bounds\":{\"left\":" + JsonNumber(round6(mapping.left)) +
+        ",\"bottom\":" + JsonNumber(round6(mapping.bottom)) +
+        ",\"right\":" + JsonNumber(round6(mapping.right)) +
+        ",\"top\":" + JsonNumber(round6(mapping.top)) + ",\"units\":\"mm\"}" +
+        ",\"px_per_mm\":" + JsonNumber(round6((mapping.pxPerMmX + mapping.pxPerMmY) / 2.0)) +
+        ",\"px_per_mm_xy\":[" + JsonNumber(round6(mapping.pxPerMmX)) + "," + JsonNumber(round6(mapping.pxPerMmY)) + "]";
+}
+
 // ---- saved views -----------------------------------------------------------------
 
 std::vector<std::string> SavedViewNames() {
@@ -927,6 +1226,14 @@ AppliedChange ApplyViewChange(const ViewChange& change, const Params& params) {
     }
     if (change.projection && layer) {
         gSDK->SetProjection(layer, *change.projection, false, false);
+    } else if (change.standardView && layer && *change.standardView != standardViewTop &&
+               *change.standardView != standardViewUserDefined &&
+               static_cast<short>(gSDK->GetProjection(layer)) == projectionPlan) {
+        // From Top/Plan, SetCurrentView(iso/front/...) alone keeps the plan
+        // projection (live 2026-10-14: set_view right_iso -> readback_mismatch,
+        // capture_view right_iso -> a plan image). The UI switches to an
+        // orthogonal 3D view; do the same.
+        gSDK->SetProjection(layer, projectionOrthogonal, false, false);
     }
     if (!change.fit.empty() && (change.standardView || change.projection)) {
         // Let the new orientation take effect before the fit measures it
@@ -1103,22 +1410,78 @@ std::string HandleExportImage(const Params& params) {
     request.updateViewports = GetLenientBoolParam(params, "update_viewports", false);
     request.resetPlugInObjects = GetLenientBoolParam(params, "reset_plugin_objects", false);
     request.exportGeoreferencing = GetLenientBoolParam(params, "export_georeferencing", false);
-    double l = 0, b = 0, r = 0, t = 0;
-    if (ParseRect(params, l, b, r, t)) {
+    ScaleBoost boost = ParseScaleBoost(params);
+    FullView view = ReadFullView();
+    ViewRect area = DrawingArea(view);
+    const auto computeExportRect = [&]() {
+        request.hasExportRect = false;
+        double l = 0, b = 0, r = 0, t = 0;
+        if (!ParseRect(params, l, b, r, t)) return;
         ViewRect target;
-        if (gSDK->WorldRect2ViewRect(WorldRect(l, t, r, b), target)) {
-            request.hasExportRect = true;
-            request.rectLeft = std::min(target.Left(), target.Right());
-            request.rectRight = std::max(target.Left(), target.Right());
-            request.rectTop = std::min(target.Top(), target.Bottom());
-            request.rectBottom = std::max(target.Top(), target.Bottom());
+        if (!gSDK->WorldRect2ViewRect(WorldRect(l, t, r, b), target)) return;
+        request.hasExportRect = true;
+        request.rectLeft = std::min(target.Left(), target.Right());
+        request.rectRight = std::max(target.Left(), target.Right());
+        request.rectTop = std::min(target.Top(), target.Bottom());
+        request.rectBottom = std::max(target.Top(), target.Bottom());
+        if (!area.IsEmpty()) {
+            request.rectLeft = std::max<ViewCoord>(area.Left(), request.rectLeft);
+            request.rectRight = std::min<ViewCoord>(area.Right(), request.rectRight);
+            request.rectTop = std::max<ViewCoord>(area.Top(), request.rectTop);
+            request.rectBottom = std::min<ViewCoord>(area.Bottom(), request.rectBottom);
         }
+        if (request.rectRight - request.rectLeft < 8 || request.rectBottom - request.rectTop < 8) {
+            request.hasExportRect = false;
+        }
+    };
+    const auto exportRegion = [&]() {
+        return request.hasExportRect
+            ? ViewRect(request.rectLeft, request.rectTop, request.rectRight, request.rectBottom)
+            : area;
+    };
+    computeExportRect();
+    std::optional<NativeIO::Result> result;
+    ImageMapping mapping;
+    std::exception_ptr failure;
+    try {
+        PlanScaleBoost(boost, view, exportRegion(), false);
+        if (boost.Active()) {
+            view = ReadFullView();
+            area = DrawingArea(view);
+            computeExportRect();
+        }
+        result = NativeIO::ExportImage(request);
+        int width = 0, height = 0;
+        ReadImageSize(result->canonicalPath, width, height);
+        mapping = MapImageToWorld(view, exportRegion(), width, height);
+    } catch (...) {
+        failure = std::current_exception();
     }
-    const auto result = NativeIO::ExportImage(request);
+    // Exact original layer scales, then the original zoom/centre.
+    const bool boosted = boost.factor > 1.0001;
+    try {
+        boost.RestoreScales();
+        if (boosted) {
+            if (boost.zoomKnown) gSDK->SetZoomFactorN(boost.zoomBefore);
+            gSDK->SetViewCenter(boost.centerBefore);
+            gSDK->DrawScreen();
+            boost.dirtyAfter = ActiveDirtyState();
+        }
+    } catch (...) {
+        boost.restored = false;
+    }
+    if (failure) std::rethrow_exception(failure);
     int width = 0, height = 0;
-    ReadImageSize(result.canonicalPath, width, height);
-    return ResultJson(result) + ",\"width\":" + std::to_string(width) + ",\"height\":" + std::to_string(height) +
-        ",\"bytes\":" + std::to_string(result.sizeBytes) + "}";
+    ReadImageSize(result->canonicalPath, width, height);
+    std::string json = ResultJson(*result) + ",\"width\":" + std::to_string(width) + ",\"height\":" +
+        std::to_string(height) + ",\"bytes\":" + std::to_string(result->sizeBytes);
+    json += ",\"scale_boost\":" + ScaleBoostJson(boost);
+    json += ImageMappingJson(mapping);
+    if (request.hasExportRect) {
+        json += ",\"export_rect\":[" + std::to_string(request.rectLeft) + "," + std::to_string(request.rectTop) + "," +
+            std::to_string(request.rectRight) + "," + std::to_string(request.rectBottom) + "]";
+    }
+    return json + "}";
 }
 
 namespace {
@@ -1280,6 +1643,8 @@ std::string HandleCaptureView(const Params& params) {
     std::optional<NativeIO::Result> result;
     AppliedChange applied;
     Isolation isolation;
+    ScaleBoost boost = ParseScaleBoost(params);
+    ImageMapping mapping;
     FullView used;
     ViewRect usedAreaPx;
     std::string failure;
@@ -1288,42 +1653,91 @@ std::string HandleCaptureView(const Params& params) {
         if (isolate && (target == CaptureTarget::Layer || target == CaptureTarget::Sheet ||
                         target == CaptureTarget::Objects)) {
             isolation = ApplyIsolation(IsolationLayers(target, params));
+        } else if ((target == CaptureTarget::Drawing || target == CaptureTarget::Selection) &&
+                   GetLenientBoolParam(params, "ungray_others", true)) {
+            isolation = UngrayOthers();
         }
         applied = ApplyViewChange(change, params);
         gSDK->DrawScreen();
         used = ReadFullView();
-        const ViewRect usedArea = DrawingArea(used);
+        ViewRect usedArea = DrawingArea(used);
         usedAreaPx = usedArea;
-        double l = 0, b = 0, r = 0, t = 0;
-        if (ParseRect(params, l, b, r, t)) {
-            ViewRect rect;
-            if (gSDK->WorldRect2ViewRect(WorldRect(l, t, r, b), rect)) {
-                request.hasExportRect = true;
-                request.rectLeft = std::max<ViewCoord>(usedArea.Left(), std::min(rect.Left(), rect.Right()));
-                request.rectRight = std::min<ViewCoord>(usedArea.Right(), std::max(rect.Left(), rect.Right()));
-                request.rectTop = std::max<ViewCoord>(usedArea.Top(), std::min(rect.Top(), rect.Bottom()));
-                request.rectBottom = std::min<ViewCoord>(usedArea.Bottom(), std::max(rect.Top(), rect.Bottom()));
-                if (request.rectRight - request.rectLeft < 8 || request.rectBottom - request.rectTop < 8) {
-                    request.hasExportRect = false;
+        const auto clampRect = [&](const ViewRect& rect) {
+            request.hasExportRect = true;
+            request.rectLeft = std::max<ViewCoord>(usedArea.Left(), std::min(rect.Left(), rect.Right()));
+            request.rectRight = std::min<ViewCoord>(usedArea.Right(), std::max(rect.Left(), rect.Right()));
+            request.rectTop = std::max<ViewCoord>(usedArea.Top(), std::min(rect.Top(), rect.Bottom()));
+            request.rectBottom = std::min<ViewCoord>(usedArea.Bottom(), std::max(rect.Top(), rect.Bottom()));
+            if (request.rectRight - request.rectLeft < 8 || request.rectBottom - request.rectTop < 8) {
+                request.hasExportRect = false;
+            }
+        };
+        // Export rect for the current zoom (recomputed after a scale boost).
+        const auto computeExportRect = [&]() {
+            request.hasExportRect = false;
+            double l = 0, b = 0, r = 0, t = 0;
+            if (ParseRect(params, l, b, r, t)) {
+                ViewRect rect;
+                if (gSDK->WorldRect2ViewRect(WorldRect(l, t, r, b), rect)) clampRect(rect);
+            } else if (applied.fit && applied.fit->hasViewRect && GetLenientBoolParam(params, "crop_to_fit", true)) {
+                // The fit was computed before DrawScreen; recompute the crop.
+                ViewRect rect;
+                Bounds expanded = applied.fit->bounds;
+                expanded.Expand(change.marginPct);
+                if (gSDK->WorldRect2ViewRect(WorldRect(expanded.left, expanded.top, expanded.right, expanded.bottom), rect)) {
+                    clampRect(rect);
                 }
             }
-        } else if (applied.fit && applied.fit->hasViewRect && GetLenientBoolParam(params, "crop_to_fit", true)) {
-            // The fit was computed before DrawScreen; recompute the crop.
-            ViewRect rect;
-            Bounds expanded = applied.fit->bounds;
-            expanded.Expand(change.marginPct);
-            if (gSDK->WorldRect2ViewRect(WorldRect(expanded.left, expanded.top, expanded.right, expanded.bottom), rect)) {
-                request.hasExportRect = true;
-                request.rectLeft = std::max<ViewCoord>(usedArea.Left(), std::min(rect.Left(), rect.Right()));
-                request.rectRight = std::min<ViewCoord>(usedArea.Right(), std::max(rect.Left(), rect.Right()));
-                request.rectTop = std::max<ViewCoord>(usedArea.Top(), std::min(rect.Top(), rect.Bottom()));
-                request.rectBottom = std::min<ViewCoord>(usedArea.Bottom(), std::max(rect.Top(), rect.Bottom()));
-                if (request.rectRight - request.rectLeft < 8 || request.rectBottom - request.rectTop < 8) {
-                    request.hasExportRect = false;
+        };
+        const auto rereadView = [&]() {
+            used = ReadFullView();
+            usedArea = DrawingArea(used);
+            usedAreaPx = usedArea;
+            computeExportRect();
+        };
+        const auto exportRegion = [&]() {
+            return request.hasExportRect
+                ? ViewRect(request.rectLeft, request.rectTop, request.rectRight, request.rectBottom)
+                : usedArea;
+        };
+        computeExportRect();
+        const bool activeOnlyLayers = isolation.applied && isolation.mode == "active_only";
+        PlanScaleBoost(boost, used, exportRegion(), activeOnlyLayers);
+        if (boost.Active()) rereadView();
+        result = NativeIO::CaptureView(request);
+        int firstWidth = 0, firstHeight = 0;
+        ReadImageSize(result->canonicalPath, firstWidth, firstHeight);
+        if (CorrectScaleBoost(boost, used, firstWidth, firstHeight, activeOnlyLayers)) {
+            // One corrective export into a sibling file that then replaces the
+            // first image (which stays if the second export fails).
+            rereadView();
+            const fs::path finalPath = fs::u8path(result->canonicalPath);
+            fs::path second = finalPath;
+            second.replace_filename(finalPath.stem().u8string() + ".vw-mcp-boost" + finalPath.extension().u8string());
+            std::error_code ignored;
+            fs::remove(second, ignored);
+            NativeIO::ImageExportRequest secondRequest = request;
+            secondRequest.output.absolutePath = second.u8string();
+            secondRequest.output.overwritePolicy = NativeIO::OverwritePolicy::FailIfExists;
+            try {
+                const NativeIO::Result secondResult = NativeIO::CaptureView(secondRequest);
+                std::error_code renameError;
+                fs::rename(fs::u8path(secondResult.canonicalPath), finalPath, renameError);
+                if (!renameError) {
+                    result->sizeBytes = secondResult.sizeBytes;
+                    result->extraJson = secondResult.extraJson;
+                } else {
+                    fs::remove(fs::u8path(secondResult.canonicalPath), ignored);
                 }
+            } catch (...) {
+                fs::remove(second, ignored);
             }
         }
-        result = NativeIO::CaptureView(request);
+        {
+            int finalWidth = 0, finalHeight = 0;
+            ReadImageSize(result->canonicalPath, finalWidth, finalHeight);
+            mapping = MapImageToWorld(used, exportRegion(), finalWidth, finalHeight);
+        }
     } catch (const std::exception& error) {
         failure = error.what();
         failurePtr = std::current_exception();
@@ -1338,6 +1752,14 @@ std::string HandleCaptureView(const Params& params) {
     bool restored = false;
     std::vector<std::string> mismatches;
     int restorePasses = 0;
+    // Layer scales first: zoom values only mean the same view at the
+    // original scales.
+    const bool boosted = boost.factor > 1.0001;
+    try {
+        boost.RestoreScales();
+    } catch (...) {
+        boost.restored = false;
+    }
     if (restore) {
         try {
             for (int pass = 0; pass < 2; ++pass) {
@@ -1363,6 +1785,10 @@ std::string HandleCaptureView(const Params& params) {
                 }
                 if (mismatches.empty()) break;
             }
+            if (!boost.restored) {
+                mismatches.push_back("{\"field\":\"layer_scale\",\"before\":null,\"after\":" +
+                                     JsonStringArray(boost.restoreErrors) + "}");
+            }
             restored = mismatches.empty();
         } catch (const std::exception& error) {
             restored = false;
@@ -1377,9 +1803,16 @@ std::string HandleCaptureView(const Params& params) {
         // layer/class isolation.
         try {
             RevertIsolation(isolation);
+            if (boosted) {
+                // Keep the captured region on screen at the original scale.
+                if (boost.zoomKnown) gSDK->SetZoomFactorN(boost.zoomBefore);
+                gSDK->SetViewCenter(boost.centerBefore);
+                gSDK->DrawScreen();
+            }
         } catch (...) {
         }
     }
+    if (boosted) boost.dirtyAfter = ActiveDirtyState();
     if (restorePoint) {
         try {
             gSDK->ViewDelete(restorePoint);
@@ -1418,6 +1851,8 @@ std::string HandleCaptureView(const Params& params) {
     json += ",\"fit_to_objects_applied\":";
     json += fitApplied ? "true" : "false";
     json += ",\"isolation\":" + IsolationJson(isolation);
+    json += ",\"scale_boost\":" + ScaleBoostJson(boost);
+    json += ImageMappingJson(mapping);
     json += ",\"restored\":";
     json += restored ? "true" : "false";
     // Legacy alias of `restored` (both mean: re-read state equals the state

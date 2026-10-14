@@ -14,6 +14,7 @@
 //     touched. Env VW_MCP_AUTO_DISMISS_HOME=0 disables the automatic path; the
 //     explicit `dismiss_home` action still works.
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -48,6 +49,9 @@ std::uint64_t DismissSequence();
 std::string DismissedSinceJson(std::uint64_t after);
 // True if a "home" dismissal happened after `after`.
 bool HomeDismissedSince(std::uint64_t after);
+// Title, message and report grid rows of handler_report / handler_message
+// records with sequence > `after`, as one line (for error messages).
+std::string HandlerReportTextSince(std::uint64_t after, std::size_t maxChars = 4000);
 // Last few dismissals (ping).
 std::string RecentDismissedJson();
 

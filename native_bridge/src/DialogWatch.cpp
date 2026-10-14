@@ -1,6 +1,7 @@
 #include "StdAfx.h"
 
 #include "DialogWatch.hpp"
+#include "GridReader.hpp"
 
 #include "JsonParams.hpp"
 #include "UiGate.hpp"
@@ -8,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <deque>
 #include <map>
 #include <mutex>
@@ -34,7 +36,10 @@ struct DismissRecord {
     std::string message;
     std::vector<std::string> buttons;  // handler_report / handler_message: visible button labels
     std::string pressed;               // label of the button that was pressed
-    bool grid = false;                 // dialog contains a report grid (rows not readable)
+    bool grid = false;                 // dialog contains a report grid
+    std::vector<std::string> rows;     // grid rows read before pressing (cap 50 x 300 chars)
+    bool rowsCaptured = false;
+    std::string rowsMethod;            // msaa | list_view | child_windows | "" ; or the read error
 };
 
 std::mutex gMutex;
@@ -114,6 +119,7 @@ struct Candidate {
     std::vector<ButtonInfo> buttons;
     bool otherInputs = false;
     bool grid = false;
+    HWND gridWindow = nullptr;
 };
 
 struct ChildScan {
@@ -129,6 +135,7 @@ struct ChildScan {
     int buttonId = 0;
     bool otherInputs = false;
     bool grid = false;
+    HWND gridWindow = nullptr;
     std::string statics;
     std::vector<ButtonInfo> buttonList;
 };
@@ -200,7 +207,10 @@ BOOL CALLBACK ScanChild(HWND child, LPARAM param) {
         const bool readOnlyEdit = (cls == "edit" || cls.rfind("richedit", 0) == 0) && (style & ES_READONLY) != 0;
         if (!readOnlyEdit && IsWindowVisible(child)) scan->otherInputs = true;
     }
-    if (Contains(cls, "grid") || cls == "syslistview32") scan->grid = true;
+    if (Contains(cls, "grid") || cls == "syslistview32") {
+        scan->grid = true;
+        if (!scan->gridWindow && IsWindowVisible(child)) scan->gridWindow = child;
+    }
     return TRUE;
 }
 
@@ -252,6 +262,7 @@ Candidate Classify(HWND window) {
     candidate.buttons = scan.buttonList;
     candidate.otherInputs = scan.otherInputs;
     candidate.grid = scan.grid;
+    candidate.gridWindow = scan.gridWindow;
     return candidate;
 }
 
@@ -298,7 +309,14 @@ DialogInfo ToInfo(const Candidate& candidate) {
     return info;
 }
 
-void Record(const Candidate& candidate, const char* trigger, const std::string& pressed = std::string()) {
+struct GridRead {
+    std::vector<std::string> rows;
+    bool captured = false;
+    std::string method;
+};
+
+void Record(const Candidate& candidate, const char* trigger, const std::string& pressed = std::string(),
+            const GridRead* gridRead = nullptr) {
     DismissRecord record;
     record.seq = gSequence.fetch_add(1) + 1;
     record.kind = candidate.kind;
@@ -308,6 +326,11 @@ void Record(const Candidate& candidate, const char* trigger, const std::string& 
         for (const auto& button : candidate.buttons) record.buttons.push_back(button.label);
         record.pressed = pressed;
         record.grid = candidate.grid;
+        if (gridRead) {
+            record.rows = gridRead->rows;
+            record.rowsCaptured = gridRead->captured;
+            record.rowsMethod = gridRead->method;
+        }
     }
     record.at = IsoUtcNow();
     record.trigger = trigger ? trigger : "";
@@ -345,7 +368,12 @@ std::string RecordsJson(std::uint64_t after, std::size_t maxCount) {
             (record.message.empty() ? std::string() : ",\"message\":" + JsonString(record.message));
         if (!record.buttons.empty()) json += ",\"buttons\":" + JsonStringArray(record.buttons);
         if (!record.pressed.empty()) json += ",\"pressed\":" + JsonString(record.pressed);
-        if (record.grid) json += ",\"grid\":true,\"grid_rows_captured\":false";
+        if (record.grid) {
+            json += ",\"grid\":true,\"grid_rows_captured\":";
+            json += record.rowsCaptured ? "true" : "false";
+            if (!record.rows.empty()) json += ",\"rows\":" + JsonStringArray(record.rows);
+            if (!record.rowsMethod.empty()) json += ",\"grid_read\":" + JsonString(record.rowsMethod);
+        }
         json += "}";
     }
     return json + "]";
@@ -474,6 +502,25 @@ bool HomeDismissedSince(std::uint64_t after) {
     return false;
 }
 
+std::string HandlerReportTextSince(std::uint64_t after, std::size_t maxChars) {
+    std::lock_guard<std::mutex> lock(gMutex);
+    std::string text;
+    for (const auto& record : gRecords) {
+        if (record.seq <= after) continue;
+        if (record.kind != "handler_report" && record.kind != "handler_message") continue;
+        if (!text.empty()) text += " || ";
+        text += record.title.empty() ? std::string("dialog") : record.title;
+        if (!record.message.empty()) text += ": " + record.message;
+        for (const auto& row : record.rows) text += " | " + row;
+        if (record.grid && !record.rowsCaptured) {
+            text += " | (report grid rows not readable: " +
+                (record.rowsMethod.empty() ? std::string("unknown") : record.rowsMethod) + ")";
+        }
+    }
+    if (text.size() > maxChars) text = text.substr(0, maxChars) + "...";
+    return text;
+}
+
 std::string RecentDismissedJson() {
     return RecordsJson(0, 5u);
 }
@@ -566,6 +613,30 @@ AckRole ClassifyAckButton(const std::string& normalized, int& priority) {
     return AckRole::Unknown;
 }
 
+// ---- report grid rows (IFC Export Report: BCGPGridCtrl) -----------------
+// Read by GridReader on the MAIN thread only (the pump timer runs inside the
+// dialog's modal loop); other threads defer pressing OK on a grid dialog for
+// kGridDeferMs so the main-thread read can happen first.
+constexpr std::size_t kMaxGridRows = 50u;
+constexpr std::size_t kMaxRowChars = 300u;
+constexpr int kGridReadBudgetMs = 1500;
+constexpr std::int64_t kGridDeferMs = 3000;
+std::map<HWND, std::int64_t> gGridFirstSeen;  // guarded by gMutex
+std::map<HWND, GridRead> gGridReads;          // guarded by gMutex
+
+GridRead ReadGridRows(HWND grid) {
+    GridRead read;
+    try {
+        GridReader::Result result = GridReader::ReadRows(grid, kMaxGridRows, kMaxRowChars, kGridReadBudgetMs);
+        read.rows = std::move(result.rows);
+        read.captured = result.captured;
+        read.method = result.method;
+    } catch (...) {
+        read.method = "grid_read_exception";
+    }
+    return read;
+}
+
 bool ReportLike(const Candidate& candidate) {
     if (candidate.grid || candidate.buttons.size() > 1u) return true;
     const std::string title = ToLower(candidate.title);
@@ -615,8 +686,36 @@ bool TryAckHandlerMessage(const char* trigger) {
                 }
             }
             if (!eligible || !press) continue;
+            const bool onMainThread = GetCurrentThreadId() == static_cast<DWORD>(UiGate::MainThreadId());
+            bool readGridHere = false;
+            {
+                std::lock_guard<std::mutex> lock(gMutex);
+                if (std::find(gScopeExisting.begin(), gScopeExisting.end(), candidate.hwnd) != gScopeExisting.end()) continue;
+                for (auto it = gGridFirstSeen.begin(); it != gGridFirstSeen.end();) {
+                    if (!IsWindow(it->first)) {
+                        gGridReads.erase(it->first);
+                        it = gGridFirstSeen.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+                if (candidate.grid && gGridReads.find(candidate.hwnd) == gGridReads.end()) {
+                    const std::int64_t seen = gGridFirstSeen.emplace(candidate.hwnd, SteadyNowMs()).first->second;
+                    if (onMainThread) {
+                        readGridHere = true;
+                    } else if (SteadyNowMs() - seen < kGridDeferMs) {
+                        // Leave it to the main-thread timer, which can read the
+                        // report rows safely before OK is pressed.
+                        continue;
+                    }
+                }
+            }
+            if (readGridHere) {
+                GridRead read = ReadGridRows(candidate.gridWindow);
+                std::lock_guard<std::mutex> lock(gMutex);
+                gGridReads[candidate.hwnd] = std::move(read);
+            }
             std::lock_guard<std::mutex> lock(gMutex);
-            if (std::find(gScopeExisting.begin(), gScopeExisting.end(), candidate.hwnd) != gScopeExisting.end()) continue;
             for (auto it = gLastPost.begin(); it != gLastPost.end();) {
                 if (!IsWindow(it->first)) it = gLastPost.erase(it);
                 else ++it;
@@ -630,7 +729,16 @@ bool TryAckHandlerMessage(const char* trigger) {
             if (attempt == 0) {
                 Candidate recorded = candidate;
                 recorded.kind = ReportLike(candidate) ? "handler_report" : "handler_message";
-                Record(recorded, trigger, press->label);
+                const auto gridRead = gGridReads.find(candidate.hwnd);
+                if (gridRead != gGridReads.end()) {
+                    Record(recorded, trigger, press->label, &gridRead->second);
+                } else if (candidate.grid) {
+                    GridRead missing;
+                    missing.method = "not_read_on_main_thread";
+                    Record(recorded, trigger, press->label, &missing);
+                } else {
+                    Record(recorded, trigger, press->label);
+                }
             }
             return true;
         }

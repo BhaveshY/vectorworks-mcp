@@ -1484,6 +1484,7 @@ std::string HandleNativeIO(const std::string& action, const Params& params) {
         NativeIO::IFCRequest request;
         request.output = ParseOutputTarget(params);
         request.method = GetStringParam(params, "method");
+        request.schema = GetStringParam(params, "schema");
         return NativeIOResultJson(NativeIO::ExportIFC(request));
     }
     if (action == "import_ifc") {
@@ -2234,6 +2235,9 @@ MCObjectHandle CreatePrimitiveFromSpec(
         request.descriptorFingerprint = spec.descriptorFingerprint;
         const auto receipt = CreateVerifiedBuiltInOpening(request);
         object = receipt.object;
+        if (warnings) {
+            for (const auto& warning : receipt.warnings) warnings->push_back(warning);
+        }
         UnregisteredCreatedObjectGuard openingGuard(object);
         adoptedArtifact = transaction.AdoptFinal(
             object,
@@ -2268,7 +2272,7 @@ MCObjectHandle CreatePrimitiveFromSpec(
         request.expectedWall = wall;
         request.descriptorFingerprint = spec.descriptorFingerprint;
         request.parameters = spec.parametricValues;
-        object = CreateVerifiedParametricObject(request);
+        object = CreateVerifiedParametricObject(request, warnings);
         if (wallMutation) {
             pendingExternalAfter = *wallMutation;
         }

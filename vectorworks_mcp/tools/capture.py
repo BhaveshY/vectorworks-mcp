@@ -61,6 +61,8 @@ def handle(args: dict, ctx, warnings: list):
         if a.get("margin_pct") not in (None, ""):
             params["margin_pct"] = C.number(a["margin_pct"], "margin_pct")
         params["capture_target"] = view  # bridge 1.0.x: explicit target (older bridges ignore it)
+        if a.get("max_px") not in (None, ""):
+            params["max_px"] = int(C.number(a["max_px"], "max_px"))
         if a.get("fill_pct") not in (None, ""):
             params["fill_pct"] = C.number(a["fill_pct"], "fill_pct")
         from ._tx import FEATURE_CAPTURE_ISOLATION, has_feature
@@ -123,6 +125,13 @@ def handle(args: dict, ctx, warnings: list):
         structured["restore_mismatch"] = data.get("restore_mismatch") or []
         warnings.append("Vectorworks could not fully restore the user's view after the capture (see "
                         "restore_mismatch); tell the user which view settings changed.")
+    boost = data.get("scale_boost") if isinstance(data.get("scale_boost"), dict) else {}
+    if boost.get("marked_dirty"):
+        warnings.append("For a sharp image the layer scale was raised during the capture and restored exactly; "
+                        "Vectorworks now marks the document as changed. Nothing in the drawing changed "
+                        "(pass max_px=0 to avoid this on saved projects).")
+    if boost.get("scales_restored") is False:
+        warnings.append(f"A layer scale could not be restored after the capture: {boost.get('restore_errors')}; tell the user.")
     if data.get("transcode_error"):
         warnings.append(f"capture transcode: {data['transcode_error']}")
     if target.document:

@@ -1,6 +1,7 @@
 #include "StdAfx.h"
 
 #include "NativeIOHandlers.hpp"
+#include "DialogWatch.hpp"
 #include "ImageTranscode.hpp"
 #include "ScriptEngine.hpp"
 #include "WallInserts.hpp"
@@ -869,40 +870,167 @@ bool InternalScriptUsable(std::string& reason) {
 }  // namespace
 #endif
 
-// IFC export (finding #17, 2026-10-14): IIFCSupport::ExportFile(bShowUI=false)
-// ran for minutes, showed the modal "IFC Export Report" inside the handler and
-// then returned a failure code. The report is now acknowledged by DialogWatch
-// (BM_CLICK on OK, its text is returned in `dismissed_dialogs`), and the
-// produced file -- not the VCOM result -- decides success: a recognisable IFC
-// file at the staging path is accepted (with the SDK status reported). If the
-// SDK call produced no file, vs.IFC_ExportNoUI(path) is tried through the
-// internal Python engine (method "auto").
+// IFC export (findings #17 and 2026-10-14 live run, VW 2024 29.0.8 Architect):
+// IIFCSupport::ExportFile(staged, bShowUI=false) returned VCOM 1 in ~240 ms
+// and showed the modal "IFC Export Report" (acknowledged by DialogWatch, which
+// now reads the report grid rows before pressing OK); vs.IFC_ExportNoUI
+// returned False in ~30 ms; no file anywhere, untitled or saved documents,
+// plain or dotted staging names.
+//
+// Every attempt is recorded. Sequence per schema (request.schema, default
+// IFC2x3 then IFC4): SetIFCScheme + UpdateVWDocumentIFCData, then
+// ExportFile(bShowUI=false), then IIFCSupport::IFC_ExportNoUI (the native
+// entry point vs.IFC_ExportNoUI wraps, VW 2021+). Method "auto" finally tries
+// vs.IFC_ExportNoUI through the internal Python engine. The produced file, not
+// the VCOM status, decides success. The output is written straight to the
+// requested path when it does not exist yet (removed again on failure),
+// otherwise to a plain sibling "<stem>.vw-mcp-ifc-<n>.ifc" (no leading dot)
+// that replaces it. The document's original IFC schema is restored.
+namespace {
+#if VECTORWORKS_MCP_NATIVE_IO_HAS_SDK
+fs::path PlainIfcSibling(const fs::path& target) {
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    for (unsigned int attempt = 0; attempt < 100u; ++attempt) {
+        const std::string name = PathText(target.stem()) + ".vw-mcp-ifc-" + std::to_string(stamp % 1000000000LL) +
+            "-" + std::to_string(attempt) + PathText(target.extension());
+        const fs::path candidate = target.parent_path() / fs::u8path(name);
+        std::error_code error;
+        if (!fs::exists(candidate, error) && !error) return candidate;
+    }
+    throw Error(ErrorCode::InvalidPath, "could not reserve a staging path beside the output file");
+}
+
+const char* IfcSchemaName(VectorWorks::IFCLib::EIFCSupportSchema schema) {
+    switch (schema) {
+        case VectorWorks::IFCLib::kIFCSupportScheme_2x2: return "IFC2x2";
+        case VectorWorks::IFCLib::kIFCSupportScheme_2x3: return "IFC2x3";
+        case VectorWorks::IFCLib::kIFCSupportScheme_2x4: return "IFC4";
+#if SDK_VERSION >= 3000
+        case VectorWorks::IFCLib::kIFCSupportScheme_4x3: return "IFC4x3";
+#endif
+    }
+    return "unknown";
+}
+
+std::vector<VectorWorks::IFCLib::EIFCSupportSchema> IfcSchemas(const std::string& requested) {
+    using namespace VectorWorks::IFCLib;
+    std::string value = Lower(requested);
+    value.erase(std::remove_if(value.begin(), value.end(), [](char ch) { return ch == ' ' || ch == '_' || ch == '.'; }),
+                value.end());
+    if (value.empty() || value == "auto") return {kIFCSupportScheme_2x3, kIFCSupportScheme_2x4};
+    if (value == "ifc2x3" || value == "2x3") return {kIFCSupportScheme_2x3};
+    if (value == "ifc4" || value == "4" || value == "ifc2x4" || value == "2x4") return {kIFCSupportScheme_2x4};
+#if SDK_VERSION >= 3000
+    if (value == "ifc4x3" || value == "4x3") return {kIFCSupportScheme_4x3};
+#endif
+    throw Error(ErrorCode::InvalidRequest, "schema must be auto, ifc2x3 or ifc4");
+}
+
+std::string HexStatus(VCOMError status) {
+    return std::to_string(static_cast<long long>(status));
+}
+#endif
+}  // namespace
+
 Result ExportIFC(const IFCRequest& request) {
 #if VECTORWORKS_MCP_NATIVE_IO_HAS_SDK
+    using namespace VectorWorks::IFCLib;
     const std::string method = IfcMethod(request);
+    const std::vector<EIFCSupportSchema> schemas = IfcSchemas(request.schema);
     const PreparedOutput output = PrepareOutput(request.output, {".ifc", ".ifczip", ".ifcxml"});
-    const fs::path staged = UniqueSibling(output.target, "ifc");
+    const bool direct = !output.targetExisted;
+    const fs::path staged = direct ? output.target : PlainIfcSibling(output.target);
     ScopedPathCleanup cleanup(staged);
+    const std::uint64_t dialogSeq = DialogWatch::DismissSequence();
     std::vector<std::string> attempts;
     std::string usedMethod;
+    std::string usedSchema;
     std::string fileKind;
+    std::string setupJson = "{}";
+    const auto reportSince = [](std::uint64_t seq) { return DialogWatch::HandlerReportTextSince(seq, 1500); };
+    const auto clearStaged = [&]() {
+        std::error_code ignored;
+        fs::remove(staged, ignored);
+    };
     if (method != "script") {
-        VCOMPtr<VectorWorks::IFCLib::IIFCSupport> ifc(VectorWorks::IFCLib::IID_IFCSupport);
+        VCOMPtr<IIFCSupport> ifc(IID_IFCSupport);
         if (!ifc) {
-            attempts.push_back("{\"method\":\"sdk:IIFCSupport::ExportFile\",\"ok\":false,\"error\":\"interface_unavailable\"}");
+            attempts.push_back("{\"method\":\"sdk:IIFCSupport\",\"ok\":false,\"error\":\"interface_unavailable\"}");
         } else {
+            EIFCSupportSchema original = kIFCSupportScheme_2x3;
+            const VCOMError getStatus = ifc->IFC_GetIFCScheme(original);
+            const bool originalKnown = !VCOM_FAILED(getStatus);
+            setupJson = "{\"original_schema\":" +
+                (originalKnown ? JsonEscape(IfcSchemaName(original)) : std::string("null"));
+            try {
+                nlohmann::json header;
+                const VCOMError headerStatus = ifc->IFC_ExportHeaderAsJson(header);
+                std::string dumped = VCOM_FAILED(headerStatus) ? std::string() : header.dump();
+                if (dumped.size() > 1200) dumped = dumped.substr(0, 1200) + "...";
+                setupJson += ",\"header_status\":" + HexStatus(headerStatus) +
+                    ",\"header\":" + (dumped.empty() ? std::string("null") : JsonEscape(dumped));
+            } catch (...) {
+                setupJson += ",\"header\":\"exception\"";
+            }
+            setupJson += "}";
             auto identifier = FileIdentifier(staged);
-            const std::int64_t started = IfcNowMs();
-            const VCOMError status = ifc->ExportFile(identifier, false);
-            const std::int64_t elapsed = IfcNowMs() - started;
-            fileKind = IfcFileKind(staged);
-            attempts.push_back("{\"method\":\"sdk:IIFCSupport::ExportFile\",\"ok\":" +
-                               std::string(fileKind.empty() ? "false" : "true") +
-                               ",\"vcom_result\":" + std::to_string(static_cast<long long>(status)) +
-                               ",\"sdk_reported_success\":" + (VCOM_FAILED(status) ? "false" : "true") +
-                               ",\"file_produced\":" + (fileKind.empty() ? "false" : "true") +
-                               ",\"elapsed_ms\":" + std::to_string(elapsed) + "}");
-            if (!fileKind.empty()) usedMethod = "sdk:IIFCSupport::ExportFile";
+            for (const EIFCSupportSchema schema : schemas) {
+                if (!usedMethod.empty()) break;
+                const VCOMError schemeStatus = ifc->SetIFCScheme(schema);
+                const VCOMError docSchemeStatus = ifc->IFC_SetIFCScheme(schema);
+                const VCOMError updateStatus = ifc->UpdateVWDocumentIFCData();
+                const std::string common = ",\"schema\":" + JsonEscape(IfcSchemaName(schema)) +
+                    ",\"set_scheme\":" + HexStatus(schemeStatus) + ",\"ifc_set_scheme\":" + HexStatus(docSchemeStatus) +
+                    ",\"update_document_data\":" + HexStatus(updateStatus);
+                // 1) ExportFile without UI.
+                {
+                    clearStaged();
+                    const std::uint64_t seq = DialogWatch::DismissSequence();
+                    const std::int64_t started = IfcNowMs();
+                    const VCOMError status = ifc->ExportFile(identifier, false);
+                    const std::int64_t elapsed = IfcNowMs() - started;
+                    fileKind = IfcFileKind(staged);
+                    std::string attempt = "{\"method\":\"sdk:IIFCSupport::ExportFile\",\"ok\":" +
+                        std::string(fileKind.empty() ? "false" : "true") + common +
+                        ",\"vcom_result\":" + HexStatus(status) +
+                        ",\"sdk_reported_success\":" + (VCOM_FAILED(status) ? "false" : "true") +
+                        ",\"file_produced\":" + (fileKind.empty() ? "false" : "true") +
+                        ",\"elapsed_ms\":" + std::to_string(elapsed);
+                    const std::string report = reportSince(seq);
+                    if (!report.empty()) attempt += ",\"report\":" + JsonEscape(report);
+                    attempts.push_back(attempt + "}");
+                    if (!fileKind.empty()) {
+                        usedMethod = "sdk:IIFCSupport::ExportFile";
+                        usedSchema = IfcSchemaName(schema);
+                        break;
+                    }
+                }
+                // 2) IIFCSupport::IFC_ExportNoUI (same entry point as vs.IFC_ExportNoUI).
+                {
+                    clearStaged();
+                    const std::uint64_t seq = DialogWatch::DismissSequence();
+                    const std::int64_t started = IfcNowMs();
+                    const VCOMError status = ifc->IFC_ExportNoUI(identifier);
+                    const std::int64_t elapsed = IfcNowMs() - started;
+                    fileKind = IfcFileKind(staged);
+                    std::string attempt = "{\"method\":\"sdk:IIFCSupport::IFC_ExportNoUI\",\"ok\":" +
+                        std::string(fileKind.empty() ? "false" : "true") + common +
+                        ",\"vcom_result\":" + HexStatus(status) +
+                        ",\"file_produced\":" + (fileKind.empty() ? "false" : "true") +
+                        ",\"elapsed_ms\":" + std::to_string(elapsed);
+                    const std::string report = reportSince(seq);
+                    if (!report.empty()) attempt += ",\"report\":" + JsonEscape(report);
+                    attempts.push_back(attempt + "}");
+                    if (!fileKind.empty()) {
+                        usedMethod = "sdk:IIFCSupport::IFC_ExportNoUI";
+                        usedSchema = IfcSchemaName(schema);
+                    }
+                }
+            }
+            if (originalKnown) {
+                ifc->SetIFCScheme(original);
+                ifc->IFC_SetIFCScheme(original);
+            }
         }
     }
     if (usedMethod.empty() && method != "sdk") {
@@ -910,8 +1038,7 @@ Result ExportIFC(const IFCRequest& request) {
         if (!InternalScriptUsable(reason)) {
             attempts.push_back("{\"method\":\"script:vs.IFC_ExportNoUI\",\"ok\":false,\"skipped\":" + JsonEscape(reason) + "}");
         } else {
-            std::error_code ignored;
-            fs::remove(staged, ignored);  // never accept a partial file of the first attempt
+            clearStaged();  // never accept a partial file of an earlier attempt
             const std::int64_t started = IfcNowMs();
             std::string scriptResult;
             std::string scriptError;
@@ -934,16 +1061,21 @@ Result ExportIFC(const IFCRequest& request) {
         }
     }
     if (usedMethod.empty()) {
+        clearStaged();
+        const std::string report = reportSince(dialogSeq);
         throw Error(
             ErrorCode::SdkOperationFailed,
-            "IFC export produced no IFC file (no dialog fallback was attempted); attempts: " + JoinJson(attempts) +
-            "; see dismissed_dialogs for the IFC Export Report text");
+            "IFC export produced no IFC file (no dialog fallback was attempted)" +
+            (report.empty() ? std::string("; no IFC report dialog was shown")
+                            : "; IFC Export Report: " + report) +
+            "; setup: " + setupJson + "; attempts: " + JoinJson(attempts));
     }
-    CommitStagedFile(staged, output);
+    if (!direct) CommitStagedFile(staged, output);
     cleanup.Release();
     Result completed = CompletedResult("export_ifc", output);
     completed.extraJson = ",\"method\":" + JsonEscape(usedMethod) + ",\"ifc_format\":" + JsonEscape(fileKind) +
-        ",\"attempts\":" + JoinJson(attempts);
+        (usedSchema.empty() ? std::string() : ",\"schema\":" + JsonEscape(usedSchema)) +
+        ",\"setup\":" + setupJson + ",\"attempts\":" + JoinJson(attempts);
     return completed;
 #else
     (void) request;

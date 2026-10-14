@@ -509,6 +509,76 @@ def main() -> int:
                 by_uuid = client.call("query_objects", w({"uuids": [door_uuid]}))
                 report.check("door_in_wall_resolvable_by_uuid", len(by_uuid.get("items", [])) == 1, by_uuid)
 
+        # ------------------- wall inserts survive wall edits (2026-10-14 data loss)
+        # Native doors/windows used to be only parented into the wall (no
+        # kSymbolBreak); Vectorworks drops such orphans when it rebuilds the
+        # wall. They must survive class change, move, reset and Undo.
+        wschema = report.run("describe_window_schema",
+                             lambda: client.call("describe_parametric_schema", w({"plugin_name": "Window"})),
+                             required=False)
+        if schema and schema.get("descriptor_fingerprint") and wschema and wschema.get("descriptor_fingerprint"):
+            ins_ops = [
+                {"op": "create", "local_ref": "wi", "object_type": "wall", "x1": 0, "y1": 80000, "x2": 6000,
+                 "y2": 80000, "thickness": 200, "height": 2800},
+                {"op": "create", "object_type": "door", "x1": 1500, "y1": 80000, "width": 900, "height": 2100,
+                 "wall_uuid": "$wi", "require_wall_host": True, "descriptor_fingerprint": schema["descriptor_fingerprint"]},
+                {"op": "create", "object_type": "window", "x1": 4200, "y1": 80000, "width": 1200, "height": 1300,
+                 "sill_height": 900, "wall_uuid": "$wi", "require_wall_host": True,
+                 "descriptor_fingerprint": wschema["descriptor_fingerprint"]},
+            ]
+            ins_res = report.run("wall_inserts_create", lambda: client.call("apply_operations", w(ops_params(ins_ops, "acc-ins"))))
+            if ins_res and ins_res.get("ok"):
+                wall_u, door_u, win_u = [o.get("uuid") for o in ins_res["transaction"]["operations"]]
+                probe = (
+                    "w = vs.GetObjectByUuid(%r)\n"
+                    "out = {'wall': w is not None, 'items': {}}\n"
+                    "for key, u in (('door', %r), ('window', %r)):\n"
+                    "    h = vs.GetObjectByUuid(u)\n"
+                    "    rec = 'Door' if key == 'door' else 'Window'\n"
+                    "    out['items'][key] = None if h is None else {\n"
+                    "        'parent_is_wall': w is not None and vs.GetParent(h) == w,\n"
+                    "        'break': bool(vs.GetObjectWallOffset(h, w)[0]) if w is not None else False,\n"
+                    "        'width': vs.GetRField(h, rec, 'Width'),\n"
+                    "        'set_at': vs.GetRField(h, rec, 'ElevationSetAt') if key == 'window' else None}\n"
+                    "result = out\n") % (wall_u, door_u, win_u)
+
+                def inserts_state() -> dict:
+                    res = client.call("run_script", w({"language": "python", "transaction": False, "code": probe}))
+                    return (res or {}).get("result") or {}
+
+                def inserts_ok(state: dict) -> bool:
+                    items = state.get("items") or {}
+                    return bool(state.get("wall")) and all(
+                        items.get(k) and items[k]["parent_is_wall"] and items[k]["break"] for k in ("door", "window"))
+
+                st0 = inserts_state()
+                report.check("wall_inserts_have_break_records", inserts_ok(st0), st0)
+                report.check("window_elevation_set_at_sill",
+                             ((st0.get("items") or {}).get("window") or {}).get("set_at") == "Sill of Window",
+                             st0, required=False)
+                widths0 = {k: (v or {}).get("width") for k, v in (st0.get("items") or {}).items()}
+                cls = f"ACC-Walls-{int(time.time())}"
+                steps = [
+                    ("class", lambda: client.call("apply_operations", w(ops_params([
+                        {"op": "set_property", "target": f"uuid:{wall_u}", "property_name": "class", "value": cls}],
+                        "acc-ins-class")))),
+                    ("move", lambda: client.call("apply_operations", w(ops_params([
+                        {"op": "object.transform", "target": f"uuid:{wall_u}", "delta_x": 0, "delta_y": 1000}],
+                        "acc-ins-move")))),
+                    ("reset", lambda: client.call("run_script", w({
+                        "language": "python", "transaction": False,
+                        "code": "vs.ResetObject(vs.GetObjectByUuid(%r))\nresult = True\n" % wall_u}))),
+                    ("undo", lambda: client.call("run_script", w({
+                        "language": "python", "transaction": False,
+                        "code": "vs.DoMenuTextByName('Undo', 0)\nresult = True\n"}))),
+                ]
+                for step, func in steps:
+                    report.run(f"wall_inserts_{step}", func, required=(step != "undo"))
+                    st = inserts_state()
+                    widths = {k: (v or {}).get("width") for k, v in (st.get("items") or {}).items()}
+                    report.check(f"wall_inserts_survive_{step}", inserts_ok(st) and widths == widths0,
+                                 {"state": st, "widths_before": widths0}, required=(step != "undo"))
+
         # ------------------------------------------------ automatic wall joins
         jops = [
             {"op": "create", "local_ref": "j1", "object_type": "wall", "x1": 10000, "y1": 0, "x2": 14000, "y2": 0,
@@ -615,9 +685,19 @@ def main() -> int:
             ctl_png = os.path.join(work_dir, "capture_layer_not_isolated.png")
             iso_cap = report.run("capture_layer_isolated", lambda: client.call("capture_view", w({
                 "path": iso_png, "layer": layer_a, "fit": "layer", "restore": True})))
+            # The control must SHOW the other layers: with Layer Options "Gray
+            # Others" (6 = Gray/Snap Others, the 2024 Blank template default)
+            # ExportImage draws non-active layers as light outlines without
+            # fills, so isolated and control captures were byte-identical
+            # (2026-10-14). Not an isolation bug; force "Show/Snap/Modify Others".
+            opts = client.call("run_script", w({"language": "python", "transaction": False,
+                                                 "code": "result = vs.GetLayerOptions()\nvs.SetLayerOptions(5)\n"}))
             ctl_cap = report.run("capture_layer_not_isolated", lambda: client.call("capture_view", w({
                 "path": ctl_png, "layer": layer_a, "fit": "layer", "isolate": False, "restore": True})),
                 required=False)
+            if (opts or {}).get("ok") and isinstance(opts.get("result"), int):
+                client.call("run_script", w({"language": "python", "transaction": False,
+                                             "code": "vs.SetLayerOptions(%d)\nresult = True\n" % opts["result"]}))
             if iso_cap:
                 used = iso_cap.get("view_used") or {}
                 report.check("capture_layer_plan_default",
@@ -645,9 +725,124 @@ def main() -> int:
                 report.check("capture_layer_contains_no_other_layer",
                              iso_dark is not None and iso_dark < 0.25,
                              {"isolated_dark_fraction": iso_dark, "not_isolated_dark_fraction": ctl_dark})
+                # Layer B's black rect covers A's crop; even if B is stacked
+                # below A's (white-filled) rect, the 5 % margin band is black.
                 report.check("capture_isolation_differs_from_control",
-                             iso_dark is not None and ctl_dark is not None and ctl_dark > iso_dark + 0.2,
+                             iso_dark is not None and ctl_dark is not None and ctl_dark > iso_dark + 0.1,
                              {"isolated": iso_dark, "control": ctl_dark}, required=False)
+                # Capture resolution (2026-10-14): ExportImage renders at 72 dpi of the
+                # layer's PAGE size, whatever the zoom; the bridge boosts the layer scale.
+                boost = iso_cap.get("scale_boost") or {}
+                report.check("capture_resolution_boost_plan",
+                             long_edge >= 1200 and boost.get("applied") is True and (boost.get("factor") or 0) > 1,
+                             {"image": [iso_cap.get("width"), iso_cap.get("height")], "scale_boost": boost})
+                report.check("capture_scale_boost_restored",
+                             boost.get("scales_restored") is True and iso_cap.get("restored") is True,
+                             {"scale_boost": boost, "restore_mismatch": iso_cap.get("restore_mismatch")})
+                report.check("capture_world_bounds_plan",
+                             isinstance(iso_cap.get("world_bounds"), dict) and (iso_cap.get("px_per_mm") or 0) > 0,
+                             {k: iso_cap.get(k) for k in ("world_bounds", "px_per_mm", "px_per_mm_xy")})
+
+            # (b) the layer scale reads back unchanged and the capture leaves no
+            # undo entry: a sentinel created right before the capture must be the
+            # object removed by ONE Undo (best effort: Undo from a script).
+            scale_code = "result = vs.GetLScale(vs.GetLayerByName(%r))\n" % layer_a
+            scale_before = (client.call("run_script", w({"language": "python", "transaction": False,
+                                                         "code": scale_code})) or {}).get("result")
+            sentinel = report.run("capture_undo_sentinel", lambda: client.call("apply_operations", w(ops_params([
+                {"op": "create", "object_type": "rect", "x1": 50500, "y1": 200, "x2": 50600, "y2": 300,
+                 "layer": layer_a, "name": f"ACC_SENTINEL_{ts}"}], "acc-sentinel"))), required=False)
+            ping_dirty_before = (client.call("ping").get("active_document") or {}).get("dirty")
+            boost_png = os.path.join(work_dir, "capture_boost_undo.png")
+            bcap = report.run("capture_boost_for_undo", lambda: client.call("capture_view", w({
+                "path": boost_png, "layer": layer_a, "fit": "layer"})))
+            scale_after = (client.call("run_script", w({"language": "python", "transaction": False,
+                                                        "code": scale_code})) or {}).get("result")
+            ping_dirty_after = (client.call("ping").get("active_document") or {}).get("dirty")
+            report.check("capture_layer_scale_unchanged",
+                         scale_before is not None and scale_before == scale_after,
+                         {"before": scale_before, "after": scale_after, "scale_boost": (bcap or {}).get("scale_boost")})
+            report.check("capture_dirty_state_unchanged",
+                         ping_dirty_before is True or ping_dirty_before == ping_dirty_after,
+                         {"before": ping_dirty_before, "after": ping_dirty_after,
+                          "note": "untitled documents are always dirty; SetLayerScaleN marks a clean document "
+                                  "dirty (scale_boost.marked_dirty)"}, required=False)
+            if sentinel and sentinel.get("ok"):
+                sentinel_uuid = sentinel["transaction"]["operations"][0].get("uuid")
+                client.call("run_script", w({"language": "python", "transaction": False,
+                                             "code": "vs.DoMenuTextByName('Undo', 0)\nresult = True\n"}))
+                gone = client.call("query_objects", w({"uuids": [sentinel_uuid]}))
+                scale_undo = (client.call("run_script", w({"language": "python", "transaction": False,
+                                                           "code": scale_code})) or {}).get("result")
+                report.check("capture_leaves_no_undo_entry",
+                             not gone.get("items") and scale_undo == scale_before,
+                             {"sentinel_still_there": bool(gone.get("items")), "scale_after_undo": scale_undo,
+                              "scale_before": scale_before}, required=False)
+
+            # (c) 3D capture: right_iso from Top/Plan must really be 3D and large.
+            iso3d_png = os.path.join(work_dir, "capture_layer_3d.png")
+            cap3d = report.run("capture_3d_boost", lambda: client.call("capture_view", w({
+                "path": iso3d_png, "layer": layer_a, "fit": "layer", "standard_view": "right_iso",
+                "render_mode": "opengl"})))
+            if cap3d:
+                used3d = cap3d.get("view_used") or {}
+                report.check("capture_3d_is_3d", used3d.get("projection_name") != "plan"
+                             and used3d.get("standard_view_name") == "right_iso",
+                             {k: used3d.get(k) for k in ("standard_view_name", "projection_name")})
+                report.check("capture_resolution_boost_3d",
+                             max(cap3d.get("width") or 0, cap3d.get("height") or 0) >= 1200,
+                             {"image": [cap3d.get("width"), cap3d.get("height")],
+                              "scale_boost": cap3d.get("scale_boost")})
+                report.check("capture_3d_no_world_bounds", cap3d.get("world_bounds") is None,
+                             cap3d.get("world_bounds"), required=False)
+
+        # (d) image pixel -> world mapping: two black squares far apart on their own
+        # layer; their pixel centroids mapped through world_bounds/px_per_mm must
+        # land on their world centres within 1 % of the extent.
+        layer_m = f"ACC Map {ts}"
+        report.run("layers_create_map", lambda: client.call("layers", w({"action": "create", "name": layer_m,
+                                                                           "kind": "design"})))
+        centres = {"P": (200400.0, 100400.0), "Q": (212400.0, 106400.0)}
+        map_ops = []
+        for key, (cx, cy) in centres.items():
+            map_ops.append({"op": "create", "local_ref": key.lower(), "object_type": "rect", "x1": cx - 400,
+                            "y1": cy - 400, "x2": cx + 400, "y2": cy + 400, "layer": layer_m,
+                            "name": f"ACC_MAP_{key}_{ts}"})
+            map_ops.append({"op": "set_property", "target": "$" + key.lower(), "property_name": "fillColor",
+                            "value": "0,0,0"})
+            map_ops.append({"op": "set_property", "target": "$" + key.lower(), "property_name": "fillPattern",
+                            "value": "1"})
+        map_res = report.run("map_rects_create", lambda: client.call("apply_operations", w(ops_params(map_ops, "acc-map"))))
+        if map_res and map_res.get("ok"):
+            map_uuids = [o.get("uuid") for o in map_res["transaction"]["operations"] if o.get("op") == "create"]
+            map_png = os.path.join(work_dir, "capture_map.png")
+            mcap = report.run("capture_map", lambda: client.call("capture_view", w({
+                "path": map_png, "fit": "objects", "object_uuids": map_uuids})))
+            wb = (mcap or {}).get("world_bounds") or {}
+            ppm = (mcap or {}).get("px_per_mm") or 0
+            detail: dict = {"world_bounds": wb, "px_per_mm": ppm,
+                            "image": [(mcap or {}).get("width"), (mcap or {}).get("height")]}
+            ok = False
+            try:
+                width, height, pixels = read_png(map_png)
+                dark = [(i % width, i // width) for i, (r, g, b) in enumerate(pixels) if r + g + b < 150]
+                halves = {"P": [q for q in dark if q[0] < width / 2], "Q": [q for q in dark if q[0] >= width / 2]}
+                extent = max(wb["right"] - wb["left"], wb["top"] - wb["bottom"])
+                errors = {}
+                for key, pts in halves.items():
+                    u = sum(q[0] for q in pts) / len(pts) + 0.5
+                    v = sum(q[1] for q in pts) / len(pts) + 0.5
+                    x = wb["left"] + u / ppm
+                    y = wb["top"] - v / ppm
+                    errors[key] = {"pixel": [round(u, 1), round(v, 1)], "world": [round(x, 1), round(y, 1)],
+                                   "expected": centres[key],
+                                   "error_pct": round(100 * max(abs(x - centres[key][0]),
+                                                                abs(y - centres[key][1])) / extent, 3)}
+                detail["mapping"] = errors
+                ok = all(e["error_pct"] < 1.0 for e in errors.values())
+            except Exception as error:  # noqa: BLE001
+                detail["error"] = f"{type(error).__name__}: {error}"
+            report.check("capture_world_mapping_accurate", ok, detail)
 
         # spaces behind walls (#1)
         sp_ops = [
@@ -849,6 +1044,13 @@ def main() -> int:
             reports = [d for d in dialogs if d.get("kind") in ("handler_report", "handler_message")]
             if reports:
                 report.notes.append(f"IFC dialogs acknowledged: {json.dumps(reports)[:1500]}")
+            grid_reports = [d for d in reports if d.get("grid")]
+            if grid_reports:
+                # The IFC Export Report grid rows are read (MSAA) before OK is pressed.
+                report.check("ifc_report_rows_captured",
+                             all(d.get("grid_rows_captured") is True and d.get("rows") for d in grid_reports),
+                             [{k: d.get(k) for k in ("title", "grid_rows_captured", "grid_read", "rows")}
+                              for d in grid_reports], required=False)
             ping_after_ifc = client.call("ping")
             report.check("ifc_report_dialog_auto_closed", not ping_after_ifc.get("modal_dialog"),
                          {"modal_dialog": ping_after_ifc.get("modal_dialog"), "acknowledged": reports})

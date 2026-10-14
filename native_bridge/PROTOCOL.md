@@ -242,11 +242,23 @@ acknowledged: OK, else Close/Schließen, else Done/Fertig is pressed — never
 Save Report, Help or Details. Any other button (Cancel, Yes/No, …) leaves the
 dialog untouched (reported as `modal_dialog`). The record is
 `{kind:"handler_message"|"handler_report", title, at, trigger, message,
-buttons:[labels], pressed:"OK", grid?:true, grid_rows_captured?:false}` —
+buttons:[labels], pressed:"OK", grid?:true, grid_rows_captured?:bool,
+rows?:[text], grid_read?:method|reason}` —
 `handler_report` when the dialog has a report grid, more than one button, or
 "report"/"bericht" in its title. `message` is the visible static text (≤ 2000
-chars). Rows of report grids (e.g. BCGPGridCtrl in the IFC Export Report) are
-not window text and are not captured (`grid_rows_captured:false`).
+chars). **Report grid rows** (BCGPGridCtrl in the IFC Export Report; 2026-10-14)
+are read before OK is pressed, on the Vectorworks **main thread** only (the
+pump timer runs inside the dialog's modal loop, so `AccessibleObjectFromWindow`
+/ `IAccessible` calls are direct, in-apartment calls): MSAA
+(`AccessibleObjectFromWindow(grid, OBJID_CLIENT)`, `AccessibleChildren`; each
+row = the child's name/value plus its cells joined with ` | `), else
+list-view items (`LVM_GETITEMTEXTW`), else child window texts. ≤ 50 rows of
+≤ 300 chars, 1.5 s budget, access violations contained (SEH).
+`grid_rows_captured:true` with `rows` and `grid_read:"msaa"|"list_view"|
+"child_windows"`, otherwise `false` with `grid_read` = the reason
+(`msaa_unavailable_0x…`, `msaa_no_rows`, `msaa_fault_0x…`, `no_rows`,
+`not_read_on_main_thread`). Socket-thread watchdogs wait up to 3 s before
+pressing OK on a grid dialog so the main-thread read happens first.
 
 Results of requests during or before which a dialog was auto-dismissed carry
 `"dismissed_dialogs":[{kind,title,at,trigger,…}]` and, for the Home screen,
@@ -338,8 +350,9 @@ execution_context, may_write_document, destructive}`, `create_object_types`,
   default_busy_wait_ms:3000, max_jobs:64, job_retention_ms:900000,
   max_clients:16, client_idle_seconds:120, max_operations:2000}`
 - `object_read_features` additionally lists `op_layer`, `order_op`,
-  `auto_send_to_back`, `capture_isolation`, `compact_import_receipts`
-  (1.0.x feature flags; `capability_revision` stays 6).
+  `auto_send_to_back`, `capture_isolation`, `compact_import_receipts`,
+  `capture_scale_boost`, `capture_world_bounds`, `wall_insert_breaks`,
+  `ifc_report_rows` (1.0.x feature flags; `capability_revision` stays 6).
 
 `run_script` is omitted from `implemented_actions` / `actions` when
 `VW_MCP_ALLOW_SCRIPT=0`.
@@ -554,7 +567,8 @@ replace_confirmation?, fit?, object_uuids?, margin_pct?, fill_pct?, fit_layer?,
 standard_view?, projection?, render_mode?, layer?, saved_view?, zoom?,
 center?, clear_selection?, rect?, crop_to_fit?, restore?, update_viewports?,
 reset_plugin_objects?, export_georeferencing?, fit_to_objects?,
-capture_target?, plan_default?, isolate?}`** (R):
+capture_target?, plan_default?, isolate?, ungray_others?, max_px?,
+scale_boost?}`** (R):
 
 **Capture target** (1.0.x). `capture_target` = `current` | `drawing` |
 `selection` | `objects` | `layer` | `sheet` | `saved_view`; when absent it is
@@ -590,6 +604,62 @@ fit) needs no change; sending `capture_target` explicitly is recommended.
   class_options_used, hidden_layers}` (`{applied:false}` otherwise).
   Layer switches into/out of a sheet layer use
   `SetCurrentLayerN(layer, bAllowUnifiedViewMaintenance=true)`.
+- **Gray others** (`ungray_others`, default true; `drawing` and `selection`
+  targets without isolation): Layer Options Gray Others / Gray-Snap Others
+  (2/6 — 6 is the default of the 2024 Blank template) and Class Options 2/6
+  are switched to Show/Snap/Modify Others (5) for the export and reverted
+  (`isolation.mode:"ungray_others"`). With gray layers `ExportImage` draws
+  every non-active layer as light outlines **without fills** (live
+  2026-10-14). This also explains the old acceptance observation that an
+  `isolate:false` control capture equalled the isolated one: isolation works;
+  the control showed the other layer grayed, i.e. without its black fill.
+- **Standard views from Top/Plan** (2026-10-14): `standard_view` other than
+  `top` / `user_defined` without `projection` while the layer is in the plan
+  projection now also sets the orthogonal projection (as the UI does).
+  Before, `SetCurrentView` alone kept Top/Plan: `set_view {standard_view:
+  "right_iso"}` failed with `readback_mismatch` and `capture_view` silently
+  exported a plan image.
+- **Resolution / scale boost** (`max_px`, default 1600, clamped 400–4000;
+  `max_px:0` or `scale_boost:false` disables). `ISDK::ExportImage` ignores the
+  screen zoom and the size of `fExportRect`: it renders the exported region
+  at **72 dpi of page size**, i.e. at the layer scale (live 2026-10-14: a
+  2000×1000 mm rect on a 1:50 layer → 126×63 px at zoom 1, 4, 16 and with
+  fit; the same capture at 1:2.5 → 2497×1249 px; plan and 3D). Measured rule
+  (±1 px): `image px = region px × 72 / (screen dpi × zoom)`. Before the
+  export the bridge estimates the long edge of the export region this way and,
+  when it is below `max_px`, divides the scale of the shown design layers
+  (the active layer for Active Only / an `active_only` isolation, else every
+  visible design layer) by `k = clamp(max_px / estimate, 1, 50)`
+  (`SetLayerScaleN`), divides the zoom by `k` (same world region on screen),
+  re-derives the crop and exports. If the image is still below 60 % of
+  `max_px` (fast render modes only) one corrective export with the measured
+  factor replaces the file. The exact original scales are restored right after
+  the export — before the view restore, also on errors (RAII) — and read back.
+  Text, dimensions and line weights are page based and keep their pixel size
+  (they look relatively smaller in boosted images). Sheet layers are never
+  changed (`skipped:"sheet_layer"`). Result `scale_boost:{applied, factor,
+  target_px, estimated_px, passes, skipped?, layers:[{name, scale,
+  boosted_scale}], scales_restored?, restore_errors?, dirty_before?,
+  dirty_after?, marked_dirty?}`; a scale that does not read back adds
+  `restore_mismatch` field `layer_scale` (`restored:false`). **Side effects**:
+  `SetLayerScaleN` marks a clean (saved, unmodified) document as changed
+  (live: a run_script `SetLScale` + restore turned `dirty` false → true; the
+  view changes of a capture do not) — the ISDK has no call to clear the flag,
+  so `marked_dirty:true` is reported (VW 2024; `null` on 2025, where the dirty
+  state is not readable). The capture opens no undo event; whether
+  Vectorworks records the scale changes in the undo table is checked live by
+  `capture_leaves_no_undo_entry` (not verifiable before installation).
+  `NonUndoableActionOK` was not used (it asks the user with a dialog).
+- **Image → world mapping** (plan projection only). Result
+  `world_bounds:{left, bottom, right, top, units:"mm"}`, `px_per_mm` (mean of
+  `px_per_mm_xy:[x, y]`). `ExportImage` renders exactly the export region
+  (`fExportRect`, or the whole drawing pane when it is empty; live: pane
+  1426×924 at zoom 4 → 268×174 px, crops keep their objects centred), so
+  `world_bounds` = the region's corners through `ViewPt2WorldPt` (after the
+  scale boost) and `px_per_mm` = image size / world size. Image pixel
+  `(u, v)` (origin top-left) ↦ `x = left + u / px_per_mm`,
+  `y = top − v / px_per_mm` (live check with a `rect` capture: ≤ 1 px).
+  3D views: `world_bounds:null, px_per_mm:null`.
 
 Steps:
 
@@ -605,9 +675,9 @@ Steps:
 3. `ExportImage` with `fExportRect` = `rect` (world coordinates, converted
    with `WorldRect2ViewRect`, clamped to the drawing area) or — when a plan
    view `fit` was applied and `crop_to_fit` (default true) — the fitted
-   bounds + margin; otherwise the whole drawing area. `ExportImage` renders at
-   screen resolution, so the image's long edge ≈ `fill_pct` × the drawing
-   area's long edge (≥ 1200 px when the drawing area is ≥ ~1340 px wide).
+   bounds + margin; otherwise the whole drawing area. The image size follows
+   the page size at 72 dpi, not the screen (see **Resolution / scale boost**
+   — the scale boost runs between the view change and the export).
 4. With `restore` (default **true**): reverts isolation, `ViewRestore`s the
    snapshot, then explicitly restores layer, standard view (before the
    projection: Top/Plan = view 7 + plan projection), projection, view matrix
@@ -639,7 +709,8 @@ also in `view_used`), `"isolation"`, `"restored"` (verified, see step 4),
 `"restore_verified"` (same value as `restored`; legacy name),
 `"restore_passes"` (1–2, with `restore`), `"restore_mismatch"?`,
 `"view_used":view`, `"selection_count"`, `"fit"?`, `"export_rect"?:[l,t,r,b]`,
-`"drawing_area_px":[w,h]` (of the captured view), `"encoded_format"`
+`"drawing_area_px":[w,h]` (of the captured view), `"scale_boost"`,
+`"world_bounds"`, `"px_per_mm"`, `"px_per_mm_xy"?`, `"encoded_format"`
 (`png`/`jpeg`/… actually in the file), `"transcoded_from"?` / `"transcode_error"?`
 (see below),
 `"slow_render_mode":bool` (render mode other than wireframe/OpenGL — prefer
@@ -659,9 +730,13 @@ data is kept and the result says `encoded_format:"jpeg"`,
 extension). Re-encoding does not remove JPEG artefacts already present.
 
 **`export_image {path | file_path, replace?, replace_confirmation?, rect?,
-update_viewports?, reset_plugin_objects?, export_georeferencing?}`** (R) →
-the current view as-is → `{"operation":"export_image","path","size_bytes",
-"replaced_existing","width","height","bytes"}`. Extensions `.png .jpg .jpeg
+update_viewports?, reset_plugin_objects?, export_georeferencing?, max_px?,
+scale_boost?}`** (R) → the current view (or `rect`, clamped to the drawing
+pane) → `{"operation":"export_image","path","size_bytes",
+"replaced_existing","width","height","bytes","scale_boost","world_bounds",
+"px_per_mm","px_per_mm_xy"?,"export_rect"?}`. The scale boost, its restore
+(scales, then the original zoom and centre) and the world mapping work as in
+`capture_view`; no corrective second export. Extensions `.png .jpg .jpeg
 .tif .tiff .bmp`; `.png` appended when missing.
 
 **`saved_views {action, name?, save_view?, save_classes?, save_layers?}`**
@@ -880,25 +955,41 @@ imports (`import_dwg`, `import_ifc`) add `document_mutation`:
 | `export_pdf` (L) | `file_path`, `range?` (`current_view` \| `all_pages` \| `sheet`), `sheet?` (sheet layer name; required for `range:"sheet"`), `dpi?` (alias `resolution_dpi`; 72–2400, default 300), `current_view_only?` (v1), `update_viewports?`=false, `reset_plugin_objects?`=false, `recalculate_worksheets?`=true | `sheet` activates that sheet layer, exports its current view and restores the active layer |
 | `export_dwg` (L) | `file_path`, `update_viewports?`=false, `reset_plugin_objects?`=false, `recalculate_worksheets?`=true | silent `IImportExportDWG` |
 | `import_dwg` (W, L) | `file_path` (.dwg) | silent import + mutation receipt |
-| `export_ifc` (L) | `file_path` (.ifc/.ifczip/.ifcxml), `method?` (`auto` \| `sdk` \| `script`, default `auto`) | see below |
+| `export_ifc` (L) | `file_path` (.ifc/.ifczip/.ifcxml), `method?` (`auto` \| `sdk` \| `script`, default `auto`), `schema?` (`auto` \| `ifc2x3` \| `ifc4`, default `auto` = IFC2x3 then IFC4) | see below |
 | `import_ifc` (W, L) | `file_path` (.ifc/.ifczip/.ifcxml), `method?` (as export), `detail?` | see below + mutation receipt |
 | `export_vectorworks_document` (L) | `file_path` (.vwx), `target_file_version?`=29 | `ExportDocument` |
 
-**IFC (1.0.x, finding #17).** `export_ifc`: `sdk` =
-`IIFCSupport::ExportFile(staging file, bShowUI=false)` with the document's IFC
-settings; success is decided by the **produced file** (exists, non-empty and
-starts with `ISO-10303-21` / `PK` / `<`), not by the VCOM result (live, the
-SDK returned a failure code after writing its report). `auto` (default) runs
-the SDK path and, when it produced no IFC file, `vs.IFC_ExportNoUI(path)`
-through the internal Python engine (skipped when scripting is disabled or the
-engine is poisoned); `script` runs only the latter. The modal "IFC Export
-Report" shown during the export is acknowledged by the handler-owned dialog
-rule (§3.1: OK pressed, title/text/buttons in `dismissed_dialogs`, kind
-`handler_report`). Result adds `"method":"sdk:IIFCSupport::ExportFile"|
-"script:vs.IFC_ExportNoUI"`, `"ifc_format":"step"|"zip"|"xml"` and
-`"attempts":[{method, ok, vcom_result?, sdk_reported_success?,
-file_produced, elapsed_ms, returned?, error?, skipped?}]`. No file →
-`sdk_operation_failed` whose message contains the attempts JSON.
+**IFC (1.0.x, finding #17; reworked 2026-10-14).** Live on VW 2024 29.0.8
+(Architect): `ExportFile(bShowUI=false)` returned VCOM 1 in ~240 ms after
+showing the modal "IFC Export Report"; `vs.IFC_ExportNoUI` returned False in
+~30 ms without a dialog; no file for untitled and saved documents, plain or
+dotted names (also reproduced with `IFC_SetIFCScheme` 0–4 and `/` paths).
+`export_ifc` now: reads the document's schema (`IFC_GetIFCScheme`) and the
+IFC header (`IFC_ExportHeaderAsJson`, ≤ 1200 chars, as diagnostics); then
+for each schema (`schema`, default IFC2x3 then IFC4 =
+`kIFCSupportScheme_2x3` / `kIFCSupportScheme_2x4`): `SetIFCScheme` +
+`IFC_SetIFCScheme` + `UpdateVWDocumentIFCData`, then
+`IIFCSupport::ExportFile(path, bShowUI=false)`, then the native
+`IIFCSupport::IFC_ExportNoUI(path)` (VW 2021+, the entry point behind
+`vs.IFC_ExportNoUI`); stops at the first produced file. `method:"auto"`
+finally tries `vs.IFC_ExportNoUI` through the internal Python engine
+(skipped when scripting is disabled or the engine is poisoned); `script` runs
+only that, `sdk` never. The original schema is restored. The file is written
+**directly to `file_path`** when it does not exist yet (removed on failure),
+otherwise to a plain sibling `<stem>.vw-mcp-ifc-<n>.<ext>` (no leading dot)
+that replaces it. Success is decided by the **produced file** (non-empty,
+starts with `ISO-10303-21` / `PK` / `<`), not by the VCOM result. The
+"IFC Export Report" is acknowledged by the handler-owned dialog rule (§3.1)
+after its grid rows were read. Result adds `"method":
+"sdk:IIFCSupport::ExportFile"|"sdk:IIFCSupport::IFC_ExportNoUI"|
+"script:vs.IFC_ExportNoUI"`, `"schema"?:"IFC2x3"|"IFC4"`, `"ifc_format":
+"step"|"zip"|"xml"`, `"setup":{original_schema, header_status?, header?}` and
+`"attempts":[{method, ok, schema?, set_scheme?, ifc_set_scheme?,
+update_document_data?, vcom_result?, sdk_reported_success?, file_produced,
+elapsed_ms, report?, returned?, error?, skipped?}]` (`report` = title,
+message and grid rows of the report dialog(s) shown during that attempt). No
+file → `sdk_operation_failed` whose message contains the report text
+("IFC Export Report: … | row | row …"), the setup and the attempts JSON.
 `import_ifc`: `sdk` = `IIFCSupport::ImportFile(…, bShowUI=false)` (accepted
 when the SDK reports success or the document changed); `auto` falls back to
 `vs.IFC_ImportNoUI(path)` when the SDK call failed without changing the
@@ -1001,6 +1092,30 @@ compared case-insensitively ignoring spaces, `_` and `-` (`"Stair"`,
     same plan. Receipt `{index, op:"order", target, uuid, position, changed,
     stack_index_before, stack_index_after, stack_count, layer}` (indices
     0-based from the back; `changed:false` when it already was there).
+  - **door / window / hosted `parametric` creates register a wall break**
+    (2026-10-14, data loss fix). Vectorworks keeps an insert in the wall's
+    member list AND in a `kSymbolBreak` (`SymbolBreakType.theSymbol` = the
+    insert) that positions it along the wall; a wall regeneration rebuilds
+    the inserts from the break list. Bridge-created openings were only
+    `AddObjectToContainer`ed (live: `vs.GetObjectWallOffset(window, wall)` →
+    False, `GetNumOfWallBreaks` unchanged; `AddSymToWall` adds a break), so
+    Vectorworks could drop them when the wall was edited. Now:
+    `AddObjectToContainer` + `ISDK::AddBreak(wall, offset, kSymbolBreak,
+    {theSymbol, insertMode:kSymInsertOnCenter, breakMode:
+    kSymFullBreakWithCaps, height:0, rightSide = flipH = (rotation is
+    opposite to the wall direction)})` with `offset` = `(x1, y1)` projected
+    onto the wall axis (clamped to the wall), then a wall `ResetObject`; the
+    insert is re-resolved **by UUID** afterwards and must still be hosted,
+    keep its width and keep its break, else the operation fails (rolled back).
+    A failed create removes the break before the object. If `AddBreak` does
+    not register a break the create still succeeds with a `warnings` entry
+    ("…has no wall break record…"). The commit verifier also checks the break.
+  - **window sill**: native window creates set `ElevationSetAt` to
+    "Sill of Window" before `Elevation` (default "Head of Window" put the head
+    at the sill height, i.e. the window below the floor); when Vectorworks
+    rejects the value (readback differs, e.g. a localized popup) the previous
+    value is restored and a warning is added. The host's same-transaction
+    fix-up (`update_parametric ElevationSetAt + Elevation`) stays compatible.
   - door / window / hosted `parametric` creates accept
     **`wall_uuid:"$<local_ref>"`** of a wall created earlier in the same
     transaction (walls + openings in ONE undo step); `wall_uuid:"uuid:<u>"` is
