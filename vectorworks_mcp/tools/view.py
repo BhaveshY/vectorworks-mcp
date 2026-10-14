@@ -58,9 +58,30 @@ def handle(args: dict, ctx, warnings: list) -> dict:
             except VWError as exc:
                 if exc.code != "readback_mismatch":
                     raise
-                # Seen once live (Codex, right_iso after layer edits): the projection settled only on a second
-                # pass. Re-apply once; a second mismatch is reported.
-                result = host.call(target, "set_view", params, kind="write")
+                # Seen live (Codex): a layer switch + 3D view + render/fit in one call after other view changes
+                # read back right_iso with the plan projection. Apply the parts one by one from a consistent
+                # Top/Plan state: layer, orientation, then render mode / fit / zoom.
+                if "layer" in params:
+                    host.call(target, "set_view", {"layer": params["layer"]}, kind="write")
+                host.call(target, "set_view", {"standard_view": 7, "projection": 6}, kind="write")
+                orient = {k: params[k] for k in ("standard_view", "projection") if k in params}
+                if orient:
+                    try:
+                        host.call(target, "set_view", orient, kind="write")
+                    except VWError as again:
+                        if again.code != "readback_mismatch":
+                            raise
+                        # Live: on some layers Vectorworks keeps the plan projection even for its own Standard
+                        # Views menu command (unified view). Images still work through vw_capture.
+                        again.message = ("Vectorworks kept this layer in Top/Plan projection; the window's view could "
+                                         "not be switched to the requested 3D view (the Standard Views menu fails the "
+                                         "same way here).")
+                        again.next_step = ("To SEE the model in 3D use vw_capture(standard_view='right_iso', "
+                                           "render_mode='opengl') - captures set their own view. Do not repeat vw_view.")
+                        again.retryable = False
+                        raise
+                rest = {k: v for k, v in params.items() if k not in {"layer", "standard_view", "projection"}}
+                result = host.call(target, "set_view", rest, kind="write") if rest else host.call(target, "get_view", {})
             if isinstance(result, dict):
                 out["previous"] = _clean(result.get("previous"))
                 out["current"] = _clean(result.get("current", result))

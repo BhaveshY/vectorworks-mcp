@@ -112,11 +112,13 @@ def geometry(h):
             g["at"] = _xy(vs.GetSymLoc(h))
             g["rotation"] = _r(vs.GetSymRot(h))
         elif t == 24:
-            height, width, depth = vs.Get3DInfo(h)
+            # Get3DInfo -> (Y extent, X extent, Z extent): the extrusion height is the third value (as massing.py
+            # verifies it); a Codex run read a 9 m mass as 8 m tall with the first value.
+            size_y, size_x, size_z = vs.Get3DInfo(h)
             centre, z = vs.Get3DCntr(h)
-            g["height"] = _r(MM(height))
-            g["base"] = _r(MM(z - height / 2.0))
-            g["footprint"] = [_r(MM(width)), _r(MM(depth))]
+            g["height"] = _r(MM(size_z))
+            g["base"] = _r(MM(z - size_z / 2.0))
+            g["footprint"] = [_r(MM(size_x)), _r(MM(size_y))]
         elif t == 63:
             g["start"], g["end"] = _xy(vs.GetSegPt1(h)), _xy(vs.GetSegPt2(h))
         elif t == 122:

@@ -205,11 +205,18 @@ def handle(args: dict, ctx, warnings: list):
                 op["params"]["layer"] = layer
     # objects that still have to be moved to their layer by script (fallback for bridges without per-op layer)
     moves: dict[str, list[str]] = {}
+    script_ids = {item["id"] for item in plan.script_objects}
     if wanted_layers and not native_layer:
         for local_id, layer in plan.layers.items():
             if local_id not in hosted_ids and layer != active_layer:
                 moves.setdefault(layer, []).append(local_id)
-    script_ids = {item["id"] for item in plan.script_objects}
+    elif wanted_layers:
+        # Script-made objects (extrudes, columns...) are drawn on the user's active layer: the native per-op layer
+        # only covers native ops (live: an extrude with layer="Ground" landed on Design Layer-1).
+        for local_id in script_ids:
+            layer = plan.layers.get(local_id)
+            if layer and local_id not in hosted_ids:
+                moves.setdefault(layer, []).append(local_id)
     spaces = [i for i, k in plan.kinds.items() if k == "space"]
     spaces_native_back = _tx.has_feature(host, inst, _tx.FEATURE_SPACES_BACK)
     post: list[dict] = []
