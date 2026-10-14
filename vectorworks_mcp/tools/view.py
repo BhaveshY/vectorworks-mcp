@@ -53,7 +53,14 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         if layer:
             params["layer"] = str(layer)
         if params:
-            result = host.call(target, "set_view", params, kind="write")
+            try:
+                result = host.call(target, "set_view", params, kind="write")
+            except VWError as exc:
+                if exc.code != "readback_mismatch":
+                    raise
+                # Seen once live (Codex, right_iso after layer edits): the projection settled only on a second
+                # pass. Re-apply once; a second mismatch is reported.
+                result = host.call(target, "set_view", params, kind="write")
             if isinstance(result, dict):
                 out["previous"] = _clean(result.get("previous"))
                 out["current"] = _clean(result.get("current", result))

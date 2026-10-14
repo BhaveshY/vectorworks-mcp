@@ -220,7 +220,17 @@ def style_props(src: dict, field: str, *, basic: bool = False, skip: tuple = ())
             value = C.parse_json_maybe(value)
             if isinstance(value, dict):
                 v = C.lower_keys(value)
+                kind_word = str(v.get("type") or v.get("kind") or "").strip().lower()
+                if kind_word in {"none", "solid"} and not v.get("name"):
+                    v = {}
+                    value = kind_word
+                elif kind_word and kind_word in FILL_KEYS:
+                    # {"type": "hatch", "name": "Brick"} (a common model spelling) = {"hatch": "Brick"}
+                    v = {kind_word: v.get("name") or True}
                 hit = next(((FILL_KEYS[n], v[n]) for n in FILL_KEYS if v.get(n)), None)
+                if hit is None and isinstance(value, str):
+                    out["fill"] = {"kind": value}
+                    continue
                 if hit is None:
                     raise validation(f"{label} must be {{\"hatch\": name}} / gradient / image / tile", label,
                                      {"hatch": "Brick"})
