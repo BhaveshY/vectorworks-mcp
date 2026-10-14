@@ -874,14 +874,16 @@ def main() -> int:
         if sp_res:
             wall_uuid = sp_res["transaction"]["operations"][0].get("uuid")
             space_uuid = sp_res["transaction"]["operations"][1].get("uuid")
-            order: list = []  # the layer may hold > 1000 objects (the timing test): page through it
-            offset = 0
-            while True:
-                page = client.call("query_objects", w({"layer": active_before_ops, "limit": 1000, "offset": offset}))
-                order += [o.get("uuid") for o in page["items"]]
-                if not page.get("has_more") or not page["items"]:
-                    break
-                offset += len(page["items"])
+            # Stacking order straight from the objects' own layer list (front = later in the list).
+            stack_probe = ("ws = vs.GetObjectByUuid('%s')\nsp = vs.GetObjectByUuid('%s')\norder = []\n"
+                           "h = vs.FInLayer(vs.GetLayer(ws))\n"
+                           "while h is not None and h != vs.Handle(0):\n"
+                           "    order.append(vs.GetObjectUuid(h))\n"
+                           "    h = vs.NextObj(h)\n"
+                           "result = order\n") % (wall_uuid, space_uuid)
+            stack = client.call("run_script", w({"language": "python", "transaction": False, "code": stack_probe}))
+            order = [str(u).strip("{}").lower() for u in ((stack or {}).get("result") or [])]
+            wall_uuid, space_uuid = str(wall_uuid).lower(), str(space_uuid).lower()
             report.check("space_sent_to_back",
                          (sp_res.get("sent_to_back") or 0) >= 1 and space_uuid in order and wall_uuid in order
                          and order.index(space_uuid) < order.index(wall_uuid),
