@@ -957,31 +957,16 @@ Result ExportIFC(const IFCRequest& request) {
         if (!ifc) {
             attempts.push_back("{\"method\":\"sdk:IIFCSupport\",\"ok\":false,\"error\":\"interface_unavailable\"}");
         } else {
-            EIFCSupportSchema original = kIFCSupportScheme_2x3;
-            const VCOMError getStatus = ifc->IFC_GetIFCScheme(original);
-            const bool originalKnown = !VCOM_FAILED(getStatus);
-            setupJson = "{\"original_schema\":" +
-                (originalKnown ? JsonEscape(IfcSchemaName(original)) : std::string("null"));
-            try {
-                nlohmann::json header;
-                const VCOMError headerStatus = ifc->IFC_ExportHeaderAsJson(header);
-                std::string dumped = VCOM_FAILED(headerStatus) ? std::string() : header.dump();
-                if (dumped.size() > 1200) dumped = dumped.substr(0, 1200) + "...";
-                setupJson += ",\"header_status\":" + HexStatus(headerStatus) +
-                    ",\"header\":" + (dumped.empty() ? std::string("null") : JsonEscape(dumped));
-            } catch (...) {
-                setupJson += ",\"header\":\"exception\"";
-            }
-            setupJson += "}";
+            // Live 2026-10-14: SetIFCScheme / IFC_SetIFCScheme / UpdateVWDocumentIFCData /
+            // IFC_ExportHeaderAsJson never made the export work, and after a document that
+            // ran them was closed, the next IFC export in another document crashed
+            // Vectorworks (0xC0000005). Only the export entry points are called now.
+            setupJson = "{}";
             auto identifier = FileIdentifier(staged);
-            for (const EIFCSupportSchema schema : schemas) {
+            for (const EIFCSupportSchema schema : {schemas.front()}) {  // the document's own settings
                 if (!usedMethod.empty()) break;
-                const VCOMError schemeStatus = ifc->SetIFCScheme(schema);
-                const VCOMError docSchemeStatus = ifc->IFC_SetIFCScheme(schema);
-                const VCOMError updateStatus = ifc->UpdateVWDocumentIFCData();
-                const std::string common = ",\"schema\":" + JsonEscape(IfcSchemaName(schema)) +
-                    ",\"set_scheme\":" + HexStatus(schemeStatus) + ",\"ifc_set_scheme\":" + HexStatus(docSchemeStatus) +
-                    ",\"update_document_data\":" + HexStatus(updateStatus);
+                (void) schema;
+                const std::string common;
                 // 1) ExportFile without UI.
                 {
                     clearStaged();
@@ -1026,10 +1011,6 @@ Result ExportIFC(const IFCRequest& request) {
                         usedSchema = IfcSchemaName(schema);
                     }
                 }
-            }
-            if (originalKnown) {
-                ifc->SetIFCScheme(original);
-                ifc->IFC_SetIFCScheme(original);
             }
         }
     }

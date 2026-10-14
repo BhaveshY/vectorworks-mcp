@@ -171,9 +171,27 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         try:
             result = host.call(target, native, params, kind="long", ctx=ctx)
         except VWError as exc:
-            if fmt == "ifc" and "no IFC file" in (exc.message or ""):
-                _explain_ifc_failure(host, target, exc)
-            raise
+            if not (fmt == "ifc" and "no IFC file" in (exc.message or "")):
+                raise
+            _explain_ifc_failure(host, target, exc)
+            if exc.code == "precondition_failed":
+                raise
+            # A document whose IFC export never ran exports nothing without UI: run Vectorworks' own export
+            # dialog once (driven by control id); later exports of this document work without it.
+            from .. import ifc_dialog
+            first = ifc_dialog.export_with_dialog(host, target, path, ctx)
+            if not first["ok"]:
+                if first.get("needs_stories"):
+                    exc.code, exc.retryable = "precondition_failed", True
+                    exc.message = ("IFC export needs the design layers on stories; Vectorworks' export dialog "
+                                   "showed no mapped layers.")
+                    exc.next_step = ("Ask the user, then: vw_organize(kind='story', action='create', name='Ground "
+                                     "Floor', elevation=0, layers=['<design layer>']) and export again.")
+                exc.details = {"dialog_export": first}
+                raise
+            result = {"operation": "export_ifc", "path": path, "method": "export_dialog_first_run",
+                      "note": "first IFC export of this document ran through Vectorworks' export dialog "
+                              "(settings now stored; next exports run without it)"}
         out["result"] = compact_io(result, C.boolean(a.get("detail", False), "detail"))
         if fmt == "ifc" and isinstance(out["result"], dict):
             out["result"].pop("setup", None)

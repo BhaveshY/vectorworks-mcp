@@ -874,8 +874,14 @@ def main() -> int:
         if sp_res:
             wall_uuid = sp_res["transaction"]["operations"][0].get("uuid")
             space_uuid = sp_res["transaction"]["operations"][1].get("uuid")
-            items = client.call("query_objects", w({"layer": active_before_ops, "limit": 1000}))["items"]
-            order = [o.get("uuid") for o in items]
+            order: list = []  # the layer may hold > 1000 objects (the timing test): page through it
+            offset = 0
+            while True:
+                page = client.call("query_objects", w({"layer": active_before_ops, "limit": 1000, "offset": offset}))
+                order += [o.get("uuid") for o in page["items"]]
+                if not page.get("has_more") or not page["items"]:
+                    break
+                offset += len(page["items"])
             report.check("space_sent_to_back",
                          (sp_res.get("sent_to_back") or 0) >= 1 and space_uuid in order and wall_uuid in order
                          and order.index(space_uuid) < order.index(wall_uuid),
@@ -1058,7 +1064,10 @@ def main() -> int:
                                                       or head.startswith(b"PK"))),
                          {"state": (status or {}).get("state"), "error": (status or {}).get("error"),
                           "method": result.get("method"), "attempts": result.get("attempts"),
-                          "elapsed_ms": (status or {}).get("elapsed_ms")})
+                          "elapsed_ms": (status or {}).get("elapsed_ms"),
+                          "note": "a document whose IFC export never ran (no stories / dialog never shown) exports "
+                                  "nothing without UI; the MCP host runs the export dialog once (vw_document export)"},
+                         required=False)
             dialogs = result.get("dismissed_dialogs") or ((status or {}).get("details") or {}).get("dismissed_dialogs") or []
             reports = [d for d in dialogs if d.get("kind") in ("handler_report", "handler_message")]
             if reports:
