@@ -50,6 +50,19 @@ Then ask, for example: *"Check the Vectorworks connection and summarise the
 active drawing"* or *"Draw an 8 x 6 m two-room plan with doors and windows and
 show me a picture."* The model starts with `vw_status`.
 
+**Existing (big) projects:** the model orients with `vw_read(what="summary")`,
+finds objects by type / layer / class / record criteria / name or room label
+(`search`) / area (`within`, `near`), looks with `vw_capture(view="layer", ...)`
+(sharp plan images that carry an `image_to_world` mapping) and can act on what it
+sees with `vw_read(what="query", within_px=[[u1,v1],[u2,v2]])`. Tested on a
+7,000-object, 5-storey project: open, find, look, bulk-edit and verify in ~17 s
+of tool time (`scripts/e2e_existing_project.py`). Prompts for testing in Codex:
+[docs/CODEX_E2E_PROMPT.md](docs/CODEX_E2E_PROMPT.md).
+
+**IFC:** Vectorworks exports IFC only when design layers sit on stories
+(`vw_organize(kind="story", action="create", name="Ground Floor", layers=["..."])`);
+the first export of a document briefly runs Vectorworks' own export dialog once.
+
 Tools: `vw_status`, `vw_read`, `vw_capture`, `vw_create`, `vw_edit`, `vw_apply`,
 `vw_view`, `vw_organize`, `vw_document`, `vw_script` - see
 [the skill](plugins/vectorworks/skills/vectorworks/SKILL.md) and the
