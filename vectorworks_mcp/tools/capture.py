@@ -63,6 +63,9 @@ def handle(args: dict, ctx, warnings: list):
         params["capture_target"] = view  # bridge 1.0.x: explicit target (older bridges ignore it)
         if a.get("max_px") not in (None, ""):
             params["max_px"] = int(C.number(a["max_px"], "max_px"))
+        # Undo-and-remove of the scale boost crashed Vectorworks right after doors/windows were created
+        # (live 2026-10-14, reproducible); restore the layer scales explicitly instead.
+        params["scale_boost_undo"] = str(a.get("scale_boost_undo") or "off")
         if a.get("fill_pct") not in (None, ""):
             params["fill_pct"] = C.number(a["fill_pct"], "fill_pct")
         from ._tx import FEATURE_CAPTURE_ISOLATION, has_feature

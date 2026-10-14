@@ -878,15 +878,18 @@ struct ScaleBoost {
     std::vector<std::string> restoreErrors;
     // Undo hygiene (capture_leaves_no_undo_entry): the boost runs inside its
     // own undo event, which is then removed again.
-    //   undo_and_remove (default): kUndoSwapObjects + AddBeforeSwapObject per
+    //   undo_and_remove: kUndoSwapObjects + AddBeforeSwapObject per
     //     boosted layer; UndoAndRemove restores the scales and drops the event;
     //     the scales are read back and restored explicitly when they differ.
+    //     Live 2026-10-14: crashed Vectorworks (0xC0000005) when the capture
+    //     followed the creation of doors/windows - opt-in only.
     //   end_and_remove: explicit restore inside the event, then
     //     EndAndRemoveUndoEvent (nothing is replayed).
-    //   off: no undo event (pre-fix behaviour).
+    //   off (default): no undo event, explicit restore (leaves one no-op
+    //     undo entry).
     // Never nested: when an undo event is already being built (e.g. a caller
     // transaction), no event is opened and the scales are restored explicitly.
-    std::string undoMode = "undo_and_remove";
+    std::string undoMode = "off";
     bool undoOpened = false;        // our event is open
     bool undoEventUsed = false;     // an event was opened for the boost
     bool undoRemoved = false;       // UndoAndRemove restored every scale (verified)
