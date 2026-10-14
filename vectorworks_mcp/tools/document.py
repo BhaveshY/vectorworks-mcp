@@ -26,6 +26,12 @@ IMPORT_FORMATS = {"dwg": "import_dwg", "dxf": "import_dwg", "ifc": "import_ifc",
 FORMAT_SYN = {"jpeg": "jpg", "tiff": "tif", "image": "png", "autocad": "dwg"}
 
 
+def _discard(a: dict) -> bool:
+    """Explicit consent to drop unsaved changes: discard_changes='discard' (or true), or discard=true."""
+    value = a.get("discard_changes", a.get("discard"))
+    return value is True or str(value or "").strip().lower() in ("discard", "true", "yes", "1")
+
+
 def _fmt(a: dict, path: str, allowed: dict) -> str:
     fmt = a.get("format")
     if fmt in (None, ""):
@@ -106,7 +112,7 @@ def handle(args: dict, ctx, warnings: list) -> dict:
             raise VWError("path_error", f"{path!r} does not exist.", field="path")
         target = session.target(None, need_document=False)
         params = {"file_path": path, "path": path}
-        if str(a.get("discard_changes") or "").lower() == "discard":
+        if _discard(a):
             params["replace_dirty_confirmation"] = "REPLACE_DIRTY_DOCUMENT"
             params["discard_changes"] = "discard"
         result = host.call(target, "open_document", params, kind="long", ctx=ctx)
@@ -133,7 +139,7 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         target = session.target(a.get("document"), write=True)
         doc = target.document or {}
         params = {"fingerprint": doc.get("fingerprint")}
-        if str(a.get("discard_changes") or "").lower() == "discard":
+        if _discard(a):
             params["discard_changes"] = "discard"
         elif doc.get("dirty"):
             raise VWError("confirmation_required", f"'{doc.get('name')}' has unsaved changes.", field="discard_changes",

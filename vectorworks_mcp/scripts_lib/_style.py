@@ -50,6 +50,9 @@ def did_you_mean(name, names, n=5):
     hits = [c for c in names if lowered in c.lower() or c.lower() in lowered]
     hits += [c for c in names if c not in hits and words and all(w in c.lower() for w in words)]
     hits += [c for c in names if c not in hits and words and any(w in c.lower() for w in words)]
+    # Compound spellings ("Crosshatch"): candidate words of >= 4 letters contained in the wanted name.
+    hits += sorted((c for c in names if c not in hits and any(
+        len(w) >= 4 and w in lowered for w in c.lower().replace("-", " ").replace("_", " ").split())), key=len)
     hits += [by_lower[m] for m in difflib.get_close_matches(lowered, list(by_lower), n=n, cutoff=0.5)
              if by_lower[m] not in hits]
     return hits[:n]
@@ -102,9 +105,34 @@ def apply_style(h, st):
     return _apply_rest(h, st, done)
 
 
+# Generic line style words -> (must contain, must not contain) for picking a real line type name.
+GENERIC_LINE = {"dashed": ("dash", "dot"), "dash": ("dash", "dot"), "hidden": ("dash", "dot"),
+                "dotted": ("dot", "dash"), "dot": ("dot", "dash"), "dashdot": ("dash", None),
+                "dashdotted": ("dash", None), "center": ("dash", None), "centerline": ("dash", None)}
+
+
+def _generic_line_type(word):
+    """'dashed' -> the shortest line type whose name says dashed (document first, then the library)."""
+    key = word.strip().lower().replace("-", "").replace("_", "").replace(" ", "")
+    must, avoid = GENERIC_LINE[key]
+    want_dot = key in ("dashdot", "dashdotted", "center", "centerline")
+    names = _res_names(96, 0, "")[1]
+    lib = RES_LIBRARY.get(96)
+    if lib:
+        names = names + [n for n in _res_names(96, lib[0], lib[1])[1] if n not in names]
+    hits = [n for n in names if must in n.lower() and (avoid is None or avoid not in n.lower())
+            and (not want_dot or "dot" in n.lower())]
+    if not hits:
+        raise ValueError("not_found: no %s line type in the document or the Vectorworks library" % word)
+    return sorted(hits, key=len)[0]
+
+
 def _apply_line_style(h, st, done):
     ls = st.get("line_style")
     if ls is not None:
+        if ls["kind"] == "name" and ls["name"].strip().lower().replace("-", "").replace("_", "").replace(" ", "") in GENERIC_LINE:
+            ls = dict(ls, name=_generic_line_type(ls["name"]))
+            done["line_style_picked"] = ls["name"]
         value = ls["value"] if ls["kind"] == "index" else -find_resource(96, ls["name"])
         vs.SetLSN(h, int(value))
         got = vs.GetLSN(h)
@@ -126,6 +154,18 @@ def _apply_fill(h, st, done):
                 _fail("fill", kind, got)
             done["fill"] = kind
         else:
+            generic = str(fill.get("name") or "").strip().lower()
+            if generic in FILL_KINDS or not generic:
+                # fill="gradient" / {"kind": "hatch"} without a name: the first one in the document, else the library.
+                kind = generic or (kind if kind in FILL_KINDS else "hatch")
+                names = _res_names(FILL_KINDS[kind], 0, "")[1]
+                lib = RES_LIBRARY.get(FILL_KINDS[kind])
+                if not names and lib:
+                    names = _res_names(FILL_KINDS[kind], lib[0], lib[1])[1]
+                if not names:
+                    raise ValueError("not_found: no %s resources in the document or the Vectorworks library" % kind)
+                fill = dict(fill, name=names[0])
+                done["fill_picked"] = names[0]
             if kind == "auto":
                 kind = next((k for k in ("hatch", "gradient", "image", "tile")
                              if find_resource(FILL_KINDS[k], fill["name"], required=False)), "hatch")

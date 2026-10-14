@@ -224,7 +224,8 @@ def style_props(src: dict, field: str, *, basic: bool = False, skip: tuple = ())
                 if hit is None:
                     raise validation(f"{label} must be {{\"hatch\": name}} / gradient / image / tile", label,
                                      {"hatch": "Brick"})
-                out["fill"] = {"kind": hit[0], "name": str(hit[1])}
+                # {"gradient": true} = any gradient (the script picks the first available one)
+                out["fill"] = {"kind": hit[0], "name": "" if hit[1] is True else str(hit[1])}
             elif value is False or str(value).strip().lower() in {"none", "no", "empty", "hollow", "transparent"}:
                 out["fill"] = {"kind": "none"}
             elif value is True or str(value).strip().lower() == "solid":
@@ -780,6 +781,18 @@ def did_you_mean(name: str, names: list[str], alias: Optional[dict] = None, n: i
     for key, target in (alias or {}).items():
         if sem and len(sem) > 2 and (sem in key or (len(key) > 3 and key in sem)):
             add(target)
+    # Shared words ("Crosshatch" -> "... Cross ..."): words of >=4 letters found in the other name.
+    import re as _re
+    wanted_words = set(_re.findall(r"[a-z]{4,}", low))
+    scored = []
+    for cand in names:
+        c = str(cand).lower()
+        score = sum(1 for word in set(_re.findall(r"[a-z]{4,}", c)) if word in low)
+        score += sum(1 for word in wanted_words if word in c)
+        if score:
+            scored.append((-score, len(c), cand))
+    for _, _, cand in sorted(scored)[:n]:
+        add(cand)
     lowered = {str(c).lower(): c for c in names}
     for match in difflib.get_close_matches(low, list(lowered), n=n, cutoff=0.6):
         add(lowered[match])

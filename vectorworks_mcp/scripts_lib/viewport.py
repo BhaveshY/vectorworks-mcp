@@ -294,16 +294,21 @@ elif action == "update":
     out["updated"] = [uuid_of(vp) for vp in vps]
     vp = vps[0] if len(vps) == 1 else None
 elif action == "list":
-    ref = str(A["sheet"])
-    sheet = resolve(ref) if ref.startswith("uuid:") or len(ref) >= 32 else _layer(ref, LAYER_SHEET)
-    if sheet is None:
-        raise ValueError("not_found: sheet layer %r not found" % A["sheet"])
+    ref = str(A.get("sheet") or "")
+    if ref:
+        sheet = resolve(ref) if ref.startswith("uuid:") or len(ref) >= 32 else _layer(ref, LAYER_SHEET)
+        if sheet is None:
+            raise ValueError("not_found: sheet layer %r not found" % A["sheet"])
+        sheets = [sheet]
+    else:
+        sheets = _layers(LAYER_SHEET)  # no sheet given: every sheet layer
     out["viewports"] = []
-    h = vs.FInLayer(sheet)
-    while not _nil(h):
-        if vs.GetTypeN(h) == 122:
-            out["viewports"].append(h)
-        h = vs.NextObj(h)
+    for sheet in sheets:
+        h = vs.FInLayer(sheet)
+        while not _nil(h):
+            if vs.GetTypeN(h) == 122:
+                out["viewports"].append(h)
+            h = vs.NextObj(h)
     out["viewports"] = [_record(x) for x in out["viewports"]]
     vp = None
 elif action == "annotations":

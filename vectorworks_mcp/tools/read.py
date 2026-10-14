@@ -23,6 +23,22 @@ WHAT_SYNONYMS = {"doc": "document", "info": "document", "document_info": "docume
                  "resource": "resources", "camera": "view"}
 _DROP = {"timing", "handle", "binding"}
 _SUMMARY_DROP = {"ok", "tool", "native_summary", "query", "document", "timing", "binding"}
+# Vectorworks node types the native summary reports as "type_<n>".
+_NODE_NAMES = {"type_9": "locus_3d", "type_12": "quarter_arc", "type_14": "bitmap", "type_17": "locus",
+               "type_34": "sweep", "type_38": "multi_extrude", "type_40": "mesh", "type_81": "light", "type_84": "solid",
+               "type_85": "brep", "type_95": "solid", "type_111": "nurbs_curve", "type_113": "nurbs_surface",
+               "type_114": "composite_surface", "type_122": "viewport"}
+
+
+def _type_names(value: Any) -> Any:
+    """Rename type_<n> keys (also nested per layer) to readable object type names."""
+    if not isinstance(value, dict):
+        return value
+    out: dict = {}
+    for k, v in value.items():
+        name, v = _NODE_NAMES.get(k, k), _type_names(v)
+        out[name] = out[name] + v if isinstance(v, int) and isinstance(out.get(name), int) else v
+    return out
 
 
 def _clean(item: Any, fields: list[str]) -> Any:
@@ -143,7 +159,11 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         data = host.call(target, "drawing_summary", {"layer": a.get("layer") or "", "object_type": native_type or plugin or "",
                                                      "limit": 5, "scan_limit": 100_000, "include_examples": False,
                                                      "example_limit": 0})
-        out["data"] = {k: v for k, v in data.items() if k not in _SUMMARY_DROP} if isinstance(data, dict) else data
+        out["data"] = {k: _type_names(v) if k.startswith("counts_by") else v
+                       for k, v in data.items() if k not in _SUMMARY_DROP} if isinstance(data, dict) else data
+        b = out["data"].get("bounds") if isinstance(out["data"], dict) else None
+        if isinstance(b, dict) and all(isinstance(b.get(k), (int, float)) for k in ("top", "bottom")) and b["top"] < b["bottom"]:
+            b["top"], b["bottom"] = b["bottom"], b["top"]  # native reports y-down; top is the larger y in mm
         return out
     if what in {"query", "selection"}:
         return _query(host, target, a, what, fields, limit, offset, out)
@@ -177,9 +197,8 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         # script read: works for unsaved documents (native get_viewports needs a saved-file binding) and returns
         # scale/view/render/layers/crop/centre per viewport
         if what == "viewports":
-            sheet = C.text(a.get("target") or a.get("sheet") or a.get("layer") or a.get("name"), "target",
-                           required=True)
-            args_ = {"action": "list", "sheet": sheet[5:] if sheet.startswith("name:") else sheet}
+            sheet = C.text(a.get("target") or a.get("sheet") or a.get("layer") or a.get("name"), "target")
+            args_ = {"action": "list", "sheet": sheet[5:] if sheet.startswith("name:") else sheet}  # "" = all sheets
         else:
             args_ = {"action": "annotations", "target": norm_ref(a.get("target"), "target")}
         data = host.script(target, "viewport", args_, label="Read viewports", kind="read", transaction=False) or {}
