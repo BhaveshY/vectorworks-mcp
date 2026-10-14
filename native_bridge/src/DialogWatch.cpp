@@ -32,6 +32,9 @@ struct DismissRecord {
     std::string at;
     std::string trigger;
     std::string message;
+    std::vector<std::string> buttons;  // handler_report / handler_message: visible button labels
+    std::string pressed;               // label of the button that was pressed
+    bool grid = false;                 // dialog contains a report grid (rows not readable)
 };
 
 std::mutex gMutex;
@@ -84,6 +87,13 @@ bool Contains(const std::string& text, const char* needle) {
     return text.find(needle) != std::string::npos;
 }
 
+struct ButtonInfo {
+    HWND hwnd = nullptr;
+    int id = 0;
+    std::string label;       // as shown, '&' removed, trimmed
+    std::string normalized;  // lower case, trailing "..." / ellipsis removed
+};
+
 struct Candidate {
     HWND hwnd = nullptr;
     std::string title;
@@ -100,6 +110,10 @@ struct Candidate {
     HWND singleButton = nullptr;
     int singleButtonId = 0;
     std::string messageText;
+    // Every visible, enabled push button (handler acknowledgement).
+    std::vector<ButtonInfo> buttons;
+    bool otherInputs = false;
+    bool grid = false;
 };
 
 struct ChildScan {
@@ -114,8 +128,22 @@ struct ChildScan {
     HWND button = nullptr;
     int buttonId = 0;
     bool otherInputs = false;
+    bool grid = false;
     std::string statics;
+    std::vector<ButtonInfo> buttonList;
 };
+
+std::string NormalizeButtonLabel(std::string lower) {
+    lower = TrimCopy(lower);
+    // Strip a trailing "..." or the UTF-8 ellipsis (E2 80 A6).
+    while (!lower.empty() && lower.back() == '.') lower.pop_back();
+    if (lower.size() >= 3 && static_cast<unsigned char>(lower[lower.size() - 3]) == 0xE2 &&
+        static_cast<unsigned char>(lower[lower.size() - 2]) == 0x80 &&
+        static_cast<unsigned char>(lower[lower.size() - 1]) == 0xA6) {
+        lower.resize(lower.size() - 3);
+    }
+    return TrimCopy(lower);
+}
 
 BOOL CALLBACK ScanChild(HWND child, LPARAM param) {
     auto* scan = reinterpret_cast<ChildScan*>(param);
@@ -145,6 +173,14 @@ BOOL CALLBACK ScanChild(HWND child, LPARAM param) {
                     ++scan->buttons;
                     scan->button = child;
                     scan->buttonId = GetDlgCtrlID(child);
+                    if (scan->buttonList.size() < 16u) {
+                        ButtonInfo info;
+                        info.hwnd = child;
+                        info.id = scan->buttonId;
+                        info.label = TrimCopy(text);
+                        info.normalized = NormalizeButtonLabel(lower);
+                        scan->buttonList.push_back(std::move(info));
+                    }
                     break;
                 case BS_GROUPBOX:
                     break;
@@ -157,7 +193,14 @@ BOOL CALLBACK ScanChild(HWND child, LPARAM param) {
             scan->statics += TrimCopy(text);
         }
     }
-    if (ToLower(WindowClass(child)) == "edit" || ToLower(WindowClass(child)) == "combobox") scan->otherInputs = true;
+    if (cls == "edit" || cls == "combobox" || cls == "richedit20w" || cls == "richedit50w" ||
+        cls == "msctls_trackbar32" || cls == "msctls_updown32" || cls == "listbox") {
+        // Read-only edits are report text, not input.
+        const LONG_PTR style = GetWindowLongPtrW(child, GWL_STYLE);
+        const bool readOnlyEdit = (cls == "edit" || cls.rfind("richedit", 0) == 0) && (style & ES_READONLY) != 0;
+        if (!readOnlyEdit && IsWindowVisible(child)) scan->otherInputs = true;
+    }
+    if (Contains(cls, "grid") || cls == "syslistview32") scan->grid = true;
     return TRUE;
 }
 
@@ -204,8 +247,11 @@ Candidate Classify(HWND window) {
     if (lowerClass == "#32770" && scan.buttons == 1 && !scan.otherInputs && scan.buttonId > 0) {
         candidate.singleButton = scan.button;
         candidate.singleButtonId = scan.buttonId;
-        candidate.messageText = scan.statics;
     }
+    candidate.messageText = scan.statics;
+    candidate.buttons = scan.buttonList;
+    candidate.otherInputs = scan.otherInputs;
+    candidate.grid = scan.grid;
     return candidate;
 }
 
@@ -252,16 +298,34 @@ DialogInfo ToInfo(const Candidate& candidate) {
     return info;
 }
 
-void Record(const Candidate& candidate, const char* trigger) {
+void Record(const Candidate& candidate, const char* trigger, const std::string& pressed = std::string()) {
     DismissRecord record;
     record.seq = gSequence.fetch_add(1) + 1;
     record.kind = candidate.kind;
     record.title = candidate.title;
-    record.message = candidate.messageText;
+    if (candidate.kind == "handler_message" || candidate.kind == "handler_report") {
+        record.message = candidate.messageText;
+        for (const auto& button : candidate.buttons) record.buttons.push_back(button.label);
+        record.pressed = pressed;
+        record.grid = candidate.grid;
+    }
     record.at = IsoUtcNow();
     record.trigger = trigger ? trigger : "";
     gRecords.push_back(std::move(record));
     while (gRecords.size() > kMaxRecords) gRecords.pop_front();
+}
+
+// Presses a dialog button: BM_CLICK posted to the button itself (live
+// 2026-10-14: WM_COMMAND(id) did not close the IFC Export Report, BM_CLICK
+// did); every second attempt falls back to WM_COMMAND(id, BN_CLICKED) to the
+// dialog. PostMessage only, safe from any thread.
+BOOL PressButton(HWND dialog, HWND button, int id, int attempt) {
+    if (button && IsWindow(button) && attempt % 2 == 0) {
+        return PostMessageW(button, BM_CLICK, 0, 0);
+    }
+    if (id <= 0) return FALSE;
+    return PostMessageW(dialog, WM_COMMAND, MAKEWPARAM(static_cast<WORD>(id), BN_CLICKED),
+                        reinterpret_cast<LPARAM>(button));
 }
 #endif
 
@@ -275,9 +339,14 @@ std::string RecordsJson(std::uint64_t after, std::size_t maxCount) {
     std::string json = "[";
     for (std::size_t index = 0; index < selected.size(); ++index) {
         if (index) json += ",";
-        json += "{\"kind\":" + JsonString(selected[index]->kind) + ",\"title\":" + JsonString(selected[index]->title) +
-            ",\"at\":" + JsonString(selected[index]->at) + ",\"trigger\":" + JsonString(selected[index]->trigger) +
-            (selected[index]->message.empty() ? std::string() : ",\"message\":" + JsonString(selected[index]->message)) + "}";
+        const DismissRecord& record = *selected[index];
+        json += "{\"kind\":" + JsonString(record.kind) + ",\"title\":" + JsonString(record.title) +
+            ",\"at\":" + JsonString(record.at) + ",\"trigger\":" + JsonString(record.trigger) +
+            (record.message.empty() ? std::string() : ",\"message\":" + JsonString(record.message));
+        if (!record.buttons.empty()) json += ",\"buttons\":" + JsonStringArray(record.buttons);
+        if (!record.pressed.empty()) json += ",\"pressed\":" + JsonString(record.pressed);
+        if (record.grid) json += ",\"grid\":true,\"grid_rows_captured\":false";
+        json += "}";
     }
     return json + "]";
 }
@@ -366,11 +435,8 @@ bool TryDismissKnown(const char* trigger, bool automatic) {
         const int attempt = last != gLastPost.end() ? last->second.attempts : 0;
         BOOL posted = FALSE;
         if (target->kind == "update_available" || target->kind == "backup_prompt") {
-            // "Not Now" exactly as a click would send it; never "Download...".
-            posted = PostMessageW(
-                target->hwnd, WM_COMMAND,
-                MAKEWPARAM(static_cast<WORD>(target->notNowId), BN_CLICKED),
-                reinterpret_cast<LPARAM>(target->notNowButton));
+            // "Not Now" / "No" exactly as a click would send it; never "Download...".
+            posted = PressButton(target->hwnd, target->notNowButton, target->notNowId, attempt);
         } else if (attempt % 2 == 0) {
             posted = PostMessageW(target->hwnd, WM_CLOSE, 0, 0);
         } else {
@@ -380,7 +446,7 @@ bool TryDismissKnown(const char* trigger, bool automatic) {
         }
         if (!posted) return false;
         gLastPost[target->hwnd] = PostState{now, attempt + 1};
-        Record(*target, trigger);
+        if (attempt == 0) Record(*target, trigger);
         return true;
     } catch (...) {
         return false;
@@ -458,15 +524,55 @@ std::string HandleDismissHome(int waitMs) {
 
 
 // ---------------------------------------------------------------- handler scope
-// While a bridge handler runs, a message box that appears DURING that handler
-// and offers exactly one button (e.g. VectorScript's "Script compiled
-// successfully." with OK, live 2026-10-11) is the handler's own informational
-// message: its text is recorded and its single button pressed. Dialogs that
-// existed before the handler, or that offer a choice/input, are never touched.
+// While a bridge handler runs, a dialog that appears DURING that handler, has
+// no inputs (edit, combo box, list box, check box, radio button) and whose
+// buttons are all acknowledgement buttons -- OK, Close, Done, Save Report...,
+// Help, Details... (English and German) -- is the handler's own message or
+// report (e.g. VectorScript's "Script compiled successfully." with OK, live
+// 2026-10-11; the IFC Export Report with "Save Report..." / "OK" and a report
+// grid, live 2026-10-14). Its title, static text and button labels are
+// recorded (kind "handler_message" or "handler_report") and OK / Close / Done
+// is pressed -- never Save Report, Help or Details. Dialogs that existed
+// before the handler, or that offer any other choice, are never touched.
 namespace {
 std::atomic_bool gHandlerScope{false};
 std::vector<HWND> gScopeExisting;  // guarded by gMutex
+
+#ifdef _WIN32
+enum class AckRole { Press, Ignore, Unknown };
+
+AckRole ClassifyAckButton(const std::string& normalized, int& priority) {
+    // Lower priority value = preferred button to press.
+    static const struct {
+        const char* label;
+        int priority;
+    } kPress[] = {
+        {"ok", 0}, {"okay", 0}, {"close", 1}, {"schlie\xc3\x9f" "en", 1}, {"schliessen", 1},
+        {"done", 2}, {"fertig", 2},
+    };
+    static const char* const kIgnore[] = {
+        "save report", "bericht speichern", "help", "hilfe", "details", "detail", "show details",
+        "details anzeigen",
+    };
+    for (const auto& entry : kPress) {
+        if (normalized == entry.label) {
+            priority = entry.priority;
+            return AckRole::Press;
+        }
+    }
+    for (const char* label : kIgnore) {
+        if (normalized == label) return AckRole::Ignore;
+    }
+    return AckRole::Unknown;
 }
+
+bool ReportLike(const Candidate& candidate) {
+    if (candidate.grid || candidate.buttons.size() > 1u) return true;
+    const std::string title = ToLower(candidate.title);
+    return Contains(title, "report") || Contains(title, "bericht");
+}
+#endif
+}  // namespace
 
 void BeginHandlerScope() {
 #ifdef _WIN32
@@ -491,19 +597,41 @@ bool TryAckHandlerMessage(const char* trigger) {
     try {
         const Scan scan = ScanThread();
         for (const auto& candidate : scan.candidates) {
-            if (!candidate.singleButton || !candidate.enabled || candidate.kind != "other") continue;
+            if (!candidate.enabled || candidate.kind != "other" || candidate.otherInputs) continue;
+            if (!candidate.dialogLike || candidate.toolWindow || candidate.buttons.empty()) continue;
+            const ButtonInfo* press = nullptr;
+            int bestPriority = 1000;
+            bool eligible = true;
+            for (const auto& button : candidate.buttons) {
+                int priority = 1000;
+                const AckRole role = ClassifyAckButton(button.normalized, priority);
+                if (role == AckRole::Unknown) {
+                    eligible = false;
+                    break;
+                }
+                if (role == AckRole::Press && priority < bestPriority) {
+                    bestPriority = priority;
+                    press = &button;
+                }
+            }
+            if (!eligible || !press) continue;
             std::lock_guard<std::mutex> lock(gMutex);
             if (std::find(gScopeExisting.begin(), gScopeExisting.end(), candidate.hwnd) != gScopeExisting.end()) continue;
+            for (auto it = gLastPost.begin(); it != gLastPost.end();) {
+                if (!IsWindow(it->first)) it = gLastPost.erase(it);
+                else ++it;
+            }
             const std::int64_t now = SteadyNowMs();
             const auto last = gLastPost.find(candidate.hwnd);
             if (last != gLastPost.end() && now - last->second.lastMs < kRepostIntervalMs) continue;
-            if (!PostMessageW(candidate.hwnd, WM_COMMAND,
-                    MAKEWPARAM(static_cast<WORD>(candidate.singleButtonId), BN_CLICKED),
-                    reinterpret_cast<LPARAM>(candidate.singleButton))) continue;
-            gLastPost[candidate.hwnd] = PostState{now, (last != gLastPost.end() ? last->second.attempts : 0) + 1};
-            Candidate recorded = candidate;
-            recorded.kind = "handler_message";
-            Record(recorded, trigger);
+            const int attempt = last != gLastPost.end() ? last->second.attempts : 0;
+            if (!PressButton(candidate.hwnd, press->hwnd, press->id, attempt)) continue;
+            gLastPost[candidate.hwnd] = PostState{now, attempt + 1};
+            if (attempt == 0) {
+                Candidate recorded = candidate;
+                recorded.kind = ReportLike(candidate) ? "handler_report" : "handler_message";
+                Record(recorded, trigger, press->label);
+            }
             return true;
         }
     } catch (...) {

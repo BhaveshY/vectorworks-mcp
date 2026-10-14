@@ -39,6 +39,40 @@ OPENING_PARAM_ALIASES = {
     "height": {"height", "doorheight", "windowheight", "overallheight", "leafheight", "openingheight", "h"},
     "sill": {"sill", "sillheight", "sillelevation", "elevation", "sillheightabovefloor"},
 }
+# Friendly parameter names -> real parameter ids per plug-in (compared lower-case, letters and digits only). They win
+# over the schema's own id/display-name matching (e.g. Window "sill_height" is the sill ELEVATION, not the
+# "SillHeight" board parameter). Verified live (VW 2024): Window Elevation + ElevationSetAt "Sill of Window" | "Head
+# of Window"; Door SwingDirection In|Out, SwingHingeSide Left|Right, Configuration Swing|Sliding|Pocket|...
+FRIENDLY_PARAMS: dict[str, dict[str, str]] = {
+    "Door": {"width": "Width", "w": "Width", "doorwidth": "Width", "overallwidth": "Width", "height": "Height",
+             "h": "Height", "doorheight": "Height", "overallheight": "Height", "openangle": "OpenAngle",
+             "openingangle": "OpenAngle", "angle": "OpenAngle", "swing": "SwingDirection",
+             "swingdirection": "SwingDirection", "opens": "SwingDirection", "hinge": "SwingHingeSide",
+             "hingeside": "SwingHingeSide", "handing": "SwingHingeSide", "hand": "SwingHingeSide",
+             "configuration": "Configuration", "config": "Configuration", "doortype": "Configuration",
+             "operation": "SwingOperation", "leaves": "SwingOperation", "leaftype": "LeafType"},
+    "Window": {"width": "Width", "w": "Width", "windowwidth": "Width", "overallwidth": "Width", "height": "Height",
+               "h": "Height", "windowheight": "Height", "overallheight": "Height", "sill": "Elevation",
+               "sillheight": "Elevation", "sillelevation": "Elevation", "elevation": "Elevation",
+               "openangle": "OpenAngle", "configuration": "Configuration", "config": "Configuration",
+               "windowtype": "Configuration"},
+    "Space": {"roomid": "11_Room ID", "id": "11_Room ID", "netheight": "11_Net Height",
+              "grossheight": "11_Gross Height", "height": "11_Gross Height"},
+    "Column2": {"height": "OA Height", "width": "Shaft Width", "depth": "Shaft Depth", "diameter": "Diameter"},
+}
+FRIENDLY_PARAMS["Column"] = FRIENDLY_PARAMS["Column2"]
+# The friendly names shown in vw_read(what="parametric_schema") (all spellings above work).
+FRIENDLY_SHOWN: dict[str, dict[str, str]] = {
+    "Door": {"width": "Width", "height": "Height", "open_angle": "OpenAngle", "swing": "SwingDirection",
+             "hinge": "SwingHingeSide", "configuration": "Configuration", "operation": "SwingOperation"},
+    "Window": {"width": "Width", "height": "Height", "sill_height": "Elevation", "configuration": "Configuration",
+               "open_angle": "OpenAngle"},
+    "Space": {"name": "(displayed room name)", "room_id": "11_Room ID", "height": "11_Gross Height"},
+    "Column2": {"height": "OA Height", "width": "Shaft Width", "depth": "Shaft Depth", "diameter": "Diameter"},
+}
+# Keys that rename a Space's displayed room name (label) instead of a parameter.
+SPACE_NAME_KEYS = {"name", "roomname", "label", "spacename", "title"}
+
 _UUID_RE = re.compile(r"^\{?[0-9A-Fa-f]{8}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{4}-?[0-9A-Fa-f]{12}\}?$")
 
 
@@ -50,18 +84,29 @@ def is_uuid(value: Any) -> bool:
     return isinstance(value, str) and bool(_UUID_RE.match(value.strip()))
 
 EDIT_OPS = ["set", "move", "rotate", "scale", "mirror", "reshape", "duplicate", "delete", "parametric", "class",
-            "layer", "group", "ungroup", "record", "select", "deselect"]
+            "layer", "order", "group", "ungroup", "record", "select", "deselect"]
+ORDER_POSITIONS = {"front": "front", "back": "back", "forward": "forward", "backward": "backward", "top": "front",
+                   "bottom": "back", "to_front": "front", "to_back": "back", "bring_to_front": "front",
+                   "send_to_back": "back", "bring_forward": "forward", "send_backward": "backward", "up": "forward",
+                   "down": "backward", "behind": "back", "back_most": "back", "front_most": "front"}
+# op synonyms that already say where to move (vw_edit op="send_to_back")
+ORDER_OP_POSITIONS = {"send_to_back": "back", "bring_to_front": "front", "send_backward": "backward",
+                      "bring_forward": "forward", "to_back": "back", "to_front": "front", "move_to_back": "back",
+                      "move_to_front": "front"}
 EDIT_SYNONYMS = {"translate": "move", "shift": "move", "transform": "move", "copy": "duplicate", "clone": "duplicate",
                  "remove": "delete", "erase": "delete", "set_properties": "set", "set_property": "set", "properties": "set",
                  "update": "set", "update_parametric": "parametric", "params": "parametric", "set_class": "class",
                  "move_to_layer": "layer", "set_layer": "layer", "flip": "mirror", "resize": "scale", "turn": "rotate",
-                 "attach_record": "record", "set_record": "record", "unselect": "deselect", "clear_selection": "deselect"}
+                 "attach_record": "record", "set_record": "record", "unselect": "deselect", "clear_selection": "deselect",
+                 "arrange": "order", "stack": "order", "stacking": "order", "z_order": "order", "send_to_back": "order",
+                 "bring_to_front": "order", "send_backward": "order", "bring_forward": "order", "to_back": "order",
+                 "to_front": "order", "move_to_back": "order", "move_to_front": "order"}
 PROPERTY_SYNONYMS = {"name": "name", "class": "class", "class_name": "class", "fill_color": "fillColor",
                      "fillcolor": "fillColor", "fill": "fillColor", "pen_color": "penColor", "pencolor": "penColor",
                      "pen": "penColor", "stroke": "penColor", "line_color": "penColor", "fill_pattern": "fillPattern",
                      "fillpattern": "fillPattern", "line_weight": "lineWeight", "lineweight": "lineWeight",
                      "pen_weight": "lineWeight", "opacity": "opacity"}
-SCRIPT_EDIT_OPS = {"mirror", "layer", "group", "ungroup", "record", "style", "pio"}
+SCRIPT_EDIT_OPS = {"mirror", "layer", "order", "group", "ungroup", "record", "style", "pio", "wall", "text", "space_name"}
 
 # Graphic attributes the native set_properties lacks; applied + read back by the `_style` snippet helper.
 STYLE_SYNONYMS = {
@@ -291,6 +336,10 @@ class CreatePlan:
         self.doc_mm_per_unit = 1.0
         self.script_objects: list[dict] = []  # extrude / column -> `massing` snippet
         self.styles: list[tuple[str, dict]] = []  # (local id, style) applied by script after the native create
+        self.layers: dict[str, str] = {}      # local id -> requested layer name (per-object `layer`)
+        self.kinds: dict[str, str] = {}       # local id -> friendly kind (space, wall, door, ...)
+        self.index_of: dict[str, float] = {}  # local id -> position in the caller's objects list
+        self.fixups: list[dict] = []          # normalised ops run after the creates in the same transaction
 
 
 def wall_ids_of(objects: list[dict]) -> set[str]:
@@ -345,10 +394,21 @@ def compile_create(objects: list[dict], scale: float, *, descriptors: dict[str, 
             seen_ids.add(local_id)
         else:
             local_id = f"o{index + 1}"
+        layer = _get(src, "layer", "layer_name", "on_layer")
+        layer = C.text(layer, f"{field}.layer", max_len=255).strip() if layer is not None else None
         if kind == "room":
-            for sub in _room_objects(src, field, scale, local_id):
-                _append(plan, sub, sub.pop("_id"))
+            for k, sub in enumerate(_room_objects(src, field, scale, local_id)):
+                sub_id = sub.pop("_id")
+                _append(plan, sub, sub_id)
+                plan.index_of[sub_id] = index + k / 100.0
+                plan.kinds[sub_id] = sub.get("object_type", "")
+                if layer:
+                    plan.layers[sub_id] = layer
             continue
+        plan.kinds[local_id] = kind
+        plan.index_of[local_id] = index
+        if layer:
+            plan.layers[local_id] = layer
         plugin_name = str(_get(src, "plugin", "plugin_name", "object", "pio", default="")).strip()
         if kind == "parametric" and (schemas.get(plugin_name) or {}).get("script_only"):
             at = _pt(src, ("at", "position", "location", "point", "center"), ("x", "y"), f"{field}.at", scale,
@@ -360,6 +420,8 @@ def compile_create(objects: list[dict], scale: float, *, descriptors: dict[str, 
             style = style_props(src, field, basic=True)
             if style:
                 item["style"] = style
+            if layer:
+                item["layer"] = layer
             plan.script_objects.append(item)
             plan.ids.append(local_id)
             plan.warnings.append(f"{field}: {plugin_name} has no native schema provider; created through its "
@@ -371,6 +433,8 @@ def compile_create(objects: list[dict], scale: float, *, descriptors: dict[str, 
             style = style_props(src, field, basic=True)
             if style:
                 item["style"] = style
+            if layer:
+                item["layer"] = layer
             plan.script_objects.append(item)
             plan.ids.append(local_id)
             continue
@@ -378,10 +442,23 @@ def compile_create(objects: list[dict], scale: float, *, descriptors: dict[str, 
         if kind == "wall":
             plan.local_walls[local_id] = params
         _append(plan, params, local_id)
+        if kind == "window" and "sill_height" in params:
+            plan.fixups.append(_window_sill_fixup(local_id, params, plan.doc_mm_per_unit))
         style = style_props(src, field, basic=True, skip=("name", "class", "class_name"))
         if style:
             plan.styles.append((local_id, style))
     return plan
+
+
+def _window_sill_fixup(local_id: str, params: dict, doc_mm_per_unit: float) -> dict:
+    """Live (VW 2024, bridge 1.0.0): the native window create writes the sill into 'Elevation' but leaves
+    'Elevation Set At' = 'Head of Window', so the window HEAD sits at the sill height (window below the floor).
+    Same transaction: set 'Sill of Window' and the elevation again (harmless when the bridge already does it)."""
+    return {"type": "update_parametric", "params": {
+        "target": "$" + local_id, "plugin_name": "Window",
+        "descriptor_fingerprint": params.get("descriptor_fingerprint") or "pending",
+        "parameters": [{"id": "ElevationSetAt", "type": "string", "value": "Sill of Window"},
+                       {"id": "Elevation", "type": "real", "value": float(params["sill_height"]) / (doc_mm_per_unit or 1.0)}]}}
 
 
 COLUMN_PLUGIN = "Column2"  # universal name of the Vectorworks Architect Column tool (Plug-ins/Column2.vso)
@@ -647,7 +724,8 @@ def _parametric_params(kind: str, src: dict, field: str, scale: float, plan: Cre
     p["rotation"] = C.number(_get(src, "rotation", "angle", default=0), f"{field}.rotation")
     if raw_params is not None and raw_params != {}:
         p["parameters"] = parametric_parameters(raw_params, f"{field}.parameters", scale, schemas.get(plugin),
-                                                warnings=plan.warnings, doc_mm_per_unit=plan.doc_mm_per_unit)
+                                                warnings=plan.warnings, doc_mm_per_unit=plan.doc_mm_per_unit,
+                                                plugin=plugin)
     return p
 
 
@@ -674,18 +752,75 @@ def _schema_index(schema: Optional[dict]) -> tuple[dict[str, dict], dict[str, st
     return by_id, alias
 
 
+def _shown_name(entry: dict) -> str:
+    name = str(entry.get("display_name") or "")
+    return "" if not name or name.startswith("__") or name == entry.get("id") else name
+
+
+def did_you_mean(name: str, names: list[str], alias: Optional[dict] = None, n: int = 5) -> list[str]:
+    """Up to n close names (case-insensitive substring hits first, then difflib); alias maps extra semantic
+    spellings (e.g. display names) to a name."""
+    import difflib
+    low = str(name).lower()
+    sem = _semantic(name)
+    out: list[str] = []
+
+    def add(value: Optional[str]) -> None:
+        if value and value not in out:
+            out.append(value)
+    if alias and sem in alias:
+        add(alias[sem])
+    if alias:
+        for match in difflib.get_close_matches(sem, list(alias), n=2, cutoff=0.8):
+            add(alias[match])
+    for cand in names:
+        c = str(cand).lower()
+        if low and (low in c or (len(c) > 2 and c in low)):
+            add(cand)
+    for key, target in (alias or {}).items():
+        if sem and len(sem) > 2 and (sem in key or (len(key) > 3 and key in sem)):
+            add(target)
+    lowered = {str(c).lower(): c for c in names}
+    for match in difflib.get_close_matches(low, list(lowered), n=n, cutoff=0.6):
+        add(lowered[match])
+    if alias:
+        for match in difflib.get_close_matches(sem, list(alias), n=n, cutoff=0.75):
+            add(alias[match])
+    return out[:n]
+
+
 def _read_only(entry: Optional[dict]) -> bool:
     return bool(entry) and "read only" in str(entry.get("display_name") or "").lower()
 
 
+def friendly_param(plugin: Optional[str], key: str, by_id: dict) -> Optional[str]:
+    """Friendly name ("sill_height", "swing") -> the plug-in's real parameter id, or None."""
+    table = FRIENDLY_PARAMS.get(str(plugin or ""))
+    if not table:
+        return None
+    pid = table.get(_semantic(key))
+    if pid is None or (by_id and pid not in by_id):
+        return None
+    return pid
+
+
 def parametric_parameters(params: Any, field: str, scale: float, schema: Optional[dict], *,
-                          warnings: Optional[list] = None, doc_mm_per_unit: float = 1.0) -> list[dict]:
+                          warnings: Optional[list] = None, doc_mm_per_unit: float = 1.0,
+                          plugin: Optional[str] = None) -> list[dict]:
     """{id: value} or [{id,type,value}] -> 0.7 typed parameter list.
 
-    With the live schema: ids are matched case-insensitively (also by display name), values are coerced to the
-    parameter's type (numeric strings -> numbers, "90cm" -> document units for dimension fields, numbers -> text
-    for popups) and read-only parameters are dropped with a warning (setting them fails the native readback)."""
+    With the live schema: ids are matched case-insensitively (also by display name), friendly names (width,
+    sill_height, open_angle, swing, ...) map to the plug-in's real ids, values are coerced to the parameter's type
+    (numeric strings -> numbers, "90cm" -> document units for dimension fields, numbers -> text for popups) and
+    read-only parameters are dropped with a warning (setting them fails the native readback)."""
     by_id, alias = _schema_index(schema)
+    plugin = plugin or (schema or {}).get("universal_plugin_name") or (schema or {}).get("plugin_name")
+    if isinstance(params, dict) and plugin == "Window":
+        sem = {_semantic(k) for k in params}
+        if sem & {"sill", "sillheight", "sillelevation"} and not sem & {"elevationsetat"} and \
+                (not by_id or "ElevationSetAt" in by_id):
+            # Elevation is the sill only with "Elevation Set At" = "Sill of Window" (live VW 2024)
+            params = dict(params, ElevationSetAt="Sill of Window")
     note = warnings.append if warnings is not None else (lambda _m: None)
     entries: list[tuple[str, Any, Optional[str]]] = []
     if isinstance(params, dict):
@@ -700,7 +835,17 @@ def parametric_parameters(params: Any, field: str, scale: float, schema: Optiona
     out: list[dict] = []
     seen: set[str] = set()
     for key, value, explicit_type in entries:
-        pid = key if key in by_id else alias.get(_semantic(key), key)
+        pid = key if key in by_id else (friendly_param(plugin, key, by_id) or alias.get(_semantic(key), key))
+        if by_id and pid not in by_id and explicit_type is None:
+            visible = [p for p in by_id if not str(by_id[p].get("display_name") or "").startswith("__")]
+            friendly = {k: v for k, v in FRIENDLY_PARAMS.get(str(plugin or ""), {}).items() if v in by_id}
+            close = [f"{p} ({by_id[p]['display_name']})" if _shown_name(by_id[p]) else p
+                     for p in did_you_mean(key, visible, {**{k: v for k, v in alias.items() if v in visible},
+                                                          **friendly})]
+            raise validation(f"{field}.{key}: {plugin or 'the plug-in'} has no parameter {key!r}"
+                             + (f"; did you mean {', '.join(close)}?" if close else "")
+                             + " (vw_read(what='parametric_schema', target=..., search=...) lists them)",
+                             f"{field}.{key}", {close[0].split(' (')[0] if close else "Width": 1000})
         if pid != key:
             note(f"{field}.{key} -> parameter id {pid!r}.")
         entry = by_id.get(pid)
@@ -861,6 +1006,14 @@ class EditPlan:
         self.needs_selection = False
         self.selection_ops: list[dict] = []  # select/deselect (native 'selection' action)
         self.warnings: list[str] = []
+        self.typed: list[dict] = []        # set/parametric values that depend on the target's type (route_typed)
+        self.native_order = False          # bridge has the native `order` op
+
+
+# keys of a vw_edit change that are never object properties
+EDIT_CONTROL_KEYS = {"op", "type", "action", "operation", "target", "targets", "objects", "object", "ref", "refs",
+                     "uuid", "uuids", "properties", "props", "set", "values", "document", "units", "dry_run",
+                     "preview", "idempotency_key", "id", "as"}
 
 
 def _targets(src: dict, field: str) -> list[str]:
@@ -873,8 +1026,10 @@ def _targets(src: dict, field: str) -> list[str]:
     return [v if isinstance(v, str) and v.lower() == "selection" else norm_ref(v, f"{field}.target") for v in value]
 
 
-def compile_edit(changes: list[dict], scale: float, *, schemas: dict[str, dict], descriptors: dict[str, str]) -> EditPlan:
+def compile_edit(changes: list[dict], scale: float, *, schemas: dict[str, dict], descriptors: dict[str, str],
+                 native_order: bool = False) -> EditPlan:
     plan = EditPlan()
+    plan.native_order = native_order
     for index, raw in enumerate(changes):
         field = f"changes[{index}]"
         src = C.lower_keys(raw)
@@ -890,14 +1045,23 @@ def compile_edit(changes: list[dict], scale: float, *, schemas: dict[str, dict],
         native: list[dict] = []
         if op == "set" or op == "class":
             props_src = _get(src, "properties", "props", "set", "values")
-            props_src = C.parse_json_maybe(props_src) if props_src is not None else {
-                k: v for k, v in src.items() if k in PROPERTY_SYNONYMS or k in STYLE_SYNONYMS}
+            props_src = C.parse_json_maybe(props_src) if props_src is not None else {}
+            if not isinstance(props_src, dict):
+                raise validation(f"{field}.properties must be an object", f"{field}.properties", {"fill_color": "#FF0000"})
+            has_target = any(k in src for k in ("target", "targets", "objects", "object", "ref", "refs", "uuid", "uuids"))
+            # flat form {"op":"set","target":..,"width":1800,"fill":..} (also mixed with properties)
+            flat = {k: v for k, v in src.items() if k not in EDIT_CONTROL_KEYS and (has_target or k != "name")}
+            props_src = {**flat, **props_src}
             if op == "class":
                 props_src = {"class": _get(src, "class", "class_name", "value", "to")}
-            if not isinstance(props_src, dict) or not props_src:
-                raise validation(f"{field}.properties is required", f"{field}.properties", {"fill_color": "#FF0000"})
+            if not props_src:
+                raise validation(f"{field} has nothing to set: pass the values flat or in properties (e.g. name, "
+                                 "class, fill_color, line_style; door/window width/height/sill; wall thickness/height; "
+                                 "text; any plug-in parameter)", f"{field}.properties",
+                                 {"op": "set", "target": "<uuid>", "fill_color": "#FF0000"})
             props: dict[str, str] = {}
             style_src: dict[str, Any] = {}
+            typed: dict[str, Any] = {}
             for key, value in props_src.items():
                 k = str(key).lower().replace(" ", "_")
                 canonical = PROPERTY_SYNONYMS.get(k)
@@ -906,11 +1070,9 @@ def compile_edit(changes: list[dict], scale: float, *, schemas: dict[str, dict],
                 if canonical is None:
                     if k in STYLE_SYNONYMS:
                         style_src[key] = value
-                        continue
-                    raise validation(f"{field}.properties.{key} is not editable; use name, class, fill_color, pen_color, "
-                                     "line_weight, opacity, fill (none|solid|hatch/gradient/image name), line_style, "
-                                     "font, text_size, text_style, align, start_marker/end_marker (or op='parametric')",
-                                     f"{field}.properties", {"fill_color": "#FF0000"})
+                    else:
+                        typed[str(key)] = value  # routed by the target's type (vw_edit reads it first)
+                    continue
                 if canonical in {"fillColor", "penColor"}:
                     value = C.color(value, f"{field}.properties.{key}")
                 elif canonical in {"fillPattern", "lineWeight", "opacity"}:
@@ -924,6 +1086,9 @@ def compile_edit(changes: list[dict], scale: float, *, schemas: dict[str, dict],
             if style:
                 plan.script_ops.append({"op": "style", "targets": targets, "style": style})
                 plan.needs_script = True
+            if typed or "name" in props:
+                plan.typed.append({"index": index, "field": field, "targets": targets, "values": typed,
+                                   "name": props.get("name"), "kind": "set"})
         elif op == "move":
             delta = _get(src, "by", "delta", "offset", "vector")
             if delta is not None:
@@ -997,9 +1162,18 @@ def compile_edit(changes: list[dict], scale: float, *, schemas: dict[str, dict],
         elif op == "parametric":
             params_src = _get(src, "parameters", "params", "values", "set")
             plugin = _get(src, "plugin", "plugin_name")
-            if params_src is None or plugin is None:
-                raise validation(f"{field} needs plugin (e.g. 'Door') and parameters {{id: value}}", f"{field}.parameters",
-                                 {"op": "parametric", "target": "uuid:...", "plugin": "Door", "parameters": {"OpenAngle": 45}})
+            if params_src is None:
+                flat = {k: v for k, v in src.items() if k not in EDIT_CONTROL_KEYS | {"plugin", "plugin_name", "name"}}
+                params_src = flat or None
+            if params_src is None:
+                raise validation(f"{field} needs parameters {{id or friendly name: value}} (plugin is taken from the "
+                                 "target)", f"{field}.parameters",
+                                 {"op": "parametric", "target": "<door uuid>", "parameters": {"width": 1000, "open_angle": 45}})
+            if plugin is None:
+                # plug-in name comes from the target object (vw_edit reads it before compiling)
+                plan.typed.append({"index": index, "field": field, "targets": targets, "kind": "parametric",
+                                   "values": C.parse_json_maybe(params_src)})
+                continue
             plugin = str(plugin)
             if (schemas.get(plugin) or {}).get("script_only"):
                 # no native schema provider (e.g. Column2): set the parametric record fields by script
@@ -1010,7 +1184,7 @@ def compile_edit(changes: list[dict], scale: float, *, schemas: dict[str, dict],
                                      "parametric record (script).")
                 continue
             parameters = parametric_parameters(C.parse_json_maybe(params_src), f"{field}.parameters", scale, schemas.get(plugin),
-                                               warnings=plan.warnings)
+                                               warnings=plan.warnings, plugin=plugin)
             if not parameters:
                 raise validation(f"{field}.parameters has nothing settable (see warnings: read-only parameters are "
                                  "computed by Vectorworks)", f"{field}.parameters", {"OpenAngle": 45})
@@ -1021,6 +1195,19 @@ def compile_edit(changes: list[dict], scale: float, *, schemas: dict[str, dict],
                       for t in targets]
         elif op == "layer":
             script_item["layer"] = C.text(_get(src, "layer", "to", "value"), f"{field}.layer", required=True)
+        elif op == "order":
+            raw_op = str(_get(src, "op", "type", "action", "operation", default="")).strip().lower().replace(" ", "_")
+            position = _get(src, "position", "to", "where", "direction", "order", "value")
+            if position is None:
+                position = ORDER_OP_POSITIONS.get(raw_op)
+            pos = ORDER_POSITIONS.get(str(position or "").strip().lower().replace(" ", "_").replace("-", "_"))
+            if pos is None:
+                raise validation(f"{field}.position must be front, back, forward or backward", f"{field}.position",
+                                 {"op": "order", "target": "<uuid>", "position": "back"})
+            script_item["position"] = pos
+            if plan.native_order:
+                plan.ops.extend({"type": "order", "params": {"target": t, "position": pos}} for t in targets)
+                continue
         elif op == "group":
             script_item["name"] = _get(src, "name", "group_name")
         elif op == "ungroup":
@@ -1066,13 +1253,15 @@ def expand_selection(plan: EditPlan, selection_refs: list[str]) -> None:
         else:
             new_ops.append(op)
     plan.ops = new_ops
+    for entry in plan.typed:
+        entry["targets"] = fix(entry["targets"])
 
 
-def normalise_edit_ops(native_ops: list[dict]) -> list[dict]:
+def normalise_edit_ops(native_ops: list[dict], max_ops: int = 250) -> list[dict]:
     """Run the 0.7 normaliser on already-mm ops (validation + canonical form)."""
     if not native_ops:
         return []
     try:
-        return ops._normalise_execute_operations(native_ops, coordinate_units="mm")
+        return ops._normalise_execute_operations(native_ops, coordinate_units="mm", max_operations=max_ops)
     except ValueError as exc:
         raise VWError("validation_error", str(exc), field="changes") from None

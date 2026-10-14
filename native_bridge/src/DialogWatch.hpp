@@ -52,9 +52,12 @@ bool HomeDismissedSince(std::uint64_t after);
 std::string RecentDismissedJson();
 
 // Handler scope (main thread): snapshot the dialogs open when a handler starts.
-// While the scope is active, TryAckHandlerMessage presses the single button of
-// a NEW message box (one push button, no inputs) and records it as
-// kind "handler_message" with its text. Safe from any thread (PostMessage).
+// While the scope is active, TryAckHandlerMessage acknowledges a NEW dialog
+// without inputs whose buttons are all in {OK, Close, Done, Save Report...,
+// Help, Details...} (English + German): it records title, static text and
+// button labels as kind "handler_message" / "handler_report" and presses
+// OK / Close / Done (BM_CLICK to the button, WM_COMMAND as fallback) -- never
+// Save Report, Help or Details. Safe from any thread (PostMessage).
 void BeginHandlerScope();
 void EndHandlerScope();
 bool TryAckHandlerMessage(const char* trigger);

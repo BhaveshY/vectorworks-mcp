@@ -12,6 +12,10 @@
 
 namespace VectorworksMCP::Legacy {
 
+// Maximum operation_count of one apply_operations call (ping/capabilities
+// `max_operations`).
+constexpr int kMaxApplyOperationCount = 2000;
+
 // Returns the JSON result of a 0.x action or std::nullopt when the action is
 // not a legacy action. Throws on failure (std::invalid_argument for invalid
 // input, ViewDocument::Error / NativeIO::Error / BridgeError / runtime_error).

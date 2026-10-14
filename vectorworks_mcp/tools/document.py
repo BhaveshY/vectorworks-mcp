@@ -163,7 +163,7 @@ def handle(args: dict, ctx, warnings: list) -> dict:
             if not target.inst.v2 and rng != "current_view":
                 warnings.append("Pre-1.0 bridge: PDF range all_pages/sheet may be ignored.")
         result = host.call(target, native, params, kind="long", ctx=ctx)
-        out["result"] = _clean(result)
+        out["result"] = compact_io(result, C.boolean(a.get("detail", False), "detail"))
         out["path"] = path
         if os.path.exists(path):
             out["bytes"] = os.path.getsize(path)
@@ -182,7 +182,11 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         out["result"] = host.script(target, "import_image", {"path": path, "at": at}, label="MCP import image", ctx=ctx)
         out["via"] = "script"
         return out
-    out["result"] = _clean(host.call(target, native, {"file_path": path, "path": path, "format": fmt}, kind="long", ctx=ctx))
+    detail = C.boolean(a.get("detail", False), "detail")
+    params = {"file_path": path, "path": path, "format": fmt}
+    if detail:
+        params["detail"] = True  # bridge 1.0.x returns compact import receipts unless detail
+    out["result"] = compact_io(host.call(target, native, params, kind="long", ctx=ctx), detail)
     return out
 
 
@@ -234,6 +238,36 @@ def _confirm_open(host, target, path: str, result, ctx) -> dict:
     raise VWError("unknown_commit_state", "Vectorworks accepted the open but the document was not confirmed yet.",
                   commit_state="unknown", details={"last_active": last},
                   next_step="Call vw_status in a few seconds; if the file is open it will be listed.")
+
+
+_IO_DROP = {"timing", "binding", "before", "after", "document_before", "document_after", "expected_document",
+            "transaction_artifact"}
+
+
+def compact_io(result, detail: bool = False):
+    """Import/export receipts without the internal before/after document dumps (detail=true keeps everything)."""
+    if not isinstance(result, dict) or detail:
+        return _clean(result)
+    out = {k: v for k, v in result.items() if k not in _IO_DROP}
+    mutation = out.get("document_mutation")
+    if isinstance(mutation, dict):
+        created = mutation.get("created_object_uuids") or []
+        deleted = mutation.get("deleted_object_uuids") or []
+        summary = {"verified": mutation.get("verified"), "created_objects": len(created),
+                   "deleted_objects": len(deleted)}
+        if created:
+            summary["created_uuids_first"] = created[:10]
+        for key in ("created_layers", "deleted_layers", "changed_layers", "active_layer_changed"):
+            value = mutation.get(key)
+            if value not in (None, [], {}):
+                summary[key] = value[:20] if isinstance(value, list) else value
+        out["document_mutation"] = summary
+    for key, value in list(out.items()):
+        if isinstance(value, str) and len(value) > 1500:
+            out[key] = value[:1500] + " ...(truncated; detail=true for all)"
+        elif isinstance(value, list) and len(value) > 50:
+            out[key] = value[:20] + [f"... {len(value) - 20} more (detail=true)"]
+    return out
 
 
 def _clean(value):

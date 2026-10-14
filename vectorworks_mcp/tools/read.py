@@ -56,7 +56,7 @@ def _offset(cursor: Any) -> int:
 
 def _criteria(a: dict) -> Optional[str]:
     parts = []
-    for key, code in (("class", "C"), ("name", "N")):
+    for key, code in (("class", "C"),):
         value = a.get(key)
         if value not in (None, ""):
             parts.append(f"({code}='{str(value).replace(chr(39), chr(39) * 2)}')")
@@ -89,6 +89,12 @@ def handle(args: dict, ctx, warnings: list) -> dict:
                 a["what"] = a.pop(alt)
                 break
     what = C.choice(a.get("what"), "what", READ_WHAT, WHAT_SYNONYMS)
+    if a.get("query") in (None, "") and a.get("search") not in (None, ""):
+        a["query"] = a["search"]  # search= is the documented spelling for name filters
+    if what in {"viewports", "annotations"} and a.get("target") in (None, ""):
+        alias = a.get("sheet") if what == "viewports" else (a.get("viewport") or a.get("sheet"))
+        if alias not in (None, ""):
+            a["target"] = alias
     if what == "plan_quality":
         return _plan_quality(a)
     host = get_host()
@@ -142,7 +148,7 @@ def handle(args: dict, ctx, warnings: list) -> dict:
     if what in {"query", "selection"}:
         return _query(host, target, a, what, fields, limit, offset, out)
     if what == "object":
-        return _object(host, target, a, fields, out)
+        return _object(host, target, a, fields, out, C.boolean(a.get("detail", False), "detail"))
     if what == "view":
         out["data"] = _clean(host.call(target, "get_view", {}), [])
         return out
@@ -171,7 +177,8 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         # script read: works for unsaved documents (native get_viewports needs a saved-file binding) and returns
         # scale/view/render/layers/crop/centre per viewport
         if what == "viewports":
-            sheet = C.text(a.get("target") or a.get("layer") or a.get("name"), "target", required=True)
+            sheet = C.text(a.get("target") or a.get("sheet") or a.get("layer") or a.get("name"), "target",
+                           required=True)
             args_ = {"action": "list", "sheet": sheet[5:] if sheet.startswith("name:") else sheet}
         else:
             args_ = {"action": "annotations", "target": norm_ref(a.get("target"), "target")}
@@ -220,22 +227,27 @@ def handle(args: dict, ctx, warnings: list) -> dict:
             out["via"] = "script"
         return out
     if what == "parametric_schema":
-        plugin = C.text(a.get("target") or a.get("name") or a.get("query"), "target", required=True)
+        plugin = C.text(a.get("target") or a.get("name") or (a.get("query") if not a.get("search") else None),
+                        "target", required=True)
+        search = str(a.get("search") or (a.get("query") if a.get("target") or a.get("name") else "") or "")
+        detail = C.boolean(a.get("detail", False), "detail")
         if builders_is_uuid(plugin) or plugin.startswith("uuid:"):
             # parameters of one placed plug-in object (parametric record values)
-            out["data"] = host.script(target, "pio_schema", {"target": norm_ref(plugin, "target")},
-                                      label="Read parameters", kind="read", transaction=False)
+            data = host.script(target, "pio_schema", {"target": norm_ref(plugin, "target")},
+                               label="Read parameters", kind="read", transaction=False)
+            out["data"] = _compact_schema(data, search, detail, limit if a.get("limit") else None)
             out["via"] = "script"
             return out
         schema = host.schema(inst, plugin)
         if schema.get("script_only"):
-            out["data"] = host.script(target, "pio_schema", {"plugin": plugin}, label="Read parameters", kind="read",
-                                      transaction=False)
+            data = host.script(target, "pio_schema", {"plugin": plugin}, label="Read parameters", kind="read",
+                               transaction=False)
+            out["data"] = _compact_schema(data, search, detail, limit if a.get("limit") else None)
             out["via"] = "script"
             warnings.append(f"{plugin} has no native schema provider: parameters come from its parametric record "
                             "(field types + current defaults); vw_edit op='parametric' sets them the same way.")
             return out
-        out["data"] = _clean(schema, [])
+        out["data"] = _compact_schema(_clean(schema, []), search, detail, limit if a.get("limit") else None)
         return out
     if what == "capabilities":
         return _capabilities(host, inst, out)
@@ -327,12 +339,11 @@ def _native_page(out: dict, data: Any, offset: int, fields: list[str], key: str 
 
 def _query(host, target, a: dict, what: str, fields: list[str], limit: int, offset: int, out: dict) -> dict:
     inst = target.inst
-    if what == "query" and a.get("type") in (None, "") and a.get("query") not in (None, ""):
-        if _known_type(a["query"]):
-            a = dict(a, type=a["query"])  # weak models write query="Door" for type="door"
-        else:
-            out.setdefault("warnings", []).append("query is a text filter only for symbols/classes/worksheets; for "
-                                                  "objects use type=, name=, class=, layer= or criteria=.")
+    text_filter = ""
+    if what == "query" and a.get("type") in (None, "") and a.get("query") not in (None, "") and _known_type(a["query"]):
+        a = dict(a, type=a["query"], query=None)  # weak models write query="Door" for type="door"
+    if what == "query":
+        text_filter = str(a.get("query") or a.get("name") or "").strip().lower()
     criteria = _criteria(a) if what == "query" else None
     native_type, plugin = _type_filter(a.get("type"))
     features = inst.status.get("object_read_features")
@@ -358,10 +369,13 @@ def _query(host, target, a: dict, what: str, fields: list[str], limit: int, offs
     params.update({f"field_{i}": f for i, f in enumerate(native_fields, 1)})
     if not inst.supports("query_objects"):
         raise host.bridge.missing_action(inst, "query_objects")
+    if text_filter:
+        return _filtered_query(host, target, params, text_filter, fields, limit, offset, out)
     data = host.call(target, "query_objects", params)
     items = data.get("items") if isinstance(data, dict) else None
     if not isinstance(items, list):
         raise VWError("protocol_error", "query_objects returned no items list")
+    _add_room_names(host, target, items, fields)
     out["data"] = [_clean(i, fields) for i in items]
     more = bool(data.get("has_more"))
     out["page"] = {"cursor": str(offset) if offset else "", "returned": len(items),
@@ -369,6 +383,72 @@ def _query(host, target, a: dict, what: str, fields: list[str], limit: int, offs
     if more:
         out["page"]["note"] = "More objects exist; pass cursor=next_cursor, or use what='summary' for counts."
     return out
+
+
+_FILTER_SCAN_LIMIT = 20_000
+
+
+def _filtered_query(host, target, params: dict, needle: str, fields: list[str], limit: int, offset: int,
+                    out: dict) -> dict:
+    """query/name = case-insensitive 'contains' filter over object name, text content and Space room name.
+    The cursor is the native offset to continue scanning from."""
+    native_fields = [f for f in fields]
+    if native_fields:
+        native_fields = list(dict.fromkeys(native_fields + ["name", "text", "type", "plugin_name", "uuid"]))
+    hits: list = []
+    scan = offset
+    more = False
+    while len(hits) < limit and scan - offset < _FILTER_SCAN_LIMIT:
+        page = dict(params, offset=scan, limit=1000, field_count=len(native_fields))
+        page.update({f"field_{i}": f for i, f in enumerate(native_fields, 1)})
+        data = host.call(target, "query_objects", page)
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            raise VWError("protocol_error", "query_objects returned no items list")
+        _add_room_names(host, target, items, [])
+        consumed = 0
+        for item in items:
+            consumed += 1
+            if not isinstance(item, dict):
+                continue
+            hay = " ".join(str(item.get(k) or "") for k in ("name", "text", "room_name")).lower()
+            if needle in hay:
+                hits.append(item)
+                if len(hits) >= limit:
+                    break
+        scan += consumed
+        native_more = bool(data.get("has_more")) or consumed < len(items)
+        if not native_more:
+            more = False
+            break
+        more = True
+    out["data"] = [_clean(i, fields) for i in hits]
+    out["page"] = {"cursor": str(offset) if offset else "", "returned": len(hits),
+                   "next_cursor": str(scan) if more else None, "filter": f"name/text contains {needle!r}"}
+    if more:
+        out["page"]["note"] = "More objects may match; pass cursor=next_cursor."
+    return out
+
+
+def _add_room_names(host, target, items: list, fields: list[str]) -> None:
+    """Spaces: room_name = the displayed label (the object name is a separate, often generated, value)."""
+    if fields and "room_name" not in fields:
+        return
+    spaces = [i for i in items if isinstance(i, dict) and (i.get("type") == "space" or i.get("plugin_name") == "Space")
+              and i.get("uuid")]
+    if not spaces or not host.can_script(target.inst):
+        return
+    try:
+        data = host.script(target, "object_detail", {"labels": [i["uuid"] for i in spaces[:1000]]},
+                           label="Read room names", kind="read", transaction=False) or {}
+    except VWError:
+        return
+    labels = data.get("labels") or {}
+    lower = {str(k).lower(): v for k, v in labels.items()}
+    for item in spaces:
+        label = labels.get(item["uuid"], lower.get(str(item["uuid"]).lower()))
+        if label is not None:
+            item["room_name"] = label
 
 
 def _find_by_uuid(host, target, uuid: str, fields: list[str]) -> Optional[dict]:
@@ -401,7 +481,7 @@ def _find_by_uuid(host, target, uuid: str, fields: list[str]) -> Optional[dict]:
     return None
 
 
-def _object(host, target, a: dict, fields: list[str], out: dict) -> dict:
+def _object(host, target, a: dict, fields: list[str], out: dict, detail: bool = False) -> dict:
     ref = norm_ref(a.get("target") or a.get("name"), "target")
     item: Optional[dict] = None
     if ref.startswith("name:"):
@@ -416,17 +496,134 @@ def _object(host, target, a: dict, fields: list[str], out: dict) -> dict:
         raise validation("target must be a uuid or an object name", "target", "uuid:1A2B-...")
     if item is None:
         raise VWError("not_found", f"No object matches {ref}.")
-    record = _clean(item, fields)
-    if host.can_script(target.inst):
+    record = _clean(item, fields) if (fields or detail) else compact_record(item)
+    if host.can_script(target.inst) and not fields:
         try:
-            detail = host.script(target, "object_detail", {"target": "uuid:" + str(item.get("uuid"))},
-                                 label="Read object detail", kind="read", transaction=False)
-            if isinstance(detail, dict):
-                record = {**record, **{k: v for k, v in detail.items() if k not in record}}
+            extra = host.script(target, "object_detail", {"target": "uuid:" + str(item.get("uuid")), "detail": detail},
+                                label="Read object detail", kind="read", transaction=False)
+            if isinstance(extra, dict):
+                if not detail:
+                    extra = _trim_detail(extra)
+                record = {**record, **{k: v for k, v in extra.items() if k not in record or k == "layer"}}
         except VWError as exc:
             out.setdefault("warnings", []).append(f"detail unavailable: {exc.message}")
+    if not detail and not fields:
+        record.pop("type_id", None)
+        out["more"] = "detail=true adds all records/parametric parameters"
     out["data"] = record
     return out
+
+
+_ATTR_KEYS = {"fillColor": "fill_color", "penColor": "pen_color", "lineWeight": "line_weight",
+              "fillPattern": "fill_pattern", "opacity": "opacity"}
+_KEEP = ("uuid", "type", "plugin_name", "name", "layer", "class", "room_id", "height", "net_area", "gross_area",
+         "width", "parent_uuid", "text")
+
+
+def compact_record(item: dict) -> dict:
+    """Native object record -> compact form (attributes grouped, bounds as [[x1,y1],[x2,y2]])."""
+    out = {k: item[k] for k in _KEEP if item.get(k) not in (None, "")}
+    if out.get("parent_uuid"):
+        out["wall"] = out.pop("parent_uuid")
+    if isinstance(out.get("text"), str) and len(out["text"]) > 200:
+        out["text"] = out["text"][:200] + "..."
+    attrs = {_ATTR_KEYS[k]: item[k] for k in _ATTR_KEYS if item.get(k) not in (None, "")}
+    if attrs:
+        out["attributes"] = attrs
+    bounds = item.get("bounds")
+    if isinstance(bounds, dict) and bounds.get("top_left") and bounds.get("bottom_right"):
+        tl, br = bounds["top_left"], bounds["bottom_right"]
+        out["bounds"] = [[_r(tl[0]), _r(br[1])], [_r(br[0]), _r(tl[1])]]
+    return out
+
+
+def _r(v):
+    try:
+        v = round(float(v), 1)
+        return int(v) if v == int(v) else v
+    except (TypeError, ValueError):
+        return v
+
+
+def _trim_detail(extra: dict) -> dict:
+    extra = {k: v for k, v in extra.items() if k not in {"type_id", "uuid", "name", "class", "plugin"}}
+    inserts = extra.get("inserts")
+    if isinstance(inserts, list) and len(inserts) > 6:
+        extra["inserts"] = {"count": len(inserts), "first": inserts[:6]}
+    points = extra.get("points")
+    if isinstance(points, list) and len(points) > 50:
+        extra["points"] = points[:50]
+    return extra
+
+
+# Parameter field styles -> type names (describe_parametric_schema field_style / vs.GetFldType).
+_FIELD_TYPES = {1: "integer", 2: "boolean", 3: "real", 4: "text", 7: "length", 8: "popup", 9: "radio", 10: "coord_x",
+                11: "coord_y", 13: "angle", 14: "static", 18: "class", 20: "angle", 21: "area", 22: "volume",
+                24: "material", 29: "texture"}
+# The parameters most edits need, per plug-in (shown first in the compact schema).
+_USEFUL = {
+    "Door": ["Width", "Height", "Configuration", "SwingOperation", "SwingDirection", "SwingHingeSide", "OpenAngle",
+             "LeafType", "TopShape", "Transom", "SideLights", "Threshold", "Lintel", "UseWallDepth", "DoorThickness",
+             "JambWidth", "JambDepth", "IntTrim", "ExtTrim", "IDLabel", "IDPrefix", "OnSched", "3DOpen",
+             "Show3DHinge", "DoorFR", "Manuf", "Model", "Notes"],
+    "Window": ["Width", "Height", "Elevation", "ElevationSetAt", "Configuration", "CasementOperation", "HungOperation",
+               "OpenAngle", "TopShape", "Transom", "IncludeSill", "SillStyle", "SillDepth", "Lintels", "UseWallDepth",
+               "JambWidth", "JambDepth", "SashWidth", "IntTrim", "ExtTrim", "MuntinPattern", "IDLabel", "IDPrefix",
+               "OnSchedule", "Show3DOpen", "Manuf", "Model", "WindowDesc"],
+    "Space": ["11_Number", "11_Room ID", "11_Space Type", "11_Gross Height", "11_Net Height", "11_Show 3D Detail",
+              "11_Boundary Display", "11_Occupancy Type", "11_Proposed Area", "11_Calc Dims", "11_On Schedule",
+              "Area", "Gross Area", "Perim", "Volume", "Floor Finish", "Ceiling Material", "Remarks"],
+}
+
+
+def _compact_schema(data: Any, search: str, detail: bool, limit: Optional[int]) -> Any:
+    """Schema / parametric record -> {plugin, total, parameters:[{id, name?, type, value}]} with the ~30 most
+    useful parameters (search filters id + display name; detail=true returns everything)."""
+    if not isinstance(data, dict) or not isinstance(data.get("parameters"), list):
+        return data
+    plugin = data.get("universal_plugin_name") or data.get("plugin_name") or ""
+    params = [p for p in data["parameters"] if isinstance(p, dict)]
+    if detail and not search:
+        return data
+    rows = []
+    for p in params:
+        name = str(p.get("display_name") or "")
+        hidden = name.startswith("__") or str(p.get("id", "")).startswith("__")
+        row = {"id": p.get("id")}
+        if name and not hidden and name != p.get("id"):
+            row["name"] = name
+        style = p.get("field_style")
+        row["type"] = p.get("type") or _FIELD_TYPES.get(style, str(style) if style is not None else "")
+        value = p.get("value")
+        row["value"] = value[:60] if isinstance(value, str) else value
+        if "read only" in name.lower():
+            row["read_only"] = True
+        rows.append((row, hidden))
+    from ..builders import FRIENDLY_SHOWN
+    shown = FRIENDLY_SHOWN.get(plugin, {})
+    if search:
+        q = search.lower()
+        by_id = {r["id"]: r for r, _h in rows}
+        hits = [by_id[pid] for key, pid in shown.items() if q in key and pid in by_id]
+        hits += [r for r, _h in rows if r not in hits and (q in str(r["id"]).lower() or q in str(r.get("name", "")).lower())]
+        out_rows = hits if detail else hits[:limit or 40]
+    else:
+        useful = _USEFUL.get(plugin, [])
+        by_id = {r["id"]: r for r, hidden in rows}
+        out_rows = [by_id[i] for i in useful if i in by_id]
+        out_rows += [r for r, hidden in rows if not hidden and r not in out_rows and r.get("type") not in
+                     {"class", "material", "texture", "static"}]
+        out_rows = out_rows[:limit or 30]
+    result = {"plugin": plugin, "total": len(params), "shown": len(out_rows), "parameters": out_rows}
+    if data.get("descriptor_fingerprint"):
+        result["descriptor_fingerprint"] = data["descriptor_fingerprint"]
+    if data.get("source"):
+        result["source"] = data["source"]
+    if shown:
+        result["friendly_names"] = shown
+    if len(out_rows) < len(params):
+        result["more"] = "search='<part of id or name>' filters all parameters; detail=true returns every parameter"
+    return result
 
 
 _CELL = re.compile(r"^([A-Za-z]{1,3})(\d{1,6})$")
@@ -485,9 +682,28 @@ def _resources(host, target, a: dict, fields: list[str], limit: int, offset: int
     if rtype in {"all", "symbols", "worksheets", ""}:
         data = host.call(target, "resources", {"action": "list", "query": query})
         if rtype in {"symbols", "worksheets"}:
-            out["data"], out["page"] = _page(_list_from(data, rtype), offset, limit, fields)
-        else:
+            items = _list_from(data, rtype)
+            if query:
+                q = str(query).lower()
+                items = [i for i in items if q in str(i.get("name", i) if isinstance(i, dict) else i).lower()]
+            out["data"], out["page"] = _page(items, offset, limit, fields)
+            return out
+        if not query:
             out["data"] = _clean(data, [])
+            return out
+        # search across every resource kind: symbols/worksheets natively + attribute resources by script
+        q = str(query).lower()
+        rows = [{"name": i.get("name"), "type": kind[:-1]} for kind in ("symbols", "worksheets")
+                for i in _list_from(data, kind) if isinstance(i, dict) and q in str(i.get("name", "")).lower()]
+        if host.can_script(target.inst):
+            codes = [scripts_lib.RESOURCE_TYPES[k] for k in ("hatches", "line_types", "text_styles", "gradients",
+                                                              "image_fills", "tiles", "wall_styles", "slab_styles")]
+            res = host.script(target, "resource_list", {"resource_types": codes, "query": query, "offset": 0,
+                                                        "limit": 1000, "library": True},
+                              label="Search resources", kind="read", transaction=False) or {}
+            rows += _list_from(res, "items")
+        out["data"], out["page"] = _page(rows, offset, limit, fields)
+        out["page"]["filter"] = f"name contains {query!r}"
         return out
     code = scripts_lib.RESOURCE_TYPES.get(rtype)
     if code is None:

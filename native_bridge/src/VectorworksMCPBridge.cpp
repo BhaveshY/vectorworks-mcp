@@ -1373,16 +1373,51 @@ std::string NativeIODocumentSnapshotJson(const NativeIO::DocumentMutationSnapsho
         ",\"object_count\":" + std::to_string(snapshot.objectUuids.size()) + "}";
 }
 
-std::string NativeIOResultJson(const NativeIO::Result& result) {
+std::vector<std::string> LayerSnapshotNames(const std::vector<NativeIO::LayerSnapshot>& layers, std::size_t limit) {
+    std::vector<std::string> names;
+    for (const auto& layer : layers) {
+        if (names.size() >= limit) break;
+        names.push_back(layer.name);
+    }
+    return names;
+}
+
+// Import receipts (finding #21): by default a compact summary (counts, layer
+// names, first object uuids); `detail:true` returns the full before/after
+// snapshots and every created/deleted uuid.
+std::string NativeIOResultJson(const NativeIO::Result& result, bool detail = false) {
     std::string json = "{\"operation\":" + JsonString(result.operation);
     json += ",\"path\":" + JsonString(result.canonicalPath);
     json += ",\"size_bytes\":" + std::to_string(result.sizeBytes);
     json += ",\"replaced_existing\":";
     json += result.replacedExisting ? "true" : "false";
-    if (result.hasDocumentMutationReceipt) {
+    if (result.hasDocumentMutationReceipt && !detail) {
+        constexpr std::size_t kSample = 20u;
+        const auto& mutation = result.documentMutationReceipt;
+        std::vector<std::string> sample(
+            mutation.createdObjectUuids.begin(),
+            mutation.createdObjectUuids.begin() +
+                static_cast<std::ptrdiff_t>(std::min(kSample, mutation.createdObjectUuids.size())));
+        json += ",\"document_mutation\":{\"verified\":";
+        json += mutation.verified ? "true" : "false";
+        json += ",\"detail\":false";
+        json += ",\"created_object_count\":" + std::to_string(mutation.createdObjectUuids.size());
+        json += ",\"deleted_object_count\":" + std::to_string(mutation.deletedObjectUuids.size());
+        json += ",\"created_object_uuids_sample\":" + JsonStringArray(sample);
+        json += ",\"created_layers\":" + JsonStringArray(LayerSnapshotNames(mutation.createdLayers, 50u));
+        json += ",\"created_layer_count\":" + std::to_string(mutation.createdLayers.size());
+        json += ",\"deleted_layer_count\":" + std::to_string(mutation.deletedLayers.size());
+        json += ",\"changed_layer_count\":" + std::to_string(mutation.changedLayers.size());
+        json += ",\"object_count_before\":" + std::to_string(mutation.before.objectUuids.size());
+        json += ",\"object_count_after\":" + std::to_string(mutation.after.objectUuids.size());
+        json += ",\"active_layer_changed\":";
+        json += mutation.activeLayerChanged ? "true" : "false";
+        json += "}";
+    } else if (result.hasDocumentMutationReceipt) {
         const auto& mutation = result.documentMutationReceipt;
         json += ",\"document_mutation\":{\"verified\":";
         json += mutation.verified ? "true" : "false";
+        json += ",\"detail\":true";
         json += ",\"before\":" + NativeIODocumentSnapshotJson(mutation.before);
         json += ",\"after\":" + NativeIODocumentSnapshotJson(mutation.after);
         json += ",\"created_object_uuids\":" + JsonStringArray(mutation.createdObjectUuids);
@@ -1394,6 +1429,7 @@ std::string NativeIOResultJson(const NativeIO::Result& result) {
         json += mutation.activeLayerChanged ? "true" : "false";
         json += "}";
     }
+    json += result.extraJson;
     json += "}";
     return json;
 }
@@ -1434,7 +1470,7 @@ std::string HandleNativeIO(const std::string& action, const Params& params) {
     if (action == "import_dwg") {
         NativeIO::DWGImportRequest request;
         request.absolutePath = GetStringParam(params, "file_path", GetStringParam(params, "path"));
-        return NativeIOResultJson(NativeIO::ImportDWG(request));
+        return NativeIOResultJson(NativeIO::ImportDWG(request), GetLenientBoolParam(params, "detail", false));
     }
     if (action == "export_dwg") {
         NativeIO::DWGExportRequest request;
@@ -1447,12 +1483,14 @@ std::string HandleNativeIO(const std::string& action, const Params& params) {
     if (action == "export_ifc") {
         NativeIO::IFCRequest request;
         request.output = ParseOutputTarget(params);
+        request.method = GetStringParam(params, "method");
         return NativeIOResultJson(NativeIO::ExportIFC(request));
     }
     if (action == "import_ifc") {
         NativeIO::IFCRequest request;
         request.absolutePath = GetStringParam(params, "file_path", GetStringParam(params, "path"));
-        return NativeIOResultJson(NativeIO::ImportIFC(request));
+        request.method = GetStringParam(params, "method");
+        return NativeIOResultJson(NativeIO::ImportIFC(request), GetLenientBoolParam(params, "detail", false));
     }
     throw std::invalid_argument("unsupported native I/O action: " + action);
 }
@@ -2794,6 +2832,7 @@ enum class ApplyOperationKind {
     UpdateParametric,
     Duplicate,
     Delete,
+    Order,
 };
 
 struct ApplyOperation {
@@ -2818,7 +2857,158 @@ struct ApplyOperation {
     std::string confirmation;
     // Create ops only: false excludes this wall from automatic joining.
     bool joinWalls = true;
+    // Create ops: target layer (name, "name:<n>", "uuid:<u>" or bare uuid);
+    // empty = the active layer when the call started. Resolved before the
+    // transaction opens (layer_not_found otherwise).
+    std::string layerRef;
+    bool layerExplicit = false;  // the op itself named the layer (not the plan default)
+    MCObjectHandle layerHandle = nullptr;
+    // Order ops: front | back | forward | backward.
+    std::string orderPosition;
 };
+
+MCObjectHandle FindLayerByReference(const std::string& reference) {
+    std::string value = TrimCopy(reference);
+    if (value.empty()) return nullptr;
+    bool byUuid = false;
+    if (value.rfind("uuid:", 0u) == 0u) {
+        value = value.substr(5);
+        byUuid = true;
+    } else if (value.rfind("name:", 0u) == 0u) {
+        value = value.substr(5);
+    }
+    for (MCObjectHandle layer : CollectLayerHandles()) {
+        if (!byUuid) {
+            TXString name;
+            gSDK->GetObjectName(layer, name);
+            if (TxToUtf8(name) == value) return layer;
+        }
+        TXString uuid;
+        if (gSDK->GetObjectUuid(layer, uuid) && TxToUtf8(uuid) == value) return layer;
+    }
+    return nullptr;
+}
+
+bool IsSheetLayer(MCObjectHandle layer) {
+    Sint16 type = kLayerDesign;
+    TVariableBlock block(type);
+    if (layer && gSDK->GetObjectVariable(layer, ovLayerType, block)) block.GetSint16(type);
+    return type == kLayerSheet;
+}
+
+std::string LayerDisplayName(MCObjectHandle layer) {
+    if (!layer) return "";
+    TXString name;
+    gSDK->GetObjectName(layer, name);
+    return TxToUtf8(name);
+}
+
+// 2D annotation types that may be placed on a sheet layer; BIM objects need a
+// design layer.
+bool AllowedOnSheetLayer(const std::string& objectType) {
+    static const char* const kTypes[] = {
+        "rect", "oval", "circle", "line", "arc", "polygon", "text", "linear_dimension", "symbol",
+    };
+    for (const char* type : kTypes) {
+        if (objectType == type) return true;
+    }
+    return false;
+}
+
+// Activates a layer for object creation. Transitions into or out of a sheet
+// layer use Vectorworks' unified view maintenance (as the UI does).
+void SwitchActiveLayer(MCObjectHandle layer) {
+    if (!layer) return;
+    MCObjectHandle current = gSDK->GetActiveLayer();
+    if (current == layer) return;
+    gSDK->SetCurrentLayerN(layer, IsSheetLayer(current) || IsSheetLayer(layer));
+}
+
+std::string CanonicalOrderPosition(std::string position) {
+    position = ToLower(TrimCopy(position));
+    for (auto& ch : position) {
+        if (ch == ' ' || ch == '-') ch = '_';
+    }
+    if (position == "front" || position == "to_front" || position == "bring_to_front") return "front";
+    if (position == "back" || position == "to_back" || position == "send_to_back") return "back";
+    if (position == "forward" || position == "bring_forward") return "forward";
+    if (position == "backward" || position == "send_backward" || position == "backwards") return "backward";
+    return "";
+}
+
+// Stacking index (0 = back-most) of an object inside its container and the
+// container's member count (terminator nodes excluded).
+void StackPosition(MCObjectHandle object, int& index, int& count) {
+    index = -1;
+    count = 0;
+    MCObjectHandle parent = object ? gSDK->ParentObject(object) : nullptr;
+    if (!parent) return;
+    for (MCObjectHandle member = gSDK->FirstMemberObj(parent);
+         member && gSDK->GetObjectTypeN(member) != kTermNode;
+         member = gSDK->NextObject(member)) {
+        if (member == object) index = count;
+        ++count;
+    }
+}
+
+MCObjectHandle LastStackMember(MCObjectHandle parent) {
+    MCObjectHandle last = nullptr;
+    for (MCObjectHandle member = gSDK->FirstMemberObj(parent);
+         member && gSDK->GetObjectTypeN(member) != kTermNode;
+         member = gSDK->NextObject(member)) {
+        last = member;
+    }
+    return last;
+}
+
+MCObjectHandle PreviousStackMember(MCObjectHandle object) {
+    MCObjectHandle parent = gSDK->ParentObject(object);
+    MCObjectHandle previous = nullptr;
+    for (MCObjectHandle member = gSDK->FirstMemberObj(parent);
+         member && gSDK->GetObjectTypeN(member) != kTermNode;
+         member = gSDK->NextObject(member)) {
+        if (member == object) return previous;
+        previous = member;
+    }
+    return nullptr;
+}
+
+MCObjectHandle NextStackMember(MCObjectHandle object) {
+    MCObjectHandle next = gSDK->NextObject(object);
+    return next && gSDK->GetObjectTypeN(next) != kTermNode ? next : nullptr;
+}
+
+// Moves `object` within its container's stacking order (first member = back).
+// Returns true when the order changed.
+bool MoveInStack(MCObjectHandle object, const std::string& position) {
+    MCObjectHandle parent = gSDK->ParentObject(object);
+    if (!parent) return false;
+    if (position == "back") {
+        MCObjectHandle first = gSDK->FirstMemberObj(parent);
+        if (!first || first == object) return false;
+        gSDK->InsertObjectBefore(object, first);
+        return true;
+    }
+    if (position == "front") {
+        MCObjectHandle last = LastStackMember(parent);
+        if (!last || last == object) return false;
+        gSDK->InsertObjectAfter(object, last);
+        return true;
+    }
+    if (position == "backward") {
+        MCObjectHandle previous = PreviousStackMember(object);
+        if (!previous) return false;
+        gSDK->InsertObjectBefore(object, previous);
+        return true;
+    }
+    if (position == "forward") {
+        MCObjectHandle next = NextStackMember(object);
+        if (!next) return false;
+        gSDK->InsertObjectAfter(object, next);
+        return true;
+    }
+    return false;
+}
 
 // ---- automatic wall joins (apply_operations) ------------------------------
 // Walls created in one apply_operations call are joined inside the same undo
@@ -2865,16 +3055,22 @@ bool NearlyParallel(const WorldPt& as, const WorldPt& ae, const WorldPt& bs, con
     return std::abs(ax * by - ay * bx) / (la * lb) < 1e-3;  // ~0.06 degrees
 }
 
+// Only pairs with at least one wall at index >= firstNew are examined (pairs
+// of older walls were examined by an earlier call), so a long plan that
+// alternates walls and openings stays linear per new wall. Walls on different
+// layers are never joined.
 std::vector<WallJoinRecord> JoinCreatedWalls(
     const std::vector<MCObjectHandle>& walls,
-    std::set<std::pair<MCObjectHandle, MCObjectHandle>>& done) {
+    std::set<std::pair<MCObjectHandle, MCObjectHandle>>& done,
+    std::size_t firstNew = 0u) {
     std::vector<WallJoinRecord> records;
-    for (std::size_t i = 0; i < walls.size(); ++i) {
-        for (std::size_t j = i + 1; j < walls.size(); ++j) {
+    for (std::size_t j = std::max<std::size_t>(firstNew, 1u); j < walls.size(); ++j) {
+        for (std::size_t i = 0; i < j; ++i) {
             MCObjectHandle a = walls[i];
             MCObjectHandle b = walls[j];
             if (!a || !b || done.count({a, b}) != 0u) continue;
             if (gSDK->GetObjectTypeN(a) != kWallNode || gSDK->GetObjectTypeN(b) != kWallNode) continue;
+            if (gSDK->SearchForAncestorType(kLayerNode, a) != gSDK->SearchForAncestorType(kLayerNode, b)) continue;
             WorldPt as, ae, bs, be;
             gSDK->GetEndPoints(a, as, ae);
             gSDK->GetEndPoints(b, bs, be);
@@ -2952,7 +3148,11 @@ struct ApplyOperationsCacheEntry {
     std::string transactionJson;
 };
 
-constexpr std::size_t kMaxApplyOperations = 250u;
+// 1.0.x: raised from 250 (finding #19). Per create op the native cost is one
+// SDK create + UUID read + receipt; commit verification resolves each UUID
+// (VW keeps a UUID map) and registers one AddAfterSwapObject, so the work is
+// linear in the op count (wall joins are incremental, see JoinCreatedWalls).
+constexpr std::size_t kMaxApplyOperations = static_cast<std::size_t>(Legacy::kMaxApplyOperationCount);
 constexpr std::size_t kMaxApplyOperationsCacheEntries = 128u;
 constexpr std::size_t kMaxApplyReferenceChars = 128u;
 std::deque<ApplyOperationsCacheEntry> gApplyOperationsCache;
@@ -3084,6 +3284,14 @@ std::string WrapApplyOperationsResult(
     }
     json += ",\"transaction\":";
     json += transactionJson;
+    // Convenience copy of transaction.sent_to_back at the top level.
+    const std::string sentKey = "\"sent_to_back\":";
+    const auto sentAt = transactionJson.rfind(sentKey);
+    if (sentAt != std::string::npos) {
+        std::size_t end = sentAt + sentKey.size();
+        while (end < transactionJson.size() && std::isdigit(static_cast<unsigned char>(transactionJson[end]))) ++end;
+        json += ",\"sent_to_back\":" + transactionJson.substr(sentAt + sentKey.size(), end - sentAt - sentKey.size());
+    }
     // Convenience copy of transaction.wall_joins at the top level.
     const std::string key = "\"wall_joins\":[";
     const auto start = transactionJson.rfind(key);
@@ -3120,6 +3328,8 @@ std::vector<ApplyOperation> ParseApplyOperations(const Params& params) {
     std::vector<ApplyOperation> operations;
     operations.reserve(static_cast<std::size_t>(operationCount));
     std::unordered_set<std::string> declaredLocalRefs;
+    // Plan-level default layer for create ops without their own `layer`.
+    const std::string defaultLayer = TrimCopy(GetStringParam(params, "layer"));
 
     for (int index = 1; index <= operationCount; ++index) {
         const std::string key = "operation_" + std::to_string(index) + "_json";
@@ -3135,6 +3345,11 @@ std::vector<ApplyOperation> ParseApplyOperations(const Params& params) {
             operation.kind = ApplyOperationKind::Create;
             operation.primitive = ParsePrimitiveSpec(operationParams, label);
             operation.joinWalls = GetLenientBoolParam(operationParams, "join_walls", true);
+            operation.layerExplicit = HasParam(operationParams, "layer");
+            operation.layerRef = TrimCopy(GetStringParam(operationParams, "layer", defaultLayer));
+            if (operation.layerRef.size() > kMaxApplyReferenceChars) {
+                throw std::invalid_argument(label + ".layer is too long");
+            }
             if (!operation.primitive.wallUuid.empty() && operation.primitive.wallUuid.front() == '$' &&
                 declaredLocalRefs.find(operation.primitive.wallUuid.substr(1)) == declaredLocalRefs.end()) {
                 throw std::invalid_argument(
@@ -3318,9 +3533,28 @@ std::vector<ApplyOperation> ParseApplyOperations(const Params& params) {
             operations.push_back(std::move(operation));
             continue;
         }
+        if (op == "order" || op == "object.order") {
+            ApplyOperation operation;
+            operation.kind = ApplyOperationKind::Order;
+            operation.target = GetStringParam(operationParams, "target");
+            if (!operation.target.empty() && operation.target.front() == '$') {
+                const std::string localRef = operation.target.substr(1);
+                if (declaredLocalRefs.find(localRef) == declaredLocalRefs.end()) {
+                    throw std::invalid_argument(label + ".target references an unknown local_ref: " + localRef);
+                }
+            } else {
+                ValidateMutationTarget(operation, label);
+            }
+            operation.orderPosition = CanonicalOrderPosition(GetStringParam(operationParams, "position"));
+            if (operation.orderPosition.empty()) {
+                throw std::invalid_argument(label + ".position must be front, back, forward or backward");
+            }
+            operations.push_back(std::move(operation));
+            continue;
+        }
         throw std::invalid_argument(
             label + ".op must be create, set_property, object.transform, object.reshape, "
-            "object.update_parametric, object.duplicate, or object.delete");
+            "object.update_parametric, object.duplicate, object.delete, or order");
     }
     return operations;
 }
@@ -3756,7 +3990,8 @@ PreparedApplyOperationTargets PrepareApplyOperationTargets(
               operation.kind == ApplyOperationKind::Reshape ||
               operation.kind == ApplyOperationKind::UpdateParametric ||
               operation.kind == ApplyOperationKind::Duplicate ||
-              operation.kind == ApplyOperationKind::Delete) &&
+              operation.kind == ApplyOperationKind::Delete ||
+              operation.kind == ApplyOperationKind::Order) &&
              !operation.target.empty() && operation.target.front() == '$')) {
             continue;
         }
@@ -3791,7 +4026,7 @@ std::string HandleApplyOperations(const Params& params) {
     if (idempotencyKey.size() > kMaxApplyReferenceChars) {
         throw std::invalid_argument("idempotency_key is too long");
     }
-    const auto operations = ParseApplyOperations(params);
+    auto operations = ParseApplyOperations(params);
     const std::uint64_t operationsFingerprint = ApplyOperationsFingerprint(params);
     if (const auto cached = FindCachedApplyOperations(
             idempotencyKey,
@@ -3807,6 +4042,55 @@ std::string HandleApplyOperations(const Params& params) {
     if (params.find("expected_document_fingerprint") != params.end())
         Documentation::ValidateTargetBinding(*gSDK, ParseDocumentationTargetBinding(params));
     PreparedApplyOperationTargets preparedTargets = PrepareApplyOperationTargets(operations);
+
+    // Per-op layers (finding #14): resolved before anything is written; a
+    // missing layer fails the whole plan with layer_not_found (never a silent
+    // fallback to the active layer).
+    MCObjectHandle originalActiveLayer = gSDK->GetActiveLayer();
+    for (std::size_t index = 0; index < operations.size(); ++index) {
+        auto& operation = operations[index];
+        if (operation.kind != ApplyOperationKind::Create || operation.layerRef.empty()) continue;
+        const bool wallHosted = operation.primitive.objectType == "door" || operation.primitive.objectType == "window" ||
+            (operation.primitive.objectType == "parametric" && operation.primitive.requireWallHost);
+        if (wallHosted && !operation.layerExplicit) {
+            // The plan-level default does not apply to wall inserts: they
+            // always live on their host wall's layer.
+            operation.layerRef.clear();
+            continue;
+        }
+        const std::string label = "operation_" + std::to_string(index + 1u);
+        MCObjectHandle layer = FindLayerByReference(operation.layerRef);
+        if (!layer) {
+            throw Protocol::BridgeError(
+                "layer_not_found", label + ".layer was not found: " + operation.layerRef, false, "not_started",
+                "{\"operation\":" + std::to_string(index + 1u) + ",\"layer\":" + JsonString(operation.layerRef) +
+                ",\"available_layers\":" + JsonStringArray(CollectLayerNames()) + "}");
+        }
+        if (IsSheetLayer(layer) && !AllowedOnSheetLayer(operation.primitive.objectType)) {
+            throw Protocol::BridgeError(
+                "invalid_request",
+                label + ".layer is a sheet layer; " + operation.primitive.objectType + " needs a design layer: " +
+                    operation.layerRef,
+                false, "not_started");
+        }
+        operation.layerHandle = layer;
+    }
+    // Restores the user's active layer however the plan ends.
+    struct ActiveLayerGuard {
+        MCObjectHandle layer;
+        ~ActiveLayerGuard() {
+            try {
+                if (layer && gSDK && gSDK->GetActiveLayer() != layer) SwitchActiveLayer(layer);
+            } catch (...) {
+            }
+        }
+    } activeLayerGuard{originalActiveLayer};
+    const bool autoOrder = GetLenientBoolParam(params, "auto_order", true);
+    std::vector<MCObjectHandle> sendToBackSpaces;
+    std::vector<MCObjectHandle> sendToBackSlabs;
+    std::size_t sentToBack = 0;
+    std::size_t sendToBackFailed = 0;
+    std::unordered_set<std::string> orderedExternalUuids;
 
     std::unordered_map<std::string, MCObjectHandle> localObjects;
     std::unordered_map<std::string, Transactions::ArtifactId> localArtifacts;
@@ -3853,7 +4137,7 @@ std::string HandleApplyOperations(const Params& params) {
 
         const auto runPendingWallJoins = [&]() {
             if (!joinWallsEnabled || joinableWalls.size() < 2u || joinableWalls.size() == joinedWallCount) return;
-            auto records = JoinCreatedWalls(joinableWalls, joinedPairs);
+            auto records = JoinCreatedWalls(joinableWalls, joinedPairs, joinedWallCount);
             joinedWallCount = joinableWalls.size();
             for (auto& record : records) wallJoins.push_back(std::move(record));
         };
@@ -3869,9 +4153,40 @@ std::string HandleApplyOperations(const Params& params) {
             if (operation.kind == ApplyOperationKind::Create) {
                 std::vector<std::string> warnings;
                 Transactions::ArtifactId artifact = 0;
+                // Objects are created on the active layer: switch to the op's
+                // layer (or back to the user's layer) only when it differs.
+                const bool wallHostedCreate = operation.primitive.objectType == "door" ||
+                    operation.primitive.objectType == "window" ||
+                    (operation.primitive.objectType == "parametric" && operation.primitive.requireWallHost);
+                MCObjectHandle wantedLayer = operation.layerHandle
+                    ? operation.layerHandle
+                    : (wallHostedCreate ? nullptr : originalActiveLayer);
+                if (wantedLayer && gSDK->GetActiveLayer() != wantedLayer) {
+                    SwitchActiveLayer(wantedLayer);
+                    if (gSDK->GetActiveLayer() != wantedLayer) {
+                        throw std::runtime_error(
+                            "Vectorworks did not switch to the requested layer: " + LayerDisplayName(wantedLayer));
+                    }
+                }
                 MCObjectHandle object = CreatePrimitiveFromSpec(
                     operation.primitive, transaction, &artifact, &warnings, &localObjects);
                 createdHandles.insert(object);
+                MCObjectHandle objectLayer = gSDK->SearchForAncestorType(kLayerNode, object);
+                if (operation.layerHandle && objectLayer != operation.layerHandle) {
+                    // Doors/windows live in their host wall: its layer wins.
+                    throw std::invalid_argument(
+                        "operation_" + std::to_string(index + 1u) + " was placed on layer '" +
+                        LayerDisplayName(objectLayer) + "' instead of the requested '" +
+                        LayerDisplayName(operation.layerHandle) +
+                        "' (a door/window/hosted object is always on its host wall's layer)");
+                }
+                if (autoOrder && gSDK->ParentObject(object) == objectLayer && objectLayer) {
+                    if (gSDK->GetObjectTypeN(object) == kSlabNode) {
+                        sendToBackSlabs.push_back(object);
+                    } else if (IsSpaceObject(object)) {
+                        sendToBackSpaces.push_back(object);
+                    }
+                }
                 if (isWallCreate && operation.joinWalls && gSDK->GetObjectTypeN(object) == kWallNode) {
                     joinableWalls.push_back(object);
                 }
@@ -3891,7 +4206,8 @@ std::string HandleApplyOperations(const Params& params) {
                 });
                 std::string result = "{\"index\":" + std::to_string(index + 1u) +
                     ",\"op\":\"create\",\"handle\":" + JsonString(HandleId(object)) +
-                    ",\"uuid\":" + JsonString(transaction.Uuid(artifact));
+                    ",\"uuid\":" + JsonString(transaction.Uuid(artifact)) +
+                    ",\"layer\":" + JsonString(LayerDisplayName(objectLayer));
                 if (MCObjectHandle hostWall = WallInserts::HostWall(object)) {
                     result += ",\"parent_uuid\":" + JsonString(ObjectUuidString(hostWall)) + ",\"host\":\"wall\"";
                 }
@@ -3908,6 +4224,60 @@ std::string HandleApplyOperations(const Params& params) {
             if (!object) {
                 object = ResolveApplyOperationTarget(operation.target, localObjects);
             }
+            if (operation.kind == ApplyOperationKind::Order) {
+                MCObjectHandle parent = gSDK->ParentObject(object);
+                if (!parent || gSDK->GetObjectTypeN(parent) == kWallNode) {
+                    throw std::invalid_argument(
+                        "operation_" + std::to_string(index + 1u) +
+                        " order: the target has no stacking order of its own (wall inserts follow their wall)");
+                }
+                int indexBefore = -1, count = 0;
+                StackPosition(object, indexBefore, count);
+                const bool external = createdHandles.find(object) == createdHandles.end();
+                sendToBackSpaces.erase(std::remove(sendToBackSpaces.begin(), sendToBackSpaces.end(), object),
+                                       sendToBackSpaces.end());
+                sendToBackSlabs.erase(std::remove(sendToBackSlabs.begin(), sendToBackSlabs.end(), object),
+                                      sendToBackSlabs.end());
+                if (external) {
+                    const std::string orderedUuid = ObjectUuidString(object);
+                    if (!orderedUuid.empty()) orderedExternalUuids.insert(orderedUuid);
+                }
+                // Existing objects: one move record pair so Undo restores the
+                // stacking position (objects created in this plan are removed
+                // by Undo anyway).
+                if (external) gSDK->AddBeforeMoveObject(object);
+                const bool changed = MoveInStack(object, operation.orderPosition);
+                if (external) gSDK->AddAfterMoveObject(object);
+                int indexAfter = -1;
+                StackPosition(object, indexAfter, count);
+                const bool expectedMove =
+                    (operation.orderPosition == "back" && indexBefore > 0) ||
+                    (operation.orderPosition == "front" && indexBefore >= 0 && indexBefore < count - 1) ||
+                    (operation.orderPosition == "backward" && indexBefore > 0) ||
+                    (operation.orderPosition == "forward" && indexBefore >= 0 && indexBefore < count - 1);
+                const bool positionOk =
+                    (operation.orderPosition == "back" && indexAfter == 0) ||
+                    (operation.orderPosition == "front" && indexAfter == count - 1) ||
+                    (operation.orderPosition == "backward" && indexAfter == (expectedMove ? indexBefore - 1 : indexBefore)) ||
+                    (operation.orderPosition == "forward" && indexAfter == (expectedMove ? indexBefore + 1 : indexBefore));
+                if (!positionOk || changed != expectedMove) {
+                    throw std::runtime_error(
+                        "order " + operation.orderPosition + " readback mismatch (stack index " +
+                        std::to_string(indexBefore) + " -> " + std::to_string(indexAfter) + " of " +
+                        std::to_string(count) + ")");
+                }
+                std::string result = "{\"index\":" + std::to_string(index + 1u) +
+                    ",\"op\":\"order\",\"target\":" + JsonString(operation.target) +
+                    ",\"uuid\":" + JsonString(ObjectUuidString(object)) +
+                    ",\"position\":" + JsonString(operation.orderPosition) +
+                    ",\"changed\":" + (changed ? "true" : "false") +
+                    ",\"stack_index_before\":" + std::to_string(indexBefore) +
+                    ",\"stack_index_after\":" + std::to_string(indexAfter) +
+                    ",\"stack_count\":" + std::to_string(count) +
+                    ",\"layer\":" + JsonString(LayerDisplayName(gSDK->SearchForAncestorType(kLayerNode, object))) + "}";
+                operationResults.push_back(std::move(result));
+                continue;
+            }
             std::string externalUuid;
             if (operation.kind == ApplyOperationKind::Delete &&
                 createdHandles.find(object) == createdHandles.end()) {
@@ -3918,7 +4288,8 @@ std::string HandleApplyOperations(const Params& params) {
                     throw std::runtime_error(
                         "external deletion target does not expose a stable Vectorworks UUID");
                 }
-                if (externalMutationIds.find(externalUuid) != externalMutationIds.end()) {
+                if (externalMutationIds.find(externalUuid) != externalMutationIds.end() ||
+                    orderedExternalUuids.find(externalUuid) != orderedExternalUuids.end()) {
                     throw std::invalid_argument(
                         "operation_" + std::to_string(index + 1u) +
                         " deletes an object that an earlier operation in the same transaction changed "
@@ -3978,6 +4349,8 @@ std::string HandleApplyOperations(const Params& params) {
                         if (createdHandles.erase(object) != 0u) {
                             createdHandles.insert(rotatedObject);
                         }
+                        std::replace(sendToBackSpaces.begin(), sendToBackSpaces.end(), object, rotatedObject);
+                        std::replace(sendToBackSlabs.begin(), sendToBackSlabs.end(), object, rotatedObject);
                         if (!externalUuid.empty()) {
                             externalFinalHandles[externalUuid] = rotatedObject;
                         }
@@ -4162,6 +4535,26 @@ std::string HandleApplyOperations(const Params& params) {
         }
 
         runPendingWallJoins();
+        // Finding #1: created spaces (and slabs) go to the back of their
+        // layer so walls, doors and windows draw on top. Reverse creation
+        // order keeps their relative order; slabs end up behind spaces.
+        const auto sendToBack = [&](const std::vector<MCObjectHandle>& objects) {
+            for (auto it = objects.rbegin(); it != objects.rend(); ++it) {
+                MCObjectHandle object = *it;
+                if (!object || createdHandles.find(object) == createdHandles.end()) continue;
+                MoveInStack(object, "back");
+                int position = -1, count = 0;
+                StackPosition(object, position, count);
+                // Cosmetic: never fail the plan over it, report it instead.
+                if (position != 0) {
+                    ++sendToBackFailed;
+                    continue;
+                }
+                ++sentToBack;
+            }
+        };
+        sendToBack(sendToBackSpaces);
+        sendToBack(sendToBackSlabs);
         for (MCObjectHandle object : dirtyHandles) {
             gSDK->ResetObject(object);
         }
@@ -4217,6 +4610,10 @@ std::string HandleApplyOperations(const Params& params) {
         transactionJson += "}";
     }
     transactionJson += "],\"wall_joins\":" + WallJoinsJson(wallJoins);
+    if (sendToBackFailed != 0u) {
+        transactionJson += ",\"send_to_back_failed\":" + std::to_string(sendToBackFailed);
+    }
+    transactionJson += ",\"sent_to_back\":" + std::to_string(sentToBack);
     transactionJson += ",\"undo_committed\":";
     transactionJson += transactionReceipt.endUndoEventSucceeded ? "true" : "false";
     transactionJson += "}";

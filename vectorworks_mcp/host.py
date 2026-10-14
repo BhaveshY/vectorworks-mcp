@@ -104,8 +104,12 @@ def script_result(reply: Any) -> Any:
                     details = dict(details or {}, traceback=message[-1500:])
                 message = line[line.index(prefix + ":"):]
                 break
+        next_step = None
+        if code == "not_found" and "did you mean" in message:
+            next_step = ("Nothing was changed. Use one of the names suggested in error.message (or list them as the "
+                         "message says) and send the call again.")
         raise VWError(code, message[:1500], commit_state="rolled_back" if reply.get("rolled_back", True) else "unknown",
-                      details=details)
+                      details=details, next_step=next_step)
     return reply.get("result")
 
 

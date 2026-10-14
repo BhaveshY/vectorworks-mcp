@@ -79,7 +79,8 @@ class Doc:
         self.selection: set[str] = set()
         self.saved_views = ["Plan"]
         self.stories: list[dict] = []
-        self.records: dict[str, list[str]] = {"Costs": ["Cost", "Supplier"]}
+        self.records: dict[str, list[str]] = {"Costs": ["Cost", "Supplier"],
+                                              "Space": ["NumberLabelText", "11_Number", "Number", "11_Room ID"]}
         self.worksheets = {"Room Schedule": {"rows": 5, "columns": 3, "cells": {(1, 1): "Room", (1, 2): "Area"}}}
         self.symbols = ["Chair", "Table"]
         self.resources: dict[int, list[str]] = {66: ["Hatch A", "Hatch B"], 96: ["Dash"]}
@@ -198,6 +199,9 @@ class Model:
         self.modal_dialog: Optional[dict] = None   # {title, class, kind: home|update_available|other}
         self.dismissed: list[dict] = []
         self.auto_dismiss = os.environ.get("VW_MCP_AUTO_DISMISS_HOME", "1").strip().lower() not in {"0", "false", "no"}
+        # bridge 1.0.x feature flags (mock_set {"features": [...]}): op_layer, order_op, auto_send_to_back, ...
+        self.features: set = set()
+        self.max_operations = 250
 
     def dismiss_dialog(self) -> Optional[dict]:
         """Close the Home screen / update dialog (never other dialogs). Returns the dismissal record."""
@@ -487,6 +491,88 @@ class FakeVS:
         items = list(self._d.objects[g].get("members") or []) if g in self._d.objects else []
         self._iter = items
         return items[0] if items else None
+
+    # ----- geometry / stacking / walls (object_detail, _ops) ------------------------------------
+    def _layer_items(self, h):
+        o = self._d.objects[h]
+        return [u for u in self._d.order if u in self._d.objects and self._d.objects[u]["layer"] == o["layer"]
+                and not self._d.objects[u].get("parent_uuid") and not self._d.objects[u].get("in_group")]
+
+    def PrevObj(self, h):
+        if h in self._d.objects and not self._d.objects[h].get("parent_uuid"):
+            items = self._layer_items(h)
+            i = items.index(h)
+            return items[i - 1] if i > 0 else None
+        return None
+
+    def HMoveForward(self, h, to_front):
+        self._move(h, +1, bool(to_front))
+
+    def HMoveBackward(self, h, to_back):
+        self._move(h, -1, bool(to_back))
+
+    def _move(self, h, direction, to_end):
+        items = self._layer_items(h)
+        order = self._d.order
+        if to_end:
+            order.remove(h)
+            anchor = items[-1] if direction > 0 else items[0]
+            if anchor == h:
+                order.insert(len(order) if direction > 0 else 0, h)
+            else:
+                pos = order.index(anchor)
+                order.insert(pos + 1 if direction > 0 else pos, h)
+        else:
+            i = items.index(h)
+            j = i + direction
+            if 0 <= j < len(items):
+                a, b = order.index(h), order.index(items[j])
+                order[a], order[b] = order[b], order[a]
+        self._iter = self._layer_items(h)
+
+    def GetSegPt1(self, h):
+        o = self._d.objects[h]
+        return (o.get("start_x", o.get("x1", 0.0)), o.get("start_y", o.get("y1", 0.0)))
+
+    def GetSegPt2(self, h):
+        o = self._d.objects[h]
+        return (o.get("end_x", o.get("x2", 0.0)), o.get("end_y", o.get("y2", 0.0)))
+
+    def GetWallThickness(self, h):
+        return True, float(self._d.objects[h].get("thickness", 200.0))
+
+    def SetWallThickness(self, h, value):
+        self._d.objects[h]["thickness"] = float(value)
+        return True
+
+    def GetWallHeight(self, h):
+        height = float(self._d.objects[h].get("height", 3000.0))
+        return height, 0.0, height, 0.0
+
+    def SetWallOverallHeights(self, h, bb, bs, bl, boff, tb, ts, tl, toff):
+        self._d.objects[h]["height"] = float(toff)
+        return True
+
+    def GetWallStyle(self, h):
+        return self._d.objects[h].get("style_name", "")
+
+    def FIn3D(self, h):
+        items = [u for u, o in self._d.objects.items() if o.get("parent_uuid") == h]
+        self._iter = items
+        return items[0] if items else None
+
+    def GetParent(self, h):
+        o = self._d.objects.get(h) or {}
+        if o.get("parent_uuid"):
+            return o["parent_uuid"]
+        return self.GetLayerByName(o.get("layer", ""))
+
+    def GetSymLoc(self, h):
+        o = self._d.objects[h]
+        return (o.get("x", o.get("x1", 0.0)), o.get("y", o.get("y1", 0.0)))
+
+    def SetText(self, h, text):
+        self._d.objects[h]["text"] = text
 
     def ClassNum(self):
         return len(self._d.classes)
@@ -899,6 +985,9 @@ class Handler:
                     m.ui_state = "modal" if m.modal_dialog else "idle"
                 if "auto_dismiss" in params:
                     m.auto_dismiss = bool(params["auto_dismiss"])
+                if "features" in params:
+                    m.features = set(params["features"] or [])
+                    m.max_operations = 2000 if m.features else 250
                 if "drop_reply_once" in params:
                     m.drop_reply_once = params["drop_reply_once"]
                 for key in ("ui_state", "latency"):
@@ -937,7 +1026,7 @@ class Handler:
                 "native_bridge": True, "cad_api_safe": True, "transport_only": False, "native_phase": 4,
                 "main_context_pump_ready": True, "main_context_idle_ms": 5,
                 "capability_fingerprint": "mockfp", "object_read_features": ["text_content", "paged_object_reads", "bound_apply_operations"]
-                + ([] if m.legacy else ["wall_inserts", "object_type_plugin_names", "uuid_lookup"]),
+                + ([] if m.legacy else ["wall_inserts", "object_type_plugin_names", "uuid_lookup"] + sorted(m.features)),
                 "create_object_types": ["arc", "box", "circle", "line", "oval", "polygon", "polyline", "rect", "rectangle", "wall",
                                         "door", "window", "text", "dimension", "linear_dimension", "slab", "roof", "space",
                                         "parametric", "symbol"],
@@ -954,6 +1043,8 @@ class Handler:
                      "script_engine": "poisoned" if getattr(m, "script_poisoned", False) else "ok",
                      "modal_dialog": dict(m.modal_dialog) if m.modal_dialog else None,
                      "auto_dismiss_dialogs": m.auto_dismiss, "dismissed_dialogs": list(m.dismissed)})
+        if m.features:
+            base["max_operations"] = m.max_operations
         return base
 
     def actions(self) -> set:
@@ -966,6 +1057,8 @@ class Handler:
             caps["actions"] = [{"name": a, "mutates": a not in {"ping", "capabilities", "get_document_info", "query_objects"},
                                 "long_running": a in ASYNC_ACTIONS, "supports_async": a in ASYNC_ACTIONS}
                                for a in sorted(self.actions())]
+            caps["limits"] = {"max_operations": self.m.max_operations}
+            caps["object_read_features"] = sorted(self.m.features)
         return caps
 
     def start_job(self, action: str, params: dict) -> dict:
@@ -1290,9 +1383,15 @@ class Handler:
         params = {"Door": [{"id": "DoorWidth", "display_name": "Leaf Width (Read Only)", "field_style": 7, "value": "826"},
                            {"id": "Width", "display_name": "Width", "field_style": 7, "value": "915"},
                            {"id": "OpenAngle", "display_name": "Open Angle", "field_style": 3, "value": "90"},
-                           {"id": "Config", "field_style": 8, "value": "Swing"}],
+                           {"id": "Config", "field_style": 8, "value": "Swing"},
+                           {"id": "SwingDirection", "display_name": "Swing Direction", "field_style": 8, "value": "In"},
+                           {"id": "SwingLW", "display_name": "__NNA_DO_NOT_CHANGE", "field_style": 1, "value": "2"}],
                   "Window": [{"id": "SashOp", "field_style": 8, "value": "Fixed"},
-                             {"id": "Width", "display_name": "Width", "field_style": 7, "value": "900"}],
+                             {"id": "Width", "display_name": "Width", "field_style": 7, "value": "900"},
+                             {"id": "Elevation", "display_name": "Elevation", "field_style": 7, "value": "2100"},
+                             {"id": "ElevationSetAt", "display_name": "Elevation Set At", "field_style": 8,
+                              "value": "Head of Window"},
+                             {"id": "SillHeight", "display_name": "Sill Height", "field_style": 7, "value": "152"}],
                   "Space": [{"id": "Name", "field_style": 4, "value": ""}],
                   "Stair": [{"id": "TotalRise", "display_name": "Total Rise", "field_style": 7, "value": "3000"},
                             {"id": "NumRisers", "display_name": "Number of Risers", "field_style": 1, "value": "17"},
@@ -1418,6 +1517,17 @@ class Handler:
         ops = [json.loads(p[f"operation_{i}_json"]) for i in range(1, count + 1)]
         if key in m.transactions:
             return dict(m.transactions[key], replayed=True)
+        if count > m.max_operations:
+            raise BridgeError(f"operation_count must be 1..{m.max_operations}", "invalid_request", False, "not_started")
+        layer_names = {l["name"] for l in d.layers}
+        for i, op in enumerate(ops, 1):
+            if op.get("op") == "create" and op.get("layer"):
+                if "op_layer" not in m.features:
+                    raise BridgeError(f"operations[{i}] unsupported key: layer", "invalid_request", False, "not_started")
+                if op["layer"] not in layer_names:
+                    raise BridgeError("layer not found: " + str(op["layer"]), "layer_not_found", False, "not_started",
+                                      {"operation": i, "layer": op["layer"], "available_layers": sorted(layer_names)})
+        sent_back = 0
         snapshot = copy.deepcopy((d.objects, d.order))
         local: dict[str, str] = {}
         receipts = []
@@ -1453,6 +1563,9 @@ class Handler:
                         params["wall_uuid"] = host["uuid"]
                         params["parent_uuid"] = host["uuid"]
                         params["host"] = "wall"
+                    if otype == "symbol" and params.get("definition_name") not in d.symbols:
+                        raise BridgeError("unique symbol definition was not found: " + str(params.get("definition_name")),
+                                          "sdk_operation_failed", False, "rolled_back")
                     if otype in {"door", "window"}:
                         if params.get("descriptor_fingerprint") != "fp-" + otype:
                             raise BridgeError("descriptor_fingerprint mismatch")
@@ -1462,11 +1575,19 @@ class Handler:
                         params = {k: v for k, v in params.items() if not k.startswith("parameter_")}
                         if values:
                             params["parameters"] = values
+                    op_layer = params.pop("layer", None)
                     if otype == "wall":
                         params.pop("join_walls", None)
                         if op.get("join_walls", True) and plan_join:
                             new_walls.append(None)  # placeholder, filled below
                     obj = d.add(otype, **params)
+                    if otype == "space":
+                        obj["plugin_name"] = "Space"
+                        label = obj.get("name") or "1"
+                        obj["records"]["Space"] = {"NumberLabelText": label, "11_Number": label, "Number": label,
+                                                   "11_Room ID": params.get("room_id", "")}
+                    if op_layer:
+                        obj["layer"] = op_layer
                     if otype == "wall" and new_walls and new_walls[-1] is None:
                         new_walls[-1] = obj
                     elif otype == "wall":
@@ -1475,6 +1596,8 @@ class Handler:
                         local[op["local_ref"]] = obj["uuid"]
                     receipt = {"index": i, "op": "create", "local_ref": op.get("local_ref"), "uuid": obj["uuid"],
                                "type": otype, "verified": True}
+                    if m.features:
+                        receipt["layer"] = obj["layer"]
                     if params.get("parent_uuid"):
                         receipt["parent_uuid"] = params["parent_uuid"]
                     receipts.append(receipt)
@@ -1524,6 +1647,16 @@ class Handler:
                     if inserts:
                         receipt["cascaded_inserts"] = inserts
                     receipts.append(receipt)
+                elif kind in {"order", "object.order"} and "order_op" in m.features:
+                    obj = resolve(op["target"])
+                    if obj.get("parent_uuid"):
+                        raise BridgeError("wall inserts cannot be ordered", "invalid_request", False, "rolled_back")
+                    fvs = FakeVS(m)
+                    pos = op.get("position")
+                    mover = fvs.HMoveForward if pos in {"front", "forward"} else fvs.HMoveBackward
+                    mover(obj["uuid"], pos in {"front", "back"})
+                    receipts.append({"index": i, "op": "order", "uuid": obj["uuid"], "position": pos, "changed": True,
+                                     "layer": obj["layer"]})
                 elif kind == "object.update_parametric":
                     obj = resolve(op["target"])
                     obj.setdefault("parameters", {})
@@ -1535,12 +1668,20 @@ class Handler:
                 else:
                     raise BridgeError(f"operations[{i}].op is unsupported: {kind}")
             wall_joins = _join_walls([w for w in new_walls if w], d, no_join) if plan_join else []
+            if "auto_send_to_back" in m.features and p.get("auto_order", True) is not False:
+                fvs = FakeVS(m)
+                for r in reversed(receipts):
+                    if r.get("op") == "create" and r.get("type") in {"space", "slab"}:
+                        fvs.HMoveBackward(r["uuid"], True)
+                        sent_back += 1
         except Exception:
             d.objects, d.order = snapshot
             raise
         d.touch()
         result = {"committed": True, "verified": True, "operation_count": count, "operations": receipts,
                   "wall_joins": wall_joins, "timing": {"handler_ms": 1.0}}
+        if sent_back:
+            result["sent_to_back"] = sent_back
         result["transaction"] = {"committed": True, "operation_count": count, "operations": receipts,
                                  "wall_joins": wall_joins}
         if key:

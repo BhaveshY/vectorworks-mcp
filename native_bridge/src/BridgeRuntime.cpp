@@ -431,6 +431,7 @@ std::string PingJson() {
     json += ",\"auto_dismiss_dialogs\":";
     json += DialogWatch::AutoDismissEnabled() ? "true" : "false";
     json += ",\"dismissed_dialogs\":" + DialogWatch::RecentDismissedJson();
+    json += ",\"max_operations\":" + std::to_string(Legacy::kMaxApplyOperationCount);
     json += ",\"script_enabled\":";
     json += Scripting::ScriptingAllowed() ? "true" : "false";
     json += ",\"script_engine\":" + JsonString(Scripting::ScriptEngineState());
@@ -454,7 +455,8 @@ std::string CapabilitiesJson() {
             ",\"max_timeout_ms\":" + std::to_string(RequestScheduler::kMaxTimeoutMs) +
             ",\"default_busy_wait_ms\":3000,\"max_jobs\":" + std::to_string(RequestScheduler::kMaxJobs) +
             ",\"job_retention_ms\":" + std::to_string(RequestScheduler::kJobRetentionMs) +
-            ",\"max_clients\":16,\"client_idle_seconds\":120}";
+            ",\"max_clients\":16,\"client_idle_seconds\":120,\"max_operations\":" +
+            std::to_string(Legacy::kMaxApplyOperationCount) + "}";
         json += "}";
     }
     return json;

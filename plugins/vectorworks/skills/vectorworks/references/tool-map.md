@@ -26,8 +26,8 @@ name, path or fingerprint). Write tools accept an optional `idempotency_key`
 ## vw_read (read-only)
 
 Arguments: `what` (required), `type`, `layer`, `class`, `name`, `criteria`,
-`query`, `target`, `resource_type`, `fields`, `range`, `limit`, `cursor`,
-`plan`, `document`.
+`query` / `search` (name contains), `target` (`sheet` / `viewport` aliases), `resource_type`, `fields`, `range`,
+`limit`, `cursor`, `detail`, `plan`, `document`.
 
 | `what` | Returns / main arguments |
 |---|---|
@@ -36,16 +36,16 @@ Arguments: `what` (required), `type`, `layer`, `class`, `name`, `criteria`,
 | `layers` | design + sheet layers with visibility, scale, elevation, story, object count |
 | `classes` | classes with visibility (`query` filters names) |
 | `summary` | whole-drawing counts by type / layer / class (`type`, `layer`) - use for "how many" |
-| `query` | objects; filter `type`, `layer`, `class`, `name`, `criteria`; `fields`; paged by `limit` + `cursor` |
-| `object` | one object in full (`target` = uuid or name) |
+| `query` | objects; filter `type`, `layer`, `class`, `criteria` (VW criteria); `search` / `query` / `name` = name, text or room label contains (case-insensitive); spaces carry `room_name` (displayed label) next to the object `name`; `fields`; paged by `limit` + `cursor` |
+| `object` | one object, compact (<= 1.5 KB): layer, class, attributes, bounds + per-type geometry (wall start/end/length/thickness/height/style/inserts; line endpoints; rect/oval origin/size; polygon points (first 50); text content/font/size; door/window width/height/sill/wall/at; space room_name/room_id/area/height; extrude height/base; viewport scale/view); `detail=true` adds every record (parametric parameters) |
 | `selection` | selected objects (`fields`) |
 | `view` | current view, zoom, render mode, active layer |
 | `saved_views` | saved views |
-| `sheets` / `viewports` / `annotations` | sheet layers / viewports of a sheet (`target` = sheet name or uuid: scale, view, render_mode, layers, hidden_classes, centre, size, crop) / annotations of a viewport (`target` = viewport name or uuid) |
-| `symbols` / `resources` | symbol definitions / resources (`type` or `resource_type`: hatch, line_type, text_style, gradient, image_fill, tile, wall_style, slab_style, roof_style, material, symbols, ...; each item has `source` document or library) |
+| `sheets` / `viewports` / `annotations` | sheet layers / viewports of a sheet (`target` or `sheet` = sheet name or uuid: scale, view, render_mode, layers, hidden_classes, centre, size, crop) / annotations of a viewport (`target` = viewport name or uuid) |
+| `symbols` / `resources` | symbol definitions / resources (`type` or `resource_type`: hatch, line_type, text_style, gradient, image_fill, tile, wall_style, slab_style, roof_style, material, symbols, ...; each item has `source` document or library); `search` filters names (without `type`: across all kinds, items carry `type`) |
 | `worksheets` / `worksheet` | worksheet list / cells of one worksheet (`target`, `range` like `"A1:D20"`) |
 | `records` | record formats and fields |
-| `parametric_schema` | parameter ids, types and defaults of a plug-in object (`target` = "Door", "Window", "Space", "Stair", ...) |
+| `parametric_schema` | compact: ~30 most useful parameters `{id, name, type, value}` + `friendly_names` (`target` = "Door", "Window", "Space", "Stair", ... or a placed object's uuid); `search` filters ids/names (friendly names too: "sill" finds Elevation); `detail=true` = every parameter |
 | `capabilities` | what the connected bridge supports |
 | `plan_quality` | plan checks (overlaps, gaps, unhosted openings); optional `plan` |
 
@@ -58,13 +58,23 @@ back, left, right, bottom, iso, right_iso, left_iso, right_rear_iso,
 left_rear_iso), `render_mode` (wireframe, opengl, shaded, hidden_line,
 dashed_hidden_line, final_shaded, sketch, fast_renderworks, final_renderworks),
 `format` (png/jpg), `margin_pct`, `document`. Returns an inline image (long
-edge <= 1568 px) plus a link to the full-resolution file.
+edge <= 1568 px) plus a link to the full-resolution file. `drawing` / `layer` /
+`objects` default to Top/Plan; `restored:false` + `restore_mismatch` = the
+user's view could not be fully restored (tell the user).
 
 ## vw_create (write, one undo step)
 
-Arguments: `objects` and/or `floor_plan`, `units`, `dry_run`, `document`,
+Arguments: `objects` and/or `floor_plan`, `layer` (design layer for every object), `create_layer`
+(make a missing layer instead of failing), `units`, `join_walls`, `preview`, `dry_run`, `document`,
 `idempotency_key`. Each object: `type` + optional `id` (referenced later in
-the same call as `"$id"`), `name`, `class`.
+the same call as `"$id"`), `name`, `class`, `layer`.
+
+Receipt: `count`, `ids` + `created` (<= 20 objects) or `uuids` (in list order) + `named` (your id -> index) +
+`types`; `layer` / `layers`; `undo_steps` (plans above the bridge's per-transaction cap run as consecutive
+transactions; a failure deletes what the earlier ones created). Spaces (and slabs) are sent behind walls.
+`preview=true`, and automatically for >= 10 objects or 3D objects, adds an image of the new objects: look at it.
+Unknown layer -> `not_found` with close names (nothing created); unknown symbol / hatch / line type / text style
+-> `not_found` with up to 5 "did you mean" names.
 
 | `type` | Fields |
 |---|---|
@@ -75,7 +85,7 @@ the same call as `"$id"`), `name`, `class`.
 | `wall` | `start`, `end`, `thickness` (200), `height` (3000), `style` |
 | `slab` | `points`, `thickness` (200), `elevation`, `style` |
 | `roof` | `points`, `slope` (30), `thickness`, `overhang` (500), `elevation` |
-| `space` | `points`, `name`, `room_id`, `height` |
+| `space` | `points`, `name` (the displayed room label), `room_id`, `height` |
 | `text` | `at`, `text`, `size`, `rotation` |
 | `dimension` | `start`, `end`, `offset` (300) |
 | `symbol` | `symbol` (definition name), `at`, `rotation` |
@@ -96,13 +106,13 @@ Extrudes and columns alone are one undo step.
 
 ## vw_edit (write, destructive, one undo step)
 
-Arguments: `changes` (required), `units`, `dry_run`, `document`,
+Arguments: `changes` (required), `units`, `preview` (image of the changed objects), `dry_run`, `document`,
 `idempotency_key`. Each change: `op` + `target` or `targets` (uuid,
 `"name:..."`, `"$id"`, `"selection"`).
 
 | `op` | Fields |
 |---|---|
-| `set` | `properties`: name, class, fill_color, pen_color, fill_pattern, line_weight, opacity; `fill` none / solid / hatch, gradient, image or tile name (or `{"hatch": name}`); `line_style` line type name / "solid" / index; `font`; `text_size` (pt); `text_style` bold, italic, underline or a text style name; `align` left / center / right / justify; `valign`; `arrows` start / end / both / none; `start_marker` / `end_marker` arrow, open_arrow, dot, circle, slash, cross, none or `{style, size}` (page mm). Library resources are imported on first use; every value is read back. |
+| `set` | values flat (`{"op":"set","target":..,"width":1000}`) or in `properties`. Type-specific keys are routed by the target: door/window `width`, `height`, `sill` (window), `open_angle`, `swing`, `hinge`, `configuration` (-> plug-in parameters); wall `thickness`, `height`, `style`; text `text`; Space `name` = displayed room label (+ object name), `room_id`. Anything else: name, class, fill_color, pen_color, fill_pattern, line_weight, opacity; `fill` none / solid / hatch, gradient, image or tile name (or `{"hatch": name}`); `line_style` line type name / "solid" / index; `font`; `text_size` (pt); `text_style` bold, italic, underline or a text style name; `align` left / center / right / justify; `valign`; `arrows` start / end / both / none; `start_marker` / `end_marker` arrow, open_arrow, dot, circle, slash, cross, none or `{style, size}` (page mm). Library resources are imported on first use; every value is read back. |
 | `move` | `by` `[dx, dy]` |
 | `rotate` | `angle` (degrees), `center` |
 | `scale` | `factor` |
@@ -110,7 +120,8 @@ Arguments: `changes` (required), `units`, `dry_run`, `document`,
 | `reshape` | walls / lines: `start`, `end` |
 | `duplicate` | `by`, `count` (1-100) |
 | `delete` | target only |
-| `parametric` | `plugin`, `parameters` |
+| `parametric` | `parameters` (`plugin` optional: taken from the target); friendly names (`width`, `sill_height`, `open_angle`, `swing`, ...) map to the real ids; unknown ids -> "did you mean" |
+| `order` | `position` front / back / forward / backward (stacking within the layer; also `op: "send_to_back"` / `"bring_to_front"`) |
 | `class` / `layer` | `class` / `layer` |
 | `group` / `ungroup` | - |
 | `record` | `record`, `fields` |
@@ -122,7 +133,7 @@ Arguments: `changes` (required), `units`, `dry_run`, `document`,
 (`params.object_type` + 0.7 fields, e.g. wall `start_x, start_y, end_x, end_y`),
 `set_properties` (`{"edits": [{"ref", "properties"}]}`), `transform` (`target,
 dx, dy, rotation_deg, scale_x, scale_y, pivot_x, pivot_y`), `reshape`,
-`update_parametric`, `duplicate`, `delete`; sheet / viewport / annotation
+`update_parametric`, `duplicate`, `delete`, `order` (`target, position`); sheet / viewport / annotation
 lifecycle operations when the bridge supports them. `coordinate_units`,
 `idempotency_key`, `document`. Full grammar: MCP resource `vw://guide`.
 

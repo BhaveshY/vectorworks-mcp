@@ -48,6 +48,7 @@ def files_to_check(extra: list[str]) -> list[Path]:
     out = sorted((REPO / "plugins").rglob("*.md"))
     out += sorted(p for p in REPO.glob("*.md"))
     out += sorted(p for p in (REPO / "docs").glob("*.md") if p.name not in {"V1_CONTRACT.md", "PARITY.md"})
+    out.append(REPO / "vectorworks_mcp" / "guide.md")  # served as vw://guide
     out += [Path(e) for e in extra]
     return [p for p in out if p.is_file()]
 
@@ -129,6 +130,28 @@ def call_args(text: str, start: int) -> tuple[list[str], int] | None:
     return names, i
 
 
+def enum_problems(schema: dict, tool: str, body: str, where: str) -> list[str]:
+    """Literal values of enum arguments (what="query", kind="viewport") and the "op" of vw_edit changes / the
+    "type" of vw_create objects must be values the schema lists."""
+    out = []
+    props = schema.get("properties") or {}
+    for arg, spec in props.items():
+        enum = spec.get("enum") if isinstance(spec, dict) else None
+        if not enum:
+            continue
+        for value in re.findall(r"(?<![A-Za-z0-9_])%s\s*=\s*[\"']([^\"']+)[\"']" % re.escape(arg), body):
+            if value not in enum:
+                out.append("%s: %s %s=%r is not one of %s" % (where, tool, arg, value, enum))
+    nested = {"vw_edit": ("changes", "op"), "vw_create": ("objects", "type")}.get(tool)
+    if nested and nested[0] in props:
+        item = ((props[nested[0]].get("items") or {}).get("properties") or {}).get(nested[1]) or {}
+        enum = item.get("enum") or []
+        for value in re.findall(r'\\?"%s\\?"\s*:\s*\\?"([A-Za-z_]+)\\?"' % nested[1], body):
+            if enum and value not in enum:
+                out.append("%s: %s %s.%s=%r is not one of %s" % (where, tool, nested[0], nested[1], value, enum))
+    return out
+
+
 def fetch_live(launcher: str | None) -> list[dict]:
     if launcher:
         cmd = [os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "cmd.exe"), "/d", "/c", launcher]
@@ -201,10 +224,11 @@ def main() -> int:
                 if parsed is None:
                     continue
                 props = set((schemas[name].get("properties") or {}).keys())
+                line = text.count("\n", 0, m.start()) + 1
                 for arg in parsed[0]:
                     if arg not in props:
-                        line = text.count("\n", 0, m.start()) + 1
                         problems.append("%s:%d: %s has no argument %r (schema: %s)" % (rel, line, name, arg, ", ".join(sorted(props))))
+                problems += enum_problems(schemas[name], name, text[m.end():parsed[1]], "%s:%d" % (rel, line))
         checked += 1
 
     for p in problems:

@@ -39,6 +39,7 @@ import struct
 import sys
 import tempfile
 import time
+import zlib
 from typing import Any, Optional
 
 STATE_DIR = os.path.join(os.path.expanduser("~"), ".vectorworks-mcp")
@@ -143,6 +144,102 @@ def pid_alive(pid: int) -> bool:
         return False
 
 
+def read_png(path: str) -> tuple[int, int, list[tuple[int, int, int]]]:
+    """Minimal stdlib PNG decoder (8-bit, non-interlaced; gray, RGB, palette,
+    gray+alpha, RGBA). Returns (width, height, rgb pixels row-major)."""
+    with open(path, "rb") as handle:
+        data = handle.read()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("not a PNG")
+    pos, width, height, depth, ctype, interlace = 8, 0, 0, 0, 0, 0
+    palette: list[tuple[int, int, int]] = []
+    idat = b""
+    while pos < len(data):
+        length = struct.unpack(">I", data[pos:pos + 4])[0]
+        kind = data[pos + 4:pos + 8]
+        chunk = data[pos + 8:pos + 8 + length]
+        pos += 12 + length
+        if kind == b"IHDR":
+            width, height, depth, ctype, _, _, interlace = struct.unpack(">IIBBBBB", chunk)
+        elif kind == b"PLTE":
+            palette = [tuple(chunk[i:i + 3]) for i in range(0, len(chunk), 3)]
+        elif kind == b"IDAT":
+            idat += chunk
+        elif kind == b"IEND":
+            break
+    if depth != 8 or interlace:
+        raise ValueError(f"unsupported PNG (depth {depth}, interlace {interlace})")
+    channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[ctype]
+    raw = zlib.decompress(idat)
+    stride = width * channels
+    rows: list[bytearray] = []
+    prev = bytearray(stride)
+    offset = 0
+    for _ in range(height):
+        ftype = raw[offset]
+        line = bytearray(raw[offset + 1:offset + 1 + stride])
+        offset += 1 + stride
+        for i in range(stride):
+            left = line[i - channels] if i >= channels else 0
+            up = prev[i]
+            upleft = prev[i - channels] if i >= channels else 0
+            if ftype == 1:
+                line[i] = (line[i] + left) & 0xFF
+            elif ftype == 2:
+                line[i] = (line[i] + up) & 0xFF
+            elif ftype == 3:
+                line[i] = (line[i] + ((left + up) >> 1)) & 0xFF
+            elif ftype == 4:
+                pa, pb, pc = abs(up - upleft), abs(left - upleft), abs(left + up - 2 * upleft)
+                pred = left if pa <= pb and pa <= pc else (up if pb <= pc else upleft)
+                line[i] = (line[i] + pred) & 0xFF
+        rows.append(line)
+        prev = line
+    pixels: list[tuple[int, int, int]] = []
+    for line in rows:
+        for x in range(width):
+            px = line[x * channels:(x + 1) * channels]
+            if ctype in (0, 4):
+                pixels.append((px[0], px[0], px[0]))
+            elif ctype == 3:
+                pixels.append(palette[px[0]] if px[0] < len(palette) else (0, 0, 0))
+            else:
+                pixels.append((px[0], px[1], px[2]))
+    return width, height, pixels
+
+
+def dark_fraction(path: str, threshold: int = 200) -> Optional[float]:
+    """Fraction of pixels whose r+g+b < threshold (None if unreadable)."""
+    try:
+        width, height, pixels = read_png(path)
+    except Exception:  # noqa: BLE001
+        return None
+    if not pixels:
+        return None
+    step = max(1, len(pixels) // 200000)
+    sample = pixels[::step]
+    return sum(1 for r, g, b in sample if r + g + b < threshold) / len(sample)
+
+
+def ops_params(ops: list[dict], key: str, **extra) -> dict:
+    params = {"idempotency_key": f"{key}-{time.time_ns()}", "operation_count": len(ops)}
+    for i, op in enumerate(ops, 1):
+        params[f"operation_{i}_json"] = json.dumps(op)
+    params.update(extra)
+    return params
+
+
+def wait_job(client: "Client", job_id: str, seconds: float) -> Optional[dict]:
+    status = None
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        status = client.call("job_status", {"job_id": job_id})
+        if status["state"] in ("done", "failed", "cancelled"):
+            return status
+        time.sleep(0.5)
+    return status
+
+
 def discovery_records() -> list[dict]:
     records = []
     for path in glob.glob(os.path.join(STATE_DIR, "instances", "*.json")):
@@ -193,6 +290,7 @@ def main() -> int:
     parser.add_argument("--out", default="")
     parser.add_argument("--keep-documents", action="store_true")
     parser.add_argument("--skip-pdf", action="store_true")
+    parser.add_argument("--skip-ifc", action="store_true", help="skip export_ifc / import_ifc (minutes on some documents)")
     parser.add_argument("--use-active-untitled", action="store_true",
                         help="use the active document instead of new_document, but only if it is untitled and empty")
     parser.add_argument("--template", default="", help="template_path for new_document")
@@ -255,6 +353,9 @@ def main() -> int:
         report.check("capabilities_actions",
                      {"list_documents", "new_document", "close_document", "run_script", "layers", "capture_view",
                       "job_status", "cancel_job", "dismiss_home"} <= names, sorted(names))
+        report.check("ping_max_operations",
+                     ping.get("max_operations") == 2000 and (caps.get("limits") or {}).get("max_operations") == 2000,
+                     {"ping": ping.get("max_operations"), "limits": caps.get("limits")})
         if ping.get("active_document"):
             original_active = ping["active_document"].get("fingerprint")
 
@@ -457,6 +558,15 @@ def main() -> int:
             close_center = all(abs(a - b) < 1e-3 for a, b in zip(view_after["center"], view_before["center"]))
             report.check("capture_restored_view", cap.get("restored") and same_view and close_center,
                          {"before": view_before, "after": view_after, "restore_verified": cap.get("restore_verified")})
+            report.check("capture_iso_restored_verified",
+                         cap.get("restored") is True and not cap.get("restore_mismatch")
+                         and view_after.get("view_matrix") == view_before.get("view_matrix")
+                         and view_after.get("zoom") == view_before.get("zoom"),
+                         {"restored": cap.get("restored"), "mismatch": cap.get("restore_mismatch"),
+                          "before": {k: view_before.get(k) for k in ("standard_view_name", "projection_name",
+                                                                      "render_mode_name", "zoom")},
+                          "after": {k: view_after.get(k) for k in ("standard_view_name", "projection_name",
+                                                                    "render_mode_name", "zoom")}})
             report.check("capture_restored_selection",
                          sorted(o.get("uuid") for o in sel_after) == sorted(o.get("uuid") for o in sel_before),
                          {"before": len(sel_before), "after": len(sel_after)})
@@ -464,6 +574,143 @@ def main() -> int:
         cap2 = report.run("capture_view_plan_objects", lambda: client.call("capture_view", w({
             "path": plan_png, "fit": "drawing", "standard_view": "top", "projection": "plan"})))
         report.check("capture_plan_cropped", bool(cap2 and cap2.get("export_rect")), cap2 and cap2.get("fit"), required=False)
+
+        # ------------------------- 1.0.x findings: layers, isolation, order
+        ts = int(time.time())
+        layer_a, layer_b = f"ACC Iso A {ts}", f"ACC Iso B {ts}"
+        for lname_iso in (layer_a, layer_b):
+            report.run(f"layers_create_{lname_iso}", lambda n=lname_iso: client.call(
+                "layers", w({"action": "create", "name": n, "kind": "design"})))
+        active_before_ops = client.call("get_view", w({}))["active_layer"]
+        iso_ops = [
+            {"op": "create", "local_ref": "ia", "object_type": "rect", "x1": 50000, "y1": 0, "x2": 52000, "y2": 1000,
+             "layer": layer_a, "name": f"ACC_ISO_A_{ts}"},
+            {"op": "create", "local_ref": "ib", "object_type": "rect", "x1": 49000, "y1": -1000, "x2": 53000,
+             "y2": 2000, "layer": layer_b, "name": f"ACC_ISO_B_{ts}"},
+            {"op": "set_property", "target": "$ib", "property_name": "fillColor", "value": "0,0,0"},
+            {"op": "set_property", "target": "$ib", "property_name": "fillPattern", "value": "1"},
+        ]
+        iso_res = report.run("per_op_layer_create", lambda: client.call("apply_operations", w(ops_params(iso_ops, "acc-iso"))))
+        if iso_res:
+            receipts = iso_res["transaction"]["operations"]
+            report.check("per_op_layer_receipts", receipts[0].get("layer") == layer_a and receipts[1].get("layer") == layer_b,
+                         [r.get("layer") for r in receipts[:2]])
+            on_b = client.call("query_objects", w({"layer": layer_b, "limit": 100}))["items"]
+            report.check("per_op_layer_object_on_layer", any(o.get("uuid") == receipts[1].get("uuid") for o in on_b),
+                         [o.get("uuid") for o in on_b])
+            report.check("per_op_layer_active_layer_restored",
+                         client.call("get_view", w({}))["active_layer"] == active_before_ops, active_before_ops)
+        try:
+            client.call("apply_operations", w(ops_params(
+                [{"op": "create", "object_type": "rect", "x1": 0, "y1": 0, "x2": 10, "y2": 10,
+                  "layer": f"ACC no such layer {ts}"}], "acc-nolayer")))
+            report.check("per_op_layer_not_found", False, "no error")
+        except BridgeError as error:
+            report.check("per_op_layer_not_found", error.code == "layer_not_found"
+                         and error.response.get("commit_state") == "not_started", error.response)
+
+        # capture isolation (#11/#12/#22) + plan default (#10)
+        if iso_res:
+            iso_png = os.path.join(work_dir, "capture_layer_isolated.png")
+            ctl_png = os.path.join(work_dir, "capture_layer_not_isolated.png")
+            iso_cap = report.run("capture_layer_isolated", lambda: client.call("capture_view", w({
+                "path": iso_png, "layer": layer_a, "fit": "layer", "restore": True})))
+            ctl_cap = report.run("capture_layer_not_isolated", lambda: client.call("capture_view", w({
+                "path": ctl_png, "layer": layer_a, "fit": "layer", "isolate": False, "restore": True})),
+                required=False)
+            if iso_cap:
+                used = iso_cap.get("view_used") or {}
+                report.check("capture_layer_plan_default",
+                             iso_cap.get("plan_default_applied") is True and used.get("projection_name") == "plan"
+                             and used.get("standard_view") == 7,
+                             {k: used.get(k) for k in ("standard_view_name", "projection_name")})
+                report.check("capture_layer_fit_applied",
+                             iso_cap.get("fit_to_objects_applied") is True and (iso_cap.get("fit") or {}).get("applied"),
+                             iso_cap.get("fit"))
+                report.check("capture_layer_isolation_applied",
+                             (iso_cap.get("isolation") or {}).get("applied") is True
+                             and (iso_cap.get("isolation") or {}).get("layers") == [layer_a],
+                             iso_cap.get("isolation"))
+                report.check("capture_layer_restored", iso_cap.get("restored") is True, iso_cap.get("restore_mismatch"))
+                report.check("capture_png_really_png", iso_cap.get("encoded_format") == "png",
+                             {k: iso_cap.get(k) for k in ("encoded_format", "transcoded_from", "transcode_error")})
+                area = iso_cap.get("drawing_area_px") or [0, 0]
+                long_edge = max(iso_cap.get("width") or 0, iso_cap.get("height") or 0)
+                report.check("capture_layer_crisp",
+                             long_edge >= min(1200, int(0.8 * max(area))),
+                             {"image": [iso_cap.get("width"), iso_cap.get("height")], "drawing_area_px": area,
+                              "fill": (iso_cap.get("fit") or {}).get("fill")}, required=False)
+                iso_dark = dark_fraction(iso_png)
+                ctl_dark = dark_fraction(ctl_png) if ctl_cap else None
+                report.check("capture_layer_contains_no_other_layer",
+                             iso_dark is not None and iso_dark < 0.25,
+                             {"isolated_dark_fraction": iso_dark, "not_isolated_dark_fraction": ctl_dark})
+                report.check("capture_isolation_differs_from_control",
+                             iso_dark is not None and ctl_dark is not None and ctl_dark > iso_dark + 0.2,
+                             {"isolated": iso_dark, "control": ctl_dark}, required=False)
+
+        # spaces behind walls (#1)
+        sp_ops = [
+            {"op": "create", "local_ref": "sw", "object_type": "wall", "x1": 60000, "y1": 0, "x2": 64000, "y2": 0,
+             "thickness": 200, "height": 2800},
+            {"op": "create", "local_ref": "ss", "object_type": "space", "height": 2800, "name": f"ACC Room {ts}",
+             "points": [[60000, -100], [64000, -100], [64000, 3000], [60000, 3000]]},
+        ]
+        sp_res = report.run("space_with_wall_create", lambda: client.call("apply_operations", w(ops_params(sp_ops, "acc-space"))))
+        if sp_res:
+            wall_uuid = sp_res["transaction"]["operations"][0].get("uuid")
+            space_uuid = sp_res["transaction"]["operations"][1].get("uuid")
+            items = client.call("query_objects", w({"layer": active_before_ops, "limit": 1000}))["items"]
+            order = [o.get("uuid") for o in items]
+            report.check("space_sent_to_back",
+                         (sp_res.get("sent_to_back") or 0) >= 1 and space_uuid in order and wall_uuid in order
+                         and order.index(space_uuid) < order.index(wall_uuid),
+                         {"sent_to_back": sp_res.get("sent_to_back"),
+                          "space_index": order.index(space_uuid) if space_uuid in order else None,
+                          "wall_index": order.index(wall_uuid) if wall_uuid in order else None})
+
+        # order op
+        o_res = report.run("order_setup", lambda: client.call("apply_operations", w(ops_params([
+            {"op": "create", "local_ref": "o1", "object_type": "rect", "x1": 70000, "y1": 0, "x2": 71000, "y2": 1000},
+            {"op": "create", "local_ref": "o2", "object_type": "rect", "x1": 70500, "y1": 500, "x2": 71500, "y2": 1500},
+        ], "acc-order-setup"))))
+        if o_res:
+            o1 = o_res["transaction"]["operations"][0]["uuid"]
+            front = report.run("order_front", lambda: client.call("apply_operations", w(ops_params(
+                [{"op": "order", "target": f"uuid:{o1}", "position": "front"}], "acc-order-front"))))
+            rec = front and front["transaction"]["operations"][0]
+            report.check("order_front", bool(rec and rec.get("changed") and
+                                             rec.get("stack_index_after") == rec.get("stack_count", 0) - 1), rec)
+            back = report.run("order_backward", lambda: client.call("apply_operations", w(ops_params(
+                [{"op": "order", "target": f"uuid:{o1}", "position": "backward"}], "acc-order-backward"))))
+            rec2 = back and back["transaction"]["operations"][0]
+            report.check("order_backward", bool(rec2 and rec2.get("changed") and
+                                                rec2.get("stack_index_after") == rec2.get("stack_index_before", 0) - 1), rec2)
+
+        # operation cap (#19): 2001 rejected before anything runs; 1000 creates timed
+        too_many = [{"op": "create", "object_type": "rect", "x1": 0, "y1": 0, "x2": 1, "y2": 1}] * 2001
+        try:
+            client.call("apply_operations", w(ops_params(too_many, "acc-cap")))
+            report.check("operation_cap_2000", False, "no error")
+        except BridgeError as error:
+            report.check("operation_cap_2000", error.code == "invalid_request", error.code)
+        bulk_layer = f"ACC Bulk {ts}"
+        report.run("layers_create_bulk", lambda: client.call("layers", w({"action": "create", "name": bulk_layer})))
+        bulk = [{"op": "create", "object_type": "rect", "x1": 100000 + (i % 40) * 300, "y1": (i // 40) * 300,
+                 "x2": 100000 + (i % 40) * 300 + 200, "y2": (i // 40) * 300 + 200, "layer": bulk_layer}
+                for i in range(1000)]
+        started = time.time()
+        bulk_res = report.run("apply_operations_1000_rects", lambda: client.call(
+            "apply_operations", w(ops_params(bulk, "acc-bulk")), timeout_ms=300000))
+        elapsed = round(time.time() - started, 2)
+        if bulk_res:
+            report.check("apply_operations_1000_rects", bulk_res.get("ok") is True and
+                         len(bulk_res["transaction"]["operations"]) == 1000,
+                         {"elapsed_s": elapsed, "timing": bulk_res.get("timing")})
+            report.check("apply_operations_1000_rects_fast", elapsed < 30,
+                         {"elapsed_s": elapsed, "timing": bulk_res.get("timing")}, required=False)
+            report.notes.append(f"1000 rect creates in one transaction: {elapsed} s "
+                                f"(handler_ms {(bulk_res.get('timing') or {}).get('handler_ms')})")
 
         # --------------------------------------------- layers and classes
         lname = f"ACC Layer {int(time.time())}"
@@ -567,6 +814,56 @@ def main() -> int:
                         break
                     time.sleep(0.5)
                 report.check("export_pdf_job_done", bool(status and status["state"] == "done" and os.path.isfile(pdf)), status)
+
+        # ------------------------------------------------ IFC (#17)
+        if not args.skip_ifc:
+            ifc_ops = [
+                {"op": "create", "local_ref": "iw1", "object_type": "wall", "x1": 0, "y1": 30000, "x2": 5000, "y2": 30000,
+                 "thickness": 200, "height": 2800},
+                {"op": "create", "local_ref": "iw2", "object_type": "wall", "x1": 5000, "y1": 30000, "x2": 5000,
+                 "y2": 34000, "thickness": 200, "height": 2800},
+                {"op": "create", "object_type": "space", "height": 2800, "name": "ACC IFC Room",
+                 "points": [[0, 30000], [5000, 30000], [5000, 34000], [0, 34000]]},
+            ]
+            if schema and schema.get("descriptor_fingerprint"):
+                ifc_ops.insert(2, {"op": "create", "object_type": "door", "x1": 2500, "y1": 30000, "width": 900,
+                                   "height": 2100, "wall_uuid": "$iw1", "require_wall_host": True,
+                                   "descriptor_fingerprint": schema["descriptor_fingerprint"]})
+            report.run("ifc_model_create", lambda: client.call("apply_operations", w(ops_params(ifc_ops, "acc-ifc"))))
+            ifc_path = os.path.join(work_dir, "acceptance.ifc")
+            job = report.run("export_ifc_async", lambda: client.call("export_ifc", w({"file_path": ifc_path, "async": True})))
+            status = wait_job(client, job["job_id"], 900) if job else None
+            head = b""
+            if os.path.isfile(ifc_path):
+                with open(ifc_path, "rb") as handle:
+                    head = handle.read(64)
+            result = (status or {}).get("result") or {}
+            report.check("export_ifc_file", bool(status and status["state"] == "done" and os.path.isfile(ifc_path)
+                                                 and os.path.getsize(ifc_path) > 0
+                                                 and (head.lstrip(b"\xef\xbb\xbf").lstrip().startswith(b"ISO-10303-21")
+                                                      or head.startswith(b"PK"))),
+                         {"state": (status or {}).get("state"), "error": (status or {}).get("error"),
+                          "method": result.get("method"), "attempts": result.get("attempts"),
+                          "elapsed_ms": (status or {}).get("elapsed_ms")})
+            dialogs = result.get("dismissed_dialogs") or ((status or {}).get("details") or {}).get("dismissed_dialogs") or []
+            reports = [d for d in dialogs if d.get("kind") in ("handler_report", "handler_message")]
+            if reports:
+                report.notes.append(f"IFC dialogs acknowledged: {json.dumps(reports)[:1500]}")
+            ping_after_ifc = client.call("ping")
+            report.check("ifc_report_dialog_auto_closed", not ping_after_ifc.get("modal_dialog"),
+                         {"modal_dialog": ping_after_ifc.get("modal_dialog"), "acknowledged": reports})
+            if status and status["state"] == "done" and os.path.isfile(ifc_path):
+                ijob = report.run("import_ifc_async", lambda: client.call("import_ifc", w({"file_path": ifc_path, "async": True})),
+                                  required=False)
+                istatus = wait_job(client, ijob["job_id"], 900) if ijob else None
+                iresult = (istatus or {}).get("result") or {}
+                mutation = iresult.get("document_mutation") or {}
+                report.check("import_ifc_compact_receipt",
+                             bool(istatus and istatus["state"] == "done" and mutation.get("detail") is False
+                                  and "created_object_uuids" not in mutation
+                                  and (mutation.get("created_object_count") or 0) > 0),
+                             {"state": (istatus or {}).get("state"), "error": (istatus or {}).get("error"),
+                              "method": iresult.get("method"), "mutation": mutation}, required=False)
 
         # ------------------------------------------- stop is per connection
         side = Client(port, client.token)

@@ -3,7 +3,8 @@
 # (kLibrariesFolder = 13, kDefaultsFolder = 14; verified live in Vectorworks 2024).
 RES_LIBRARY = {66: (13, "Attributes/Hatches"), 96: (13, "Attributes/Line Types"), 120: (13, "Attributes/Gradients"),
                119: (13, "Attributes/Image Fills"), 108: (13, "Attributes/Tile Fills"), 109: (14, "Text Styles")}
-RES_LABEL = {66: "hatch", 96: "line type", 120: "gradient", 119: "image fill", 108: "tile", 109: "text style"}
+RES_LABEL = {66: "hatch", 96: "line type", 120: "gradient", 119: "image fill", 108: "tile", 109: "text style",
+             127: "wall style", 107: "slab style", 16: "symbol"}
 
 
 def _res_names(rtype, folder, sub):
@@ -16,25 +17,42 @@ def _res_names(rtype, folder, sub):
 
 def find_resource(rtype, name, required=True):
     """Index of a named resource; imported from the Vectorworks library when the document lacks it."""
-    _l, names = _res_names(rtype, 0, "")
-    if name in names:
+    _l, doc_names = _res_names(rtype, 0, "")
+    if name in doc_names:
         return vs.Name2Index(name)
+    lib_names = []
     lib = RES_LIBRARY.get(rtype)
     if lib:
-        list_id, names = _res_names(rtype, lib[0], lib[1])
-        if name in names:
-            h = vs.ImportResToCurFileN(list_id, names.index(name) + 1, lambda s: 1)
+        list_id, lib_names = _res_names(rtype, lib[0], lib[1])
+        if name in lib_names:
+            h = vs.ImportResToCurFileN(list_id, lib_names.index(name) + 1, lambda s: 1)
             if not _nil(h):
                 IMPORTED.append({"type": RES_LABEL.get(rtype, str(rtype)), "name": name})
                 return vs.Name2Index(name)
     if not required:
         return 0
-    lowered = name.lower()
-    close = [n for n in names if lowered in n.lower()][:5]
+    close = did_you_mean(name, doc_names + [n for n in lib_names if n not in doc_names])
     raise ValueError("not_found: no %s named %r in the document or the Vectorworks library%s; list names with "
-                     "vw_read(what='resources', type='%s')" % (RES_LABEL.get(rtype, "resource"), name,
-                                                              (" (similar: " + ", ".join(close) + ")") if close else "",
-                                                              RES_LABEL.get(rtype, "hatch").replace(" ", "_")))
+                     "vw_read(what='resources', type='%s', search='...')" % (
+                         RES_LABEL.get(rtype, "resource"), name,
+                         (" - did you mean: " + ", ".join(repr(n) for n in close) + "?") if close else "",
+                         RES_LABEL.get(rtype, "hatch").replace(" ", "_")))
+
+
+def did_you_mean(name, names, n=5):
+    """Up to n close names: case-insensitive substring hits first, then difflib similarity."""
+    import difflib
+    lowered = name.lower()
+    by_lower = {}
+    for candidate in names:
+        by_lower.setdefault(candidate.lower(), candidate)
+    words = [w for w in lowered.replace("-", " ").replace("_", " ").split() if len(w) > 2]
+    hits = [c for c in names if lowered in c.lower() or c.lower() in lowered]
+    hits += [c for c in names if c not in hits and words and all(w in c.lower() for w in words)]
+    hits += [c for c in names if c not in hits and words and any(w in c.lower() for w in words)]
+    hits += [by_lower[m] for m in difflib.get_close_matches(lowered, list(by_lower), n=n, cutoff=0.5)
+             if by_lower[m] not in hits]
+    return hits[:n]
 
 
 IMPORTED = []

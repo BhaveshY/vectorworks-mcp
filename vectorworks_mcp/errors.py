@@ -64,6 +64,7 @@ NATIVE_CODE_MAP = {
     "too_many_clients": "too_many_clients",
     "auth_failed": "auth_failed",
     "not_found": "not_found",
+    "layer_not_found": "not_found",
     "invalid_request": "native_rejected",
     "invalid_path": "path_error",
     "input_not_found": "path_error",

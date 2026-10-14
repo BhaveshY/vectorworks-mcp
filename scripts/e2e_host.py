@@ -239,7 +239,8 @@ def phase_absent(python: str, state_dir: Path) -> None:
         ("vw_create", {"objects": [{"type": "hexagon"}]}, "objects[0].type"),
         ("vw_create", {"objects": "not json"}, "objects"),
         ("vw_edit", {"changes": [{"op": "move", "target": "uuid:x"}]}, "changes[0].by"),
-        ("vw_edit", {"changes": [{"op": "set", "target": "x", "properties": {"colour_of_moon": 1}}]}, "changes[0].properties"),
+        ("vw_edit", {"changes": [{"op": "set", "target": "x"}]}, "changes[0].properties"),
+        ("vw_edit", {"changes": [{"op": "order", "target": "x", "position": "sideways"}]}, "changes[0].position"),
         ("vw_capture", {"view": "panorama"}, "view"),
         ("vw_document", {"action": "export", "path": "relative.pdf"}, "path"),
         ("vw_apply", {"operations": [{"type": "explode", "params": {}}]}, "operations[1].type"),
@@ -313,9 +314,13 @@ def phase_mock(python: str, state_dir: Path) -> None:
         check("paging: second page differs", sc2.get("ok") and sc2["data"][0]["uuid"] != sc["data"][0]["uuid"])
         sc, _ = c.call("vw_read", {"what": "summary"})
         check("summary counts", sc.get("ok") and sc["data"]["total_objects"] == 8, json.dumps(sc)[:200])
-        sc, _ = c.call("vw_read", {"what": "object", "target": box})
-        check("object detail (native + script detail)", sc.get("ok") and sc["data"].get("uuid") == box and "records" in sc["data"],
-              json.dumps(sc)[:300])
+        sc, raw = c.call("vw_read", {"what": "object", "target": box})
+        text_len = len(json.dumps(sc))
+        check("object detail compact by default (geometry, <= 1.5 KB, no records)", sc.get("ok") and
+              sc["data"].get("uuid") == box and "records" not in sc["data"] and sc["data"].get("width") == 3000
+              and text_len <= 1500, f"{text_len} B " + json.dumps(sc)[:300])
+        sc, _ = c.call("vw_read", {"what": "object", "target": box, "detail": True})
+        check("object detail=true adds records", sc.get("ok") and "records" in sc["data"], json.dumps(sc)[:300])
         sc, _ = c.call("vw_edit", {"changes": [
             {"op": "move", "target": box, "by": ["1m", 0]},
             {"op": "set", "target": box, "properties": {"fill_color": "#FF0000", "line_weight": "10", "name": "Red box"}},
@@ -811,6 +816,144 @@ def phase_weak_model(python: str, state_dir: Path) -> None:
         mock.kill()
 
 
+NEW_BRIDGE_FEATURES = ["op_layer", "order_op", "auto_send_to_back", "capture_isolation", "compact_import_receipts"]
+
+
+def phase_findings(python: str, state_dir: Path, features: list) -> None:
+    """E2E findings 2026-10-14 (#1-#21): flat/typed edits, friendly parametric names, Space room names, compact
+    reads, did-you-mean, search filters, layer placement, op-cap chunking, compact receipts, order, previews.
+    Run against the bridge 1.0.0 behaviour (no features: script fallbacks) and the 1.0.x flags (native paths)."""
+    label = "1.0.x flags" if features else "bridge 1.0.0"
+    print(f"\n== 3e. 2026-10-14 findings ({label}) ==")
+    tag = "new" if features else "old"
+    fdir = state_dir / f"findings-{tag}"
+    fdir.mkdir(exist_ok=True)
+    (fdir / "auth-token").write_text(MOCK_TOKEN, encoding="utf-8")
+    mock, port = start_mock(python, fdir)
+    try:
+        if features:
+            mock_ctl(port, features=features)
+        c = Client(python, base_env(fdir), f"findings-{tag}")
+        c.initialize()
+        # -- room on a named layer (#14), spaces behind walls (#1) -------------------------------------------
+        room = [{"type": "wall", "id": "s", "start": [0, 0], "end": [6000, 0]},
+                {"type": "wall", "id": "e", "start": [6000, 0], "end": [6000, 4000]},
+                {"type": "wall", "id": "n", "start": [6000, 4000], "end": [0, 4000]},
+                {"type": "wall", "id": "w", "start": [0, 4000], "end": [0, 0]},
+                {"type": "door", "id": "d", "wall": "$s", "at": [3000, 0]},
+                {"type": "window", "id": "win", "wall": "$n", "at": [3000, 4000], "sill": 900},
+                {"type": "space", "id": "sp", "name": "Office", "points": [[0, 0], [6000, 0], [6000, 4000], [0, 4000]]}]
+        sc, _ = c.call("vw_create", {"objects": room, "layer": "Frist"})
+        check(f"[{tag}] unknown layer -> not_found, nothing created", err_code(sc) == "not_found" and
+              "create_layer" in json.dumps(sc), json.dumps(sc)[:300])
+        sc, raw = c.call("vw_create", {"objects": room, "layer": "First", "create_layer": True, "preview": False})
+        ids = sc.get("ids") or {}
+        check(f"[{tag}] create_layer + layer: receipt names the layer", sc.get("ok") and sc.get("layer") == "First"
+              and len(ids) == 7, json.dumps(sc)[:400])
+        q, _ = c.call("vw_read", {"what": "query", "layer": "First", "fields": ["uuid", "type", "layer"]})
+        on_layer = {i.get("uuid") for i in q.get("data") or []}
+        check(f"[{tag}] every object is on layer First (doors/windows in their walls)",
+              {ids.get("s"), ids.get("e"), ids.get("n"), ids.get("w"), ids.get("sp")} <= on_layer, json.dumps(q)[:300])
+        native_layer = "op_layer" in features
+        check(f"[{tag}] layer placement path: {'native per-op layer' if native_layer else 'script fallback in the same call'}",
+              ("layer_fallback" in sc) != native_layer, json.dumps(sc)[:300])
+        check(f"[{tag}] space sent behind the walls", "spaces" in sc, json.dumps(sc)[:300])
+        sc_rect, _ = c.call("vw_create", {"objects": [{"type": "rect", "id": "r", "origin": [8000, 0], "width": 1000,
+                                                       "height": 500, "name": "Box"},
+                                                      {"type": "text", "id": "t", "at": [8000, 2000], "text": "Label"}]})
+        rid, tid = (sc_rect.get("ids") or {}).get("r"), (sc_rect.get("ids") or {}).get("t")
+        # -- flat set routed by type (#2), friendly parametric (#5), Space name (#7) -------------------------
+        sc, _ = c.call("vw_edit", {"changes": [{"op": "set", "target": ids.get("d"), "width": 1000, "open_angle": 45}]})
+        check(f"[{tag}] flat set on a door -> parametric Width/OpenAngle", sc.get("ok") and
+              any(r.get("op") == "object.update_parametric" for r in sc.get("receipts") or []), json.dumps(sc)[:300])
+        sc, _ = c.call("vw_edit", {"changes": [{"op": "parametric", "target": ids.get("win"),
+                                                "parameters": {"sill_height": 800}}]})
+        check(f"[{tag}] parametric without plugin: plugin from target, sill_height -> Elevation",
+              sc.get("ok") and any("Elevation" in w for w in sc.get("warnings") or []), json.dumps(sc)[:300])
+        sc, _ = c.call("vw_edit", {"changes": [{"op": "set", "target": ids.get("w"), "thickness": 300, "height": 2800}]})
+        check(f"[{tag}] flat set on a wall -> thickness/height (script, read back)", sc.get("ok") and
+              (sc.get("receipts") or [{}])[0].get("set") == {"thickness": 300, "height": 2800}, json.dumps(sc)[:300])
+        sc, _ = c.call("vw_edit", {"changes": [{"op": "set", "target": rid, "width": 2000}]})
+        check(f"[{tag}] width on a rectangle -> validation naming rect + matching example",
+              err_code(sc) == "validation_error" and "rect" in (sc.get("error") or {}).get("message", "") and
+              (sc.get("error") or {}).get("example", {}).get("op") == "scale", json.dumps(sc)[:300])
+        sc, _ = c.call("vw_edit", {"changes": [{"op": "set", "target": tid, "text": "Kitchen"}]})
+        check(f"[{tag}] flat text on a text object", sc.get("ok"), json.dumps(sc)[:300])
+        sc, _ = c.call("vw_edit", {"changes": [{"op": "set", "target": ids.get("sp"), "name": "Kitchen"}]})
+        row = (sc.get("receipts") or [{}])[-1]
+        check(f"[{tag}] Space name = displayed room label (read back)", sc.get("ok") and row.get("room_name") == "Kitchen",
+              json.dumps(sc)[:300])
+        q, _ = c.call("vw_read", {"what": "query", "type": "space"})
+        check(f"[{tag}] query reports room_name next to the object name",
+              (q.get("data") or [{}])[0].get("room_name") == "Kitchen", json.dumps(q)[:300])
+        sc, _ = c.call("vw_edit", {"changes": [{"op": "parametric", "target": ids.get("d"), "parameters": {"swng": "Out"}}]})
+        check(f"[{tag}] unknown parameter -> did-you-mean", err_code(sc) == "validation_error" and
+              "did you mean" in json.dumps(sc), json.dumps(sc)[:300])
+        # -- order (#1) ---------------------------------------------------------------------------------------
+        sc, _ = c.call("vw_edit", {"changes": [{"op": "send_to_back", "target": rid}]})
+        check(f"[{tag}] op=order (send_to_back synonym)", sc.get("ok") and
+              any(r.get("position") == "back" for r in sc.get("receipts") or []), json.dumps(sc)[:300])
+        sc, _ = c.call("vw_edit", {"changes": [{"op": "order", "target": rid, "position": "front"}]})
+        check(f"[{tag}] op=order front", sc.get("ok"), json.dumps(sc)[:300])
+        # -- compact reads (#3, #4, #6) ------------------------------------------------------------------------
+        sc, _ = c.call("vw_read", {"what": "object", "target": ids.get("w")})
+        data = sc.get("data") or {}
+        check(f"[{tag}] wall read: start/end/thickness/height, <= 1.5 KB", data.get("start") == [0, 4000] and
+              data.get("thickness") == 300 and len(json.dumps(sc)) <= 1500, json.dumps(sc)[:300])
+        sc, _ = c.call("vw_read", {"what": "parametric_schema", "target": "Door"})
+        check(f"[{tag}] parametric_schema compact (id/name/type/value)", sc.get("ok") and
+              all(set(p) <= {"id", "name", "type", "value", "read_only"} for p in sc["data"]["parameters"]),
+              json.dumps(sc)[:300])
+        sc, _ = c.call("vw_read", {"what": "parametric_schema", "target": "Window", "search": "sill"})
+        check(f"[{tag}] schema search: friendly 'sill' finds Elevation", sc.get("ok") and
+              any(p.get("id") == "Elevation" for p in sc["data"]["parameters"]), json.dumps(sc)[:300])
+        # -- search filters (#9, #18), sheet alias (#15), did-you-mean (#8) ------------------------------------
+        sc, _ = c.call("vw_read", {"what": "resources", "type": "hatch", "search": "brick"})
+        check(f"[{tag}] resources search filters by name", sc.get("ok") and
+              [i["name"] for i in sc.get("data") or []] == ["Brick HF"], json.dumps(sc)[:300])
+        sc, _ = c.call("vw_read", {"what": "resources", "search": "dash"})
+        check(f"[{tag}] resources search across kinds", sc.get("ok") and
+              {i.get("type") for i in sc.get("data") or []} >= {"line_type"}, json.dumps(sc)[:300])
+        sc, _ = c.call("vw_read", {"what": "query", "query": "bo"})
+        check(f"[{tag}] query = name/text contains", [i.get("uuid") for i in sc.get("data") or []] == [rid],
+              json.dumps(sc)[:300])
+        sc, _ = c.call("vw_edit", {"changes": [{"op": "set", "target": rid, "fill": "Brik HF"}]})
+        check(f"[{tag}] unknown hatch -> did you mean 'Brick HF'", err_code(sc) == "not_found" and
+              "Brick HF" in json.dumps(sc), json.dumps(sc)[:300])
+        sc, _ = c.call("vw_create", {"objects": [{"type": "symbol", "symbol": "Chiar", "at": [0, 0]}]})
+        check(f"[{tag}] unknown symbol -> did you mean 'Chair'", err_code(sc) == "not_found" and "Chair" in json.dumps(sc),
+              json.dumps(sc)[:300])
+        sc, _ = c.call("vw_read", {"what": "viewports", "sheet": "A-404"})
+        check(f"[{tag}] viewports accepts sheet= as target", err_code(sc) != "validation_error", json.dumps(sc)[:300])
+        # -- big plans: chunking + compact receipts (#19, #20) + preview ---------------------------------------
+        big = [{"type": "rect", "origin": [(i % 25) * 700, 10000 + (i // 25) * 700], "width": 500, "height": 500}
+               for i in range(250)]
+        sc, raw = c.call("vw_create", {"objects": big, "layer": "Bulk", "create_layer": True})
+        size = len(json.dumps(sc))
+        image = any(b.get("type") == "image" for b in raw.get("content") or [])
+        check(f"[{tag}] 250 objects: compact receipt (count + uuids once) <= 12 KB", sc.get("ok") and
+              sc.get("count") == 250 and len(sc.get("uuids") or []) == 250 and "created" not in sc and
+              "ids" not in sc and size <= 12_500, f"{size} B")
+        check(f"[{tag}] >= 10 objects -> preview image in the same result + LOOK hint", image and
+              "LOOK" in json.dumps(sc.get("preview")), json.dumps(sc.get("preview"))[:200])
+        big = [{"type": "rect", "origin": [(i % 25) * 700, 40000 + (i // 25) * 700], "width": 500, "height": 500}
+               for i in range(400)]
+        sc, _ = c.call("vw_create", {"objects": big, "preview": False})
+        want_steps = 1 if features else 2
+        check(f"[{tag}] 400 objects -> {want_steps} transaction(s) (native cap {2000 if features else 250})",
+              sc.get("ok") and sc.get("count") == 400 and sc.get("undo_steps") == want_steps, json.dumps(sc)[:300])
+        sc, raw = c.call("vw_edit", {"changes": [{"op": "move", "target": rid, "by": [100, 0]}], "preview": True})
+        check(f"[{tag}] vw_edit preview=true returns an image",
+              any(b.get("type") == "image" for b in raw.get("content") or []), json.dumps(sc)[:200])
+        sc, raw = c.call("vw_organize", {"kind": "viewport", "action": "create", "sheet": "A-101", "layers": ["First"],
+                                         "scale": "1:50"})
+        check(f"[{tag}] viewport create returns a sheet preview", sc.get("ok") and
+              any(b.get("type") == "image" for b in raw.get("content") or []), json.dumps(sc)[:300])
+        c.close()
+    finally:
+        mock.terminate()
+
+
 def _first_uuid(c: "Client") -> str:
     sc, _ = c.call("vw_read", {"what": "query", "limit": 1, "fields": ["uuid"]})
     return sc["data"][0]["uuid"]
@@ -847,7 +990,7 @@ def main() -> int:
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--real", action="store_true", help="also run READ-ONLY checks against Vectorworks on 9877")
     parser.add_argument("--keep", action="store_true")
-    parser.add_argument("--only", default="", help="comma list: startup,absent,mock,edge,weak,production,legacy,real")
+    parser.add_argument("--only", default="", help="comma list: startup,absent,mock,edge,weak,production,findings,legacy,real")
     args = parser.parse_args()
     only = set(filter(None, args.only.split(",")))
     state_dir = Path(tempfile.mkdtemp(prefix="vwmcp-state-"))
@@ -864,6 +1007,9 @@ def main() -> int:
             phase_weak_model(args.python, state_dir)
         if not only or "production" in only:
             phase_production(args.python, state_dir)
+        if not only or "findings" in only:
+            phase_findings(args.python, state_dir, [])
+            phase_findings(args.python, state_dir, NEW_BRIDGE_FEATURES)
         if not only or "legacy" in only:
             phase_legacy_mock(args.python, state_dir)
         if args.real or "real" in only:

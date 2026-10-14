@@ -327,9 +327,18 @@ def _viewport(host, target, a: dict, action: str, scale: float, out: dict) -> di
     out["result"] = result
     out["via"] = "script"
     out["undo"] = "one undo step"
+    want = C.boolean(a["preview"], "preview") if a.get("preview") not in (None, "") else None
     if action in {"create", "set"}:
         out["next_step"] = ("Done: the viewport readback above is authoritative. vw_capture(view='sheet', sheet=<sheet>) "
                             "once if you want to look at it.")
+        if want or (want is None and action == "create"):
+            from . import preview
+            vp = result.get("viewport") if isinstance(result.get("viewport"), dict) else {}
+            sheet = args.get("sheet") or vp.get("sheet") or vp.get("sheet_layer")
+            if sheet:
+                out["next_step"] = ("Done: the viewport readback above is authoritative. LOOK at the sheet preview image "
+                                    "before reporting success (layers, scale, crop, annotations).")
+                return preview.attach(host, a.get("document"), out, out.setdefault("warnings", []), sheet=str(sheet))
     return out
 
 

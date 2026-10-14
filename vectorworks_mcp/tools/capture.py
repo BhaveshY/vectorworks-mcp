@@ -57,6 +57,13 @@ def handle(args: dict, ctx, warnings: list):
         params.update(view_codes(a))
         if a.get("margin_pct") not in (None, ""):
             params["margin_pct"] = C.number(a["margin_pct"], "margin_pct")
+        params["capture_target"] = view  # bridge 1.0.x: explicit target (older bridges ignore it)
+        if a.get("fill_pct") not in (None, ""):
+            params["fill_pct"] = C.number(a["fill_pct"], "fill_pct")
+        from ._tx import FEATURE_CAPTURE_ISOLATION, has_feature
+        if view in {"drawing", "layer", "objects"} and "standard_view" not in params and                 not has_feature(host, inst, FEATURE_CAPTURE_ISOLATION):
+            # older bridges capture in the window's current (possibly 3D) view: plan unless asked otherwise
+            params.update({"standard_view": 7, "projection": 6})
         if view == "drawing":
             params["fit"] = "drawing"
         elif view == "selection":
@@ -101,6 +108,16 @@ def handle(args: dict, ctx, warnings: list):
         warnings.append(info["inline_error"])
     if data.get("view_used"):
         structured["view_used"] = data["view_used"]
+    for key in ("capture_target", "plan_default_applied", "fit_to_objects_applied", "isolation"):
+        if data.get(key) not in (None, {}):
+            structured[key] = ({k: v for k, v in data[key].items() if k in {"applied", "mode", "layers"}}
+                               if key == "isolation" and isinstance(data[key], dict) else data[key])
+    if data.get("restored") is False:
+        structured["restore_mismatch"] = data.get("restore_mismatch") or []
+        warnings.append("Vectorworks could not fully restore the user's view after the capture (see "
+                        "restore_mismatch); tell the user which view settings changed.")
+    if data.get("transcode_error"):
+        warnings.append(f"capture transcode: {data['transcode_error']}")
     if target.document:
         structured["document"] = doc_brief(target.document)
     return ToolOutput(structured, blocks)

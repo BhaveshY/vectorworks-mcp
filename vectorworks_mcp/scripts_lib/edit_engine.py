@@ -1,73 +1,7 @@
-# ARGS = {"ops": [{"op": ..., "targets": [...], ...}]}
+# ARGS = {"ops": [{"op": ..., "targets": [...], ...}]}   (op engine: _ops.py)
 done = []
-
-
-def _layer_handle(name):
-    h = vs.GetObject(name)
-    if _nil(h) or vs.GetTypeN(h) != 31:
-        raise ValueError("not_found: design layer not found: " + name)
-    return h
-
-
 for item in ARGS["ops"]:
-    op = item["op"]
-    handles = [resolve(t) for t in item.get("targets", [])]
-    if op == "mirror":
-        a, b = item["axis_start"], item["axis_end"]
-        for h in handles:
-            # vs.MirrorN(h, dup: BOOLEAN, p1: POINT, p2: POINT, preserveMatrix: BOOLEAN) -> HANDLE
-            # (there is no vs.HMirror; preserveMatrix keeps symbol/PIO matrices correct)
-            new = vs.MirrorN(h, bool(item.get("copy")), (float(a[0]), float(a[1])), (float(b[0]), float(b[1])), True)
-            done.append({"op": op, "uuid": uuid_of(new if (item.get("copy") and not _nil(new)) else h)})
-    elif op == "layer":
-        target = _layer_handle(item["layer"])
-        for h in handles:
-            vs.SetParent(h, target)
-            vs.ResetObject(h)
-            done.append({"op": op, "uuid": uuid_of(h), "layer": item["layer"]})
-    elif op == "group":
-        # vs.Group() groups the selection on the active layer only.
-        vs.DSelectAll()
-        for h in handles:
-            vs.SetSelect(h)
-        vs.Group()
-        g = vs.LSActLayer()
-        if not _nil(g) and item.get("name"):
-            vs.SetName(g, item["name"])
-        vs.DSelectAll()
-        done.append({"op": op, "uuid": "" if _nil(g) else uuid_of(g), "members": len(handles)})
-    elif op == "ungroup":
-        for h in handles:
-            vs.DSelectAll()
-            vs.SetSelect(h)
-            vs.Ungroup()
-            vs.DSelectAll()
-            done.append({"op": op, "ungrouped": True})
-    elif op == "record":
-        rec = item["record"]
-        if _nil(vs.GetObject(rec)):
-            for field in (item["fields"] or {"Value": ""}):
-                vs.NewField(rec, str(field), "", 4, 0)
-        for h in handles:
-            if item.get("detach"):
-                vs.DelRecord(h, rec)
-                done.append({"op": op, "uuid": uuid_of(h), "detached": rec})
-                continue
-            vs.SetRecord(h, rec)
-            for field, value in item["fields"].items():
-                vs.SetRField(h, rec, field, "" if value is None else str(value))
-            vs.ResetObject(h)
-            done.append({"op": op, "uuid": uuid_of(h), "record": rec, "fields": list(item["fields"].keys())})
-    elif op == "pio":
-        for h in handles:
-            expect = pio_set(h, item["parameters"], item.get("scale_mm", 1.0))
-            done.append({"op": op, "uuid": uuid_of(h), "set": sorted(expect), "expect": expect,
-                         "via": "parametric_record"})
-    elif op == "style":
-        for h in handles:
-            done.append({"op": op, "uuid": uuid_of(h), "set": apply_style(h, item["style"])})
-    else:
-        raise ValueError("unsupported script edit op: " + op)
+    run_op(item, done)
 
 result = {"applied": len(done), "receipts": done}
 if IMPORTED:

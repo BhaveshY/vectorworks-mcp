@@ -20,11 +20,16 @@ working in Vectorworks at the same time. Follow these rules exactly.
    `"m"`, `"in"`, `"ft"`) or a string with a unit (`"3.5m"`, `"250 mm"`,
    `"12'6\""`). Points: `[x, y]`. Read results are always in mm.
 4. **Receipts are authoritative.** A successful `vw_create` / `vw_edit` /
-   `vw_apply` result lists every object it created or changed (`ids`, `created`,
-   `receipts`). Do not re-read objects one by one, do not create them again,
-   and do not restart in a new document because a query looked empty. For a
-   visual check call `vw_capture` once and look at the image. Never use
+   `vw_apply` result lists every object it created or changed (`ids` + `created`;
+   for more than 20 objects `uuids` in the order of your list + `named` = your
+   id -> index). Do not re-read objects one by one, do not create them again,
+   and do not restart in a new document because a query looked empty. Never use
    computer-use, desktop screenshots, mouse or keyboard automation.
+4b. **LOOK at the preview.** `vw_create` with >= 10 objects or 3D objects, a new
+   viewport, and any write with `preview=true` return a small image of what
+   changed in the same result. Look at it BEFORE you report success (right
+   place, size, layer; walls drawn over spaces; nothing missing or overlapping)
+   and fix problems with `vw_edit`. Otherwise call `vw_capture` once.
 5. **Every failure has `error.code` and `error.next_step`. Do what `next_step`
    says.** Never repeat an identical failing call. Never resend a write after
    `unknown_commit_state` or `still_running` (see Recovery).
@@ -62,13 +67,17 @@ vw_status(job_id="j42")                               # result of a long operati
 vw_status(idempotency_key="plan-a-001")              # was that write applied?
 vw_read(what="summary")                              # counts by type/layer/class (whole drawing)
 vw_read(what="query", type="wall", layer="Ground Floor", fields=["uuid","name","layer","class"], limit=200)
-vw_read(what="object", target="<uuid>")
+vw_read(what="object", target="<uuid>")              # compact geometry; detail=true for every record
+vw_read(what="query", search="kitchen")               # name / text / room label contains
+vw_read(what="parametric_schema", target="Window", search="sill")
 vw_read(what="selection")
 vw_read(what="documents")
 vw_capture()                                         # whole drawing, top view
 vw_capture(view="objects", objects=["<uuid>"], standard_view="iso", render_mode="opengl")
-vw_create(objects=[{"type":"wall","id":"w1","start":[0,0],"end":[5000,0]},{"type":"door","wall":"$w1","offset":1500}])
+vw_create(layer="Ground Floor", objects=[{"type":"wall","id":"w1","start":[0,0],"end":[5000,0]},{"type":"door","wall":"$w1","offset":1500}])
 vw_edit(changes=[{"op":"move","target":"<uuid>","by":[1000,0]}])
+vw_edit(changes=[{"op":"set","target":"<door uuid>","width":1000,"open_angle":45}])   # flat keys, routed by type
+vw_edit(changes=[{"op":"order","target":"<uuid>","position":"back"}])
 vw_edit(changes=[{"op":"set","target":"<uuid>","properties":{"fill":"Brick HF","line_style":"ISO-02 Dashed"}}])
 vw_create(objects=[{"type":"extrude","points":[[0,0],[8000,0],[8000,6000],[0,6000]],"height":9000}])
 vw_organize(kind="viewport", action="create", sheet="A-101", layers=["Ground Floor"], scale="1:100", view="top_plan")
@@ -113,10 +122,16 @@ vw_create(units="mm", objects=[
 ])
 ```
 
-- That single call is the whole job: one undo step, walls meeting at their ends
-  are joined automatically (`join_walls`, default true; the result lists
-  `wall_joins`), doors/windows are inserted into their walls. The result's
-  `ids` are the uuids - report them; do not verify object by object.
+- That single call is the whole job: walls meeting at their ends are joined
+  automatically (`join_walls`, default true; the result lists `wall_joins`),
+  doors/windows are inserted into their walls, spaces are sent behind the walls.
+  The result's `ids` are the uuids - report them; do not verify object by object.
+- `layer="Ground Floor"` (for the call, or `"layer"` per object) puts the objects
+  on that design layer; the receipt names the layer. An unknown layer fails with
+  close names (nothing is created) unless you pass `create_layer=true`.
+- The space `name` is the room label shown in the drawing (`room_name` in reads).
+- Plans of any size: more objects than the bridge takes per transaction run as
+  consecutive transactions automatically (`undo_steps` in the result).
 - Door/window defaults: door 900 x 2100; window 1200 x 1500, sill 900. Only
   `wall` and `at` (or `offset` along a same-call wall) are required. Do not use
   `type: "parametric"` with `DoorWidth`/`Width` parameters for doors/windows -
@@ -191,7 +206,11 @@ vw_edit(units="mm", changes=[
   {"op": "move", "targets": ["<uuid B>", "<uuid C>"], "by": [0, 500]},
   {"op": "rotate", "target": "<uuid D>", "angle": 90, "center": [2000, 1000]},
   {"op": "reshape", "target": "<uuid E>", "start": [0, 0], "end": [6000, 0]},
-  {"op": "parametric", "target": "<uuid F>", "plugin": "Door", "parameters": {"OpenAngle": 45}},
+  {"op": "parametric", "target": "<uuid F>", "parameters": {"open_angle": 45, "swing": "Out"}},
+  {"op": "set", "target": "<door uuid>", "width": 1000},
+  {"op": "set", "target": "<wall uuid>", "thickness": 300, "height": 2800},
+  {"op": "set", "target": "<space uuid>", "name": "Kitchen"},
+  {"op": "order", "target": "<uuid K>", "position": "back"},
   {"op": "duplicate", "target": "<uuid G>", "by": [1200, 0], "count": 3},
   {"op": "layer", "target": "selection", "layer": "Furniture"},
   {"op": "record", "target": "<uuid H>", "record": "Cost", "fields": {"Price": "120"}},
@@ -199,10 +218,19 @@ vw_edit(units="mm", changes=[
 ])
 ```
 
-`set` properties: name, class, fill_color, pen_color, fill_pattern, line_weight,
-opacity, plus graphic styles (recipe I): fill, line_style, font, text_size,
-text_style, align, valign, start_marker / end_marker / arrows. Other ops: scale (`factor`), mirror (`axis` "x"/"y" + `center`),
-class (`class`), group, ungroup, select / deselect (`targets` or `criteria`).
+`set` takes its values flat or in `properties`: name, class, fill_color, pen_color,
+fill_pattern, line_weight, opacity, graphic styles (recipe I): fill, line_style,
+font, text_size, text_style, align, valign, start_marker / end_marker / arrows -
+and type-specific keys routed by the target: door/window `width`, `height`,
+`sill` (window), `open_angle`, `swing` (In|Out), `hinge` (Left|Right),
+`configuration`; wall `thickness`, `height`, `style`; text `text`; Space `name`
+(the displayed room label), `room_id`. A key that does not fit the object fails
+with what IS settable on it. `parametric` takes the plug-in from the target and
+friendly names (`sill_height`, `open_angle`); real ids: `vw_read(what=
+"parametric_schema", target="Door", search="swing")`. `order`: `position`
+front|back|forward|backward (also `op: "send_to_back"`). Other ops: scale
+(`factor`), mirror (`axis` "x"/"y" + `center`), class (`class`), group, ungroup,
+select / deselect (`targets` or `criteria`). `preview=true` returns an image.
 Prefer `reshape` / `parametric` over delete-and-recreate. `dry_run=true`
 validates without changing anything.
 
@@ -215,7 +243,10 @@ validates without changing anything.
   `vw_capture(view="sheet", sheet="A-101")`, `vw_capture(view="saved_view", saved_view="Entrance")`.
 - The image comes back inline (plus a link to the full-resolution file). Look
   at it and say what you see (missing walls, openings outside walls, overlaps).
-  The user's view, layer and selection are restored automatically.
+  The user's view, layer and selection are restored automatically; if the result
+  says `restored: false`, tell the user which settings `restore_mismatch` lists.
+- Plan captures (`drawing`, `layer`, `objects`) default to Top/Plan; pass
+  `standard_view` for 3D.
 
 ### D. Layers, classes, stories, saved views
 
@@ -263,7 +294,7 @@ validates without changing anything.
   image_fill, tile, wall_style, slab_style, symbols ...; `source` = document or library); import from a file
   `vw_organize(kind="resource", action="import", source="C:\\Lib\\furniture.vwx", name="Chair", resource_type="symbols")`.
 - Sheets / viewports / annotations: `vw_read(what="sheets")`,
-  `vw_read(what="viewports", target="A-101")` (sheet name or uuid),
+  `vw_read(what="viewports", sheet="A-101")` (sheet name or uuid),
   `vw_read(what="annotations", target="Ground floor plan")` (viewport name or uuid). Writing them: recipe J.
 - Plan checks (overlaps, gaps, unhosted openings): `vw_read(what="plan_quality")`.
 - What this Vectorworks bridge supports: `vw_read(what="capabilities")`.

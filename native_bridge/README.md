@@ -10,8 +10,9 @@ non-modal, always-on connection to Vectorworks 2024/2025:
   main thread through a message-only window pump, gated by the UI state (idle / modal /
   tracking / loading / no_document). Long work becomes a job (`job_status`).
 - **Dialogs** — the Home screen, the update notice and the autosave "name and save" prompt are
-  dismissed when an agent request is blocked; message boxes a handler itself raises are
-  acknowledged and returned as text; every other dialog is reported, never touched.
+  dismissed when an agent request is blocked; message boxes and report dialogs a handler
+  itself raises (OK/Close/Done only, e.g. the IFC Export Report) are acknowledged with
+  `BM_CLICK` and returned as text; every other dialog is reported, never touched.
 - **Scripting** — `run_script` runs Python through `ScriptContext_Begin/RunEx` (or VectorScript)
   as one undo step with rollback; access violations are contained (`script_crashed`).
 
@@ -43,7 +44,7 @@ Vectorworks must be closed to replace the plug-in (the DLL stays loaded):
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -FullNative     # build + install + register
-py -3.12 native_bridge\live_acceptance_v2.py                                    # 59 live checks
+py -3.12 native_bridge\live_acceptance_v2.py                                    # live checks (--skip-ifc / --skip-pdf to shorten)
 ```
 
 On a test PC, `scripts\dev-restart-vectorworks.ps1` restarts Vectorworks (refuses if saved

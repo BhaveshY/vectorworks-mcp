@@ -1,7 +1,8 @@
 # ARGS = {"objects": [{"id", "kind": "extrude", "points": [[x, y] mm], "bottom": mm, "top": mm, "style": {}}
 #                    | {"id", "kind": "column", "plugin": "Column2", "at": [x, y] mm, "rotation": deg,
 #                       "lengths": {field: mm}, "fields": {field: text}, "style": {}}],
-#         "restyle": [{"id", "uuid", "style": {}}]}  (styles for objects the native create just made)
+#         "restyle": [{"id", "uuid", "style": {}}],  (styles for objects the native create just made)
+#         "post": [edit op, ...]}  (_ops.run_op: layer moves, stacking order; targets may be "$<id>" of this call)
 created = []
 styled = []
 PIO_EXPECT = []
@@ -63,7 +64,17 @@ for item in ARGS.get("objects") or []:
 for item in ARGS.get("restyle") or []:
     styled.append({"id": item["id"], "uuid": item["uuid"], "set": apply_style(resolve("uuid:" + item["uuid"]), item["style"])})
 
+post_done = []
+if ARGS.get("post"):
+    local = {row["id"]: row["uuid"] for row in created}
+    for item in ARGS["post"]:
+        item = dict(item, targets=["uuid:" + local[t[1:]] if t.startswith("$") and t[1:] in local else t
+                                   for t in item.get("targets", [])])
+        run_op(item, post_done)
+
 result = {"created": created, "styled": styled}
+if post_done:
+    result["post"] = post_done
 if PIO_EXPECT:
     result["pio_expect"] = PIO_EXPECT
 if IMPORTED:

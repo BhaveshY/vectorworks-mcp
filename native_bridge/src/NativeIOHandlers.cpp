@@ -1,11 +1,15 @@
 #include "StdAfx.h"
 
 #include "NativeIOHandlers.hpp"
+#include "ImageTranscode.hpp"
+#include "ScriptEngine.hpp"
 #include "WallInserts.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cstdio>
+#include <fstream>
 #include <filesystem>
 #include <iterator>
 #include <set>
@@ -278,6 +282,29 @@ VectorWorks::Filing::IFileIdentifierPtr FileIdentifier(const fs::path& path) {
     return identifier;
 }
 
+// "png" | "jpeg" | "bmp" | "tiff" | "" from the file's magic bytes.
+std::string ImageContainer(const fs::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    unsigned char head[8] = {};
+    input.read(reinterpret_cast<char*>(head), sizeof(head));
+    const std::streamsize got = input.gcount();
+    if (got >= 8 && head[0] == 0x89 && head[1] == 'P' && head[2] == 'N' && head[3] == 'G') return "png";
+    if (got >= 3 && head[0] == 0xFF && head[1] == 0xD8 && head[2] == 0xFF) return "jpeg";
+    if (got >= 2 && head[0] == 'B' && head[1] == 'M') return "bmp";
+    if (got >= 4 && ((head[0] == 'I' && head[1] == 'I') || (head[0] == 'M' && head[1] == 'M'))) return "tiff";
+    return std::string();
+}
+
+std::string ExpectedContainer(const fs::path& path) {
+    const std::string extension = Lower(PathText(path.extension()));
+    if (extension == ".png") return "png";
+    if (extension == ".jpg" || extension == ".jpeg") return "jpeg";
+    if (extension == ".bmp") return "bmp";
+    if (extension == ".tif" || extension == ".tiff") return "tiff";
+    return std::string();
+}
+
+
 Result ExportImageImpl(const ImageExportRequest& request, const std::string& operation) {
     const PreparedOutput output = PrepareOutput(
         request.output,
@@ -297,9 +324,40 @@ Result ExportImageImpl(const ImageExportRequest& request, const std::string& ope
             ErrorCode::SdkOperationFailed,
             "ISDK::ExportImage is unavailable or failed; no menu or dialog fallback was attempted");
     }
+    // Make the file's content match its extension (ExportImage writes JPEG).
+    const std::string written = ImageContainer(staged);
+    const std::string expected = ExpectedContainer(output.target);
+    std::string encoded = written;
+    std::string extra;
+    if (!written.empty() && !expected.empty() && written != expected) {
+        std::string transcodeError;
+        bool transcoded = false;
+        // ISDK::ExportImage writes JPEG data whatever the extension (live
+        // 2026-10-14: every ".png" capture was JPEG), which blurs plan lines.
+        {
+        const fs::path converted = UniqueSibling(output.target, "image-converted");
+        ScopedPathCleanup convertedCleanup(converted);
+        if (ImageTranscode::TranscodeFile(staged.wstring(), converted.wstring(), expected, transcodeError) &&
+            ImageContainer(converted) == expected) {
+            std::error_code error;
+            fs::remove(staged, error);
+            fs::rename(converted, staged, error);
+            transcoded = !error;
+            if (error) transcodeError = "could not replace the staged image";
+        }
+        }
+        if (transcoded) {
+            encoded = expected;
+            extra = ",\"transcoded_from\":\"" + written + "\"";
+        } else {
+            extra = ",\"transcode_error\":\"" + transcodeError + "\"";
+        }
+    }
     CommitStagedFile(staged, output);
     cleanup.Release();
-    return CompletedResult(operation, output);
+    Result completed = CompletedResult(operation, output);
+    completed.extraJson = ",\"encoded_format\":\"" + (encoded.empty() ? std::string("unknown") : encoded) + "\"" + extra;
+    return completed;
 }
 
 class PDFDocument final {
@@ -730,22 +788,163 @@ Result ExportDWG(const DWGExportRequest& request) {
 #endif
 }
 
+#if VECTORWORKS_MCP_NATIVE_IO_HAS_SDK
+namespace {
+
+std::int64_t IfcNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// "step" (ISO-10303-21 .ifc), "zip" (.ifczip) or "xml" (.ifcxml); "" when
+// the file is missing, empty or not recognisably IFC.
+std::string IfcFileKind(const fs::path& path) {
+    std::error_code error;
+    if (!fs::is_regular_file(path, error) || error) return std::string();
+    if (fs::file_size(path, error) == 0u || error) return std::string();
+    std::ifstream input(path, std::ios::binary);
+    char head[64] = {};
+    input.read(head, sizeof(head));
+    const std::string text(head, static_cast<std::size_t>(input.gcount()));
+    std::size_t start = 0;
+    if (text.compare(0, 3, "\xEF\xBB\xBF") == 0) start = 3;
+    while (start < text.size() && std::isspace(static_cast<unsigned char>(text[start]))) ++start;
+    if (text.compare(start, 12, "ISO-10303-21") == 0) return "step";
+    if (text.compare(0, 2, "PK") == 0) return "zip";
+    if (start < text.size() && text[start] == '<') return "xml";
+    return std::string();
+}
+
+std::string JsonEscape(const std::string& text) {
+    std::string out = "\"";
+    for (const unsigned char ch : text) {
+        switch (ch) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (ch < 0x20) {
+                    char buffer[8];
+                    std::snprintf(buffer, sizeof(buffer), "\\u%04x", ch);
+                    out += buffer;
+                } else {
+                    out += static_cast<char>(ch);
+                }
+        }
+    }
+    return out + "\"";
+}
+
+std::string JoinJson(const std::vector<std::string>& items) {
+    std::string json = "[";
+    for (std::size_t index = 0; index < items.size(); ++index) {
+        if (index) json += ",";
+        json += items[index];
+    }
+    return json + "]";
+}
+
+std::string IfcMethod(const IFCRequest& request) {
+    const std::string method = Lower(request.method.empty() ? std::string("auto") : request.method);
+    if (method != "auto" && method != "sdk" && method != "script") {
+        throw Error(ErrorCode::InvalidRequest, "method must be auto, sdk or script");
+    }
+    return method;
+}
+
+bool InternalScriptUsable(std::string& reason) {
+    if (!Scripting::ScriptingAllowed()) {
+        reason = "script_disabled";
+        return false;
+    }
+    if (Scripting::ScriptEnginePoisoned()) {
+        reason = "script_engine_unavailable";
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+#endif
+
+// IFC export (finding #17, 2026-10-14): IIFCSupport::ExportFile(bShowUI=false)
+// ran for minutes, showed the modal "IFC Export Report" inside the handler and
+// then returned a failure code. The report is now acknowledged by DialogWatch
+// (BM_CLICK on OK, its text is returned in `dismissed_dialogs`), and the
+// produced file -- not the VCOM result -- decides success: a recognisable IFC
+// file at the staging path is accepted (with the SDK status reported). If the
+// SDK call produced no file, vs.IFC_ExportNoUI(path) is tried through the
+// internal Python engine (method "auto").
 Result ExportIFC(const IFCRequest& request) {
 #if VECTORWORKS_MCP_NATIVE_IO_HAS_SDK
+    const std::string method = IfcMethod(request);
     const PreparedOutput output = PrepareOutput(request.output, {".ifc", ".ifczip", ".ifcxml"});
     const fs::path staged = UniqueSibling(output.target, "ifc");
     ScopedPathCleanup cleanup(staged);
-    auto identifier = FileIdentifier(staged);
-    VCOMPtr<VectorWorks::IFCLib::IIFCSupport> ifc(VectorWorks::IFCLib::IID_IFCSupport);
-    if (!ifc) {
-        throw Error(ErrorCode::InterfaceUnavailable, "IIFCSupport is unavailable in this Vectorworks runtime/license");
+    std::vector<std::string> attempts;
+    std::string usedMethod;
+    std::string fileKind;
+    if (method != "script") {
+        VCOMPtr<VectorWorks::IFCLib::IIFCSupport> ifc(VectorWorks::IFCLib::IID_IFCSupport);
+        if (!ifc) {
+            attempts.push_back("{\"method\":\"sdk:IIFCSupport::ExportFile\",\"ok\":false,\"error\":\"interface_unavailable\"}");
+        } else {
+            auto identifier = FileIdentifier(staged);
+            const std::int64_t started = IfcNowMs();
+            const VCOMError status = ifc->ExportFile(identifier, false);
+            const std::int64_t elapsed = IfcNowMs() - started;
+            fileKind = IfcFileKind(staged);
+            attempts.push_back("{\"method\":\"sdk:IIFCSupport::ExportFile\",\"ok\":" +
+                               std::string(fileKind.empty() ? "false" : "true") +
+                               ",\"vcom_result\":" + std::to_string(static_cast<long long>(status)) +
+                               ",\"sdk_reported_success\":" + (VCOM_FAILED(status) ? "false" : "true") +
+                               ",\"file_produced\":" + (fileKind.empty() ? "false" : "true") +
+                               ",\"elapsed_ms\":" + std::to_string(elapsed) + "}");
+            if (!fileKind.empty()) usedMethod = "sdk:IIFCSupport::ExportFile";
+        }
     }
-    if (VCOM_FAILED(ifc->ExportFile(identifier, false))) {
-        throw Error(ErrorCode::SdkOperationFailed, "silent IIFCSupport::ExportFile failed; no dialog fallback was attempted");
+    if (usedMethod.empty() && method != "sdk") {
+        std::string reason;
+        if (!InternalScriptUsable(reason)) {
+            attempts.push_back("{\"method\":\"script:vs.IFC_ExportNoUI\",\"ok\":false,\"skipped\":" + JsonEscape(reason) + "}");
+        } else {
+            std::error_code ignored;
+            fs::remove(staged, ignored);  // never accept a partial file of the first attempt
+            const std::int64_t started = IfcNowMs();
+            std::string scriptResult;
+            std::string scriptError;
+            try {
+                scriptResult = Scripting::RunInternalPython(
+                    "result = bool(vs.IFC_ExportNoUI(" + Scripting::PythonStringLiteral(PathText(staged)) + "))\n");
+            } catch (const std::exception& error) {
+                scriptError = error.what();
+            }
+            const std::int64_t elapsed = IfcNowMs() - started;
+            fileKind = IfcFileKind(staged);
+            std::string attempt = "{\"method\":\"script:vs.IFC_ExportNoUI\",\"ok\":" +
+                std::string(fileKind.empty() ? "false" : "true") +
+                ",\"returned\":" + (scriptResult.empty() ? std::string("null") : scriptResult) +
+                ",\"file_produced\":" + (fileKind.empty() ? "false" : "true") +
+                ",\"elapsed_ms\":" + std::to_string(elapsed);
+            if (!scriptError.empty()) attempt += ",\"error\":" + JsonEscape(scriptError.substr(0, 600));
+            attempts.push_back(attempt + "}");
+            if (!fileKind.empty()) usedMethod = "script:vs.IFC_ExportNoUI";
+        }
+    }
+    if (usedMethod.empty()) {
+        throw Error(
+            ErrorCode::SdkOperationFailed,
+            "IFC export produced no IFC file (no dialog fallback was attempted); attempts: " + JoinJson(attempts) +
+            "; see dismissed_dialogs for the IFC Export Report text");
     }
     CommitStagedFile(staged, output);
     cleanup.Release();
-    return CompletedResult("export_ifc", output);
+    Result completed = CompletedResult("export_ifc", output);
+    completed.extraJson = ",\"method\":" + JsonEscape(usedMethod) + ",\"ifc_format\":" + JsonEscape(fileKind) +
+        ",\"attempts\":" + JoinJson(attempts);
+    return completed;
 #else
     (void) request;
     throw Error(ErrorCode::InterfaceUnavailable, "IIFCSupport requires an SDK-backed bridge");
@@ -754,22 +953,74 @@ Result ExportIFC(const IFCRequest& request) {
 
 Result ImportIFC(const IFCRequest& request) {
 #if VECTORWORKS_MCP_NATIVE_IO_HAS_SDK
+    const std::string method = IfcMethod(request);
     const fs::path input = CanonicalExistingInput(request.absolutePath, {".ifc", ".ifczip", ".ifcxml"});
     DocumentMutationSnapshot before = CaptureDocumentMutationSnapshot();
-    auto identifier = FileIdentifier(input);
-    VCOMPtr<VectorWorks::IFCLib::IIFCSupport> ifc(VectorWorks::IFCLib::IID_IFCSupport);
-    if (!ifc) {
-        throw Error(ErrorCode::InterfaceUnavailable, "IIFCSupport is unavailable in this Vectorworks runtime/license");
+    std::vector<std::string> attempts;
+    std::string usedMethod;
+    DocumentMutationReceipt mutation;
+    bool haveMutation = false;
+    if (method != "script") {
+        VCOMPtr<VectorWorks::IFCLib::IIFCSupport> ifc(VectorWorks::IFCLib::IID_IFCSupport);
+        if (!ifc) {
+            attempts.push_back("{\"method\":\"sdk:IIFCSupport::ImportFile\",\"ok\":false,\"error\":\"interface_unavailable\"}");
+        } else {
+            auto identifier = FileIdentifier(input);
+            const std::int64_t started = IfcNowMs();
+            const VCOMError status = ifc->ImportFile(identifier, false);
+            const std::int64_t elapsed = IfcNowMs() - started;
+            mutation = BuildDocumentMutationReceipt(before, CaptureDocumentMutationSnapshot());
+            haveMutation = true;
+            const bool ok = !VCOM_FAILED(status) || mutation.verified;
+            attempts.push_back("{\"method\":\"sdk:IIFCSupport::ImportFile\",\"ok\":" + std::string(ok ? "true" : "false") +
+                               ",\"vcom_result\":" + std::to_string(static_cast<long long>(status)) +
+                               ",\"sdk_reported_success\":" + (VCOM_FAILED(status) ? "false" : "true") +
+                               ",\"document_changed\":" + (mutation.verified ? "true" : "false") +
+                               ",\"elapsed_ms\":" + std::to_string(elapsed) + "}");
+            if (ok) usedMethod = "sdk:IIFCSupport::ImportFile";
+        }
     }
-    if (VCOM_FAILED(ifc->ImportFile(identifier, false))) {
-        throw Error(ErrorCode::SdkOperationFailed, "silent IIFCSupport::ImportFile failed; no dialog fallback was attempted");
+    if (usedMethod.empty() && method != "sdk") {
+        std::string reason;
+        if (!InternalScriptUsable(reason)) {
+            attempts.push_back("{\"method\":\"script:vs.IFC_ImportNoUI\",\"ok\":false,\"skipped\":" + JsonEscape(reason) + "}");
+        } else {
+            const std::int64_t started = IfcNowMs();
+            std::string scriptError;
+            try {
+                Scripting::RunInternalPython(
+                    "vs.IFC_ImportNoUI(" + Scripting::PythonStringLiteral(PathText(input)) + ")\nresult = True\n");
+            } catch (const std::exception& error) {
+                scriptError = error.what();
+            }
+            const std::int64_t elapsed = IfcNowMs() - started;
+            mutation = BuildDocumentMutationReceipt(before, CaptureDocumentMutationSnapshot());
+            haveMutation = true;
+            std::string attempt = "{\"method\":\"script:vs.IFC_ImportNoUI\",\"ok\":" +
+                std::string(mutation.verified ? "true" : "false") +
+                ",\"document_changed\":" + (mutation.verified ? "true" : "false") +
+                ",\"elapsed_ms\":" + std::to_string(elapsed);
+            if (!scriptError.empty()) attempt += ",\"error\":" + JsonEscape(scriptError.substr(0, 600));
+            attempts.push_back(attempt + "}");
+            if (mutation.verified) usedMethod = "script:vs.IFC_ImportNoUI";
+        }
     }
-    DocumentMutationReceipt mutation = BuildDocumentMutationReceipt(std::move(before), CaptureDocumentMutationSnapshot());
+    if (usedMethod.empty()) {
+        throw Error(
+            ErrorCode::SdkOperationFailed,
+            "IFC import failed (no dialog fallback was attempted); attempts: " + JoinJson(attempts) +
+            "; see dismissed_dialogs for any IFC report text");
+    }
+    if (!haveMutation) mutation = BuildDocumentMutationReceipt(std::move(before), CaptureDocumentMutationSnapshot());
     std::error_code error;
     const std::uintmax_t size = fs::file_size(input, error);
     Result completed{"import_ifc", PathText(input), error ? 0u : size, false};
     completed.hasDocumentMutationReceipt = true;
     completed.documentMutationReceipt = std::move(mutation);
+    completed.extraJson = ",\"method\":" + JsonEscape(usedMethod) + ",\"attempts\":" + JoinJson(attempts);
+    if (!completed.documentMutationReceipt.verified) {
+        completed.extraJson += ",\"warnings\":[\"the IFC import reported success but no document change was observed\"]";
+    }
     return completed;
 #else
     (void) request;

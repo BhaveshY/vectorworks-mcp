@@ -150,6 +150,7 @@ Every main-thread result that is a JSON object gets an extra member
 | `script_engine_unavailable` | false | not_started | `run_script` / a Python-backed handler after an earlier `script_crashed` in this process; nothing ran; same `details` |
 | `capture_failed` | false | not_started | `capture_view` export failed for a non-I/O reason (view already restored; `details.restored`) |
 | `confirmation_required`, `already_exists`, `layer_not_empty` | false | not_started | organisation guards |
+| `layer_not_found` | false | not_started | `apply_operations` create op (or plan-level) `layer` names no layer of the active document; `details {operation, layer, available_layers}`; nothing was written |
 | `readback_mismatch` | false | committed | `set_view` readback differs; `details {previous, current}` |
 | `sdk_operation_failed`, `interface_unavailable` | false | varies | SDK call failed / interface missing |
 | `invalid_path`, `input_not_found`, `unsupported_extension`, `output_exists`, `replace_confirmation_required`, `output_verification_failed`, `native_io_error` | false | not_started (exports) / rolled_back (imports) | `NativeIO::Error` (export/import/capture) |
@@ -226,8 +227,29 @@ other dialog is reported, never touched. Triggers:
 - the socket thread waiting for a request (every 200 ms) while the gate is
   `modal`/`loading` or a handler runs.
 
+Buttons are pressed with `PostMessage(BM_CLICK)` to the button window
+(1.0.x; live 2026-10-14 `WM_COMMAND(id)` did not close the IFC Export
+Report, `BM_CLICK` did); every second attempt for the same window (≥ 1.5 s
+later) falls back to `WM_COMMAND(id, BN_CLICKED)` to the dialog.
+
+**Handler-owned acknowledgement.** While a bridge handler runs, a dialog that
+appeared during that handler (not open when it started), is dialog-like
+(`#32770` / `*Dlg*` / `*Dialog*` class), has no inputs (visible edit — except
+read-only edits —, combo box, list box, check box, radio button, slider) and
+whose visible enabled buttons are all in {OK, Close, Done, Save Report…, Help,
+Details…} (also German: Schließen, Fertig, Bericht speichern…, Hilfe) is
+acknowledged: OK, else Close/Schließen, else Done/Fertig is pressed — never
+Save Report, Help or Details. Any other button (Cancel, Yes/No, …) leaves the
+dialog untouched (reported as `modal_dialog`). The record is
+`{kind:"handler_message"|"handler_report", title, at, trigger, message,
+buttons:[labels], pressed:"OK", grid?:true, grid_rows_captured?:false}` —
+`handler_report` when the dialog has a report grid, more than one button, or
+"report"/"bericht" in its title. `message` is the visible static text (≤ 2000
+chars). Rows of report grids (e.g. BCGPGridCtrl in the IFC Export Report) are
+not window text and are not captured (`grid_rows_captured:false`).
+
 Results of requests during or before which a dialog was auto-dismissed carry
-`"dismissed_dialogs":[{kind,title,at,trigger}]` and, for the Home screen,
+`"dismissed_dialogs":[{kind,title,at,trigger,…}]` and, for the Home screen,
 `"home_dismissed":true` (in `details` for failures). With auto-dismissal
 disabled, closing the last document leaves the request running until the user
 closes the Home screen (the caller gets `still_running` + job id; nothing is
@@ -291,6 +313,7 @@ v2 fields:
 | `dismissed_dialogs` | array | last ≤ 5 auto/explicit dismissals `{kind,title,at,trigger}` |
 | `script_enabled` | bool | `run_script` allowed |
 | `script_engine` | "ok" \| "poisoned" | "poisoned" after a contained script crash (§6.4.1); then also `script_engine_fault` (hex code of the first fault) and `script_engine_faults` (count) |
+| `max_operations` | 2000 | largest `operation_count` of one `apply_operations` call (was 250) |
 
 ### `dismiss_home {wait_ms?=3000 (0–15000)}`
 
@@ -313,7 +336,10 @@ execution_context, may_write_document, destructive}`, `create_object_types`,
   main-thread action, false for socket-thread actions)
 - `limits`: `{max_frame_bytes, default_timeout_ms:25000, max_timeout_ms:600000,
   default_busy_wait_ms:3000, max_jobs:64, job_retention_ms:900000,
-  max_clients:16, client_idle_seconds:120}`
+  max_clients:16, client_idle_seconds:120, max_operations:2000}`
+- `object_read_features` additionally lists `op_layer`, `order_op`,
+  `auto_send_to_back`, `capture_isolation`, `compact_import_receipts`
+  (1.0.x feature flags; `capability_revision` stays 6).
 
 `run_script` is omitted from `implemented_actions` / `actions` when
 `VW_MCP_ALLOW_SCRIPT=0`.
@@ -493,7 +519,7 @@ in orthogonal projection.
 **`get_view {}`** (R) → view record.
 
 **`set_view {standard_view?, projection?, render_mode?, zoom?, center?, fit?,
-object_uuids?, margin_pct?, fit_layer?, saved_view?, layer?, clear_selection?,
+object_uuids?, margin_pct?, fill_pct?, fit_layer?, saved_view?, layer?, clear_selection?,
 fit_to_objects?}`** (R — changes view state only) →
 `{standard_view, projection, render_mode, fit_to_objects_applied,
 selection_cleared, previous:view, current:view, fit?:fit}` (the first five
@@ -508,35 +534,94 @@ are the v1 fields). Application order: `layer` (activate by name/`uuid:`),
   else the active layer). Legacy `fit_to_objects:true` ⇒ `fit:"drawing"`;
   `object_uuids` without `fit` ⇒ `fit:"objects"`.
 - Fit uses the union of `GetObjectBounds`: `SetViewCenter` + `SetZoomFactorN`
-  so bounds + `margin_pct` (default 5, 0–200 %) fill ≤ 85 % of the drawing
-  area. No `DoMenuName`, no select-all. Exact in plan views; in 3D views the
-  3D bounds are projected through the view matrix (best effort).
+  so bounds + `margin_pct` (default 5, 0–200 %) fill `fill_pct` (default
+  **90**, 20–98; was a fixed 85) % of the drawing area along the limiting
+  axis. In plan views the projected rect is measured with
+  `WorldRect2ViewRect` and the zoom refined (≤ 4 passes) until it fills
+  `fill_pct` ± 3 %. No `DoMenuName`, no select-all. In 3D views the 3D bounds
+  are projected through the view matrix (best effort, one pass). When the
+  standard view or projection changes together with a fit, the screen is
+  redrawn once before the fit is measured.
 - fit record: `{"applied":bool,"method":"bounds_plan"|"bounds_projected_3d_best_effort"|"no_objects"|"screen_size_unavailable"|"visible_extent_unavailable"|"zoom_out_of_range",
-  "bounds":{left,bottom,right,top,object_count}|null,"view_rect"?:[l,t,r,b]}`.
+  "bounds":{left,bottom,right,top,object_count}|null,"fill"?:0.9,"iterations"?:n,"view_rect"?:[l,t,r,b]}`
+  (`fill`: achieved long-side fraction of the drawing area, plan views).
 - `clear_selection:true` deselects everything (persistent in `set_view`).
 - Readback mismatch of standard view / projection / render mode →
   `readback_mismatch` (`commit_state:"committed"`).
 
 **`capture_view {path | file_path, format?, replace?, overwrite?,
-replace_confirmation?, fit?, object_uuids?, margin_pct?, fit_layer?,
+replace_confirmation?, fit?, object_uuids?, margin_pct?, fill_pct?, fit_layer?,
 standard_view?, projection?, render_mode?, layer?, saved_view?, zoom?,
 center?, clear_selection?, rect?, crop_to_fit?, restore?, update_viewports?,
-reset_plugin_objects?, export_georeferencing?, fit_to_objects?}`** (R):
+reset_plugin_objects?, export_georeferencing?, fit_to_objects?,
+capture_target?, plan_default?, isolate?}`** (R):
+
+**Capture target** (1.0.x). `capture_target` = `current` | `drawing` |
+`selection` | `objects` | `layer` | `sheet` | `saved_view`; when absent it is
+inferred: `saved_view` given → `saved_view`; `fit:"layer"` → `layer`, or
+`sheet` when that layer (`fit_layer`/`layer`, else the active layer) is a
+sheet layer; `fit:"objects"` (or `object_uuids`) → `objects`;
+`fit:"selection"` → `selection`; `fit:"drawing"` → `drawing`, or `sheet` when
+the active (or `layer`) layer is a sheet layer (then fitted to that sheet
+layer); no fit → `current`. An explicit `capture_target` supplies the matching
+`fit` when `fit` is absent (`layer`/`sheet` → `fit:"layer"`); `sheet` with a
+design layer → `invalid_request`. So the current host mapping
+(`view:"layer"` → `{layer, fit:"layer"}`, `view:"objects"` → `{fit:"objects",
+object_uuids}`, `view:"drawing"` → `{fit:"drawing"}`, `view:"current"` → no
+fit) needs no change; sending `capture_target` explicitly is recommended.
+
+- **Plan default** (`plan_default`, default true): for `drawing`, `layer`
+  and `objects` without `standard_view`, `projection` and `saved_view` the
+  capture uses Top/Plan (`standard_view` 7 + `projection` plan) instead of the
+  window's current (possibly iso/3D) view. `current`, `selection`,
+  `saved_view` and sheet captures keep the current view. Result
+  `plan_default_applied`.
+- **Isolation** (`isolate`, default true for `layer`, `sheet`, `objects`):
+  one layer (the requested design/sheet layer, or the single layer that holds
+  all `object_uuids`) → that layer is activated and Layer Options
+  (`varLayerOptions`) set to Active Only (1); objects on several layers →
+  Layer Options Show/Snap/Modify Others (5), those layers shown (visibility
+  0) and every other design layer hidden (−1, `ovLayerVisibility`). Class
+  Options Active Only / Gray Others / Gray-Snap Others (1/2/6) → Show/Snap/
+  Modify Others (5) (class visibilities are respected). Every changed value
+  is reverted after the export (also with `restore:false`) and verified.
+  Result `isolation:{applied, mode:"active_only"|"hidden_layers", layers:[names],
+  layer_options_before, layer_options_used, class_options_before,
+  class_options_used, hidden_layers}` (`{applied:false}` otherwise).
+  Layer switches into/out of a sheet layer use
+  `SetCurrentLayerN(layer, bAllowUnifiedViewMaintenance=true)`.
+
+Steps:
 
 1. Remembers the view (active layer, standard view, view matrix, projection,
-   render mode, zoom, centre) and the selection (`ForEachObjectN(allSelected)`).
-   With `saved_view` and `restore`, the view and class/layer visibilities are
-   also snapshotted natively with ISDK `ViewCreateCurrent` (an unnamed
-   in-memory view; restored with `ViewRestore`, freed with `ViewDelete`; no
-   saved-view object, no Python).
-2. Applies the temporary changes exactly like `set_view`, then `DrawScreen`.
+   render mode, zoom, centre), Layer/Class Options, every layer's visibility
+   and the selection (`ForEachObjectN(allSelected)`). With `restore`, the
+   view and class/layer visibilities are also snapshotted natively with ISDK
+   `ViewCreateCurrent` (an unnamed in-memory view; restored with
+   `ViewRestore`, freed with `ViewDelete`; no saved-view object, no Python) —
+   for every capture since 1.0.x (was: only with `saved_view`).
+2. Applies isolation, then the temporary view changes exactly like
+   `set_view`, then `DrawScreen`.
 3. `ExportImage` with `fExportRect` = `rect` (world coordinates, converted
    with `WorldRect2ViewRect`, clamped to the drawing area) or — when a plan
    view `fit` was applied and `crop_to_fit` (default true) — the fitted
-   bounds + margin; otherwise the whole drawing area.
-4. With `restore` (default **true**): restores layer, standard view, view
-   matrix, projection, render mode, zoom, centre and selection, `DrawScreen`,
-   and verifies (`restore_verified`).
+   bounds + margin; otherwise the whole drawing area. `ExportImage` renders at
+   screen resolution, so the image's long edge ≈ `fill_pct` × the drawing
+   area's long edge (≥ 1200 px when the drawing area is ≥ ~1340 px wide).
+4. With `restore` (default **true**): reverts isolation, `ViewRestore`s the
+   snapshot, then explicitly restores layer, standard view (before the
+   projection: Top/Plan = view 7 + plan projection), projection, view matrix
+   (user-defined views, or when the rotation still differs), render mode,
+   zoom, centre and selection, `DrawScreen`, and **re-reads** everything. If
+   any field differs a second pass runs (with an extra redraw).
+   `restored:true` only when the re-read state equals the state before the
+   capture; otherwise `restored:false` and
+   `restore_mismatch:[{field, before, after}]` with `field` in
+   `active_layer`, `standard_view`, `projection`, `render_mode`,
+   `view_matrix` (rotation part, tolerance 1e-6), `zoom` (relative 1e-4),
+   `center`, `layer_options`, `class_options`, `layer_visibility` (+`layer`),
+   `selection_count`, `exception`. Hosts must surface `restored:false` (the
+   user's view was not fully restored).
 
 `format`: `png` (default) or `jpg`/`jpeg`; an extension is appended to
 `path` when it has none (otherwise the extension decides). Existing files fail
@@ -548,13 +633,30 @@ reset_plugin_objects?, export_georeferencing?, fit_to_objects?}`** (R):
 
 Result: v1 fields `{"operation":"capture_view","path","size_bytes",
 "replaced_existing"}` plus `"width","height"` (pixels from the PNG/JPEG/BMP
-header; 0 if unknown), `"bytes"`, `"format"`, `"restored"`,
-`"restore_verified"` (view equal and same selection count after restore),
+header; 0 if unknown), `"bytes"`, `"format"`, `"capture_target"`,
+`"plan_default_applied"`, `"fit_to_objects_applied"` (the fit was applied;
+also in `view_used`), `"isolation"`, `"restored"` (verified, see step 4),
+`"restore_verified"` (same value as `restored`; legacy name),
+`"restore_passes"` (1–2, with `restore`), `"restore_mismatch"?`,
 `"view_used":view`, `"selection_count"`, `"fit"?`, `"export_rect"?:[l,t,r,b]`,
+`"drawing_area_px":[w,h]` (of the captured view), `"encoded_format"`
+(`png`/`jpeg`/… actually in the file), `"transcoded_from"?` / `"transcode_error"?`
+(see below),
 `"slow_render_mode":bool` (render mode other than wireframe/OpenGL — prefer
 `async`). Failures: I/O errors keep their `NativeIO` code (e.g.
-`output_exists`); other failures → `capture_failed` (`details.restored`). The
-view is restored before any error is returned.
+`output_exists`); other failures → `capture_failed` (`details.restored`,
+`details.restore_mismatch?`). The view is restored before any error is
+returned.
+
+**Image encoding (1.0.x).** `ISDK::ExportImage` writes JPEG data whatever the
+extension (live 2026-10-14: every `.png` capture was JPEG). `capture_view` and
+`export_image` now check the magic bytes and, when they do not match the
+extension, re-encode the staged file with WIC (Windows Imaging Component;
+PNG = lossless 24-bit) before it is moved into place: result
+`encoded_format:"png"`, `transcoded_from:"jpeg"`. If WIC fails the original
+data is kept and the result says `encoded_format:"jpeg"`,
+`transcode_error:"…"` (hosts must then use the real format, not the
+extension). Re-encoding does not remove JPEG artefacts already present.
 
 **`export_image {path | file_path, replace?, replace_confirmation?, rect?,
 update_viewports?, reset_plugin_objects?, export_georeferencing?}`** (R) →
@@ -761,18 +863,48 @@ All paths absolute; outputs are written to a staging file beside the target
 and renamed into place (an existing target needs `replace:true` +
 `replace_confirmation:"REPLACE_EXISTING_FILE"`). `path` is an alias of
 `file_path`. Result `{"operation","path","size_bytes","replaced_existing"}`;
-imports add `"document_mutation":{verified, before, after,
-created_object_uuids, deleted_object_uuids, created_layers, deleted_layers,
-changed_layers, active_layer_changed}`.
+imports (`import_dwg`, `import_ifc`) add `document_mutation`:
+
+- default (compact, 1.0.x, finding #21): `{verified, detail:false,
+  created_object_count, deleted_object_count,
+  created_object_uuids_sample:[≤ 20 uuids], created_layers:[≤ 50 names],
+  created_layer_count, deleted_layer_count, changed_layer_count,
+  object_count_before, object_count_after, active_layer_changed}`;
+- with param `detail:true` (the previous full receipt): `{verified,
+  detail:true, before, after, created_object_uuids, deleted_object_uuids,
+  created_layers:[{uuid,name,native_node_type,visible}], deleted_layers,
+  changed_layers, active_layer_changed}`.
 
 | action | params | notes |
 |---|---|---|
 | `export_pdf` (L) | `file_path`, `range?` (`current_view` \| `all_pages` \| `sheet`), `sheet?` (sheet layer name; required for `range:"sheet"`), `dpi?` (alias `resolution_dpi`; 72–2400, default 300), `current_view_only?` (v1), `update_viewports?`=false, `reset_plugin_objects?`=false, `recalculate_worksheets?`=true | `sheet` activates that sheet layer, exports its current view and restores the active layer |
 | `export_dwg` (L) | `file_path`, `update_viewports?`=false, `reset_plugin_objects?`=false, `recalculate_worksheets?`=true | silent `IImportExportDWG` |
 | `import_dwg` (W, L) | `file_path` (.dwg) | silent import + mutation receipt |
-| `export_ifc` (L) | `file_path` (.ifc/.ifczip/.ifcxml) | `IIFCSupport::ExportFile(…, bShowUI=false)`, current document IFC settings |
-| `import_ifc` (W, L) | `file_path` (.ifc/.ifczip/.ifcxml) | `IIFCSupport::ImportFile(…, bShowUI=false)` + mutation receipt |
+| `export_ifc` (L) | `file_path` (.ifc/.ifczip/.ifcxml), `method?` (`auto` \| `sdk` \| `script`, default `auto`) | see below |
+| `import_ifc` (W, L) | `file_path` (.ifc/.ifczip/.ifcxml), `method?` (as export), `detail?` | see below + mutation receipt |
 | `export_vectorworks_document` (L) | `file_path` (.vwx), `target_file_version?`=29 | `ExportDocument` |
+
+**IFC (1.0.x, finding #17).** `export_ifc`: `sdk` =
+`IIFCSupport::ExportFile(staging file, bShowUI=false)` with the document's IFC
+settings; success is decided by the **produced file** (exists, non-empty and
+starts with `ISO-10303-21` / `PK` / `<`), not by the VCOM result (live, the
+SDK returned a failure code after writing its report). `auto` (default) runs
+the SDK path and, when it produced no IFC file, `vs.IFC_ExportNoUI(path)`
+through the internal Python engine (skipped when scripting is disabled or the
+engine is poisoned); `script` runs only the latter. The modal "IFC Export
+Report" shown during the export is acknowledged by the handler-owned dialog
+rule (§3.1: OK pressed, title/text/buttons in `dismissed_dialogs`, kind
+`handler_report`). Result adds `"method":"sdk:IIFCSupport::ExportFile"|
+"script:vs.IFC_ExportNoUI"`, `"ifc_format":"step"|"zip"|"xml"` and
+`"attempts":[{method, ok, vcom_result?, sdk_reported_success?,
+file_produced, elapsed_ms, returned?, error?, skipped?}]`. No file →
+`sdk_operation_failed` whose message contains the attempts JSON.
+`import_ifc`: `sdk` = `IIFCSupport::ImportFile(…, bShowUI=false)` (accepted
+when the SDK reports success or the document changed); `auto` falls back to
+`vs.IFC_ImportNoUI(path)` when the SDK call failed without changing the
+document. Result adds `method`, `attempts:[{method, ok, vcom_result?,
+document_changed, elapsed_ms, error?}]` and
+`warnings:["…no document change was observed"]` when nothing changed.
 
 The v1 `expected_document_*` binding params, when present, are validated
 before and after these exports and around `capture_view` / `export_image`.
@@ -826,10 +958,49 @@ compared case-insensitively ignoring spaces, `_` and `-` (`"Stair"`,
   `fillColor`, `penColor`, `fillPattern`, `lineWeight`, `opacity`) →
   `{changed:true, handle, property_name, value, before, after}`; unknown /
   stale handle → `stale_reference`.
-- `apply_operations {idempotency_key?, operation_count, operation_N_json,
-  expected_document_*?}` — ops `create`, `set_property`, `object.transform`,
-  `object.reshape`, `object.update_parametric`, `object.duplicate`,
-  `object.delete`; targets `uuid:`, `name:`, `handle:`, `$local_ref`. v2:
+- `apply_operations {idempotency_key?, operation_count (1 … 2000; was 250),
+  operation_N_json, layer?, auto_order?, join_walls?, expected_document_*?}` —
+  ops `create`, `set_property`, `object.transform`, `object.reshape`,
+  `object.update_parametric`, `object.duplicate`, `object.delete`, `order`;
+  targets `uuid:`, `name:`, `handle:`, `$local_ref`. 1.0.x:
+  - **per-op layer** (finding #14): a `create` op accepts `layer` (layer
+    name, `name:<n>`, `uuid:<u>` or a bare layer uuid); the plan-level
+    `layer` param is the default for create ops without their own. All
+    layers are resolved before anything is written: an unknown layer fails
+    the call with `layer_not_found` (`commit_state:"not_started"`,
+    `details {operation, layer, available_layers}`) — never a silent fallback
+    to the active layer. A sheet layer is accepted only for 2D types (`rect`,
+    `oval`, `circle`, `line`, `arc`, `polygon`, `text`, `linear_dimension`,
+    `symbol`), else `invalid_request`. The bridge activates the op's layer
+    for the create (`SetCurrentLayerN`; create ops without `layer` go to the
+    layer that was active when the call started) and re-activates the
+    original active layer when the call ends (success or failure). Doors,
+    windows and wall-hosted plug-ins live in their host wall: the plan-level
+    `layer` does not apply to them, and an op-level `layer` that differs from
+    the wall's layer fails the plan (`invalid_request`, rolled back). Create receipts add `"layer":"<name>"` (the object's actual
+    layer). Walls on different layers are never auto-joined.
+  - **automatic stacking** (finding #1; plan-level `auto_order`, default
+    true): after all ops and wall joins, created Space objects and slabs whose
+    container is a layer are moved to the back of that layer
+    (`InsertObjectBefore(obj, FirstMemberObj(layer))`; relative creation
+    order kept, slabs behind spaces) so walls, doors and windows draw on top.
+    An explicit `order` op on such an object in the same plan wins. Result:
+    `transaction.sent_to_back` (count) and top-level copy `sent_to_back`;
+    `transaction.send_to_back_failed` (count, only when > 0 — a readback that
+    did not reach index 0; the plan still commits).
+  - **`order` op** (alias `object.order`): `{"op":"order","target":<ref>,
+    "position":"front"|"back"|"forward"|"backward"}` (aliases `to_front`,
+    `bring_to_front`, `to_back`, `send_to_back`, `bring_forward`,
+    `send_backward`). Moves the target within its container's stacking order
+    (first member = back): front = after the last member, back = before the
+    first, forward/backward = one step. Existing objects are registered with
+    `AddBeforeMoveObject` / `AddAfterMoveObject` (one Undo restores the
+    position); wall inserts (doors/windows) cannot be ordered
+    (`invalid_request`). A position readback mismatch fails the plan (rolled
+    back). An existing object ordered in a plan may not be deleted later in the
+    same plan. Receipt `{index, op:"order", target, uuid, position, changed,
+    stack_index_before, stack_index_after, stack_count, layer}` (indices
+    0-based from the back; `changed:false` when it already was there).
   - door / window / hosted `parametric` creates accept
     **`wall_uuid:"$<local_ref>"`** of a wall created earlier in the same
     transaction (walls + openings in ONE undo step); `wall_uuid:"uuid:<u>"` is
@@ -862,7 +1033,7 @@ compared case-insensitively ignoring spaces, `_` and `-` (`"Stair"`,
     1e-6 tolerance; string values that both parse as numbers ("900",
     "900.0", "900mm") compare numerically; `true/1/yes` and `false/0/no` are
     equal. A remaining mismatch names the written and read-back values.
-  Result `{ok:true, atomic:true, verified:true, replayed, idempotency_key?, transaction:{…}, wall_joins:[…]}`.
+  Result `{ok:true, atomic:true, verified:true, replayed, idempotency_key?, transaction:{…}, wall_joins:[…], sent_to_back:n}`.
 - `transaction_status {idempotency_key, expected_document_*?}` →
   `{state:"committed", recorded_result, current_objects_verified:false}` or
   `{state:"unknown", retry_safe:false, reason}`.

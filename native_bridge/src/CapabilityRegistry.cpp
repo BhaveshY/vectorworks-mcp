@@ -236,7 +236,7 @@ std::string ObjectKindDescriptorsJson(bool cadHandlersImplemented) {
 }
 
 std::string ObjectReadFeaturesJson(bool cadHandlersImplemented) {
-    return cadHandlersImplemented ? R"(["text_content","paged_object_reads","bound_apply_operations","wall_inserts","object_type_plugin_names","wall_joins"])" : "[]";
+    return cadHandlersImplemented ? R"(["text_content","paged_object_reads","bound_apply_operations","wall_inserts","object_type_plugin_names","wall_joins","op_layer","order_op","auto_send_to_back","capture_isolation","compact_import_receipts"])" : "[]";
 }
 
 std::string CapabilityFingerprint(bool cadHandlersImplemented) {

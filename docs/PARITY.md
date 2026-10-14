@@ -86,3 +86,15 @@ delete), class attributes, IFC import/export, PDF page ranges, transforms rotate
 group/ungroup, record formats (list/attach/set/detach/read), resource import from another file, composite `room`
 objects, unit strings, forgiving inputs, MCP resources (`vw://guide`, `vw://status`, `vw://documents`,
 `vw://capabilities`, `vw://capture/{name}`) and prompts.
+
+### Since the 2026-10-14 E2E campaign (findings #1-#21, host side)
+| finding | 1.0 call | bridge 1.0.0 (installed) | bridge 1.0.x flags |
+|---|---|---|---|
+| #14 layer placement | `vw_create(layer=..., objects=[{..., "layer": ...}], create_layer=true)` | native create on the active layer + `SetParent` move by script in the same call (read back) | `op_layer`: per-op `layer` in `apply_operations` |
+| #1 stacking | `vw_edit(changes=[{op:"order", position:"front"/"back"/"forward"/"backward"}])`; spaces behind walls on create | script `HMoveForward/HMoveBackward(h, toEnd)` | `order_op` / `auto_send_to_back` (native) |
+| #19 large plans | `vw_create` with any number of objects | consecutive transactions of <= 250 ops (`undo_steps`, compensating delete on failure) | one transaction up to `limits.max_operations` (2000) |
+| #2/#5/#7 typed edits | `vw_edit` set flat keys / `parametric` without plugin / Space `name` | `update_parametric` (friendly names) + script (`wall`, `text`, `space_name`) | same |
+| #3/#4/#6 compact reads | `vw_read(what="object")` / `parametric_schema` (`search`, `detail`) | script `object_detail` geometry | same |
+| #8/#9/#15/#18 | did-you-mean errors, `search=`, `sheet=` alias, `query` contains | host + snippets | same |
+| #20/#21 compact receipts | `uuids` list for > 20 objects; import/export without before/after dumps (`detail:true`) | host | `compact_import_receipts` |
+| preview | `preview` on `vw_create`, `vw_edit`, `vw_organize(kind="viewport")` | `capture_view` objects/sheet fit | `capture_target`, isolation, `fill_pct` |

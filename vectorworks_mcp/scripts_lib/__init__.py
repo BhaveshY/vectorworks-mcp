@@ -20,8 +20,9 @@ from typing import Any
 _DIR = Path(__file__).resolve().parent
 
 SNIPPETS = {
-    "edit_engine": "mirror, move to layer, group, ungroup, record fields, graphic styles (line type, hatch/gradient "
-                   "fill, font/size/style/alignment, markers)",
+    "edit_engine": "mirror, move to layer, stacking order, group, ungroup, record fields, wall thickness/height/style, "
+                   "text content, Space room name, graphic styles (line type, hatch/gradient fill, font/size/style/"
+                   "alignment, markers)",
     "viewport": "sheet viewports: create / set / update / delete (layers, scale, view, render, crop, classes, "
                 "annotations)",
     "massing": "3D massing: extrudes, Column plug-in, plug-in objects without a native schema provider",
@@ -32,7 +33,7 @@ SNIPPETS = {
     "import_image": "import a PNG/JPG/BMP/TIF image into the drawing",
     "resource_list": "list hatches, line types, text styles, wall/slab styles, gradients, image fills ...",
     "resource_import": "import a named resource (symbol, hatch, style ...) from another .vwx file",
-    "object_detail": "full object detail: bounds, layer, class, records, plug-in name",
+    "object_detail": "object detail: per-type geometry, layer, class, plug-in name (records with detail)",
 }
 
 # BuildResourceList object types = resource node types (SDK Objs.TDType.h; line types 96, text styles 109
@@ -51,8 +52,8 @@ RESOURCE_SYNONYMS = {"hatch": "hatches", "line_type": "line_types", "linetype": 
                      "texture": "textures", "symbol": "symbols", "worksheet": "worksheets", "record": "records",
                      "viewport_style": "viewport_styles", "fill": "hatches", "fills": "hatches"}
 # Snippets that need shared helper files (prepended after the prelude).
-INCLUDES = {"edit_engine": ["_style", "_pio"], "massing": ["_style", "_pio"], "viewport": ["_style"],
-            "resource_list": ["_style"], "pio_schema": ["_pio"]}
+INCLUDES = {"edit_engine": ["_style", "_pio", "_geometry", "_ops"], "massing": ["_style", "_pio", "_geometry", "_ops"],
+            "viewport": ["_style"], "resource_list": ["_style"], "pio_schema": ["_pio"], "object_detail": ["_geometry"]}
 
 
 def load(name: str) -> str:

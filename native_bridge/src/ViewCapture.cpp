@@ -191,6 +191,41 @@ MCObjectHandle FindLayer(const std::string& reference) {
     return nullptr;
 }
 
+// Switching into or out of a sheet layer goes through Vectorworks' unified
+// view maintenance (as the UI does), so the sheet is shown in sheet mode and
+// the design-layer view comes back when leaving it.
+void ActivateLayer(MCObjectHandle layer) {
+    if (!layer) return;
+    MCObjectHandle current = ActiveLayerHandle();
+    if (current == layer) return;
+    const bool sheetTransition = (current && LayerKind(current) == kLayerSheet) || LayerKind(layer) == kLayerSheet;
+    gSDK->SetCurrentLayerN(layer, sheetTransition);
+}
+
+// The layer that (transitively) contains an object: wall inserts live in the
+// wall, objects in groups in the group, ...
+MCObjectHandle LayerOfObject(MCObjectHandle object) {
+    for (MCObjectHandle current = object; current; current = gSDK->ParentObject(current)) {
+        if (gSDK->GetObjectTypeN(current) == kLayerNode) return current;
+    }
+    return nullptr;
+}
+
+short ReadShortProgramVariable(short selector, short fallback) {
+    short value = fallback;
+    if (gSDK->GetProgramVariable(selector, &value)) return value;
+    return fallback;
+}
+
+bool WriteShortProgramVariable(short selector, short value) {
+    return gSDK->SetProgramVariable(selector, &value) != 0;
+}
+
+void SetLayerVisibility(MCObjectHandle layer, short visibility) {
+    TVariableBlock block(visibility);
+    gSDK->SetObjectVariable(layer, ovLayerVisibility, block);
+}
+
 struct FullView {
     short standardView = 0;
     short projection = 0;
@@ -273,7 +308,7 @@ bool IsPlanView(const FullView& view) {
         (view.standardView == standardViewTop && view.projection == projectionOrthogonal);
 }
 
-std::string FullViewJson(const FullView& view) {
+std::string FullViewJson(const FullView& view, bool fitApplied = false) {
     std::string json = "{\"standard_view\":" + std::to_string(view.standardView);
     json += ",\"standard_view_name\":" + JsonString(NameFor(kStandardViews, view.standardView));
     json += ",\"projection\":" + std::to_string(view.projection);
@@ -294,38 +329,52 @@ std::string FullViewJson(const FullView& view) {
     json += ",\"plan_view\":";
     json += IsPlanView(view) ? "true" : "false";
     // Legacy (0.7) fields.
-    json += ",\"fit_to_objects_applied\":false,\"selection_cleared\":false}";
+    json += ",\"fit_to_objects_applied\":";
+    json += fitApplied ? "true" : "false";
+    json += ",\"selection_cleared\":false}";
     return json;
 }
 
+bool RotationDiffers(const TransformMatrix& a, const TransformMatrix& b, double tolerance) {
+    for (int row = 0; row < 3; ++row) {
+        for (int column = 0; column < 3; ++column) {
+            if (std::abs(a.mat[row][column] - b.mat[row][column]) > tolerance) return true;
+        }
+    }
+    return false;
+}
+
+bool MatrixDiffers(const TransformMatrix& a, const TransformMatrix& b) {
+    for (int row = 0; row < 4; ++row) {
+        for (int column = 0; column < 3; ++column) {
+            if (std::abs(a.mat[row][column] - b.mat[row][column]) > 1e-9) return true;
+        }
+    }
+    return false;
+}
+
+// Restores active layer, standard view, projection, view matrix, render mode,
+// zoom and centre. Order matters: the standard view first (it resets the
+// projection to orthogonal), then the projection (plan = Top/Plan), then the
+// matrix only for user-defined views or when the rotation still differs
+// (SetViewMatrix turns a standard view into a custom one).
 void RestoreFullView(const FullView& view) {
-    if (view.layer && ActiveLayerHandle() != view.layer) {
-        gSDK->SetCurrentLayerN(view.layer);
-    }
+    ActivateLayer(view.layer);
     MCObjectHandle layer = ActiveLayerHandle();
-    if (static_cast<short>(gSDK->GetCurrentView()) != view.standardView && view.standardView != standardViewUserDefined) {
+    if (view.standardView != standardViewUserDefined &&
+        static_cast<short>(gSDK->GetCurrentView()) != view.standardView) {
         gSDK->SetCurrentView(view.standardView, true);
-    }
-    if (view.hasMatrix && layer) {
-        // Only push the saved matrix when the standard view did not already
-        // reproduce it (SetViewMatrix can turn a standard view into a custom one).
-        TransformMatrix current;
-        gSDK->GetViewMatrix(layer, current);
-        bool differs = false;
-        for (int row = 0; row < 4 && !differs; ++row) {
-            for (int column = 0; column < 3; ++column) {
-                if (std::abs(current.mat[row][column] - view.matrix.mat[row][column]) > 1e-9) {
-                    differs = true;
-                    break;
-                }
-            }
-        }
-        if (differs) {
-            gSDK->SetViewMatrix(layer, view.matrix);
-        }
     }
     if (layer && static_cast<short>(gSDK->GetProjection(layer)) != view.projection) {
         gSDK->SetProjection(layer, view.projection, false, false);
+    }
+    if (view.hasMatrix && layer) {
+        TransformMatrix current;
+        gSDK->GetViewMatrix(layer, current);
+        const bool push = view.standardView == standardViewUserDefined
+            ? MatrixDiffers(current, view.matrix)
+            : RotationDiffers(current, view.matrix, 1e-6);
+        if (push) gSDK->SetViewMatrix(layer, view.matrix);
     }
     if (layer && static_cast<short>(gSDK->GetRenderMode(layer)) != view.renderMode) {
         gSDK->SetRenderMode(layer, view.renderMode, true, false);
@@ -336,13 +385,163 @@ void RestoreFullView(const FullView& view) {
     gSDK->SetViewCenter(view.center);
 }
 
-bool ViewsEquivalent(const FullView& a, const FullView& b) {
+// Field-by-field comparison of two view states. Returns one JSON object per
+// mismatching field: {"field","before","after"}.
+std::vector<std::string> CompareViews(const FullView& before, const FullView& after) {
+    std::vector<std::string> mismatches;
     const auto nearlyEqual = [](double x, double y) {
         return std::abs(x - y) <= std::max(1e-6, std::abs(x) * 1e-6) + 1e-3;
     };
-    return a.layer == b.layer && a.standardView == b.standardView && a.projection == b.projection &&
-        a.renderMode == b.renderMode && (!a.zoomKnown || !b.zoomKnown || nearlyEqual(a.zoom, b.zoom)) &&
-        nearlyEqual(a.center.x, b.center.x) && nearlyEqual(a.center.y, b.center.y);
+    const auto add = [&](const char* field, const std::string& a, const std::string& b) {
+        mismatches.push_back("{\"field\":" + JsonString(field) + ",\"before\":" + a + ",\"after\":" + b + "}");
+    };
+    if (before.layer != after.layer) add("active_layer", JsonString(before.layerName), JsonString(after.layerName));
+    if (before.standardView != after.standardView) {
+        add("standard_view", JsonString(NameFor(kStandardViews, before.standardView)),
+            JsonString(NameFor(kStandardViews, after.standardView)));
+    }
+    if (before.projection != after.projection) {
+        add("projection", JsonString(NameFor(kProjections, before.projection)),
+            JsonString(NameFor(kProjections, after.projection)));
+    }
+    if (before.renderMode != after.renderMode) {
+        add("render_mode", JsonString(NameFor(kRenderModes, before.renderMode)),
+            JsonString(NameFor(kRenderModes, after.renderMode)));
+    }
+    if (before.hasMatrix && after.hasMatrix && RotationDiffers(before.matrix, after.matrix, 1e-6)) {
+        add("view_matrix", MatrixJson(before.matrix), MatrixJson(after.matrix));
+    }
+    if (before.zoomKnown && after.zoomKnown &&
+        std::abs(before.zoom - after.zoom) > std::max(1e-9, std::abs(before.zoom) * 1e-4)) {
+        add("zoom", JsonNumber(before.zoom), JsonNumber(after.zoom));
+    }
+    if (!nearlyEqual(before.center.x, after.center.x) || !nearlyEqual(before.center.y, after.center.y)) {
+        add("center", "[" + JsonNumber(before.center.x) + "," + JsonNumber(before.center.y) + "]",
+            "[" + JsonNumber(after.center.x) + "," + JsonNumber(after.center.y) + "]");
+    }
+    return mismatches;
+}
+
+// ---- layer / class options and layer visibility (capture isolation) --------
+
+struct DisplayState {
+    short layerOptions = 0;
+    short classOptions = 0;
+    std::vector<std::pair<MCObjectHandle, short>> visibilities;  // every layer
+};
+
+DisplayState ReadDisplayState() {
+    DisplayState state;
+    state.layerOptions = ReadShortProgramVariable(varLayerOptions, 0);
+    state.classOptions = ReadShortProgramVariable(varClassOptions, 0);
+    for (MCObjectHandle layer : AllLayers()) state.visibilities.emplace_back(layer, LayerVisibility(layer));
+    return state;
+}
+
+std::vector<std::string> CompareDisplayStates(const DisplayState& before, const DisplayState& after) {
+    std::vector<std::string> mismatches;
+    if (before.layerOptions != after.layerOptions) {
+        mismatches.push_back("{\"field\":\"layer_options\",\"before\":" + std::to_string(before.layerOptions) +
+                             ",\"after\":" + std::to_string(after.layerOptions) + "}");
+    }
+    if (before.classOptions != after.classOptions) {
+        mismatches.push_back("{\"field\":\"class_options\",\"before\":" + std::to_string(before.classOptions) +
+                             ",\"after\":" + std::to_string(after.classOptions) + "}");
+    }
+    for (const auto& entry : before.visibilities) {
+        const auto found = std::find_if(after.visibilities.begin(), after.visibilities.end(),
+                                        [&](const auto& other) { return other.first == entry.first; });
+        if (found != after.visibilities.end() && found->second != entry.second) {
+            mismatches.push_back("{\"field\":\"layer_visibility\",\"layer\":" + JsonString(LayerName(entry.first)) +
+                                 ",\"before\":" + std::to_string(entry.second) +
+                                 ",\"after\":" + std::to_string(found->second) + "}");
+        }
+    }
+    return mismatches;
+}
+
+struct Isolation {
+    bool applied = false;
+    std::string mode;  // active_only | hidden_layers
+    std::vector<MCObjectHandle> layers;
+    short layerOptionsBefore = 0;
+    short classOptionsBefore = 0;
+    short layerOptionsUsed = 0;
+    short classOptionsUsed = 0;
+    bool layerOptionsChanged = false;
+    bool classOptionsChanged = false;
+    std::vector<std::pair<MCObjectHandle, short>> changedVisibilities;  // previous values
+    int hiddenLayers = 0;
+};
+
+// Shows only `layers` while capturing: one layer -> make it active and set
+// Layer Options to "Active Only"; several (objects on several layers) ->
+// "Show/Snap/Modify Others" with every other design layer hidden. Class
+// Options "Active Only"/"Gray Others" would hide or gray the content of other
+// classes, so they are switched to "Show/Snap/Modify Others" (class
+// visibilities themselves are respected). Everything is reverted by
+// RevertIsolation and verified by the capture restore.
+Isolation ApplyIsolation(const std::vector<MCObjectHandle>& layers) {
+    Isolation isolation;
+    if (layers.empty()) return isolation;
+    isolation.layers = layers;
+    isolation.layerOptionsBefore = ReadShortProgramVariable(varLayerOptions, 0);
+    isolation.classOptionsBefore = ReadShortProgramVariable(varClassOptions, 0);
+    isolation.applied = true;
+    ActivateLayer(layers.front());
+    short wantedLayerOptions = kLayersActive;
+    if (layers.size() == 1u) {
+        isolation.mode = "active_only";
+    } else {
+        isolation.mode = "hidden_layers";
+        wantedLayerOptions = kLayersShowSnapModifyOthers;
+        for (MCObjectHandle layer : AllLayers()) {
+            if (LayerKind(layer) != kLayerDesign) continue;
+            const bool wanted = std::find(layers.begin(), layers.end(), layer) != layers.end();
+            const short current = LayerVisibility(layer);
+            const short target = wanted ? 0 : -1;
+            if (current == target) continue;
+            isolation.changedVisibilities.emplace_back(layer, current);
+            SetLayerVisibility(layer, target);
+            if (!wanted) ++isolation.hiddenLayers;
+        }
+    }
+    if (isolation.layerOptionsBefore != wantedLayerOptions) {
+        isolation.layerOptionsChanged = WriteShortProgramVariable(varLayerOptions, wantedLayerOptions);
+    }
+    isolation.layerOptionsUsed = ReadShortProgramVariable(varLayerOptions, isolation.layerOptionsBefore);
+    if (isolation.classOptionsBefore == kClassesActive || isolation.classOptionsBefore == kClassesGrayOthers ||
+        isolation.classOptionsBefore == kClassesGraySnapOthers) {
+        isolation.classOptionsChanged = WriteShortProgramVariable(varClassOptions, kClassesShowSnapModifyOthers);
+    }
+    isolation.classOptionsUsed = ReadShortProgramVariable(varClassOptions, isolation.classOptionsBefore);
+    return isolation;
+}
+
+void RevertIsolation(const Isolation& isolation) {
+    if (!isolation.applied) return;
+    for (auto it = isolation.changedVisibilities.rbegin(); it != isolation.changedVisibilities.rend(); ++it) {
+        if (LayerVisibility(it->first) != it->second) SetLayerVisibility(it->first, it->second);
+    }
+    if (ReadShortProgramVariable(varLayerOptions, isolation.layerOptionsBefore) != isolation.layerOptionsBefore) {
+        WriteShortProgramVariable(varLayerOptions, isolation.layerOptionsBefore);
+    }
+    if (ReadShortProgramVariable(varClassOptions, isolation.classOptionsBefore) != isolation.classOptionsBefore) {
+        WriteShortProgramVariable(varClassOptions, isolation.classOptionsBefore);
+    }
+}
+
+std::string IsolationJson(const Isolation& isolation) {
+    if (!isolation.applied) return "{\"applied\":false}";
+    std::vector<std::string> names;
+    for (MCObjectHandle layer : isolation.layers) names.push_back(LayerName(layer));
+    return "{\"applied\":true,\"mode\":" + JsonString(isolation.mode) +
+        ",\"layers\":" + JsonStringArray(names) +
+        ",\"layer_options_before\":" + std::to_string(isolation.layerOptionsBefore) +
+        ",\"layer_options_used\":" + std::to_string(isolation.layerOptionsUsed) +
+        ",\"class_options_before\":" + std::to_string(isolation.classOptionsBefore) +
+        ",\"class_options_used\":" + std::to_string(isolation.classOptionsUsed) +
+        ",\"hidden_layers\":" + std::to_string(isolation.hiddenLayers) + "}";
 }
 
 // ---- selection --------------------------------------------------------------
@@ -475,12 +674,16 @@ struct FitResult {
     Bounds bounds;
     bool hasViewRect = false;
     ViewRect viewRect;
+    double fill = 0.0;       // achieved: long side of the fitted rect / drawing area (plan)
+    int iterations = 0;
 };
 
 // Fits bounds into the drawing window. In plan views this uses
-// WorldRect2ViewRect/ViewRect2WorldRect for an exact relative zoom; 3D views
-// use the view matrix projection (best effort).
-FitResult FitToBounds(Bounds bounds, double marginPct) {
+// WorldRect2ViewRect/ViewRect2WorldRect for an exact relative zoom and then
+// refines it by measuring the projected rect (up to 4 passes) until the
+// bounds + margin fill `fillFraction` of the drawing area; 3D views use the
+// view matrix projection (best effort).
+FitResult FitToBounds(Bounds bounds, double marginPct, double fillFraction) {
     FitResult result;
     result.bounds = bounds;
     if (!bounds.valid) {
@@ -539,7 +742,7 @@ FitResult FitToBounds(Bounds bounds, double marginPct) {
     }
     (void) visibleWidth;
     (void) visibleHeight;
-    const double factor = 0.85 * std::min(vw / targetWidth, vh / targetHeight);
+    const double factor = fillFraction * std::min(vw / targetWidth, vh / targetHeight);
     double newZoom = zoom * factor;
     if (!std::isfinite(newZoom) || newZoom <= 0.0) {
         result.method = "zoom_out_of_range";
@@ -549,10 +752,38 @@ FitResult FitToBounds(Bounds bounds, double marginPct) {
     gSDK->SetZoomFactorN(newZoom);
     gSDK->SetViewCenter(WorldPt(centerX, centerY));
     result.applied = true;
+    result.iterations = 1;
     result.method = plan ? "bounds_plan" : "bounds_projected_3d_best_effort";
     if (plan) {
+        const double areaWidth = std::max<double>(1.0, screen.Width());
+        const double areaHeight = std::max<double>(1.0, screen.Height());
+        const WorldRect world(bounds.left, bounds.top, bounds.right, bounds.bottom);
+        // Measure and refine: the zoom factor is not guaranteed to be linear
+        // in every Vectorworks configuration (rulers, docked palettes).
+        for (int pass = 0; pass < 4; ++pass) {
+            ViewRect measured;
+            if (!gSDK->WorldRect2ViewRect(world, measured)) break;
+            const double width = std::abs(static_cast<double>(measured.Right() - measured.Left()));
+            const double height = std::abs(static_cast<double>(measured.Bottom() - measured.Top()));
+            if (width < 1.0 || height < 1.0) break;
+            result.fill = std::max(width / areaWidth, height / areaHeight);
+            const double ratio = fillFraction * std::min(areaWidth / width, areaHeight / height);
+            if (!std::isfinite(ratio) || std::abs(ratio - 1.0) < 0.03) break;
+            double currentZoom = newZoom;
+            double readZoom = 0.0;
+            if (gSDK->GetProgramVariable(varWindowZoomFactor, &readZoom) && std::isfinite(readZoom) && readZoom > 0.0) {
+                currentZoom = readZoom;
+            }
+            newZoom = std::clamp(currentZoom * ratio, 1e-6, 1e6);
+            gSDK->SetZoomFactorN(newZoom);
+            gSDK->SetViewCenter(WorldPt(centerX, centerY));
+            ++result.iterations;
+        }
         ViewRect target;
-        if (gSDK->WorldRect2ViewRect(WorldRect(bounds.left, bounds.top, bounds.right, bounds.bottom), target)) {
+        if (gSDK->WorldRect2ViewRect(world, target)) {
+            const double width = std::abs(static_cast<double>(target.Right() - target.Left()));
+            const double height = std::abs(static_cast<double>(target.Bottom() - target.Top()));
+            result.fill = std::max(width / areaWidth, height / areaHeight);
             const ViewCoord left = std::max<ViewCoord>(screen.Left(), std::min(target.Left(), target.Right()));
             const ViewCoord right = std::min<ViewCoord>(screen.Right(), std::max(target.Left(), target.Right()));
             const ViewCoord top = std::max<ViewCoord>(screen.Top(), std::min(target.Top(), target.Bottom()));
@@ -571,6 +802,10 @@ std::string FitJson(const FitResult& fit) {
     json += fit.applied ? "true" : "false";
     json += ",\"method\":" + JsonString(fit.method);
     json += ",\"bounds\":" + fit.bounds.Json();
+    if (fit.applied) {
+        json += ",\"fill\":" + JsonNumber(std::round(fit.fill * 1000.0) / 1000.0);
+        json += ",\"iterations\":" + std::to_string(fit.iterations);
+    }
     if (fit.hasViewRect) {
         json += ",\"view_rect\":[" + std::to_string(fit.viewRect.Left()) + "," + std::to_string(fit.viewRect.Top()) +
             "," + std::to_string(fit.viewRect.Right()) + "," + std::to_string(fit.viewRect.Bottom()) + "]";
@@ -621,6 +856,7 @@ struct ViewChange {
     double centerX = 0.0, centerY = 0.0;
     std::string fit;
     double marginPct = 5.0;
+    double fillFraction = 0.9;
     std::string savedView;
     std::string layer;
     bool clearSelection = false;
@@ -654,6 +890,7 @@ ViewChange ParseViewChange(const Params& params) {
         change.fit = "objects";
     }
     change.marginPct = std::clamp(GetFiniteNumberParam(params, "margin_pct", 5.0), 0.0, 200.0);
+    change.fillFraction = std::clamp(GetFiniteNumberParam(params, "fill_pct", 90.0), 20.0, 98.0) / 100.0;
     change.savedView = GetStringParam(params, "saved_view");
     change.layer = GetStringParam(params, "layer");
     change.clearSelection = GetLenientBoolParam(params, "clear_selection", false);
@@ -673,7 +910,7 @@ AppliedChange ApplyViewChange(const ViewChange& change, const Params& params) {
         MCObjectHandle layer = FindLayer(change.layer);
         if (!layer) throw Protocol::BridgeError("invalid_request", "layer was not found: " + change.layer);
         if (ActiveLayerHandle() != layer) {
-            gSDK->SetCurrentLayerN(layer);
+            ActivateLayer(layer);
             applied.layerChanged = true;
         }
     }
@@ -691,6 +928,11 @@ AppliedChange ApplyViewChange(const ViewChange& change, const Params& params) {
     if (change.projection && layer) {
         gSDK->SetProjection(layer, *change.projection, false, false);
     }
+    if (!change.fit.empty() && (change.standardView || change.projection)) {
+        // Let the new orientation take effect before the fit measures it
+        // (before the render mode switch, so a slow render mode is not drawn twice).
+        gSDK->DrawScreen();
+    }
     if (change.renderMode && layer) {
         gSDK->SetRenderMode(layer, *change.renderMode, true, false);
     }
@@ -699,7 +941,7 @@ AppliedChange ApplyViewChange(const ViewChange& change, const Params& params) {
         applied.selectionCleared = true;
     }
     if (!change.fit.empty()) {
-        applied.fit = FitToBounds(CollectFitBounds(change.fit, params, layer), change.marginPct);
+        applied.fit = FitToBounds(CollectFitBounds(change.fit, params, layer), change.marginPct, change.fillFraction);
     }
     if (change.zoom) {
         gSDK->SetZoomFactorN(*change.zoom);
@@ -778,7 +1020,7 @@ NativeIO::OutputTarget ParseOutput(const Params& params, const std::string& defa
 std::string ResultJson(const NativeIO::Result& result) {
     return "{\"operation\":" + JsonString(result.operation) + ",\"path\":" + JsonString(result.canonicalPath) +
         ",\"size_bytes\":" + std::to_string(result.sizeBytes) + ",\"replaced_existing\":" +
-        (result.replacedExisting ? "true" : "false");
+        (result.replacedExisting ? "true" : "false") + result.extraJson;
 }
 
 bool ParseRect(const Params& params, double& l, double& b, double& r, double& t) {
@@ -879,6 +1121,117 @@ std::string HandleExportImage(const Params& params) {
         ",\"bytes\":" + std::to_string(result.sizeBytes) + "}";
 }
 
+namespace {
+
+// What a capture shows. Explicit via `capture_target`, otherwise inferred
+// from the fit/layer/saved_view params the host already sends.
+enum class CaptureTarget { Current, Drawing, Selection, Objects, Layer, Sheet, SavedView };
+
+const char* CaptureTargetName(CaptureTarget target) {
+    switch (target) {
+        case CaptureTarget::Drawing: return "drawing";
+        case CaptureTarget::Selection: return "selection";
+        case CaptureTarget::Objects: return "objects";
+        case CaptureTarget::Layer: return "layer";
+        case CaptureTarget::Sheet: return "sheet";
+        case CaptureTarget::SavedView: return "saved_view";
+        case CaptureTarget::Current: break;
+    }
+    return "current";
+}
+
+MCObjectHandle CaptureLayerReference(const Params& params) {
+    const std::string reference = GetStringParam(params, "fit_layer", GetStringParam(params, "layer"));
+    if (reference.empty()) return ActiveLayerHandle();
+    MCObjectHandle layer = FindLayer(reference);
+    if (!layer) throw Protocol::BridgeError("invalid_request", "layer was not found: " + reference);
+    return layer;
+}
+
+CaptureTarget ResolveCaptureTarget(const Params& params, ViewChange& change) {
+    std::string explicitTarget = ToLower(TrimCopy(GetStringParam(params, "capture_target")));
+    for (auto& ch : explicitTarget) {
+        if (ch == ' ' || ch == '-') ch = '_';
+    }
+    if (!explicitTarget.empty()) {
+        if (explicitTarget == "current" || explicitTarget == "screen") return CaptureTarget::Current;
+        if (explicitTarget == "saved_view") {
+            if (change.savedView.empty()) {
+                throw Protocol::BridgeError("invalid_request", "capture_target saved_view requires saved_view");
+            }
+            return CaptureTarget::SavedView;
+        }
+        if (explicitTarget == "drawing") {
+            if (change.fit.empty()) change.fit = "drawing";
+        } else if (explicitTarget == "selection") {
+            if (change.fit.empty()) change.fit = "selection";
+            return CaptureTarget::Selection;
+        } else if (explicitTarget == "objects") {
+            if (change.fit.empty()) change.fit = "objects";
+            return CaptureTarget::Objects;
+        } else if (explicitTarget == "layer" || explicitTarget == "sheet") {
+            if (change.fit.empty()) change.fit = "layer";
+            MCObjectHandle layer = CaptureLayerReference(params);
+            const bool sheet = LayerKind(layer) == kLayerSheet;
+            if (explicitTarget == "sheet" && !sheet) {
+                throw Protocol::BridgeError("invalid_request", "capture_target sheet needs a sheet layer: " + LayerName(layer));
+            }
+            return sheet ? CaptureTarget::Sheet : CaptureTarget::Layer;
+        } else {
+            throw Protocol::BridgeError(
+                "invalid_request",
+                "capture_target must be current, drawing, selection, objects, layer, sheet or saved_view");
+        }
+    }
+    if (!change.savedView.empty()) return CaptureTarget::SavedView;
+    if (change.fit == "layer") {
+        return LayerKind(CaptureLayerReference(params)) == kLayerSheet ? CaptureTarget::Sheet : CaptureTarget::Layer;
+    }
+    if (change.fit == "objects") return CaptureTarget::Objects;
+    if (change.fit == "selection") return CaptureTarget::Selection;
+    if (change.fit == "drawing") {
+        MCObjectHandle layer = change.layer.empty() ? ActiveLayerHandle() : FindLayer(change.layer);
+        if (layer && LayerKind(layer) == kLayerSheet) {
+            // fit:"drawing" on a sheet layer = that sheet layer's content.
+            change.fit = "layer";
+            return CaptureTarget::Sheet;
+        }
+        return CaptureTarget::Drawing;
+    }
+    return CaptureTarget::Current;
+}
+
+// Layers to isolate for layer / sheet / objects captures.
+std::vector<MCObjectHandle> IsolationLayers(CaptureTarget target, const Params& params) {
+    std::vector<MCObjectHandle> layers;
+    if (target == CaptureTarget::Layer || target == CaptureTarget::Sheet) {
+        if (MCObjectHandle layer = CaptureLayerReference(params)) layers.push_back(layer);
+    } else if (target == CaptureTarget::Objects) {
+        for (std::string uuid : GetStringListParam(params, "object_uuids")) {
+            if (uuid.rfind("uuid:", 0) == 0) uuid = uuid.substr(5);
+            MCObjectHandle object = gSDK->GetObjectByUuid(TXString(uuid.c_str()));
+            MCObjectHandle layer = object ? LayerOfObject(object) : nullptr;
+            if (layer && std::find(layers.begin(), layers.end(), layer) == layers.end()) layers.push_back(layer);
+        }
+        // Prefer the active layer as the "front" one when it is involved.
+        MCObjectHandle active = ActiveLayerHandle();
+        const auto found = std::find(layers.begin(), layers.end(), active);
+        if (found != layers.end() && found != layers.begin()) std::iter_swap(layers.begin(), found);
+    }
+    return layers;
+}
+
+std::string MismatchArrayJson(const std::vector<std::string>& mismatches) {
+    std::string json = "[";
+    for (std::size_t index = 0; index < mismatches.size(); ++index) {
+        if (index) json += ",";
+        json += mismatches[index];
+    }
+    return json + "]";
+}
+
+}  // namespace
+
 std::string HandleCaptureView(const Params& params) {
     std::string format = ToLower(GetStringParam(params, "format"));
     if (format == "jpeg") format = "jpg";
@@ -895,56 +1248,76 @@ std::string HandleCaptureView(const Params& params) {
     request.resetPlugInObjects = GetLenientBoolParam(params, "reset_plugin_objects", false);
     request.exportGeoreferencing = GetLenientBoolParam(params, "export_georeferencing", false);
     const bool restore = GetLenientBoolParam(params, "restore", true);
-    const ViewChange change = ParseViewChange(params);
+    ViewChange change = ParseViewChange(params);
+    const CaptureTarget target = ResolveCaptureTarget(params, change);
+
+    // (a) Plan work is captured in Top/Plan unless the caller asked for a view:
+    // never inherit an iso/3D state left in the window.
+    bool planDefaultApplied = false;
+    if ((target == CaptureTarget::Drawing || target == CaptureTarget::Layer || target == CaptureTarget::Objects) &&
+        !change.standardView && !change.projection && change.savedView.empty() &&
+        GetLenientBoolParam(params, "plan_default", true)) {
+        change.standardView = standardViewTop;
+        change.projection = projectionPlan;
+        planDefaultApplied = true;
+    }
+    const bool isolate = GetLenientBoolParam(
+        params, "isolate",
+        target == CaptureTarget::Layer || target == CaptureTarget::Sheet || target == CaptureTarget::Objects);
 
     const FullView before = ReadFullView();
+    const DisplayState displayBefore = ReadDisplayState();
     const std::vector<MCObjectHandle> selection = SelectedObjects();
     GSHandle restorePoint = nullptr;
-    if (restore && !change.savedView.empty()) {
-        // Snapshot view + class/layer visibilities natively (ISDK
-        // ViewCreateCurrent/ViewRestore/ViewDelete: an unnamed in-memory view,
-        // no saved-view object and no Python) so restoring a saved view for the
-        // capture is reversible.
+    if (restore) {
+        // Native unnamed view snapshot (ISDK ViewCreateCurrent/ViewRestore/
+        // ViewDelete): view orientation, projection, render mode, zoom/pan and
+        // class/layer visibilities. Restored first; then every field is
+        // restored explicitly and verified.
         restorePoint = gSDK->ViewCreateCurrent();
     }
 
-    bool restored = false;
-    bool restoreVerified = false;
     std::optional<NativeIO::Result> result;
     AppliedChange applied;
+    Isolation isolation;
     FullView used;
+    ViewRect usedAreaPx;
     std::string failure;
     std::exception_ptr failurePtr;
     try {
+        if (isolate && (target == CaptureTarget::Layer || target == CaptureTarget::Sheet ||
+                        target == CaptureTarget::Objects)) {
+            isolation = ApplyIsolation(IsolationLayers(target, params));
+        }
         applied = ApplyViewChange(change, params);
         gSDK->DrawScreen();
         used = ReadFullView();
         const ViewRect usedArea = DrawingArea(used);
+        usedAreaPx = usedArea;
         double l = 0, b = 0, r = 0, t = 0;
         if (ParseRect(params, l, b, r, t)) {
-            ViewRect target;
-            if (gSDK->WorldRect2ViewRect(WorldRect(l, t, r, b), target)) {
+            ViewRect rect;
+            if (gSDK->WorldRect2ViewRect(WorldRect(l, t, r, b), rect)) {
                 request.hasExportRect = true;
-                request.rectLeft = std::max<ViewCoord>(usedArea.Left(), std::min(target.Left(), target.Right()));
-                request.rectRight = std::min<ViewCoord>(usedArea.Right(), std::max(target.Left(), target.Right()));
-                request.rectTop = std::max<ViewCoord>(usedArea.Top(), std::min(target.Top(), target.Bottom()));
-                request.rectBottom = std::min<ViewCoord>(usedArea.Bottom(), std::max(target.Top(), target.Bottom()));
+                request.rectLeft = std::max<ViewCoord>(usedArea.Left(), std::min(rect.Left(), rect.Right()));
+                request.rectRight = std::min<ViewCoord>(usedArea.Right(), std::max(rect.Left(), rect.Right()));
+                request.rectTop = std::max<ViewCoord>(usedArea.Top(), std::min(rect.Top(), rect.Bottom()));
+                request.rectBottom = std::min<ViewCoord>(usedArea.Bottom(), std::max(rect.Top(), rect.Bottom()));
                 if (request.rectRight - request.rectLeft < 8 || request.rectBottom - request.rectTop < 8) {
                     request.hasExportRect = false;
                 }
             }
         } else if (applied.fit && applied.fit->hasViewRect && GetLenientBoolParam(params, "crop_to_fit", true)) {
             // The fit was computed before DrawScreen; recompute the crop.
-            ViewRect target;
-            const Bounds& bounds = applied.fit->bounds;
-            Bounds expanded = bounds;
+            ViewRect rect;
+            Bounds expanded = applied.fit->bounds;
             expanded.Expand(change.marginPct);
-            if (gSDK->WorldRect2ViewRect(WorldRect(expanded.left, expanded.top, expanded.right, expanded.bottom), target)) {
+            if (gSDK->WorldRect2ViewRect(WorldRect(expanded.left, expanded.top, expanded.right, expanded.bottom), rect)) {
                 request.hasExportRect = true;
-                request.rectLeft = std::max<ViewCoord>(usedArea.Left(), std::min(target.Left(), target.Right()));
-                request.rectRight = std::min<ViewCoord>(usedArea.Right(), std::max(target.Left(), target.Right()));
-                request.rectTop = std::max<ViewCoord>(usedArea.Top(), std::min(target.Top(), target.Bottom()));
-                request.rectBottom = std::min<ViewCoord>(usedArea.Bottom(), std::max(target.Top(), target.Bottom()));
+                request.rectLeft = std::max<ViewCoord>(usedArea.Left(), std::min(rect.Left(), rect.Right()));
+                request.rectRight = std::min<ViewCoord>(usedArea.Right(), std::max(rect.Left(), rect.Right()));
+                request.rectTop = std::max<ViewCoord>(usedArea.Top(), std::min(rect.Top(), rect.Bottom()));
+                request.rectBottom = std::min<ViewCoord>(usedArea.Bottom(), std::max(rect.Top(), rect.Bottom()));
                 if (request.rectRight - request.rectLeft < 8 || request.rectBottom - request.rectTop < 8) {
                     request.hasExportRect = false;
                 }
@@ -959,24 +1332,60 @@ std::string HandleCaptureView(const Params& params) {
         failurePtr = std::current_exception();
     }
 
+    // (d) Restore and verify: snapshot restore, then explicit restore of every
+    // field, re-read, and a second explicit pass if anything still differs.
+    // `restored` is true only when the re-read state matches.
+    bool restored = false;
+    std::vector<std::string> mismatches;
+    int restorePasses = 0;
     if (restore) {
         try {
-            if (restorePoint) {
-                GSHandle snapshot = restorePoint;
-                restorePoint = nullptr;
-                gSDK->ViewRestore(snapshot);
-                gSDK->ViewDelete(snapshot);
+            for (int pass = 0; pass < 2; ++pass) {
+                ++restorePasses;
+                RevertIsolation(isolation);
+                if (pass == 0 && restorePoint) gSDK->ViewRestore(restorePoint);
+                RevertIsolation(isolation);
+                RestoreFullView(before);
+                if (pass == 1) {
+                    // Some view changes only settle after a redraw.
+                    gSDK->DrawScreen();
+                    RestoreFullView(before);
+                }
+                RestoreSelection(selection);
+                gSDK->DrawScreen();
+                const FullView after = ReadFullView();
+                mismatches = CompareViews(before, after);
+                for (auto& entry : CompareDisplayStates(displayBefore, ReadDisplayState())) mismatches.push_back(entry);
+                const std::size_t selectionAfter = SelectedObjects().size();
+                if (selectionAfter != selection.size()) {
+                    mismatches.push_back("{\"field\":\"selection_count\",\"before\":" + std::to_string(selection.size()) +
+                                         ",\"after\":" + std::to_string(selectionAfter) + "}");
+                }
+                if (mismatches.empty()) break;
             }
-            RestoreFullView(before);
-            RestoreSelection(selection);
-            gSDK->DrawScreen();
-            const FullView after = ReadFullView();
-            const std::vector<MCObjectHandle> selectionAfter = SelectedObjects();
-            restored = true;
-            restoreVerified = ViewsEquivalent(before, after) && selectionAfter.size() == selection.size();
+            restored = mismatches.empty();
+        } catch (const std::exception& error) {
+            restored = false;
+            mismatches.push_back("{\"field\":\"exception\",\"before\":null,\"after\":" + JsonString(error.what()) + "}");
         } catch (...) {
             restored = false;
+            mismatches.push_back("{\"field\":\"exception\",\"before\":null,\"after\":null}");
         }
+    }
+    if (!restore) {
+        // restore:false keeps the captured view, but never the temporary
+        // layer/class isolation.
+        try {
+            RevertIsolation(isolation);
+        } catch (...) {
+        }
+    }
+    if (restorePoint) {
+        try {
+            gSDK->ViewDelete(restorePoint);
+        } catch (...) {
+        }
+        restorePoint = nullptr;
     }
     if (!result && failurePtr) {
         // Keep precise error codes (output_exists, stale_reference, ...); the
@@ -991,27 +1400,42 @@ std::string HandleCaptureView(const Params& params) {
         }
     }
     if (!result) {
-        throw Protocol::BridgeError(
-            "capture_failed", "capture_view failed: " + failure, false, "not_started",
-            std::string("{\"restored\":") + (restored ? "true" : "false") + "}");
+        std::string details = std::string("{\"restored\":") + (restored ? "true" : "false");
+        if (!mismatches.empty()) details += ",\"restore_mismatch\":" + MismatchArrayJson(mismatches);
+        throw Protocol::BridgeError("capture_failed", "capture_view failed: " + failure, false, "not_started",
+                                    details + "}");
     }
+    const bool fitApplied = applied.fit && applied.fit->applied;
     int width = 0, height = 0;
     ReadImageSize(result->canonicalPath, width, height);
     std::string json = ResultJson(*result);
     json += ",\"width\":" + std::to_string(width) + ",\"height\":" + std::to_string(height);
     json += ",\"bytes\":" + std::to_string(result->sizeBytes);
     json += ",\"format\":" + JsonString(format);
+    json += ",\"capture_target\":" + JsonString(CaptureTargetName(target));
+    json += ",\"plan_default_applied\":";
+    json += planDefaultApplied ? "true" : "false";
+    json += ",\"fit_to_objects_applied\":";
+    json += fitApplied ? "true" : "false";
+    json += ",\"isolation\":" + IsolationJson(isolation);
     json += ",\"restored\":";
     json += restored ? "true" : "false";
+    // Legacy alias of `restored` (both mean: re-read state equals the state
+    // before the capture).
     json += ",\"restore_verified\":";
-    json += restoreVerified ? "true" : "false";
-    json += ",\"view_used\":" + FullViewJson(used);
+    json += restored ? "true" : "false";
+    if (restore) {
+        json += ",\"restore_passes\":" + std::to_string(restorePasses);
+        if (!mismatches.empty()) json += ",\"restore_mismatch\":" + MismatchArrayJson(mismatches);
+    }
+    json += ",\"view_used\":" + FullViewJson(used, fitApplied);
     json += ",\"selection_count\":" + std::to_string(selection.size());
     if (applied.fit) json += ",\"fit\":" + FitJson(*applied.fit);
     if (request.hasExportRect) {
         json += ",\"export_rect\":[" + std::to_string(request.rectLeft) + "," + std::to_string(request.rectTop) + "," +
             std::to_string(request.rectRight) + "," + std::to_string(request.rectBottom) + "]";
     }
+    json += ",\"drawing_area_px\":[" + std::to_string(usedAreaPx.Width()) + "," + std::to_string(usedAreaPx.Height()) + "]";
     json += ",\"slow_render_mode\":";
     json += !IsFastRenderMode(used.renderMode) ? "true" : "false";
     json += "}";

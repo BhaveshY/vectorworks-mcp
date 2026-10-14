@@ -70,6 +70,10 @@ struct PDFExportRequest {
 struct IFCRequest {
     std::string absolutePath;
     OutputTarget output;
+    // "auto" (default): IIFCSupport first, then vs.IFC_ExportNoUI /
+    // vs.IFC_ImportNoUI through the internal Python engine if the SDK call
+    // produced no file / no document change. "sdk" or "script" force one path.
+    std::string method;
 };
 
 struct VectorworksExportRequest {
@@ -122,6 +126,9 @@ struct Result {
     bool replacedExisting = false;
     bool hasDocumentMutationReceipt = false;
     DocumentMutationReceipt documentMutationReceipt;
+    // Extra pre-rendered JSON members (each starting with ","), appended to
+    // the result object (e.g. IFC method/attempts, warnings).
+    std::string extraJson;
 };
 
 DocumentMutationSnapshot CaptureDocumentMutationSnapshot();

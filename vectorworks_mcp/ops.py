@@ -1137,9 +1137,10 @@ def _normalise_execute_operations(
     operations: list[dict[str, Any]],
     *,
     coordinate_units: CoordinateUnits = "mm",
+    max_operations: int = 250,
 ) -> list[dict[str, Any]]:
-    if not isinstance(operations, list) or not 1 <= len(operations) <= 250:
-        raise ValueError("operations must contain 1 to 250 typed operations")
+    if not isinstance(operations, list) or not 1 <= len(operations) <= max_operations:
+        raise ValueError(f"operations must contain 1 to {max_operations} typed operations")
     scale_to_mm = _coordinate_scale_to_mm(coordinate_units)
     normalised: list[dict[str, Any]] = []
     for index, operation in enumerate(operations, start=1):
@@ -1159,6 +1160,7 @@ def _normalise_execute_operations(
             "update_parametric",
             "duplicate",
             "delete",
+            "order",
         }
         if operation_type not in general_operation_types | _DOCUMENTATION_OPERATION_TYPES:
             raise ValueError(
@@ -1294,6 +1296,16 @@ def _normalise_execute_operations(
                     if key not in {"x1", "y1", "rotation", "require_wall_host", "role"}
                 },
             }
+        elif operation_type == "order":
+            unknown_params = sorted(set(params) - {"target", "ref", "position"})
+            if unknown_params:
+                raise ValueError(f"{label}.params has unsupported key(s): {', '.join(unknown_params)}")
+            position = str(params.get("position", "")).strip().lower()
+            if position not in {"front", "back", "forward", "backward"}:
+                raise ValueError(f"{label}.params.position must be front, back, forward or backward")
+            canonical_params = {"target": _normalise_atomic_target(params.get("target", params.get("ref")),
+                                                                   label=f"{label}.params.target"),
+                                "position": position}
         elif operation_type == "duplicate":
             unknown_params = sorted(set(params) - {"target", "ref", "dx", "dy"})
             if unknown_params:
@@ -1386,6 +1398,9 @@ def _compact_operation_receipts(value: Any) -> list[dict[str, Any]]:
             "plugin_name",
             "wall_host_preserved",
             "parameter_count",
+            "layer",
+            "position",
+            "changed",
         ):
             field = entry.get(key)
             if isinstance(field, (str, bool, int)) and not isinstance(field, float) and field != "":
@@ -1436,7 +1451,10 @@ def compile_documentation(normalised: list[dict[str, Any]]) -> list[dict[str, An
     return [_documentation_wire_operation(operation) for operation in normalised]
 
 
-def compile_general(normalised: list[dict[str, Any]]) -> list[dict[str, Any]]:
+ORDER_WIRE_OP = "order"  # native stacking-order op {target, position} (PROTOCOL.md 6.6)
+
+
+def compile_general(normalised: list[dict[str, Any]], max_operations: int = 250) -> list[dict[str, Any]]:
     """Normalised 0.7 operations -> native apply_operations wire ops."""
     wire_operations: list[dict[str, Any]] = []
     for operation in normalised:
@@ -1469,6 +1487,8 @@ def compile_general(normalised: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 wire_item["local_ref"] = operation_id
         elif operation_type == "delete":
             wire_item = {"op": "object.delete", "target": canonical["target"], "confirm": "DELETE_OBJECT"}
+        elif operation_type == "order":
+            wire_item = {"op": ORDER_WIRE_OP, "target": canonical["target"], "position": canonical["position"]}
         else:  # set_properties
             for edit in canonical["edits"]:
                 if any(edit.get(guard) for guard in ("expected_type", "expected_layer", "expected_name")):
@@ -1479,8 +1499,9 @@ def compile_general(normalised: list[dict[str, Any]]) -> list[dict[str, Any]]:
                                             "property_name": property_name, "value": value})
             continue
         wire_operations.append(wire_item)
-    if len(wire_operations) > 250:
-        raise ValueError(f"the plan expands to {len(wire_operations)} native operations; the limit is 250 per call")
+    if len(wire_operations) > max_operations:
+        raise ValueError(f"the plan expands to {len(wire_operations)} native operations; the limit is "
+                         f"{max_operations} per transaction")
     return wire_operations
 
 
@@ -1516,6 +1537,9 @@ def summarise_transaction(decoded: Any, expected_wire_count: int) -> dict[str, A
     }
     if decoded.get("replayed"):
         out["replayed"] = True
+    sent_back = decoded.get("sent_to_back", transaction.get("sent_to_back"))
+    if isinstance(sent_back, int) and not isinstance(sent_back, bool):
+        out["sent_to_back"] = sent_back
     joins = decoded.get("wall_joins")
     if not isinstance(joins, list):
         joins = transaction.get("wall_joins")
