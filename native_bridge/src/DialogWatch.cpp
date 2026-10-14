@@ -59,6 +59,13 @@ struct PostState {
     int attempts = 0;
 };
 std::map<HWND, PostState> gLastPost;  // guarded by gMutex
+// The Home screen is a CEF web view. Closing it while it is still loading, and
+// creating a document right after, crashed Vectorworks in libcef.dll
+// (0x80000003, live 2026-10-14). Home is closed only after it has been visible
+// for kHomeSettleMs; requests wait kHomeAfterCloseMs after the close.
+constexpr std::int64_t kHomeSettleMs = 2000;
+std::map<HWND, std::int64_t> gHomeFirstSeen;  // guarded by gMutex
+std::atomic<std::int64_t> gLastHomeCloseMs{0};
 
 std::string Narrow(const wchar_t* text, int length) {
     if (!text || length <= 0) return std::string();
@@ -458,6 +465,14 @@ bool TryDismissKnown(const char* trigger, bool automatic) {
             if (!IsWindow(it->first)) it = gLastPost.erase(it);
             else ++it;
         }
+        for (auto it = gHomeFirstSeen.begin(); it != gHomeFirstSeen.end();) {
+            if (!IsWindow(it->first)) it = gHomeFirstSeen.erase(it);
+            else ++it;
+        }
+        if (target->kind == "home") {
+            const std::int64_t firstSeen = gHomeFirstSeen.emplace(target->hwnd, now).first->second;
+            if (now - firstSeen < kHomeSettleMs) return false;  // let the web view finish loading
+        }
         const auto last = gLastPost.find(target->hwnd);
         if (last != gLastPost.end() && now - last->second.lastMs < kRepostIntervalMs) return false;
         const int attempt = last != gLastPost.end() ? last->second.attempts : 0;
@@ -473,6 +488,7 @@ bool TryDismissKnown(const char* trigger, bool automatic) {
             posted = PostMessageW(target->hwnd, WM_COMMAND, MAKEWPARAM(IDCANCEL, BN_CLICKED), 0);
         }
         if (!posted) return false;
+        if (target->kind == "home") gLastHomeCloseMs.store(now);
         gLastPost[target->hwnd] = PostState{now, attempt + 1};
         if (attempt == 0) Record(*target, trigger);
         return true;
@@ -488,6 +504,11 @@ bool TryDismissKnown(const char* trigger, bool automatic) {
 
 std::uint64_t DismissSequence() {
     return gSequence.load();
+}
+
+std::int64_t MsSinceHomeClose() {
+    const std::int64_t at = gLastHomeCloseMs.load();
+    return at ? SteadyNowMs() - at : std::numeric_limits<std::int64_t>::max();
 }
 
 std::string DismissedSinceJson(std::uint64_t after) {

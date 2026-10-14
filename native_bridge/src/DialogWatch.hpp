@@ -45,6 +45,8 @@ bool TryDismissKnown(const char* trigger, bool automatic);
 
 // Monotonic count of posted dismissals.
 std::uint64_t DismissSequence();
+// Milliseconds since the bridge last closed the Home screen (INT64_MAX if never).
+std::int64_t MsSinceHomeClose();
 // [{"kind","title","at","trigger"}] for dismissals with sequence > `after`.
 std::string DismissedSinceJson(std::uint64_t after);
 // True if a "home" dismissal happened after `after`.

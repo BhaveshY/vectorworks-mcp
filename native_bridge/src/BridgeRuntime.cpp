@@ -736,6 +736,9 @@ void OnVectorworksMainPluginEvent() {
                 DialogWatch::TryDismissKnown("blocked_request", true);
             }
             if (processed >= kMaxRequestsPerTick || SteadyNowMs() - tickStarted > kTickBudgetMs) break;
+            // The Home web view tears down asynchronously after it is closed;
+            // creating/opening a document in that window crashed CEF (live).
+            if (DialogWatch::MsSinceHomeClose() < 1000) break;
             auto entry = Scheduler().TryDequeue(state);
             if (!entry) break;
             const double queueWaitMs = std::chrono::duration<double, std::milli>(
