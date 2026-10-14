@@ -113,7 +113,7 @@ def handle(args: dict, ctx, warnings: list):
     a = C.lower_keys(args)
     units = C.units_name(a.get("units") or a.get("coordinate_units"))
     scale = C.scale_for(units)
-    objects = C.obj_list(a["objects"], "objects", example=[builders._example("wall")]) if a.get("objects") not in (None, "", []) else []
+    objects = C.obj_list(a["objects"], "objects", example=[builders._example("wall")], maximum=5000) if a.get("objects") not in (None, "", []) else []
     fp_counts = None
     if a.get("floor_plan") not in (None, "", {}):
         fp_objects, fp_warnings, fp_counts = floorplan.build(a["floor_plan"], scale)

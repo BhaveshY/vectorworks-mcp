@@ -176,6 +176,19 @@ def _job(bridge, inst, job_id: str) -> dict:
     except VWError as exc:
         return {"job_id": job_id, "state": "unknown", "error": exc.envelope()["error"]}
     state = {k: v for k, v in state.items() if k != "timing"}
+    result = state.get("result")
+    if isinstance(result, dict) and len(str(result)) > 4000:
+        # A finished apply/import job carries the full native receipt (300 KB for a big plan): keep it short.
+        tx = result.get("transaction") if isinstance(result.get("transaction"), dict) else {}
+        ops = tx.get("operations") if isinstance(tx.get("operations"), list) else []
+        state["result"] = {k: v for k, v in result.items() if k not in {"transaction", "created", "items"}
+                           and len(str(v)) < 600}
+        if tx:
+            state["result"]["transaction"] = {
+                "committed": tx.get("committed"), "applied_count": tx.get("applied_count"),
+                "uuids": [o.get("uuid") for o in ops if isinstance(o, dict) and o.get("uuid")][:2000],
+                "phases_ms": tx.get("phases_ms")}
+        state["result_compacted"] = True
     if state.get("state") in {"queued", "running"}:
         state["next_step"] = "Still running; call vw_status(job_id) again in a few seconds."
     return state

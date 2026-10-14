@@ -95,7 +95,11 @@ def run_general(host: Host, target: Target, normalised: list[dict], key: str, ct
     digest = plan_hash(digest_src)
     host.session.check_plan(key, digest)
     params = ops.wire_params(wire, key, {"join_walls": bool(join_walls)} if join_walls is not None else None)
-    result = host.call(target, "apply_operations", params, kind="write", ctx=ctx, idempotency_key=key)
+    # Big plans in big documents take longer than the default write budget; scale it, staying under the
+    # client's 180 s tool timeout (a timeout here returns still_running and the rest of the plan is skipped).
+    budget = min(170.0, max(45.0, 15.0 + 0.06 * len(wire)))
+    result = host.call(target, "apply_operations", params, kind="write", ctx=ctx, idempotency_key=key,
+                       budget_s=budget)
     summary = ops.summarise_transaction(result, len(wire))
     if not summary["committed"]:
         raise VWError("native_rejected", "Vectorworks did not commit the transaction; the document is unchanged.",

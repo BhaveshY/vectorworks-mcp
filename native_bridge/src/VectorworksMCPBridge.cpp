@@ -4094,6 +4094,12 @@ std::string HandleApplyOperations(const Params& params) {
     std::vector<MCObjectHandle> sendToBackSlabs;
     std::size_t sentToBack = 0;
     std::size_t sendToBackFailed = 0;
+    // Per-phase native time (ms) for large-document profiling (transaction.phases_ms).
+    double phaseCreateMs = 0, phaseLayerMs = 0, phaseJoinMs = 0, phaseOrderMs = 0, phaseResetMs = 0, phaseCommitMs = 0;
+    const auto phaseNow = [] { return std::chrono::steady_clock::now(); };
+    const auto phaseMs = [](std::chrono::steady_clock::time_point since) {
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - since).count();
+    };
     std::unordered_set<std::string> orderedExternalUuids;
 
     std::unordered_map<std::string, MCObjectHandle> localObjects;
@@ -4152,7 +4158,9 @@ std::string HandleApplyOperations(const Params& params) {
             if (!isWallCreate) {
                 // Join the walls created so far before anything is inserted
                 // into them (doors/windows) or they are edited.
+                const auto joinStart = phaseNow();
                 runPendingWallJoins();
+                phaseJoinMs += phaseMs(joinStart);
             }
             if (operation.kind == ApplyOperationKind::Create) {
                 std::vector<std::string> warnings;
@@ -4165,6 +4173,7 @@ std::string HandleApplyOperations(const Params& params) {
                 MCObjectHandle wantedLayer = operation.layerHandle
                     ? operation.layerHandle
                     : (wallHostedCreate ? nullptr : originalActiveLayer);
+                const auto layerStart = phaseNow();
                 if (wantedLayer && gSDK->GetActiveLayer() != wantedLayer) {
                     SwitchActiveLayer(wantedLayer);
                     if (gSDK->GetActiveLayer() != wantedLayer) {
@@ -4172,8 +4181,11 @@ std::string HandleApplyOperations(const Params& params) {
                             "Vectorworks did not switch to the requested layer: " + LayerDisplayName(wantedLayer));
                     }
                 }
+                phaseLayerMs += phaseMs(layerStart);
+                const auto createStart = phaseNow();
                 MCObjectHandle object = CreatePrimitiveFromSpec(
                     operation.primitive, transaction, &artifact, &warnings, &localObjects);
+                phaseCreateMs += phaseMs(createStart);
                 createdHandles.insert(object);
                 MCObjectHandle objectLayer = gSDK->SearchForAncestorType(kLayerNode, object);
                 if (operation.layerHandle && objectLayer != operation.layerHandle) {
@@ -4538,7 +4550,10 @@ std::string HandleApplyOperations(const Params& params) {
             throw std::runtime_error("unsupported prepared apply operation kind");
         }
 
+        auto tailStart = phaseNow();
         runPendingWallJoins();
+        phaseJoinMs += phaseMs(tailStart);
+        tailStart = phaseNow();
         // Finding #1: created spaces (and slabs) go to the back of their
         // layer so walls, doors and windows draw on top. Reverse creation
         // order keeps their relative order; slabs end up behind spaces.
@@ -4559,9 +4574,12 @@ std::string HandleApplyOperations(const Params& params) {
         };
         sendToBack(sendToBackSpaces);
         sendToBack(sendToBackSlabs);
+        phaseOrderMs += phaseMs(tailStart);
+        tailStart = phaseNow();
         for (MCObjectHandle object : dirtyHandles) {
             gSDK->ResetObject(object);
         }
+        phaseResetMs += phaseMs(tailStart);
         for (const auto& entry : externalMutationIds) {
             if (deletedExternalUuids.find(entry.first) != deletedExternalUuids.end()) {
                 continue;
@@ -4573,7 +4591,9 @@ std::string HandleApplyOperations(const Params& params) {
             }
             transaction.TrackExternalAfter(entry.second, finalHandle->second);
         }
+        tailStart = phaseNow();
         transactionReceipt = transaction.Commit();
+        phaseCommitMs += phaseMs(tailStart);
     } catch (...) {
         transaction.RollbackAndRethrow(std::current_exception());
     }
@@ -4620,6 +4640,12 @@ std::string HandleApplyOperations(const Params& params) {
     transactionJson += ",\"sent_to_back\":" + std::to_string(sentToBack);
     transactionJson += ",\"undo_committed\":";
     transactionJson += transactionReceipt.endUndoEventSucceeded ? "true" : "false";
+    transactionJson += ",\"phases_ms\":{\"create\":" + std::to_string(static_cast<long long>(phaseCreateMs)) +
+        ",\"layer_switch\":" + std::to_string(static_cast<long long>(phaseLayerMs)) +
+        ",\"wall_joins\":" + std::to_string(static_cast<long long>(phaseJoinMs)) +
+        ",\"send_to_back\":" + std::to_string(static_cast<long long>(phaseOrderMs)) +
+        ",\"reset\":" + std::to_string(static_cast<long long>(phaseResetMs)) +
+        ",\"commit\":" + std::to_string(static_cast<long long>(phaseCommitMs)) + "}";
     transactionJson += "}";
 
     StoreCachedApplyOperations(

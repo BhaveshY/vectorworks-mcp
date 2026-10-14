@@ -21,6 +21,10 @@ struct NativeTransaction::Artifact {
     bool semanticallyVerified = false;
     bool absentBeforeCommit = false;
     SemanticVerifier semanticVerifier;
+    // Handle at adoption. GetObjectByUuid walks the document (live 2026-10-14:
+    // 250 creates took 3.9 s in a 12k-object drawing vs 0.4 s in an empty one),
+    // so simple, never-regenerated objects reuse this handle (see Lookup).
+    MCObjectHandle handle = nullptr;
 };
 
 struct NativeTransaction::ExternalMutation {
@@ -123,6 +127,7 @@ ArtifactId NativeTransaction::AdoptFinal(
     artifact.role = ArtifactRole::FinalObject;
     artifact.expectedNodeType = expectedNodeType;
     artifact.semanticVerifier = std::move(semanticVerifier);
+    artifact.handle = handle;
     // The push happens while the creator's local guard is still active. If
     // allocation fails, ownership has not transferred and the guard deletes.
     artifacts_.push_back(std::move(artifact));
@@ -292,9 +297,25 @@ void NativeTransaction::TrackExternalDeleted(ExternalMutationId id) {
     mutation.afterRequired = false;
 }
 
+namespace {
+// Simple objects (lines, rects, polys, text...) are never regenerated or
+// replaced by Vectorworks while the transaction runs, so their adoption handle
+// stays valid while the artifact is Owned; compound objects (walls, plug-ins,
+// slabs, roofs, spaces) may be rebuilt and are always re-resolved by UUID.
+template <class A>
+MCObjectHandle FastLookup(VectorWorks::ISDK& sdk, const A& artifact) {
+    if (artifact.family == ObjectFamily::Simple && artifact.handle &&
+        artifact.disposition == ArtifactDisposition::Owned &&
+        sdk.GetObjectTypeN(artifact.handle) == artifact.expectedNodeType) {
+        return artifact.handle;
+    }
+    return sdk.GetObjectByUuid(TXString(artifact.uuid.c_str()));
+}
+}  // namespace
+
 MCObjectHandle NativeTransaction::Resolve(ArtifactId id) const {
     const Artifact& artifact = RequireArtifact(id);
-    return sdk_.GetObjectByUuid(TXString(artifact.uuid.c_str()));
+    return FastLookup(sdk_, artifact);
 }
 
 const std::string& NativeTransaction::Uuid(ArtifactId id) const {
@@ -438,7 +459,7 @@ void NativeTransaction::VerifyFinalObjects() {
         if (artifact.disposition == ArtifactDisposition::RemovedBeforeCommit) {
             continue;
         }
-        MCObjectHandle handle = sdk_.GetObjectByUuid(TXString(artifact.uuid.c_str()));
+        MCObjectHandle handle = FastLookup(sdk_, artifact);
         if (!handle) {
             throw std::runtime_error(
                 "Vectorworks final object disappeared before commit: " + artifact.uuid);
@@ -452,7 +473,7 @@ void NativeTransaction::VerifyFinalObjects() {
 
         // A verifier may reset/regenerate a compound object. Re-resolve from
         // UUID instead of trusting the pre-verification raw handle.
-        handle = sdk_.GetObjectByUuid(TXString(artifact.uuid.c_str()));
+        handle = FastLookup(sdk_, artifact);
         if (!handle || sdk_.GetObjectTypeN(handle) != artifact.expectedNodeType) {
             throw std::runtime_error(
                 "Vectorworks final object failed identity readback after semantic verification: " +
@@ -471,7 +492,7 @@ void NativeTransaction::RegisterFinalObjects() {
         if (artifact.disposition == ArtifactDisposition::RemovedBeforeCommit) {
             continue;
         }
-        MCObjectHandle handle = sdk_.GetObjectByUuid(TXString(artifact.uuid.c_str()));
+        MCObjectHandle handle = FastLookup(sdk_, artifact);
         if (!handle) {
             throw std::runtime_error(
                 "Vectorworks final object disappeared before undo registration: " + artifact.uuid);

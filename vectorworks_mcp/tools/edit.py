@@ -69,7 +69,7 @@ def handle(args: dict, ctx, warnings: list):
     if raw_changes is None and ("op" in a or "action" in a):
         raw_changes = [{k: v for k, v in a.items() if k not in {"units", "document", "dry_run", "idempotency_key",
                                                                  "preview"}}]
-    changes = C.obj_list(raw_changes, "changes", example=EXAMPLE)
+    changes = C.obj_list(raw_changes, "changes", example=EXAMPLE, maximum=2000)
     units = C.units_name(a.get("units") or a.get("coordinate_units"))
     scale = C.scale_for(units)
     dry_run = C.boolean(a.get("dry_run", False), "dry_run")
