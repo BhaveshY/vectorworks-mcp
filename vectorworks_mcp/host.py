@@ -41,6 +41,10 @@ class Host:
              ctx: Optional[CallContext] = None, idempotency_key: Optional[str] = None, budget_s: Optional[float] = None) -> Any:
         merged = dict(params or {})
         merged.update(target.params)
+        if action in {"capture_view", "export_image"}:
+            # Bridge builds before 7f22b11 default to undo-and-remove for the capture scale boost, which crashed
+            # Vectorworks right after doors/windows were created (live 2026-10-14): always ask for the explicit restore.
+            merged.setdefault("scale_boost_undo", "off")
         progress = ctx.report_progress if ctx is not None else None
         cancelled = ctx.cancelled if ctx is not None else None
         result = self.bridge.call(target.inst, action, merged, kind=kind, idempotency_key=idempotency_key,
