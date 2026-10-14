@@ -11,11 +11,13 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <functional>
 #include <iomanip>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <unordered_set>
+#include <utility>
 
 namespace VectorworksMCP {
 namespace {
@@ -424,34 +426,41 @@ void DeleteInsertAndBreak(MCObjectHandle object, MCObjectHandle wall) {
 // Vectorworks keeps the objects inserted in a wall in two places: the wall's
 // member list AND a symbol break (kSymbolBreak, SymbolBreakType.theSymbol)
 // that positions the insert along the wall. AddObjectToContainer only does the
-// first; a wall regeneration rebuilds its inserts from the break list, and an
-// insert without a break is an orphan that Vectorworks may drop (live
-// 2026-10-14: GetObjectWallOffset() returned False for every bridge-created
-// door/window, AddSymToWall adds a break). This registers the break exactly
-// like an interactive insertion: centre insertion, full break with caps, the
-// offset of (x, y) projected onto the wall axis, mirrored (rightSide + flipH
-// = 180 degrees) only when the requested rotation is opposite to the wall.
+// first; an insert without a break may be dropped when Vectorworks rebuilds the
+// wall (class change, move, reset). Live history (VW 2024):
+//  - before 714c15d: AddObjectToContainer only; creates succeeded, the
+//    openings had no break and were dropped by later wall edits;
+//  - 714c15d: AddObjectToContainer + ISDK::AddBreak registered NO break, and
+//    the wall ResetObject added to prove survival made every door/window
+//    create fail ("final object disappeared before commit");
+//  - vs.AddSymToWall (Python) does register a break; the MCP host now creates
+//    doors/windows that way.
+// The native path therefore treats the break as best effort: it never fails a
+// create because of break handling and never regenerates the wall itself.
 struct WallBreakRegistration {
     bool registered = false;
-    bool preexisting = false;
     double offset = 0.0;
-    std::string note;
+    std::string method;                 // how the break was registered (empty = none)
+    std::vector<std::string> attempts;  // diagnostics, one entry per attempt
+    MCObjectHandle object = nullptr;    // insert handle after the attempts
 };
 
-WallBreakRegistration EnsureWallSymbolBreak(
-    MCObjectHandle object,
+// Break data of an interactive centre insertion: full break with caps, the
+// offset of (x, y) projected onto the wall axis (clamped to the wall),
+// mirrored (rightSide + flipH = 180 degrees) only when the requested rotation
+// is opposite to the wall direction.
+struct SymbolBreakPlacement {
+    bool valid = false;
+    double along = 0.0;
+    SymbolBreakType data;
+};
+
+SymbolBreakPlacement ComputeSymbolBreakPlacement(
     MCObjectHandle wall,
     double x,
     double y,
     double rotationDegrees) {
-    WallBreakRegistration result;
-    double existingOffset = 0.0;
-    if (FindWallSymbolBreak(wall, object, &existingOffset) >= 0) {
-        result.registered = true;
-        result.preexisting = true;
-        result.offset = existingOffset;
-        return result;
-    }
+    SymbolBreakPlacement placement;
     WorldPt start;
     WorldPt end;
     gSDK->GetEndPoints(wall, start, end);
@@ -459,36 +468,97 @@ WallBreakRegistration EnsureWallSymbolBreak(
     const double dy = end.y - start.y;
     const double length = std::hypot(dx, dy);
     if (!std::isfinite(length) || length <= 1e-6) {
-        result.note = "wall has no measurable axis";
-        return result;
+        return placement;
     }
     double along = ((x - start.x) * dx + (y - start.y) * dy) / length;
     if (!std::isfinite(along)) {
         along = length / 2.0;
     }
-    along = std::clamp(along, 0.0, length);
-    SymbolBreakType data;
-    data.theSymbol = object;
-    data.insertMode = kSymInsertOnCenter;
-    data.breakMode = kSymFullBreakWithCaps;
-    data.height = 0.0;
+    placement.along = std::clamp(along, 0.0, length);
+    placement.data.insertMode = kSymInsertOnCenter;
+    placement.data.breakMode = kSymFullBreakWithCaps;
+    placement.data.height = 0.0;
     const double wallAngle = std::atan2(dy, dx) * 180.0 / 3.14159265358979323846;
     double relative = std::fmod(rotationDegrees - wallAngle, 360.0);
     if (relative > 180.0) relative -= 360.0;
     if (relative <= -180.0) relative += 360.0;
     if (std::abs(std::abs(relative) - 180.0) < 1.0) {
-        data.rightSide = true;
-        data.flipH = true;
+        placement.data.rightSide = true;
+        placement.data.flipH = true;
     }
-    gSDK->AddBreak(wall, along, kSymbolBreak, &data);
-    double registeredOffset = 0.0;
-    if (FindWallSymbolBreak(wall, object, &registeredOffset) >= 0) {
-        result.registered = true;
-        result.offset = registeredOffset;
-    } else {
-        result.note = "ISDK::AddBreak did not register a symbol break for the insert";
+    placement.valid = true;
+    return placement;
+}
+
+// (index, theSymbol) of every symbol break of `wall`.
+std::vector<std::pair<Sint32, MCObjectHandle>> ListWallSymbolBreaks(MCObjectHandle wall) {
+    std::vector<std::pair<Sint32, MCObjectHandle>> breaks;
+    if (!wall || gSDK->GetObjectTypeN(wall) != kWallNode) {
+        return breaks;
     }
-    return result;
+    gSDK->ForEachBreakN(
+        wall,
+        [&](MCObjectHandle, Sint32 index, WorldCoord, Sint32 breakType, void* breakData) -> bool {
+            if (breakType == kSymbolBreak) {
+                breaks.emplace_back(
+                    index,
+                    breakData ? static_cast<const SymbolBreakType*>(breakData)->theSymbol : nullptr);
+            }
+            return false;
+        });
+    return breaks;
+}
+
+// Removes symbol breaks that appeared since `before` and do not reference a
+// symbol that was already there (an AddBreak that registered something other
+// than our insert must not leave a dangling break behind).
+size_t RemoveNewSymbolBreaks(
+    MCObjectHandle wall,
+    const std::vector<std::pair<Sint32, MCObjectHandle>>& before) {
+    std::vector<Sint32> stray;
+    for (const auto& entry : ListWallSymbolBreaks(wall)) {
+        const bool known = std::any_of(
+            before.begin(), before.end(),
+            [&](const std::pair<Sint32, MCObjectHandle>& old) { return old.second == entry.second; });
+        if (!known) {
+            stray.push_back(entry.first);
+        }
+    }
+    std::sort(stray.begin(), stray.end(), std::greater<Sint32>());
+    for (const Sint32 index : stray) {
+        gSDK->DeleteBreak(wall, static_cast<short>(index));
+    }
+    return stray.size();
+}
+
+// Strict containment: the insert's container chain reaches the wall.
+bool IsParentedByWall(MCObjectHandle object, MCObjectHandle wall) {
+    MCObjectHandle current = object ? gSDK->ParentObject(object) : nullptr;
+    for (int depth = 0; current && depth < 16; ++depth) {
+        if (current == wall) {
+            return true;
+        }
+        current = gSDK->ParentObject(current);
+    }
+    return false;
+}
+
+std::string JoinAttempts(const std::vector<std::string>& attempts) {
+    std::string joined;
+    for (const auto& attempt : attempts) {
+        if (!joined.empty()) joined += "; ";
+        joined += attempt;
+    }
+    return joined.empty() ? std::string("no attempt") : joined;
+}
+
+std::string NoWallBreakWarning(const std::string& what, const WallBreakRegistration& registration) {
+    return "wallBreakRegistered=false: the " + what +
+           " is in the wall's object list but has no wall break record (" +
+           JoinAttempts(registration.attempts) +
+           "); it may be dropped when Vectorworks regenerates the wall (class change, move, "
+           "reset). The MCP host creates doors/windows with vs.AddSymToWall, which registers "
+           "the break; use vw_create rather than raw apply_operations for durable openings";
 }
 
 class CreatedParametricGuard final {
@@ -527,21 +597,123 @@ private:
     std::string uuid_;
 };
 
-// Regenerates the host wall (as any later wall edit would) and re-resolves the
-// insert by UUID. Throws when the wall dropped the insert or lost its break.
-MCObjectHandle RegenerateWallAndResolveInsert(
+// Moves a detached insert into `wall` and tries to register its symbol break:
+// (a) ISDK::AddBreak while the insert is NOT yet in the wall (AddBreak does the
+// insertion), (b) AddObjectToContainer when the insert is still not inside the
+// wall (exactly the pre-714c15d behaviour), (c) with still no break,
+// ISDK::SetObjectWallOffset. Throws only when the insert cannot be attached to
+// the wall at all; a missing break is reported (registered=false + attempts),
+// never thrown. The wall itself is never reset here.
+WallBreakRegistration InsertIntoWallWithBreak(
+    MCObjectHandle object,
+    const std::string& uuid,
     MCObjectHandle wall,
-    const std::string& insertUuid,
-    MCObjectHandle fallback) {
-    gSDK->ResetObject(wall);
-    MCObjectHandle resolved = insertUuid.empty()
-        ? fallback
-        : gSDK->GetObjectByUuid(TXString(insertUuid.c_str()));
-    if (!resolved) {
-        throw std::runtime_error(
-            "the host wall dropped the inserted opening when it was regenerated");
+    double x,
+    double y,
+    double rotationDegrees,
+    CreatedParametricGuard& guard,
+    const std::string& what) {
+    WallBreakRegistration result;
+    result.object = object;
+    // From here a failure removes the insert together with any break of it.
+    guard.SetWall(wall);
+    auto resolve = [&]() {
+        if (!uuid.empty()) {
+            if (MCObjectHandle current = gSDK->GetObjectByUuid(TXString(uuid.c_str()))) {
+                result.object = current;
+            }
+        }
+    };
+    auto probe = [&](const char* method) -> bool {
+        double offset = 0.0;
+        if (FindWallSymbolBreak(wall, result.object, &offset) >= 0) {
+            result.registered = true;
+            result.offset = offset;
+            result.method = method;
+            return true;
+        }
+        return false;
+    };
+
+    const SymbolBreakPlacement placement =
+        ComputeSymbolBreakPlacement(wall, x, y, rotationDegrees);
+    if (!placement.valid) {
+        result.attempts.push_back("no break attempted: the wall has no measurable axis");
     }
-    return resolved;
+
+    // (a) AddBreak with the insert still detached.
+    if (placement.valid && !IsParentedByWall(result.object, wall)) {
+        const auto before = ListWallSymbolBreaks(wall);
+        SymbolBreakType data = placement.data;
+        data.theSymbol = result.object;
+        const short rc = gSDK->AddBreak(wall, placement.along, kSymbolBreak, &data);
+        resolve();
+        const bool found = probe("add_break_before_attach");
+        const bool parented = IsParentedByWall(result.object, wall);
+        std::string note = "AddBreak on the detached insert returned " + std::to_string(rc) +
+                           (found ? ", break registered" : ", no break") +
+                           (parented ? ", insert now in the wall" : ", insert not in the wall");
+        if (!found) {
+            const size_t removed = RemoveNewSymbolBreaks(wall, before);
+            if (removed > 0) {
+                note += ", removed " + std::to_string(removed) + " unmatched new break(s)";
+            }
+        }
+        result.attempts.push_back(note);
+    }
+
+    // (b) The pre-714c15d attachment.
+    if (!IsParentedByWall(result.object, wall)) {
+        if (!gSDK->AddObjectToContainer(result.object, wall)) {
+            throw std::runtime_error(
+                "Vectorworks did not attach the " + what + " to the exact requested wall");
+        }
+        resolve();
+        if (!result.registered && probe("add_object_to_container")) {
+            result.attempts.push_back("AddObjectToContainer registered a break");
+        }
+    }
+
+    // (c) Ask the wall to position the insert (expected to need an existing
+    // break; tried because it is the only other SDK call that addresses an
+    // insert by wall offset).
+    if (!result.registered && placement.valid) {
+        const bool ok = gSDK->SetObjectWallOffset(result.object, wall, placement.along);
+        const bool found = probe("set_object_wall_offset");
+        result.attempts.push_back(
+            std::string("SetObjectWallOffset returned ") + (ok ? "true" : "false") +
+            (found ? ", break registered" : ", no break"));
+    }
+    if (!result.registered) {
+        WorldCoord offset = 0.0;
+        const bool known = gSDK->GetObjectWallOffset(result.object, wall, offset);
+        result.attempts.push_back(
+            std::string("GetObjectWallOffset ") + (known ? "true" : "false") +
+            ", wall symbol breaks: " + std::to_string(ListWallSymbolBreaks(wall).size()));
+    }
+    return result;
+}
+
+// Non-destructive break readback (no wall ResetObject) after the insert's own
+// parameter reset.
+void RecheckWallBreak(
+    WallBreakRegistration& registration,
+    MCObjectHandle wall,
+    MCObjectHandle object) {
+    double offset = 0.0;
+    if (FindWallSymbolBreak(wall, object, &offset) >= 0) {
+        if (!registration.registered) {
+            registration.method = "after_insert_reset";
+        }
+        registration.registered = true;
+        registration.offset = offset;
+    } else if (registration.registered) {
+        registration.attempts.push_back(
+            "the break registered by " + registration.method +
+            " was gone after the insert's parameter reset");
+        registration.registered = false;
+        registration.method.clear();
+    }
 }
 
 }  // namespace
@@ -687,13 +859,10 @@ BuiltInOpeningReceipt CreateVerifiedBuiltInOpening(
     }
     CreatedParametricGuard guard(object);
     const std::string objectUuid = HandleUuid(object);
-    if (!gSDK->AddObjectToContainer(object, spec.expectedWall)) {
-        throw std::runtime_error(
-            "Vectorworks did not attach the built-in opening to the exact requested wall");
-    }
-    guard.SetWall(spec.expectedWall);
-    const WallBreakRegistration wallBreak = EnsureWallSymbolBreak(
-        object, spec.expectedWall, spec.x, spec.y, spec.rotationDegrees);
+    WallBreakRegistration wallBreak = InsertIntoWallWithBreak(
+        object, objectUuid, spec.expectedWall, spec.x, spec.y, spec.rotationDegrees,
+        guard, "built-in opening");
+    object = wallBreak.object;
     // Built-in Door/Window parametrics become wall-hosted when moved into the
     // exact wall container.  SetObjectWallInsertMode is intended for symbol
     // definitions/instances and returns false for these built-in parametrics in
@@ -769,41 +938,20 @@ BuiltInOpeningReceipt CreateVerifiedBuiltInOpening(
             "built-in opening schema changed between discovery and semantic readback");
     }
 
-    // Regenerate the host wall once, exactly as any later wall edit (class,
-    // move, reset) would, and prove the opening survives it with its break.
-    object = RegenerateWallAndResolveInsert(spec.expectedWall, objectUuid, object);
-    WallBreakRegistration finalBreak = wallBreak;
-    {
-        double offsetAfter = 0.0;
-        if (FindWallSymbolBreak(spec.expectedWall, object, &offsetAfter) >= 0) {
-            finalBreak.registered = true;
-            finalBreak.offset = offsetAfter;
-        } else if (wallBreak.registered) {
-            throw std::runtime_error(
-                "the host wall lost the opening's symbol break when it was regenerated");
-        }
-    }
-    if (!IsObjectHostedByWall(object, spec.expectedWall)) {
-        throw std::runtime_error(
-            "built-in opening lost its exact wall host when the wall was regenerated");
-    }
-    {
-        VWParametricObj regenerated(object);
-        if (!NumbersClose(regenerated.GetParamReal(TXString(ids.widthUniversalName.c_str())), spec.width)) {
-            throw std::runtime_error("built-in opening width changed when the host wall was regenerated");
-        }
-    }
+    // Break readback only. The wall is deliberately NOT reset here: in 714c15d
+    // a ResetObject(wall) made every create fail when no break registered
+    // (the regenerated wall dropped the insert before commit).
+    RecheckWallBreak(wallBreak, spec.expectedWall, object);
 
     BuiltInOpeningReceipt receipt;
     receipt.object = object;
     receipt.wall = spec.expectedWall;
-    receipt.wallBreakRegistered = finalBreak.registered;
-    receipt.wallOffset = finalBreak.offset;
-    if (!finalBreak.registered) {
-        receipt.warnings.push_back(
-            "the opening is in the wall's object list but has no wall break record (" +
-            (finalBreak.note.empty() ? std::string("unknown reason") : finalBreak.note) +
-            "); Vectorworks may drop it when the wall is edited");
+    receipt.wallBreakRegistered = wallBreak.registered;
+    receipt.wallOffset = wallBreak.offset;
+    receipt.wallBreakMethod = wallBreak.method;
+    if (!wallBreak.registered) {
+        receipt.warnings.push_back(NoWallBreakWarning(
+            spec.kind == BuiltInParametricKind::Window ? "window" : "door", wallBreak));
     }
     if (!elevationNote.empty()) {
         receipt.warnings.push_back(elevationNote);
@@ -834,10 +982,8 @@ void VerifyBuiltInOpeningReceipt(
         throw std::runtime_error(
             "built-in opening commit verifier could not confirm the exact wall host");
     }
-    if (receipt.wallBreakRegistered && FindWallSymbolBreak(receipt.wall, object) < 0) {
-        throw std::runtime_error(
-            "built-in opening commit verifier found no wall break record for the opening");
-    }
+    // The wall break is best effort (reported at create time) and is never a
+    // commit failure.
     const std::string expectedPlugin = BuiltInParametricUniversalName(receipt.kind);
     if (expectedPlugin.empty() || receipt.universalPluginName != expectedPlugin ||
         receipt.descriptorFingerprint.empty()) {
@@ -948,42 +1094,28 @@ MCObjectHandle CreateVerifiedParametricObject(
     // Hosted objects are detached until attached; a failure below must not
     // leave a half-inserted object (or a dangling wall break) behind.
     std::optional<CreatedParametricGuard> hostedGuard;
-    std::string objectUuid;
     WallBreakRegistration wallBreak;
     if (spec.requireWallHost) {
         hostedGuard.emplace(object);
-        objectUuid = HandleUuid(object);
-        if (!gSDK->AddObjectToContainer(object, spec.expectedWall)) {
-            throw std::runtime_error(
-                "Vectorworks did not attach the parametric object to the exact requested wall");
-        }
-        hostedGuard->SetWall(spec.expectedWall);
-        wallBreak = EnsureWallSymbolBreak(object, spec.expectedWall, spec.x, spec.y, spec.rotationDegrees);
+        wallBreak = InsertIntoWallWithBreak(
+            object, HandleUuid(object), spec.expectedWall, spec.x, spec.y,
+            spec.rotationDegrees, *hostedGuard, "parametric object");
+        object = wallBreak.object;
     }
-    ValidateParameters(parametric, spec.parameters);
-    ApplyParameters(parametric, spec.parameters);
+    VWParametricObj target(object);
+    ValidateParameters(target, spec.parameters);
+    ApplyParameters(target, spec.parameters);
     gSDK->ResetObject(object);
-    VerifyParameters(parametric, spec.parameters);
+    VerifyParameters(target, spec.parameters);
     if (spec.requireWallHost) {
         if (!IsObjectHostedByWall(object, spec.expectedWall)) {
             throw std::runtime_error(
                 "Vectorworks did not insert the parametric object into the required wall");
         }
-        object = RegenerateWallAndResolveInsert(spec.expectedWall, objectUuid, object);
-        const bool hasBreak = FindWallSymbolBreak(spec.expectedWall, object) >= 0;
-        if (!hasBreak && wallBreak.registered) {
-            throw std::runtime_error(
-                "the host wall lost the parametric object's symbol break when it was regenerated");
-        }
-        if (!IsObjectHostedByWall(object, spec.expectedWall)) {
-            throw std::runtime_error(
-                "the parametric object lost its wall host when the wall was regenerated");
-        }
-        if (!hasBreak && warnings) {
-            warnings->push_back(
-                "the hosted object has no wall break record (" +
-                (wallBreak.note.empty() ? std::string("unknown reason") : wallBreak.note) +
-                "); Vectorworks may drop it when the wall is edited");
+        // Readback only; the wall is not reset here (see CreateVerifiedBuiltInOpening).
+        RecheckWallBreak(wallBreak, spec.expectedWall, object);
+        if (!wallBreak.registered && warnings) {
+            warnings->push_back(NoWallBreakWarning("hosted parametric object", wallBreak));
         }
         hostedGuard->Release();
     }

@@ -47,9 +47,18 @@ class Host:
                                   budget_s=budget_s, progress=progress, cancelled=cancelled)
         if isinstance(result, dict) and (result.get("home_dismissed") or result.get("dismissed_dialogs")):
             dialogs = result.get("dismissed_dialogs") if isinstance(result.get("dismissed_dialogs"), list) else []
-            titles = ", ".join(f"'{d.get('title')}'" for d in dialogs if isinstance(d, dict) and d.get("title"))
-            notice(f"The bridge closed the Vectorworks Home screen{' (' + titles + ')' if titles else ''} before "
-                   f"{action}; nothing else was affected.")
+            home = [d for d in dialogs if isinstance(d, dict) and d.get("kind") in (None, "home", "update_available",
+                                                                                      "backup_prompt")]
+            other = [d for d in dialogs if isinstance(d, dict) and d not in home]
+            if result.get("home_dismissed") or home:
+                titles = ", ".join(f"'{d.get('title')}'" for d in home if d.get("title"))
+                notice(f"The bridge closed the Vectorworks start-up dialog{' (' + titles + ')' if titles else ''} "
+                       f"before {action}; nothing else was affected.")
+            for d in other:
+                rows = "; ".join(str(r) for r in (d.get("rows") or [])[:5] if str(r).strip(" ,|"))
+                text = d.get("message") or rows
+                notice(f"Vectorworks showed '{d.get('title')}' during {action}" + (f": {text[:300]}" if text else "")
+                       + f" - closed with '{d.get('pressed') or 'OK'}'.")
         return result
 
     def can_script(self, inst: Instance) -> bool:

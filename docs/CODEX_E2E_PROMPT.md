@@ -79,3 +79,45 @@ documents as in STEP 1.
 FINAL: print a table of the 14 steps with PASS/FAIL, the total number of tool calls you made,
 how many returned errors, and anything that confused you about the tools.
 ```
+
+---
+
+## Prompt 2: working in an existing (big) project
+
+Build the test project once (about 7,000 objects, 5 storeys; saved to `%TEMP%\vw-e2e\big-project.vwx`):
+
+```bash
+py -3.12 scripts\mcp_drive.py start
+```
+
+```bash
+py -3.12 scripts\make_big_project.py
+```
+
+Then paste this into a new Codex thread:
+
+```text
+You are an architect's assistant working in an EXISTING Vectorworks project. Use ONLY the
+vectorworks MCP tools. Open %TEMP%\vw-e2e\big-project.vwx (vw_document action="open"; expand
+%TEMP% to the real path first with vw_status or ask me) and never save it - close it at the end
+WITHOUT saving. Do not use shell commands or computer use.
+
+1. Give me a short overview of the project: storeys/layers, sheets, object counts by type.
+2. How many doors are on layer L02, and which apartments (labels like A-2nn) have a living-room
+   window narrower than 1200 mm on any storey? Answer from tool results only.
+3. Find the room labelled "A-305 Bedroom". Tell me its area and which doors are within 500 mm
+   of it.
+4. Show me storey L03 as an image. In that image, point out the apartments in the top-right
+   quarter by selecting what you see (vw_read with within_px on that capture), and list their
+   room labels.
+5. Make all apartment entrance doors on L02 1100 mm wide, rename "A-305 Bedroom" to
+   "A-305 Study", and hide the furniture class A-Furn. Verify each change by reading it back,
+   and capture L02 to check visually that the doors are still in their walls.
+6. Show the furniture class again, then close the project without saving.
+
+FINAL: a table of the 6 tasks with PASS/FAIL and evidence, the number of tool calls, the total
+time, and anything that was slow or confusing.
+```
+
+Expected: every task PASS in about 20 to 35 tool calls. The same flow runs unattended with
+`py -3.12 scripts\e2e_existing_project.py` (prints timings per call).

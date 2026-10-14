@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 
-from .. import builders, ops
+from .. import builders, openings, ops
 from .. import names as namehelp
 from .. import coerce as C
 from .. import floorplan
@@ -13,6 +13,9 @@ from ..host import doc_brief, get_host
 from . import _tx, preview
 
 COMPACT_OVER = 20      # receipts for more objects: count + ids map + type counts (no per-object list)
+# idempotency key -> script receipt rows of the doors/windows that call inserted. A resend with the same key replays
+# the native part; the openings must not be inserted a second time (the native replay used to cover them).
+_OPENINGS_DONE: dict[str, list[dict]] = {}
 _KIND_TYPES = {"room": "wall"}
 
 
@@ -53,7 +56,7 @@ def _split_pio(items: list[dict]) -> tuple[list[dict], list[tuple[str, list, flo
 def _compensate(host, document, plan, created_ids: dict, exc: VWError, ctx, native_key: str, max_ops: int) -> None:
     """A later part failed after the native part committed: delete the native objects again (all-or-nothing for
     the model). Doors/windows first (deleting a wall would cascade them)."""
-    hosted = {op["operation_id"] for op in plan.hosted}
+    hosted = {op["operation_id"] for op in plan.hosted} | set(plan.opening_flags)
     uuids = [created_ids[i] for i in created_ids if i in hosted] + \
         [created_ids[i] for i in created_ids if i not in hosted]
     retarget = lambda: host.session.target(document, write=True, bind_apply=True)  # noqa: E731
@@ -152,7 +155,9 @@ def handle(args: dict, ctx, warnings: list):
 
     plan = compile_all({}, {})  # validate everything before touching Vectorworks
     target = None
+    opening_items: list[dict] = []
     descriptors: dict = {}
+    schemas: dict = {}
     if not dry_run:
         target = host.session.target(a.get("document"), write=True, bind_apply=True)
         needed = _plugins_needed(objects + fp_objects)
@@ -161,8 +166,13 @@ def handle(args: dict, ctx, warnings: list):
             plan = compile_all(descriptors, schemas, _tx.doc_mm_per_unit(target))
         if (plan.script_objects or plan.styles) and not host.can_script(target.inst):
             raise host.bridge.missing_action(target.inst, "run_script")
+        if host.can_script(target.inst):
+            # doors/windows: inserted by script (real wall break), sized natively afterwards (openings.py)
+            opening_items = openings.extract(plan)
+        elif any(op["params"].get("object_type") in openings.KINDS for op in plan.primary + plan.hosted):
+            warnings.append(openings.NATIVE_RISK_WARNING.format(what="this bridge has no run_script"))
     warnings.extend(dict.fromkeys(plan.warnings))
-    hosted_ids = {op["operation_id"] for op in plan.hosted}
+    hosted_ids = {op["operation_id"] for op in plan.hosted} | {item["id"] for item in opening_items}
     wanted_layers = {l for i, l in plan.layers.items() if i not in hosted_ids}
     if dry_run:
         out = {"ok": True, "dry_run": True, "units": units, "native_units": "mm",
@@ -178,6 +188,10 @@ def handle(args: dict, ctx, warnings: list):
             out["join_walls"] = join_walls
         if fp_counts:
             out["floor_plan"] = fp_counts
+        if plan.opening_flags:
+            out["doors_windows"] = ("inserted into their walls by script (vs.AddSymToWall: real wall break), then "
+                                    "sized natively (update_parametric); the native create ops above are only used "
+                                    "by bridges without run_script")
         return out
 
     inst = target.inst
@@ -212,7 +226,8 @@ def handle(args: dict, ctx, warnings: list):
         warnings.append("Spaces were not sent behind the walls (bridge without run_script); use vw_edit op='order'.")
 
     namehelp.warn_new_classes(host, target, {op["params"].get("class_name") for op in plan.primary + plan.hosted} |
-                           {(item.get("style") or {}).get("class") for item in plan.script_objects}, warnings)
+                           {(item.get("style") or {}).get("class") for item in plan.script_objects} |
+                           {item.get("class") for item in opening_items}, warnings)
     _tx.fill_descriptors(plan.primary + plan.hosted, descriptors)
     fixups: list[dict] = []
     if plan.fixups:
@@ -222,9 +237,11 @@ def handle(args: dict, ctx, warnings: list):
         except ValueError as exc:
             raise VWError("validation_error", str(exc)) from None
         _tx.fill_descriptors(fixups, descriptors)
-    key = host.session.idempotency_key(a.get("idempotency_key"), [plan.primary, plan.hosted], target)
+    key = host.session.idempotency_key(a.get("idempotency_key"), [plan.primary, plan.hosted] +
+                                       ([opening_items] if opening_items else []), target)
     created_ids: dict[str, str] = {}
     receipts: list = []
+    replayed = False
     wall_joins: list = []
     steps = 0
     retarget = lambda: host.session.target(a.get("document"), write=True, bind_apply=True)  # noqa: E731
@@ -241,6 +258,7 @@ def handle(args: dict, ctx, warnings: list):
             namehelp.enrich_symbol_error(host, target, exc)
             raise
         steps = summary["undo_steps"]
+        replayed = bool(summary.get("replayed"))
         created_ids.update(_tx.ids_from(summary))
         receipts += [r for r in summary["receipts"] if r.get("op", "create") == "create"]
         wall_joins += summary.get("wall_joins") or []
@@ -268,6 +286,13 @@ def handle(args: dict, ctx, warnings: list):
             created_ids.update(_tx.ids_from(summary2))
             receipts += [r for r in summary2["receipts"] if r.get("op", "create") == "create"]
     native_steps = steps
+    if opening_items and key in _OPENINGS_DONE and (replayed or not (plan.primary or plan.hosted)):
+        # same call again (same idempotency key): report the openings it inserted instead of inserting them twice
+        for row in _OPENINGS_DONE[key]:
+            receipts.append(dict(row))
+            created_ids[row["operation_id"]] = row["uuid"]
+        warnings.append("Replayed: this call was already applied (same idempotency key); nothing new was created.")
+        opening_items = []
     script_result: dict = {}
     restyle = [{"id": i, "uuid": created_ids[i], "style": st} for i, st in plan.styles if created_ids.get(i)]
     script_objects, deferred = _split_pio(plan.script_objects)
@@ -277,13 +302,14 @@ def handle(args: dict, ctx, warnings: list):
                 if i in created_ids or i in script_ids]
         if refs:
             post_ops.append({k: v for k, v in item.items() if k != "ids"} | {"targets": refs})
-    if script_objects or restyle or post_ops:
+    if script_objects or restyle or post_ops or opening_items:
         if steps:
             target = host.session.target(a.get("document"), write=True)
         try:
-            script_result = host.script(target, "massing", {"objects": script_objects, "restyle": restyle,
-                                                            "post": post_ops},
-                                        label="MCP create", ctx=ctx) or {}
+            script_args = {"objects": script_objects, "restyle": restyle, "post": post_ops}
+            if opening_items:
+                script_args["openings"] = openings.script_args(opening_items, created_ids)
+            script_result = host.script(target, "massing", script_args, label="MCP create", ctx=ctx) or {}
         except VWError as exc:
             if steps and exc.commit_state != "unknown":
                 _compensate(host, a.get("document"), plan, created_ids, exc, ctx, key, max_ops)
@@ -291,8 +317,31 @@ def handle(args: dict, ctx, warnings: list):
         warnings.extend(script_result.get("warnings") or [])
         steps += 1
         for row in script_result.get("created") or []:
-            receipts.append({"operation_id": row["id"], "uuid": row["uuid"], "type": row["type"]})
+            receipt = {"operation_id": row["id"], "uuid": row["uuid"], "type": row["type"]}
+            if row.get("wall"):
+                receipt["parent_uuid"] = row["wall"]
+            receipts.append(receipt)
             created_ids[row["id"]] = row["uuid"]
+    if opening_items:
+        # sizes + parameters + name/class of the inserted doors/windows: native update_parametric (vw_edit's path)
+        param_ops = openings.param_ops(opening_items, created_ids, descriptors, _tx.doc_mm_per_unit(target),
+                                        schemas)
+        if param_ops:
+            target = host.session.target(a.get("document"), write=True, bind_apply=True)
+            try:
+                psum = _tx.run_chunked(host, target, param_ops, key + "-p", ctx, retarget=retarget, max_ops=max_ops)
+            except VWError as exc:
+                if exc.commit_state != "unknown":
+                    _compensate(host, a.get("document"), plan, created_ids, exc, ctx, key, max_ops)
+                raise
+            steps += psum["undo_steps"]
+        done_ids = {item["id"] for item in opening_items}
+        _OPENINGS_DONE[key] = [r for r in receipts if r.get("operation_id") in done_ids]
+        while len(_OPENINGS_DONE) > 64:
+            _OPENINGS_DONE.pop(next(iter(_OPENINGS_DONE)))
+        warnings.append(f"{len(opening_items)} door(s)/window(s) were inserted into their walls by script (real wall "
+                        "breaks: they survive wall class changes, moves and resets), then sized natively: the "
+                        "walls, the insertion and the sizing are separate undo steps (see undo_steps).")
     if deferred:
         # Live (VW 2024, Column2): a new plug-in object initialises its record fields on its FIRST regeneration,
         # which runs only after the creating script returned, overwriting most values set in that script (but it
@@ -322,7 +371,7 @@ def handle(args: dict, ctx, warnings: list):
     if spaces and (spaces_native_back or any(r.get("op") == "order" for r in script_result.get("post") or [])):
         # bridge 1.0.x: auto_order sends spaces (and slabs) behind walls inside the same transaction
         out["spaces"] = "sent to the back of their layer (behind walls, doors and windows)"
-    if steps > native_steps and native_steps and (plan.script_objects or restyle or post_ops):
+    if steps > native_steps and native_steps and (plan.script_objects or restyle or post_ops) and not opening_items:
         warnings.append("Native objects and the script-made part (extrudes/columns/graphic styles/layer moves/space "
                         "order) are separate undo steps (native apply_operations and run_script cannot share one "
                         "undo event).")
@@ -350,7 +399,7 @@ def _auto_id(local_id: str) -> bool:
 
 def _receipt(plan, receipts: list, created_ids: dict, key: str, steps: int, call_layer, active_layer: str,
              native_layer: bool) -> dict:
-    hosted = {op["operation_id"] for op in plan.hosted}
+    hosted = {op["operation_id"] for op in plan.hosted} | set(plan.opening_flags)
     count = len(created_ids)
     out: dict = {"ok": True, "count": count}
     actual = {(r.get("operation_id") or r.get("local_ref")): r["layer"] for r in receipts if r.get("layer")}

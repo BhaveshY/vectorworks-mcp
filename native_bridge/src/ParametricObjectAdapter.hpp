@@ -84,8 +84,13 @@ struct BuiltInOpeningReceipt {
     bool semanticReadbackVerified = false;
     // A kSymbolBreak of the wall references the opening (what keeps it in the
     // wall when Vectorworks regenerates the wall), and its offset along the wall.
+    // Best effort: false is reported as a "wallBreakRegistered=false: ..."
+    // warning, never as a create or commit failure.
     bool wallBreakRegistered = false;
     double wallOffset = 0.0;
+    // "add_break_before_attach", "add_object_to_container",
+    // "set_object_wall_offset", "after_insert_reset", or empty (no break).
+    std::string wallBreakMethod;
     std::vector<std::string> warnings;
 };
 

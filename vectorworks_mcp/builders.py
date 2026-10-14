@@ -341,6 +341,7 @@ class CreatePlan:
         self.kinds: dict[str, str] = {}       # local id -> friendly kind (space, wall, door, ...)
         self.index_of: dict[str, float] = {}  # local id -> position in the caller's objects list
         self.fixups: list[dict] = []          # normalised ops run after the creates in the same transaction
+        self.opening_flags: dict[str, dict] = {}  # door/window id -> {"flip", "right"} for vs.AddSymToWall
 
 
 def wall_ids_of(objects: list[dict]) -> set[str]:
@@ -439,6 +440,8 @@ def compile_create(objects: list[dict], scale: float, *, descriptors: dict[str, 
             plan.script_objects.append(item)
             plan.ids.append(local_id)
             continue
+        if kind in {"door", "window"}:
+            src, plan.opening_flags[local_id] = opening_options(kind, src, field, plan.warnings)
         params = _create_params(kind, src, field, scale, plan, descriptors, schemas)
         if kind == "wall":
             plan.local_walls[local_id] = params
@@ -460,6 +463,79 @@ def _window_sill_fixup(local_id: str, params: dict, doc_mm_per_unit: float) -> d
         "descriptor_fingerprint": params.get("descriptor_fingerprint") or "pending",
         "parameters": [{"id": "ElevationSetAt", "type": "string", "value": "Sill of Window"},
                        {"id": "Elevation", "type": "real", "value": float(params["sill_height"]) / (doc_mm_per_unit or 1.0)}]}}
+
+
+# Flat door/window keys of a vw_create object that are plug-in parameters (semantic spelling; mapped through
+# FRIENDLY_PARAMS). "angle" is NOT one of them: it is the rotation alias.
+OPENING_FLAT_KEYS = {"openangle", "openingangle", "swing", "swingdirection", "opens", "hinge", "hingeside", "handing",
+                     "configuration", "config", "doortype", "windowtype", "operation", "leaves", "leaftype"}
+# Which side of the wall (looking from the wall's start to its end) the door leaf swings into.
+OPENING_SIDE_KEYS = {"side", "swingside", "openside", "opensto", "opensinto", "swingto"}
+OPENING_SIDES = {"left": False, "right": True, "l": False, "r": True}
+
+
+def opening_options(kind: str, src: dict, field: str, warnings: list) -> tuple[dict, dict]:
+    """Flat door/window options of a vw_create object -> (src with them folded into `parameters`, AddSymToWall flags).
+
+    Live (VW 2024, AddSymToWall into a wall drawn from start to end): right=False puts the leaf on the LEFT side of
+    the wall, right=True on the right side (the door is turned 180 degrees); flip mirrors the hinge to the other
+    jamb. With right=False the hinge is at the jamb nearer the wall START, flip=True moves it to the END jamb (and the
+    other way round with right=True). Friendly keys:
+      side / swing_side / opens_to: left|right   (swing: left|right is read the same way)
+      hinge: start|end (jamb nearer the wall start/end); hinge: Left|Right stays the Door's SwingHingeSide parameter
+      flip, right_side: explicit booleans (win over the derived values)
+      swing: In|Out, open_angle, configuration, ... -> plug-in parameters (FRIENDLY_PARAMS)."""
+    plugin = "Door" if kind == "door" else "Window"
+    table = FRIENDLY_PARAMS.get(plugin, {})
+    out = dict(src)
+    extra: dict[str, Any] = {}
+    side = hinge_end = None
+    flip = right = None
+    for key, value in src.items():
+        sem = _semantic(key)
+        label = f"{field}.{key}"
+        if sem in OPENING_SIDE_KEYS:
+            side = value
+        elif sem in {"flip", "flipped", "mirror", "mirrored"}:
+            flip = C.boolean(value, label)
+        elif sem in {"rightside", "right"}:
+            right = C.boolean(value, label)
+        elif sem in OPENING_FLAT_KEYS:
+            word = value.strip().lower() if isinstance(value, str) else value
+            if sem in {"swing", "opens", "swingdirection"} and word in OPENING_SIDES:
+                side = word
+            elif sem in {"hinge", "hingeside", "handing"} and word in {"start", "end"}:
+                hinge_end = word
+            elif isinstance(value, (list, dict)):
+                raise validation(f"{label} must be a single value", label, "In" if sem == "swing" else 45)
+            elif table.get(sem) is None:
+                warnings.append(f"{label} ignored: a {kind} has no {key!r} (use parameters for plug-in ids).")
+            else:
+                extra[str(key)] = value
+        else:
+            continue
+        out.pop(key, None)
+    if side is not None:
+        word = str(side).strip().lower()
+        if word not in OPENING_SIDES:
+            raise validation(f"{field}.side must be left or right (the side of the wall, looking from its start to "
+                             "its end, the leaf swings into)", f"{field}.side", "left")
+        if right is None:
+            right = OPENING_SIDES[word]
+    right = bool(right)
+    if flip is None:
+        flip = (hinge_end == "end") != right if hinge_end else False
+    if extra:
+        raw = C.parse_json_maybe(_get(out, "parameters", "params", "values", "fields"))
+        for alias in ("params", "values", "fields"):
+            out.pop(alias, None)
+        if isinstance(raw, list):
+            out["parameters"] = list(raw) + [{"id": k, "value": v} for k, v in extra.items()]
+        elif isinstance(raw, dict):
+            out["parameters"] = {**raw, **extra}
+        else:
+            out["parameters"] = extra
+    return out, {"flip": bool(flip), "right": right}
 
 
 COLUMN_PLUGIN = "Column2"  # universal name of the Vectorworks Architect Column tool (Plug-ins/Column2.vso)

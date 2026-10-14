@@ -110,7 +110,8 @@ TOOLS: list[dict] = [
                 "start": PT, "end": PT, "at": PT, "center": PT, "origin": PT, "points": {"type": ["array", "string"]},
                 "width": LEN, "height": LEN, "depth": LEN, "radius": LEN, "thickness": LEN, "offset": LEN, "sill": LEN,
                 "elevation": LEN, "rotation": N, "text": S, "size": N, "symbol": S, "plugin": S, "wall": S, "style": S,
-                "parameters": {"type": "object"}, "join_walls": B, "fill": {}, "line_style": S, "layer": S},
+                "parameters": {"type": "object"}, "join_walls": B, "fill": {}, "line_style": S, "layer": S,
+                "side": {"type": "string", "enum": ["left", "right"]}, "swing": S, "hinge": S, "open_angle": N},
                 "required": ["type"]}},
             "floor_plan": {"type": "object"}, "layer": S, "create_layer": B, "units": UNITS, "join_walls": B,
             "preview": B, "dry_run": B, "document": DOC, "idempotency_key": IDEM}),
@@ -175,10 +176,10 @@ TOOLS: list[dict] = [
         "description": (
             "Document structure. kind=layer|class|story|saved_view|worksheet (cell+value)|resource (import: source, resourc"
             "e_type)|viewport; action=create|set|delete|write|import|update. Layer/class: name, new_name, visibility, scale"
-            ", elevation, colours, layer_kind=sheet. viewport: sheet, name, layers, scale '1:100', view, render_mode, at [x"
-            ",y] sheet mm, crop [[x1,y1],[x2,y2]], classes {name: hide}, title, annotations; update regenerates; delete nee"
-            "ds confirm; create returns a sheet preview image. Example: vw_organize(kind=\"viewport\", action=\"create\", sheet"
-            "=\"A-101\", layers=[\"GF\"], scale=\"1:100\")."),
+            ", elevation, colours, layer_kind=sheet. story: name, elevation, layers (IFC export needs them). viewport: "
+            "sheet, name, layers, scale '1:100', view, render_mode, at [x,y] sheet mm, crop [[x1,y1],[x2,y2]], classes "
+            "{name: hide}, title, annotations; delete needs confirm. Example: vw_organize(kind=\"viewport\", action=\"cr"
+            "eate\", sheet=\"A-101\", layers=[\"GF\"], scale=\"1:100\")."),
         "input": obj({"kind": {"type": "string", "enum": ["layer", "class", "story", "saved_view", "worksheet", "resource",
                                                            "viewport"]},
                       "action": {"type": "string", "enum": ["create", "set", "delete", "write", "import", "update"]},

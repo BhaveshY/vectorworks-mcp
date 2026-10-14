@@ -138,6 +138,10 @@ vw_create(units="mm", objects=[
   use `type: "door"`/`"window"` with `width`/`height`/`sill`.
 - Doors/windows show up in `vw_read(what="query", type="door")` /
   `type="window"` with their host `wall` uuid, `width` and `height`.
+- Door swing: `side` = `left`|`right` of the wall seen from its start (where the
+  leaf swings), `hinge` = `start`|`end` jamb, `swing` = `In`|`Out`, `open_angle`.
+- Create doors/windows with `vw_create` (or `floor_plan`), not `vw_apply`: they are
+  inserted with a real wall break and survive wall class changes, moves and resets.
 
 Fast path for several rooms - rooms become real walls with labels; doors/windows are hosted on the
 nearest wall:

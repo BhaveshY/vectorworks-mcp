@@ -674,6 +674,28 @@ class FakeVS:
         o = self._d.objects[h]
         return (0.0, 0.0, o.get("top", 0.0) - o.get("bottom", 0.0))
 
+    def AddSymToWall(self, wall, offset, height, flip, right, name):
+        """Like Vectorworks: the Door/Window plug-in (or a symbol) inserted into the wall at `offset` along it from
+        the wall start, with a wall break; the new object is LNewObj()."""
+        w = self._d.objects.get(wall)
+        if not w or w.get("type") != "wall" or name not in {"Door", "Window"}:
+            self._last = None
+            return
+        sx, sy, ex, ey = w["start_x"], w["start_y"], w["end_x"], w["end_y"]
+        length = ((ex - sx) ** 2 + (ey - sy) ** 2) ** 0.5
+        t = float(offset) / length if length else 0.0
+        kind = name.lower()
+        obj = self._new(kind, plugin_name=name, x1=sx + (ex - sx) * t, y1=sy + (ey - sy) * t, wall_uuid=wall,
+                        parent_uuid=wall, host="wall", width=910.0, height=2058.0 if kind == "door" else 1500.0,
+                        flip=bool(flip), right=bool(right))
+        obj["layer"] = w.get("layer", obj["layer"])
+        if kind == "window":
+            obj["sill_height"] = 2100.0
+        w["breaks"] = int(w.get("breaks", 0)) + 1
+
+    def GetNumOfWallBreaks(self, wall):
+        return True, int(self._d.objects[wall].get("breaks", 0))
+
     def CreateCustomObjectN(self, name, p, rotation, show_pref):
         if name != "Column2":
             return None
@@ -1385,13 +1407,15 @@ class Handler:
                            {"id": "OpenAngle", "display_name": "Open Angle", "field_style": 3, "value": "90"},
                            {"id": "Config", "field_style": 8, "value": "Swing"},
                            {"id": "SwingDirection", "display_name": "Swing Direction", "field_style": 8, "value": "In"},
-                           {"id": "SwingLW", "display_name": "__NNA_DO_NOT_CHANGE", "field_style": 1, "value": "2"}],
+                           {"id": "SwingLW", "display_name": "__NNA_DO_NOT_CHANGE", "field_style": 1, "value": "2"},
+                           {"id": "SideLights", "display_name": "Side Lights", "field_style": 2, "value": "False"}],
                   "Window": [{"id": "SashOp", "field_style": 8, "value": "Fixed"},
                              {"id": "Width", "display_name": "Width", "field_style": 7, "value": "900"},
                              {"id": "Elevation", "display_name": "Elevation", "field_style": 7, "value": "2100"},
                              {"id": "ElevationSetAt", "display_name": "Elevation Set At", "field_style": 8,
                               "value": "Head of Window"},
-                             {"id": "SillHeight", "display_name": "Sill Height", "field_style": 7, "value": "152"}],
+                             {"id": "SillHeight", "display_name": "Sill Height", "field_style": 7, "value": "152"},
+                             {"id": "SashLS", "field_style": 1, "value": "2"}],
                   "Space": [{"id": "Name", "field_style": 4, "value": ""}],
                   "Stair": [{"id": "TotalRise", "display_name": "Total Rise", "field_style": 7, "value": "3000"},
                             {"id": "NumRisers", "display_name": "Number of Risers", "field_style": 1, "value": "17"},
@@ -1663,6 +1687,10 @@ class Handler:
                     for n in range(1, int(op.get("parameter_count", 0)) + 1):
                         ptype = op[f"parameter_{n}_type"]
                         obj["parameters"][op[f"parameter_{n}_name"]] = op[f"parameter_{n}_{ptype}"]
+                    if obj.get("type") in {"door", "window"}:  # dedicated fields read back by query_objects
+                        for pid, field in (("Width", "width"), ("Height", "height"), ("Elevation", "sill_height")):
+                            if pid in obj["parameters"] and (field != "sill_height" or obj["type"] == "window"):
+                                obj[field] = float(obj["parameters"][pid])
                     touched.add(obj["uuid"])
                     receipts.append({"index": i, "op": kind, "uuid": obj["uuid"], "verified": True})
                 else:

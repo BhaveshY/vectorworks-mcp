@@ -646,10 +646,23 @@ fit) needs no change; sending `capture_target` explicitly is recommended.
   (live: a run_script `SetLScale` + restore turned `dirty` false → true; the
   view changes of a capture do not) — the ISDK has no call to clear the flag,
   so `marked_dirty:true` is reported (VW 2024; `null` on 2025, where the dirty
-  state is not readable). The capture opens no undo event; whether
-  Vectorworks records the scale changes in the undo table is checked live by
-  `capture_leaves_no_undo_entry` (not verifiable before installation).
-  `NonUndoableActionOK` was not used (it asks the user with a dialog).
+  state is not readable). **Undo**: the scale changes were recorded as an
+  undo entry (live: `capture_leaves_no_undo_entry` failed — one Undo after a
+  capture did not remove the sentinel). The boost now runs in its own undo
+  event, opened only when `IsCurrentlyBuildingAnUndoEvent()` is false (never
+  nested in a caller's event): `SupportUndoAndRemove` +
+  `SetUndoMethod(kUndoSwapObjects)` + `AddBeforeSwapObject(layer)` per boosted
+  layer, then the scales; after the export `UndoAndRemove()` restores the
+  scales and drops the event. The scales are read back (layer handles that
+  are no longer listed are re-resolved by UUID, `layer_handles_changed:true`);
+  any mismatch falls back to the explicit restore. Optional
+  `scale_boost_undo:"undo_and_remove"` (default) | `"end_and_remove"`
+  (explicit restore inside the event, then `EndAndRemoveUndoEvent`, nothing
+  replayed) | `"off"` (no event, pre-fix behaviour). `scale_boost` adds
+  `undo_mode, undo_event, undo_removed` (UndoAndRemove restored every scale),
+  `undo_event_removed, layer_handles_changed?, undo_note?`; `dirty_*` /
+  `marked_dirty` are still reported. `NonUndoableActionOK` was not used (it
+  asks the user with a dialog).
 - **Image → world mapping** (plan projection only). Result
   `world_bounds:{left, bottom, right, top, units:"mm"}`, `px_per_mm` (mean of
   `px_per_mm_xy:[x, y]`). `ExportImage` renders exactly the export region
@@ -1092,24 +1105,42 @@ compared case-insensitively ignoring spaces, `_` and `-` (`"Stair"`,
     same plan. Receipt `{index, op:"order", target, uuid, position, changed,
     stack_index_before, stack_index_after, stack_count, layer}` (indices
     0-based from the back; `changed:false` when it already was there).
-  - **door / window / hosted `parametric` creates register a wall break**
-    (2026-10-14, data loss fix). Vectorworks keeps an insert in the wall's
-    member list AND in a `kSymbolBreak` (`SymbolBreakType.theSymbol` = the
-    insert) that positions it along the wall; a wall regeneration rebuilds
-    the inserts from the break list. Bridge-created openings were only
-    `AddObjectToContainer`ed (live: `vs.GetObjectWallOffset(window, wall)` →
-    False, `GetNumOfWallBreaks` unchanged; `AddSymToWall` adds a break), so
-    Vectorworks could drop them when the wall was edited. Now:
-    `AddObjectToContainer` + `ISDK::AddBreak(wall, offset, kSymbolBreak,
-    {theSymbol, insertMode:kSymInsertOnCenter, breakMode:
-    kSymFullBreakWithCaps, height:0, rightSide = flipH = (rotation is
-    opposite to the wall direction)})` with `offset` = `(x1, y1)` projected
-    onto the wall axis (clamped to the wall), then a wall `ResetObject`; the
-    insert is re-resolved **by UUID** afterwards and must still be hosted,
-    keep its width and keep its break, else the operation fails (rolled back).
-    A failed create removes the break before the object. If `AddBreak` does
-    not register a break the create still succeeds with a `warnings` entry
-    ("…has no wall break record…"). The commit verifier also checks the break.
+  - **door / window / hosted `parametric` creates: wall break is best
+    effort** (2026-10-14). Vectorworks keeps an insert in the wall's member
+    list AND in a `kSymbolBreak` (`SymbolBreakType.theSymbol` = the insert)
+    that positions it along the wall; an insert without a break may be
+    dropped when the wall is regenerated (class change, move, reset). Live
+    VW 2024 history: `AddObjectToContainer` alone → creates succeed, no break
+    (`vs.GetObjectWallOffset` → False); commit 714c15d added
+    `AddObjectToContainer` + `ISDK::AddBreak` + a wall `ResetObject` →
+    AddBreak registered **no** break and the wall reset made every
+    door/window create fail ("final object disappeared before commit",
+    "host wall dropped the inserted opening"). Since the fix the native create
+    never fails because of break handling and never resets the wall:
+    1. `CreateCustomObject` (detached), then `ISDK::AddBreak(wall, offset,
+       kSymbolBreak, {theSymbol, insertMode:kSymInsertOnCenter, breakMode:
+       kSymFullBreakWithCaps, height:0, rightSide = flipH = (rotation is
+       opposite to the wall direction)})` **before** the insert is in the
+       wall (`offset` = `(x1, y1)` projected onto the wall axis, clamped);
+       checked with `ForEachBreakN` (theSymbol = insert) and the parent chain.
+       New symbol breaks that do not reference the insert are deleted again.
+    2. When the insert is still not inside the wall: `AddObjectToContainer`
+       (the pre-714c15d behaviour; failure to attach is still an error).
+    3. Still no break: `ISDK::SetObjectWallOffset(insert, wall, offset)`,
+       re-checked. (`SetObjectAsSpanWallBreak` was not used: it changes the
+       insert to a centred spanning break.)
+    4. After the insert's own parameter reset the break is read back only.
+    Without a break the create succeeds with a `warnings` entry starting
+    `"wallBreakRegistered=false: …"` that lists each attempt (AddBreak return
+    code, parent state, SetObjectWallOffset/GetObjectWallOffset results) and
+    says the opening may be dropped when the wall is regenerated and that the
+    MCP host creates doors/windows with `vs.AddSymToWall` (which registers the
+    break) — the host's `vw_create` uses that path; raw `apply_operations`
+    keeps the native path. A failed create still removes any break of the
+    insert before the insert (`DeleteInsertAndBreak`). The commit verifier no
+    longer checks the break. The window `ElevationSetAt = "Sill of Window"`
+    fix below is unchanged. Live acceptance: `wall_inserts_have_break_records`
+    and `wall_inserts_survive_*` are informational (WARN) for this path.
   - **window sill**: native window creates set `ElevationSetAt` to
     "Sill of Window" before `Elevation` (default "Head of Window" put the head
     at the sill height, i.e. the window below the floor); when Vectorworks

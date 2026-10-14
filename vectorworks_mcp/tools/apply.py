@@ -12,6 +12,7 @@ import re
 from .. import builders
 from .. import coerce as C
 from .. import ops
+from .. import openings
 from ..errors import VWError
 from ..host import doc_brief, get_host
 from . import _tx
@@ -43,6 +44,10 @@ def handle(args: dict, ctx, warnings: list) -> dict:
     host = get_host()
     target = None
     operations = forgive_plan(operations, scale, warnings)
+    if any(isinstance(op, dict) and str(op.get("type") or "").strip().lower() == "create" and
+           isinstance(op.get("params"), dict) and str(op["params"].get("object_type") or "").lower() in openings.KINDS
+           for op in operations):
+        warnings.append(openings.NATIVE_RISK_WARNING.format(what="vw_apply"))
     if _needs_descriptors(operations):
         # Discover the live descriptor (and parameter schema) for door/window/parametric creates.
         target = host.session.target(a.get("document"), write=True, bind_apply=True)

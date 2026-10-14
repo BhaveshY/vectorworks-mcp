@@ -13,6 +13,7 @@ import math
 from typing import Any, Optional
 
 from . import coerce as C
+from .builders import OPENING_FLAT_KEYS, OPENING_SIDE_KEYS
 from .errors import validation
 
 
@@ -180,6 +181,12 @@ def _hosted(kind: str, src: dict, field: str, scale: float, name: str, width: fl
     for key in ("height", "sill", "sill_height", "rotation", "parameters"):
         if key in src:
             obj[key] = src[key] if key in {"rotation", "parameters"} else C.length(src[key], f"{field}.{key}", scale)
+    for key, value in src.items():
+        # swing side / hinge jamb / flip and plug-in options (swing In|Out, open_angle, ...): builders.opening_options
+        sem = "".join(ch for ch in str(key).lower() if ch.isalnum())
+        if (sem in OPENING_FLAT_KEYS or sem in OPENING_SIDE_KEYS or
+                sem in {"flip", "flipped", "mirror", "mirrored", "rightside"}) and not isinstance(value, (list, dict)):
+            obj[key] = value
     if cls or src.get("class"):
         obj["class"] = src.get("class") or cls
     if src.get("wall"):

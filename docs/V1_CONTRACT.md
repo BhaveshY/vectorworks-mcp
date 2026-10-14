@@ -297,6 +297,15 @@ The 0.7 server is preserved verbatim as `legacy/server_v07.py`, reachable only w
 - **H, §2.3 vw_create `$id` hosting:** for doors/windows the host sends `wall_uuid: "$<local_ref>"` inside the single
   `apply_operations` on revision ≥ 6 — **N must resolve local refs in `wall_uuid`** (as it does for `target`). On
   revision ≤ 5 the host runs two transactions (walls, then openings with real UUIDs) and warns "two undo steps".
+- **H, §2.3 vw_create doors/windows (2026-10-14, live VW 2024):** a door/window made by the native create sits in the
+  wall without a wall break record and Vectorworks deletes it when the wall regenerates (class change, move, reset).
+  On bridges with `run_script` the host now inserts every vw_create / floor_plan door and window by script
+  (`vs.AddSymToWall` + `vs.LNewObj`, massing snippet `openings`; offset = projection of `at` onto the wall axis,
+  clamped into the wall; `side`/`hinge`/`flip` -> AddSymToWall flip/right) and then sets width/height/sill, the other
+  parameters and name/class with native `update_parametric`/`set_properties` (`openings.py`). A call with walls and
+  openings is therefore 3 undo steps (walls, insertion, sizing), not one; a failure in a later step deletes everything
+  the call created. Bridges without `run_script` keep the native path (warned). `vw_apply` raw door/window creates
+  stay native and warn.
 - **H, §2.3 vw_edit:** `mirror`, `layer`, `group`, `ungroup`, `record` run through the vetted `run_script` snippet
   `scripts_lib/edit_engine.py`; when mixed with native ops they form a second undo step (warned). Extra ops `select` /
   `deselect` (0.7 `vw_selection` parity). Target `"selection"` expands to the selected objects' UUIDs.

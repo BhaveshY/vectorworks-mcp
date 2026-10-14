@@ -299,8 +299,45 @@ def phase_mock(python: str, state_dir: Path) -> None:
             {"type": "circle", "center": [500, 500], "diameter": 400},
             {"type": "polyline", "points": [[0, 0], [100, 100], [200, 0]]}]})
         ids = sc.get("ids") or {}
-        check("vw_create walls + hosted door/window ($w1) + unit strings, one transaction",
-              sc.get("ok") and len(ids) == 8 and sc.get("undo") == "one undo step", json.dumps(sc)[:400])
+        door_row = next((r for r in sc.get("created") or [] if r.get("type") == "door"), {})
+        check("vw_create walls + door/window ($w1) + unit strings: walls native, openings by script into the wall, "
+              "sizes native (3 undo steps, said so)",
+              sc.get("ok") and len(ids) == 8 and sc.get("undo_steps") == 3 and door_row.get("wall") == ids.get("w1")
+              and any("wall break" in w for w in sc.get("warnings") or []), json.dumps(sc)[:600])
+        q, _ = c.call("vw_read", {"what": "query", "type": "door"})
+        qw, _ = c.call("vw_read", {"what": "query", "type": "window"})
+        d0, w0 = (q.get("data") or [{}])[0], (qw.get("data") or [{}])[0]
+        check("inserted door/window: in their walls, width/height/sill set by the native parameter step",
+              d0.get("wall") == ids.get("w1") and d0.get("width") == 900.0 and w0.get("wall") == ids.get("w2")
+              and w0.get("width") == 1200.0 and w0.get("sill_height") == 900.0
+              and (w0.get("parameters") or {}).get("SashLS") == 2 and (d0.get("parameters") or {}).get("SideLights") is False,
+              json.dumps([d0, w0])[:600])
+        sc, _ = c.call("vw_create", {"idempotency_key": "openings-replay", "objects": [
+            {"type": "door", "id": "dx", "wall": ids.get("w1"), "at": [4500, 300], "width": 800, "side": "right",
+             "hinge": "end", "swing": "Out", "open_angle": 45, "name": "D-02", "class": "A-Door"}]})
+        q, _ = c.call("vw_read", {"what": "query", "type": "door"})
+        dx = next((r for r in q.get("data") or [] if r.get("uuid") == (sc.get("ids") or {}).get("dx")), {})
+        check("door into an existing wall: side=right/hinge=end -> right, no flip; name/class/params natively",
+              sc.get("ok") and sc.get("undo_steps") == 2 and dx.get("right") is True and dx.get("flip") is False
+              and dx.get("name") == "D-02" and dx.get("class") == "A-Door" and dx.get("width") == 800.0
+              and dx.get("x1") == 4500.0 and dx.get("y1") == 0.0, json.dumps([sc, dx])[:700])
+        sc2, _ = c.call("vw_create", {"idempotency_key": "openings-replay", "objects": [
+            {"type": "door", "id": "dx", "wall": ids.get("w1"), "at": [4500, 300], "width": 800, "side": "right",
+             "hinge": "end", "swing": "Out", "open_angle": 45, "name": "D-02", "class": "A-Door"}]})
+        q2, _ = c.call("vw_read", {"what": "query", "type": "door"})
+        check("resend with the same idempotency_key: openings not inserted twice",
+              sc2.get("ok") and (sc2.get("ids") or {}).get("dx") == (sc.get("ids") or {}).get("dx")
+              and len(q2.get("data") or []) == len(q.get("data") or []), json.dumps(sc2)[:300])
+        nwalls = len((c.call("vw_read", {"what": "query", "type": "wall"})[0].get("data") or []))
+        sc, _ = c.call("vw_create", {"objects": [
+            {"type": "wall", "id": "cw", "start": [0, 9000], "end": [4000, 9000]},
+            {"type": "door", "wall": "$cw", "at": [1000, 9000]},
+            {"type": "door", "wall": ids.get("o5"), "at": [500, 5000]}]})
+        after = len((c.call("vw_read", {"what": "query", "type": "wall"})[0].get("data") or []))
+        check("door into a non-wall host: script fails, the walls of the call are deleted again (rolled_back)",
+              err_code(sc) == "native_rejected" and (sc.get("error") or {}).get("commit_state") == "rolled_back"
+              and after == nwalls, json.dumps(sc)[:400])
+        c.call("vw_edit", {"changes": [{"op": "delete", "target": dx.get("uuid") or "uuid:none"}]})
         box = ids.get("o5")
         sc, _ = c.call("vw_read", {"what": "query", "type": "wall", "limit": 5000})
         check("query with limit clamped (warning), returns walls", sc.get("ok") and len(sc.get("data", [])) == 2 and
@@ -744,7 +781,7 @@ def phase_weak_model(python: str, state_dir: Path) -> None:
         mock_ctl(port, auto_dismiss=True, modal_dialog={"title": "Vectorworks 2026 is available", "kind": "update_available"})
         sc, _ = c.call("vw_read", {"what": "layers"})
         check("auto-dismissed update dialog -> call succeeds with a warning", sc.get("ok") and
-              any("Home screen" in w for w in sc.get("warnings", [])), json.dumps(sc)[:300])
+              any("start-up dialog" in w for w in sc.get("warnings", [])), json.dumps(sc)[:300])
         mock_ctl(port, modal_dialog={"title": "Save changes?", "kind": "other"})
         sc, _ = c.call("vw_read", {"what": "layers"})
         check("other dialog -> busy, next_step asks the user to close it by title", err_code(sc) == "vectorworks_busy"
@@ -804,6 +841,8 @@ def phase_weak_model(python: str, state_dir: Path) -> None:
                                                                           "x1": 0, "y1": 1400, "x2": 0, "y2": 2600}}]})
         check("vw_apply door/window with vw_create aliases + defaults", sc.get("ok") and sc.get("committed"),
               json.dumps(sc)[:400])
+        check("vw_apply raw door/window create warns (dropped on wall regeneration -> use vw_create)",
+              any("regenerated" in w and "vw_create" in w for w in sc.get("warnings") or []), json.dumps(sc)[:400])
         sc, _ = c.call("vw_apply", {"coordinate_units": "mm", "join_walls": False, "operations": [
             {"type": "create", "operation_id": "x1", "params": {"object_type": "wall", "x1": 6000, "y1": 4000,
                                                                 "x2": 9000, "y2": 4000}}]})

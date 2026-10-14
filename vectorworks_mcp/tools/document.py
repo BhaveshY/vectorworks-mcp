@@ -168,8 +168,17 @@ def handle(args: dict, ctx, warnings: list) -> dict:
                 params["dpi"] = params["resolution_dpi"] = C.integer(a["dpi"], "dpi")
             if not target.inst.v2 and rng != "current_view":
                 warnings.append("Pre-1.0 bridge: PDF range all_pages/sheet may be ignored.")
-        result = host.call(target, native, params, kind="long", ctx=ctx)
+        try:
+            result = host.call(target, native, params, kind="long", ctx=ctx)
+        except VWError as exc:
+            if fmt == "ifc" and "no IFC file" in (exc.message or ""):
+                _explain_ifc_failure(host, target, exc)
+            raise
         out["result"] = compact_io(result, C.boolean(a.get("detail", False), "detail"))
+        if fmt == "ifc" and isinstance(out["result"], dict):
+            out["result"].pop("setup", None)
+            if isinstance(out["result"].get("attempts"), list):
+                out["result"]["attempts"] = len(out["result"]["attempts"])
         out["path"] = path
         if os.path.exists(path):
             out["bytes"] = os.path.getsize(path)
@@ -194,6 +203,23 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         params["detail"] = True  # bridge 1.0.x returns compact import receipts unless detail
     out["result"] = compact_io(host.call(target, native, params, kind="long", ctx=ctx), detail)
     return out
+
+
+def _explain_ifc_failure(host, target, exc: VWError) -> None:
+    """Vectorworks exports IFC only when design layers sit on stories (live 2026-10-14: a document without
+    stories always failed; after story + layer assignment and one export it worked)."""
+    try:
+        stories = (host.script(target, "stories", {"action": "list"}, label="MCP stories", kind="read") or {}).get("stories")
+    except VWError:
+        return
+    if not stories:
+        exc.code = "precondition_failed"
+        exc.message = ("IFC export needs the design layers on a story (IFC building storeys); this document has no "
+                       "stories, so Vectorworks exported nothing.")
+        exc.next_step = ("Ask the user, then: vw_organize(kind='story', action='create', name='Ground Floor', "
+                         "elevation=0, layers=['<design layer>']) and export again.")
+        exc.retryable = True
+        exc.details = None
 
 
 def _dismiss_home(host, a: dict, out: dict) -> dict:

@@ -136,6 +136,14 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         else:
             out["result"] = host.script(target, "stories", params, label="MCP story")
             out["via"] = "script"
+        layers = C.str_list(a.get("layers") or a.get("layer"), "layers")
+        if layers:  # put design layers on this story (IFC export maps stories from these)
+            assigned = host.script(target, "stories", {"action": "assign", "name": params.get("new_name") or name,
+                                                       "layers": layers, "level_type": a.get("level_type") or ""},
+                                   label="MCP story layers")
+            out["layers"] = assigned
+            if isinstance(assigned, dict) and assigned.get("failed"):
+                warnings.append(f"Not assigned to the story: {assigned['failed']} ({assigned.get('note')}).")
         return out
 
     if kind == "saved_view":

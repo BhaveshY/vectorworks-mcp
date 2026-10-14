@@ -876,14 +876,117 @@ struct ScaleBoost {
     int dirtyAfter = -1;
     bool restored = true;
     std::vector<std::string> restoreErrors;
+    // Undo hygiene (capture_leaves_no_undo_entry): the boost runs inside its
+    // own undo event, which is then removed again.
+    //   undo_and_remove (default): kUndoSwapObjects + AddBeforeSwapObject per
+    //     boosted layer; UndoAndRemove restores the scales and drops the event;
+    //     the scales are read back and restored explicitly when they differ.
+    //   end_and_remove: explicit restore inside the event, then
+    //     EndAndRemoveUndoEvent (nothing is replayed).
+    //   off: no undo event (pre-fix behaviour).
+    // Never nested: when an undo event is already being built (e.g. a caller
+    // transaction), no event is opened and the scales are restored explicitly.
+    std::string undoMode = "undo_and_remove";
+    bool undoOpened = false;        // our event is open
+    bool undoEventUsed = false;     // an event was opened for the boost
+    bool undoRemoved = false;       // UndoAndRemove restored every scale (verified)
+    bool undoEventRemoved = false;  // the event was removed from the undo table
+    bool layerHandlesChanged = false;
+    std::string undoNote;
+    std::vector<std::string> layerUuids;  // parallel to `layers`
 
     bool Active() const { return !layers.empty(); }
+
+    // Opens the boost's own undo event (first boost pass only).
+    void OpenUndo() {
+        if (undoMode == "off" || undoOpened || undoEventUsed) return;
+        bool building = true;
+        try {
+            building = gSDK->IsCurrentlyBuildingAnUndoEvent();
+        } catch (...) {
+            building = true;
+        }
+        if (building) {
+            undoNote = "an undo event was already open; not nested, scales restored explicitly";
+            return;
+        }
+        gSDK->SupportUndoAndRemove();
+        gSDK->SetUndoMethod(kUndoSwapObjects);
+        gSDK->NameUndoEvent(TXString("Vectorworks MCP capture"));
+        undoOpened = true;
+        undoEventUsed = true;
+        if (undoMode == "undo_and_remove") {
+            std::size_t failed = 0;
+            for (const auto& entry : layers) {
+                if (!gSDK->AddBeforeSwapObject(entry.first)) ++failed;
+            }
+            if (failed) {
+                undoNote = "AddBeforeSwapObject failed for " + std::to_string(failed) + " layer(s)";
+            }
+        }
+    }
+
+    // True when every boosted layer reads back its original scale; refreshes
+    // a layer handle that the undo replay replaced (re-resolved by UUID).
+    bool ScalesMatchOriginal() {
+        const std::vector<MCObjectHandle> all = AllLayers();
+        bool match = true;
+        for (std::size_t index = 0; index < layers.size(); ++index) {
+            auto& entry = layers[index];
+            if (std::find(all.begin(), all.end(), entry.first) == all.end()) {
+                layerHandlesChanged = true;
+                MCObjectHandle current = index < layerUuids.size() && !layerUuids[index].empty()
+                    ? gSDK->GetObjectByUuid(TXString(layerUuids[index].c_str()))
+                    : nullptr;
+                if (!current) {
+                    match = false;
+                    continue;
+                }
+                entry.first = current;
+            }
+            double_gs readBack = 0.0;
+            gSDK->GetLayerScaleN(entry.first, readBack);
+            if (std::abs(readBack - entry.second) > std::max(1e-9, std::abs(entry.second) * 1e-9)) {
+                match = false;
+            }
+        }
+        return match;
+    }
 
     // Exact original scales back (idempotent; also run from the destructor).
     void RestoreScales() {
         if (layers.empty()) return;
+        if (undoOpened && undoMode == "undo_and_remove") {
+            undoOpened = false;
+            bool called = false;
+            try {
+                gSDK->UndoAndRemove();
+                called = true;
+            } catch (...) {
+                undoNote = "UndoAndRemove threw";
+            }
+            undoEventRemoved = called;
+            if (called && ScalesMatchOriginal()) {
+                undoRemoved = true;
+                restored = true;
+                layers.clear();
+                return;
+            }
+            if (called) {
+                undoNote = "UndoAndRemove did not restore every layer scale; restored explicitly "
+                           "(this explicit restore is outside an undo event)";
+            }
+        }
         bool ok = true;
+        const std::vector<MCObjectHandle> liveLayers =
+            layerHandlesChanged ? AllLayers() : std::vector<MCObjectHandle>{};
         for (auto it = layers.rbegin(); it != layers.rend(); ++it) {
+            if (layerHandlesChanged &&
+                std::find(liveLayers.begin(), liveLayers.end(), it->first) == liveLayers.end()) {
+                ok = false;
+                restoreErrors.push_back("layer handle no longer valid after UndoAndRemove");
+                continue;
+            }
             try {
                 gSDK->SetLayerScaleN(it->first, it->second);
                 double_gs readBack = 0.0;
@@ -900,6 +1003,17 @@ struct ScaleBoost {
         }
         restored = ok;
         layers.clear();
+        if (undoOpened) {
+            // end_and_remove: the scales are already back; drop the event
+            // without replaying it.
+            undoOpened = false;
+            try {
+                undoEventRemoved = gSDK->EndAndRemoveUndoEvent() ? true : false;
+                if (!undoEventRemoved) undoNote = "EndAndRemoveUndoEvent returned false";
+            } catch (...) {
+                undoNote = "EndAndRemoveUndoEvent threw";
+            }
+        }
     }
 
     ~ScaleBoost() {
@@ -948,10 +1062,12 @@ bool ApplyScaleBoost(ScaleBoost& boost, const std::vector<MCObjectHandle>& layer
             gSDK->GetLayerScaleN(layer, scale);
             if (std::isfinite(scale) && scale > 0.0) {
                 boost.layers.emplace_back(layer, scale);
+                boost.layerUuids.push_back(ObjectUuid(layer));
                 boost.report.emplace_back(LayerName(layer), scale);
             }
         }
         if (boost.layers.empty()) return false;
+        boost.OpenUndo();
     }
     double zoom = 0.0;
     const bool zoomKnown = gSDK->GetProgramVariable(varWindowZoomFactor, &zoom) && std::isfinite(zoom) && zoom > 0.0;
@@ -1000,6 +1116,15 @@ std::string ScaleBoostJson(const ScaleBoost& boost) {
         json += boost.dirtyAfter < 0 ? "null" : (boost.dirtyAfter ? "true" : "false");
         json += ",\"marked_dirty\":";
         json += boost.dirtyBefore == 0 && boost.dirtyAfter == 1 ? "true" : "false";
+        json += ",\"undo_mode\":" + JsonString(boost.undoMode);
+        json += ",\"undo_event\":";
+        json += boost.undoEventUsed ? "true" : "false";
+        json += ",\"undo_removed\":";
+        json += boost.undoRemoved ? "true" : "false";
+        json += ",\"undo_event_removed\":";
+        json += boost.undoEventRemoved ? "true" : "false";
+        if (boost.layerHandlesChanged) json += ",\"layer_handles_changed\":true";
+        if (!boost.undoNote.empty()) json += ",\"undo_note\":" + JsonString(boost.undoNote);
     }
     return json + "}";
 }
@@ -1016,6 +1141,10 @@ ScaleBoost ParseScaleBoost(const Params& params) {
         }
     }
     if (!boost.enabled) boost.skipped = "disabled";
+    const std::string undoMode = ToLower(TrimCopy(GetStringParam(params, "scale_boost_undo")));
+    if (undoMode == "undo_and_remove" || undoMode == "end_and_remove" || undoMode == "off") {
+        boost.undoMode = undoMode;
+    }
     return boost;
 }
 
