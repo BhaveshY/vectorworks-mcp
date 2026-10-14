@@ -39,6 +39,9 @@ def view_codes(a: dict) -> dict:
 def handle(args: dict, ctx, warnings: list):
     a = C.lower_keys(args)
     host = get_host()
+    views = {"drawing", "current", "selection", "objects", "layer", "sheet", "saved_view"}
+    if not (a.get("view") or a.get("mode") or a.get("what")) and str(a.get("target") or "").lower() in views:
+        a["view"] = a.pop("target")  # weak models write target="layer" for view="layer"
     view = C.choice(a.get("view") or a.get("mode") or a.get("what"), "view",
                     ["drawing", "current", "selection", "objects", "layer", "sheet", "saved_view"],
                     {"all": "drawing", "fit": "drawing", "extents": "drawing", "screen": "current", "screenshot": "current",
@@ -104,6 +107,10 @@ def handle(args: dict, ctx, warnings: list):
                   "restored": data.get("restored", inst.v2 and True)}
     if info.get("model_width"):
         structured["image_scaled_to"] = [info["model_width"], info["model_height"]]
+    mapping = cap.image_mapping(real_path.name, data, info)
+    if mapping:
+        # "select what you see": vw_read(what="query", within_px=[[u1,v1],[u2,v2]]) uses this capture's mapping
+        structured["image_to_world"] = mapping
     if info.get("inline_error"):
         warnings.append(info["inline_error"])
     if data.get("view_used"):

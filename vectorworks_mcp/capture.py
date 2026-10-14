@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import logging
 import time
 import uuid
@@ -30,12 +31,13 @@ def new_capture_path(fmt: str) -> Path:
 def prune(keep: int = KEEP) -> None:
     directory = config.captures_dir()
     try:
-        files = sorted((p for p in directory.iterdir() if p.is_file() and p.name.startswith("capture-")),
-                       key=lambda p: p.stat().st_mtime, reverse=True)
+        files = sorted((p for p in directory.iterdir() if p.is_file() and p.name.startswith("capture-")
+                        and not p.name.endswith(".map.json")), key=lambda p: p.stat().st_mtime, reverse=True)
     except OSError:
         return
     for old in files[keep:]:
         try:
+            old.with_name(old.name + ".map.json").unlink(missing_ok=True)  # image_to_world sidecar
             old.unlink()
         except OSError:
             pass
@@ -122,6 +124,48 @@ def content_blocks(path: Path) -> tuple[list[dict], dict]:
                    "description": "Full-resolution Vectorworks capture"})
     info["resource"] = uri
     return blocks, info
+
+
+_MAPPINGS: dict[str, dict] = {}  # capture file name -> image_to_world (this server session)
+_LAST: list[str] = []
+
+
+def image_mapping(name: str, native: dict, info: dict) -> Optional[dict]:
+    """Pixel (u, v) of the image the model received -> drawing mm, from the bridge's world_bounds/px_per_mm
+    plus the host's trim and downscale. None for 3D captures or old bridges."""
+    wb, ppm = native.get("world_bounds"), native.get("px_per_mm")
+    try:
+        left, top, ppm = float(wb["left"]), float(wb["top"]), float(ppm)
+    except (TypeError, KeyError, ValueError):
+        return None
+    if ppm <= 0:
+        return None
+    width, height = info.get("width") or native.get("width"), info.get("height") or native.get("height")
+    box = info.get("trimmed_box") or [0, 0, width, height]
+    scale = (info["model_width"] / float(box[2] - box[0])) if info.get("model_width") else 1.0
+    mapping = {"x0": round(left + box[0] / ppm, 1), "y0": round(top - box[1] / ppm, 1),
+               "mm_per_px": round(1.0 / (ppm * scale), 4),
+               "rule": "x = x0 + u*mm_per_px, y = y0 - v*mm_per_px (u, v = pixel in the returned image)"}
+    _MAPPINGS[name] = mapping
+    _LAST[:] = [name]
+    try:
+        (config.captures_dir() / (name + ".map.json")).write_text(json.dumps(mapping), encoding="utf-8")
+    except OSError:
+        pass
+    return mapping
+
+
+def mapping_for(name: Optional[str]) -> Optional[dict]:
+    """The image_to_world of a capture (default: the latest one this session)."""
+    name = (name or (_LAST[0] if _LAST else "")).rsplit("/", 1)[-1]
+    if not name or ".." in name or "\\" in name:
+        return None
+    if name in _MAPPINGS:
+        return _MAPPINGS[name]
+    try:
+        return json.loads((config.captures_dir() / (name + ".map.json")).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
 
 
 def read_capture(uri: str):

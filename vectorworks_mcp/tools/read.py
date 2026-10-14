@@ -388,8 +388,9 @@ def _query(host, target, a: dict, what: str, fields: list[str], limit: int, offs
     params.update({f"field_{i}": f for i, f in enumerate(native_fields, 1)})
     if not inst.supports("query_objects"):
         raise host.bridge.missing_action(inst, "query_objects")
-    if text_filter:
-        return _filtered_query(host, target, params, text_filter, fields, limit, offset, out)
+    region = _region(a) if what == "query" else None
+    if text_filter or region:
+        return _filtered_query(host, target, params, text_filter, fields, limit, offset, out, region)
     data = host.call(target, "query_objects", params)
     items = data.get("items") if isinstance(data, dict) else None
     if not isinstance(items, list):
@@ -407,13 +408,48 @@ def _query(host, target, a: dict, what: str, fields: list[str], limit: int, offs
 _FILTER_SCAN_LIMIT = 20_000
 
 
+def _region(a: dict) -> Optional[tuple[float, float, float, float]]:
+    """within=[[x1,y1],[x2,y2]] (a box) or near=[x,y] (+ radius, default 1000 mm) -> (xmin, ymin, xmax, ymax) in mm."""
+    scale = C.scale_for(C.units_name(a.get("units")))
+    if a.get("within_px") not in (None, ""):
+        from .. import capture as cap
+        m = cap.mapping_for(a.get("capture"))
+        if not m:
+            raise VWError("not_found", "within_px needs a plan capture from this session (its image_to_world).",
+                          field="capture", next_step="Call vw_capture() (plan view) first, then pass pixel corners "
+                          "of the image you received; or use within=[[x1,y1],[x2,y2]] in mm.")
+        (u1, v1), (u2, v2) = C.points(a["within_px"], "within_px", 1.0, minimum=2, maximum=2)
+        xs = [m["x0"] + u * m["mm_per_px"] for u in (u1, u2)]
+        ys = [m["y0"] - v * m["mm_per_px"] for v in (v1, v2)]
+        return min(xs), min(ys), max(xs), max(ys)
+    if a.get("within") not in (None, ""):
+        p1, p2 = C.points(a["within"], "within", scale, minimum=2, maximum=2)
+        return min(p1[0], p2[0]), min(p1[1], p2[1]), max(p1[0], p2[0]), max(p1[1], p2[1])
+    if a.get("near") not in (None, ""):
+        x, y = C.point(a["near"], "near", scale)[:2]
+        r = C.number(a.get("radius", 1000), "radius") * scale
+        return x - r, y - r, x + r, y + r
+    return None
+
+
+def _item_box(item: dict) -> Optional[tuple[float, float, float, float]]:
+    b = item.get("bounds")
+    if not isinstance(b, dict):
+        return None
+    try:
+        (x1, y1), (x2, y2) = b["top_left"][:2], b["bottom_right"][:2]
+    except (KeyError, TypeError, ValueError):
+        return None
+    return min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)
+
+
 def _filtered_query(host, target, params: dict, needle: str, fields: list[str], limit: int, offset: int,
-                    out: dict) -> dict:
-    """query/name = case-insensitive 'contains' filter over object name, text content and Space room name.
-    The cursor is the native offset to continue scanning from."""
+                    out: dict, region: Optional[tuple] = None) -> dict:
+    """query/name = case-insensitive 'contains' filter over object name, text content and Space room name;
+    within/near = object bounds intersect the region. The cursor is the native offset to continue scanning from."""
     native_fields = [f for f in fields]
     if native_fields:
-        native_fields = list(dict.fromkeys(native_fields + ["name", "text", "type", "plugin_name", "uuid"]))
+        native_fields = list(dict.fromkeys(native_fields + ["name", "text", "type", "plugin_name", "uuid", "bounds"]))
     hits: list = []
     scan = offset
     more = False
@@ -431,7 +467,10 @@ def _filtered_query(host, target, params: dict, needle: str, fields: list[str], 
             if not isinstance(item, dict):
                 continue
             hay = " ".join(str(item.get(k) or "") for k in ("name", "text", "room_name")).lower()
-            if needle in hay:
+            box = _item_box(item) if region else None
+            in_region = not region or (box is not None and box[0] <= region[2] and box[2] >= region[0]
+                                       and box[1] <= region[3] and box[3] >= region[1])
+            if needle in hay and in_region:
                 hits.append(item)
                 if len(hits) >= limit:
                     break
@@ -443,7 +482,10 @@ def _filtered_query(host, target, params: dict, needle: str, fields: list[str], 
         more = True
     out["data"] = [_clean(i, fields) for i in hits]
     out["page"] = {"cursor": str(offset) if offset else "", "returned": len(hits),
-                   "next_cursor": str(scan) if more else None, "filter": f"name/text contains {needle!r}"}
+                   "next_cursor": str(scan) if more else None,
+                   "filter": "; ".join(([f"name/text contains {needle!r}"] if needle else []) +
+                                       ([f"bounds intersect x {region[0]:g}..{region[2]:g}, y {region[1]:g}..{region[3]:g} mm"]
+                                        if region else []))}
     if more:
         out["page"]["note"] = "More objects may match; pass cursor=next_cursor."
     return out

@@ -248,6 +248,27 @@ validates without changing anything.
 - Plan captures (`drawing`, `layer`, `objects`) default to Top/Plan; pass
   `standard_view` for 3D.
 
+### C2. Existing (big) projects: find, look, change
+
+Never scan everything. Narrow first, then act on uuids:
+
+1. Orient: `vw_read(what="summary")` (counts per type/layer/class, bounds) and
+   `vw_read(what="layers")` / `what="sheets"`.
+2. Find: combine filters in one query - `type`, `layer`, `class`, `search`
+   (name/text/room label contains), `criteria` (Vectorworks criteria, e.g.
+   record fields `('Door Data'.'Fire Rating'='EI30')`), and an area:
+   `within=[[x1,y1],[x2,y2]]` or `near=[x,y], radius=500` (mm).
+   `fields=["uuid","name","layer","bounds"]` keeps the result small.
+3. Look: `vw_capture(view="layer", layer="Level 01")` or
+   `vw_capture(view="objects", objects=[uuids])`. Plan captures return
+   `image_to_world` - to act on something you SEE, pass a pixel box of that
+   image: `vw_read(what="query", within_px=[[u1,v1],[u2,v2]], type="door")` ->
+   uuids of exactly those objects. (x = x0 + u*mm_per_px, y = y0 - v*mm_per_px.)
+4. Detail only what you change: `vw_read(what="object", target=uuid)`
+   (compact geometry; `detail=true` for records/parameters).
+5. Change in ONE `vw_edit(changes=[...])`, then capture the same area again to
+   verify. Pin the document (`document="<name>"`) when several are open.
+
 ### D. Layers, classes, stories, saved views
 
 - Read: `vw_read(what="layers")`, `vw_read(what="classes")`, `vw_read(what="saved_views")`.

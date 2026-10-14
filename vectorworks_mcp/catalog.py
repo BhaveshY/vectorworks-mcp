@@ -64,15 +64,14 @@ TOOLS: list[dict] = [
         "name": "vw_read",
         "title": "Read drawing data",
         "description": (
-            "Read-only. what=document|documents|layers|classes|summary (counts)|query (objects: type wall/door/space/..., l"
-            "ayer, class, criteria; search=name/text contains; spaces carry room_name; paged by cursor)|object (target; com"
-            "pact geometry, detail=true for records)|selection|view|saved_views|sheets|viewports (sheet=)|annotations|symbo"
-            "ls|worksheets|worksheet (target, range)|resources (type=hatch|line_type|text_style|wall_style...; search=)|rec"
-            "ords|parametric_schema (target='Door' or uuid; search=)|capabilities|plan_quality. mm. Example: vw_read(what=\""
-            "query\", type=\"wall\")."),
+            "Read-only. what=summary (counts)|query (type wall/door/space/..., layer, class, criteria, search=name/text, "
+            "within=[[x1,y1],[x2,y2]] | near=[x,y]+radius | within_px=pixel box of the last capture; cursor pages)|object "
+            "(target; detail=true)|document(s)|layers|classes|selection|view|saved_views|sheets|viewports|annotations|"
+            "symbols|worksheet(s)|resources (type=hatch|line_type|...; search=)|records|parametric_schema|capabilities|"
+            "plan_quality. mm. Example: vw_read(what=\"query\", type=\"door\", layer=\"GF\")."),
         "input": obj({"what": {"type": "string", "enum": READ_WHAT}, "document": DOC, "target": S, "type": S, "layer": S,
                       "class": S, "name": S, "criteria": S, "query": S, "search": S, "resource_type": S, "fields": STRS,
-                      "range": S, "limit": I, "cursor": S, "detail": B, "sheet": S, "viewport": S,
+                      "range": S, "limit": I, "cursor": S, "detail": B, "sheet": S, "viewport": S, "within": {"type": "array"}, "within_px": {"type": "array"}, "capture": S, "near": {"type": "array"}, "radius": N,
                       "plan": {"type": "object"}}, ("what",)),
         "output": out_schema(data={}, page={"type": "object"}, document={"type": "object"}),
         "annotations": RO,
