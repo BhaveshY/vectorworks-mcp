@@ -71,7 +71,7 @@ def main() -> int:
         b = ((ob.get("data") or {}).get("bounds")) or {}
         check("room geometry", ob.get("ok") and b, dt, b)
         try:
-            (x1, y1), (x2, y2) = b["top_left"], b["bottom_right"]
+            (x1, y1), (x2, y2) = (b["top_left"], b["bottom_right"]) if isinstance(b, dict) else b[:2]
             q, _, dt = call("vw_read", {**P, "what": "query", "type": "door", "layer": "L03",
                                         "within": [[min(x1, x2) - 200, min(y1, y2) - 200], [max(x1, x2) + 200, max(y1, y2) + 200]]})
             check("doors around that room (within)", len(q.get("data") or []) >= 1, dt, len(q.get("data") or []))
