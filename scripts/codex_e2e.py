@@ -66,6 +66,16 @@ SCENARIOS: dict[str, tuple[str, str]] = {
         "(4) capture the massing in right isometric view with a shaded render mode; (5) put the design layer "
         "on a sheet 'A-001' at 1:200 and export that sheet to PDF in %TEMP%\\vw-codex-e2e as A-001.pdf. "
         "Report what vw_read returns for the objects, the PDF size, and describe the isometric image."),
+    "luna_existing": ("gpt-5.6-luna",
+        "You work in an EXISTING Vectorworks project. Use ONLY the vectorworks MCP tools (no shell, no computer "
+        "use). Open " + str(pathlib.Path(os.environ.get("TEMP", ".")) / "vw-e2e" / "big-project.vwx") + " with "
+        "vw_document(action='open'); never save it and close it WITHOUT saving at the end. Tasks: (1) overview: "
+        "storeys/layers, sheets and object counts by type; (2) how many doors are on layer L02, and which apartments "
+        "(labels A-2nn etc.) have a living-room window narrower than 1200 mm; (3) find the room labelled "
+        "'A-305 Bedroom' and list the doors within 500 mm of it; (4) capture storey L03 and, using the image you "
+        "receive, select the rooms in its top-right quarter (vw_read within_px) and list their labels; (5) make all "
+        "entrance doors on L02 1100 mm wide and rename 'A-305 Bedroom' to 'A-305 Study', verify both by reading "
+        "back; (6) close without saving. Answer with a short PASS/FAIL list with evidence."),
     "luna_offline": ("gpt-5.6-luna",
         "Use only the vectorworks MCP tools. Check whether Vectorworks is connected and tell me in one sentence "
         "what the user must do if it is not. Do not retry more than once."),
