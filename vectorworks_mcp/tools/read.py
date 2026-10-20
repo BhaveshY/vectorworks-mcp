@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 from typing import Any, Optional
 
 from .. import coerce as C
@@ -531,17 +532,32 @@ def _add_room_names(host, target, items: list, fields: list[str]) -> None:
               and i.get("uuid")]
     if not spaces or not host.can_script(target.inst):
         return
-    try:
-        data = host.script(target, "object_detail", {"labels": [i["uuid"] for i in spaces[:1000]]},
-                           label="Read room names", kind="read", transaction=False) or {}
-    except VWError:
-        return
-    labels = data.get("labels") or {}
-    lower = {str(k).lower(): v for k, v in labels.items()}
+    # Each script costs ~0.4 s in a big drawing (Vectorworks' Python context setup), and searches read labels page by
+    # page: cache labels per document until this server writes anything (host.writes).
+    # also expires every minute: the user may rename rooms by hand in Vectorworks meanwhile
+    key = ((target.document or {}).get("fingerprint"), host.writes, int(time.monotonic() // 60))
+    cache = _ROOM_LABELS.setdefault(key, {})
+    if len(_ROOM_LABELS) > 8:
+        for old in list(_ROOM_LABELS)[:-4]:
+            _ROOM_LABELS.pop(old, None)
+    missing = [i["uuid"] for i in spaces if str(i["uuid"]).lower() not in cache][:1000]
+    if missing:
+        # empty cache: all Spaces of the document at once (searches then cost one script, not one per page)
+        args = {"all_labels": True} if not cache else {"labels": missing}
+        try:
+            data = host.script(target, "object_detail", args,
+                               label="Read room names", kind="read", transaction=False) or {}
+        except VWError:
+            return
+        for k, v in (data.get("labels") or {}).items():
+            cache[str(k).lower()] = v
     for item in spaces:
-        label = labels.get(item["uuid"], lower.get(str(item["uuid"]).lower()))
+        label = cache.get(str(item["uuid"]).lower())
         if label is not None:
             item["room_name"] = label
+
+
+_ROOM_LABELS: dict[tuple, dict] = {}
 
 
 def _find_by_uuid(host, target, uuid: str, fields: list[str]) -> Optional[dict]:

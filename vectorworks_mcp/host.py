@@ -54,6 +54,7 @@ class Host:
         self.started = time.time()
         self.log_path = None
         self.schema_cache: dict[tuple, dict] = {}
+        self.writes = 0  # count of non-read bridge calls by this server (cache generation)
 
     # ----- native helpers ---------------------------------------------
     def call(self, target: Target, action: str, params: Optional[dict] = None, *, kind: str = "read",
@@ -67,6 +68,8 @@ class Host:
         progress = ctx.report_progress if ctx is not None else None
         cancelled = ctx.cancelled if ctx is not None else None
         started = time.perf_counter()
+        if kind != "read":
+            self.writes += 1  # invalidates read caches (room labels)
         result = self.bridge.call(target.inst, action, merged, kind=kind, idempotency_key=idempotency_key,
                                   budget_s=budget_s, progress=progress, cancelled=cancelled)
         if _TIMING:

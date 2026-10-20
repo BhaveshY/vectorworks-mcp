@@ -23,7 +23,15 @@ def _detail_of(h):
     return out
 
 
-if ARGS.get("labels") is not None:
+if ARGS.get("all_labels"):
+    # every Space of the document in one pass: {uuid: room_name} (one script instead of one per query page)
+    labels = {}
+
+    def _space(h):
+        labels[vs.GetObjectUuid(h)] = space_label(h)
+    vs.ForEachObject(_space, "(PON='Space')")
+    result = {"labels": labels}
+elif ARGS.get("labels") is not None:
     # displayed Space room names for a query page: {uuid: room_name}
     labels = {}
     for u in ARGS["labels"]:

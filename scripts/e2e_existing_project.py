@@ -82,10 +82,9 @@ def main() -> int:
     imgs = [b for b in (raw["reply"].get("result") or {}).get("content", []) if b.get("type") == "image"]
     m = c.get("image_to_world")
     check("capture storey L03 (plan, isolated)", c.get("ok") and imgs and c.get("restored") is True, dt,
-          {"size": [c.get("width"), c.get("height")], "scaled": c.get("image_scaled_to"), "map": m,
-           "iso": c.get("isolation")})
-    if m and c.get("image_scaled_to"):
-        w, h = c["image_scaled_to"]
+          {"image": c.get("image_size"), "map": m, "isolated": c.get("isolated_layers")})
+    if m and c.get("image_size"):
+        w, h = c["image_size"]
         # top-right quarter of the image = apartments on the far east of the north row
         q, _, dt = call("vw_read", {**P, "what": "query", "type": "space", "layer": "L03",
                                     "within_px": [[int(w * 0.75), 0], [w, int(h * 0.5)]], "fields": ["uuid", "room_name", "name"]})
@@ -108,7 +107,7 @@ def main() -> int:
     e, _, dt = call("vw_organize", {**P, "kind": "class", "action": "set", "name": "A-Furn", "visibility": "hidden"})
     c2, _, dt2 = call("vw_capture", {**P, "view": "layer", "layer": "L02"})
     check("hide furniture class + capture", e.get("ok") and c2.get("ok"), dt + dt2,
-          {"size": [c2.get("width"), c2.get("height")]})
+          {"image": c2.get("image_size")})
     call("vw_organize", {**P, "kind": "class", "action": "set", "name": "A-Furn", "visibility": "visible"})
 
     q, _, dt = call("vw_read", {**P, "what": "query", "type": "window", "layer": "L01", "fields": ["uuid"]})
