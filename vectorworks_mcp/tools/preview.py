@@ -61,11 +61,8 @@ def attach(host, document: Optional[str], out: dict, warnings: list, *, uuids: O
             blocks.append({"type": "image", "data": base64.b64encode(image).decode("ascii"), "mimeType": mime})
         blocks.append({"type": "resource_link", "uri": f"vw://capture/{real.name}", "name": real.name,
                        "mimeType": "image/png", "description": "Full-resolution preview"})
-        out["preview"] = {"resource": f"vw://capture/{real.name}",
-                          "view": "sheet" if sheet else ("iso" if three_d else "top_plan"),
-                          "ms": round((time.perf_counter() - started) * 1000),
-                          "check": "LOOK at the image before reporting success: right place, size, layer, "
-                                   "nothing overlapping or missing."}
+        # the image itself is in the content; next_step already says to look at it
+        out["preview"] = {"view": "sheet" if sheet else ("iso" if three_d else "top_plan")}
         if info.get("model_width"):
             out["preview"]["size"] = [info["model_width"], info["model_height"]]
         if data.get("restored") is False:

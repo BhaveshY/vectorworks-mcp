@@ -4,6 +4,8 @@ session, caches) and small helpers used by several tools."""
 from __future__ import annotations
 
 import logging
+import os
+import sys
 import threading
 import time
 import traceback
@@ -16,10 +18,27 @@ from .errors import VWError, error_envelope
 from .mcp_core import CallContext, ToolOutput
 
 log = logging.getLogger("vectorworks_mcp.host")
+_TIMING = os.environ.get("VW_MCP_TIMING") == "1"  # per bridge call timings on stderr (profiling)
 
 _host: Optional["Host"] = None
 _host_lock = threading.Lock()
 _notices = threading.local()  # per tool call: notes merged into the result's warnings by tool_entry
+
+
+_PRUNE_KEYS = {"warnings", "annotations_created", "gray_layers", "hidden_classes", "via", "undo"}
+
+
+def _prune_empty(value: Any, depth: int = 0) -> None:
+    """Token hygiene for every result: drop empty lists/dicts and internal markers (via, undo text) - also nested
+    under "result" (organize/document receipts)."""
+    if not isinstance(value, dict) or depth > 3:
+        return
+    for key in list(value):
+        item = value[key]
+        if key in _PRUNE_KEYS and (item in ([], {}, None, "") or key in {"via", "undo"}):
+            value.pop(key)
+        elif isinstance(item, dict):
+            _prune_empty(item, depth + 1)
 
 
 def notice(message: str) -> None:
@@ -47,8 +66,18 @@ class Host:
             merged.setdefault("scale_boost_undo", "off")
         progress = ctx.report_progress if ctx is not None else None
         cancelled = ctx.cancelled if ctx is not None else None
+        started = time.perf_counter()
         result = self.bridge.call(target.inst, action, merged, kind=kind, idempotency_key=idempotency_key,
                                   budget_s=budget_s, progress=progress, cancelled=cancelled)
+        if _TIMING:
+            timing = (result.get("timing") or {}) if isinstance(result, dict) else {}
+            native, queue = timing.get("handler_ms"), timing.get("queue_wait_ms")
+            label = merged.get("undo_label") or ""
+            sys.stderr.write(f"[timing] {action} {label} {(time.perf_counter() - started) * 1000:.0f} ms"
+                             f"{f' (native {native:.0f} ms' if isinstance(native, (int, float)) else ' ('}"
+                             f"{f', queue {queue:.0f} ms' if isinstance(queue, (int, float)) else ''}, "
+                             f"request {len(str(merged))} B)\n")
+            sys.stderr.flush()
         if isinstance(result, dict) and (result.get("home_dismissed") or result.get("dismissed_dialogs")):
             dialogs = result.get("dismissed_dialogs") if isinstance(result.get("dismissed_dialogs"), list) else []
             home = [d for d in dialogs if isinstance(d, dict) and d.get("kind") in (None, "home", "update_available",
@@ -167,6 +196,7 @@ def tool_entry(fn: Callable[[dict, CallContext, list], Any]) -> Callable[[dict, 
         if warnings:
             structured.setdefault("warnings", [])
             structured["warnings"] = list(dict.fromkeys(structured["warnings"] + warnings))
+        _prune_empty(structured)
         if config.trace_enabled():
             structured["_trace"] = {"ms": round((time.perf_counter() - started) * 1000, 1)}
         return output

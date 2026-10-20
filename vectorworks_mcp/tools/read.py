@@ -161,6 +161,14 @@ def handle(args: dict, ctx, warnings: list) -> dict:
                                                      "example_limit": 0})
         out["data"] = {k: _type_names(v) if k.startswith("counts_by") else v
                        for k, v in data.items() if k not in _SUMMARY_DROP} if isinstance(data, dict) else data
+        if isinstance(out["data"], dict) and not C.boolean(a.get("detail", False), "detail"):
+            d = out["data"]
+            for key in ("counts_by_layer_type", "objects_returned", "named_objects_returned", "layer_count"):
+                d.pop(key, None)
+            if d.get("possibly_truncated") is False:
+                d.pop("possibly_truncated")
+            d["layers"] = [{k: v for k, v in l.items() if k in {"name", "kind", "visible"}} if isinstance(l, dict) else l
+                           for l in d.get("layers") or []]
         b = out["data"].get("bounds") if isinstance(out["data"], dict) else None
         if isinstance(b, dict) and all(isinstance(b.get(k), (int, float)) for k in ("top", "bottom")) and b["top"] < b["bottom"]:
             b["top"], b["bottom"] = b["bottom"], b["top"]  # native reports y-down; top is the larger y in mm
@@ -397,6 +405,8 @@ def _query(host, target, a: dict, what: str, fields: list[str], limit: int, offs
         raise VWError("protocol_error", "query_objects returned no items list")
     _add_room_names(host, target, items, fields)
     out["data"] = [_clean(i, fields) for i in items]
+    if not fields and not C.boolean(a.get("detail", False), "detail"):
+        out["data"] = [_compact_row(i) for i in out["data"]]
     more = bool(data.get("has_more"))
     out["page"] = {"cursor": str(offset) if offset else "", "returned": len(items),
                    "next_cursor": str(offset + len(items)) if more else None}
@@ -430,6 +440,28 @@ def _region(a: dict) -> Optional[tuple[float, float, float, float]]:
         r = C.number(a.get("radius", 1000), "radius") * scale
         return x - r, y - r, x + r, y + r
     return None
+
+
+_ROW_DROP = {"type_id", "native_type", "fillColor", "penColor", "lineWeight", "fillPattern", "opacity", "host",
+             "parent_uuid"}
+
+
+def _compact_row(item: Any) -> Any:
+    """Default query row: identity, layer/class, the type's key values and a [[minx,miny],[maxx,maxy]] box.
+    Graphic attributes and internal type ids come with detail=true (or fields=[...])."""
+    if not isinstance(item, dict):
+        return item
+    row = {k: v for k, v in item.items() if k not in _ROW_DROP and v not in ("", None)}
+    if row.get("class") == "None":
+        row.pop("class")
+    if row.get("plugin_name") and row.get("type") != "parametric":
+        row.pop("plugin_name")
+    if row.get("room_name") and row.get("room_name") == row.get("name"):
+        row.pop("room_name")
+    box = _item_box(item)
+    if box:
+        row["bounds"] = [[round(box[0]), round(box[1])], [round(box[2]), round(box[3])]]
+    return row
 
 
 def _item_box(item: dict) -> Optional[tuple[float, float, float, float]]:
@@ -480,7 +512,7 @@ def _filtered_query(host, target, params: dict, needle: str, fields: list[str], 
             more = False
             break
         more = True
-    out["data"] = [_clean(i, fields) for i in hits]
+    out["data"] = [_clean(i, fields) for i in hits] if fields else [_compact_row(i) for i in hits]
     out["page"] = {"cursor": str(offset) if offset else "", "returned": len(hits),
                    "next_cursor": str(scan) if more else None,
                    "filter": "; ".join(([f"name/text contains {needle!r}"] if needle else []) +
@@ -780,10 +812,15 @@ def _resources(host, target, a: dict, fields: list[str], limit: int, offset: int
     out["page"] = {"cursor": str(offset) if offset else "", "returned": len(out["data"]),
                    "next_cursor": data.get("next_cursor") if isinstance(data, dict) else None,
                    "total": data.get("total") if isinstance(data, dict) else None}
-    out["via"] = "script"
+    if not fields and not C.boolean(a.get("detail", False), "detail"):
+        # Plain names (half the tokens); names already in the document are listed separately.
+        items = out["data"]
+        out["data"] = [i.get("name") if isinstance(i, dict) else i for i in items]
+        in_doc = [i.get("name") for i in items if isinstance(i, dict) and i.get("source") == "document"]
+        if in_doc:
+            out["in_document"] = in_doc
     if rtype in {"hatches", "line_types", "gradients", "image_fills", "tiles", "text_styles"}:
-        out["usage"] = ("Use the name in vw_edit set properties / vw_create objects (fill, line_style, text_style); "
-                        "source='library' names are imported into the document automatically on first use.")
+        out["usage"] = "Use a name as fill / line_style / text_style; library names import on first use."
     return out
 
 

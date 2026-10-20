@@ -105,25 +105,31 @@ def handle(args: dict, ctx, warnings: list):
     real_path = Path(str(data.get("path") or data.get("file_path") or path))
     if not real_path.exists():
         raise VWError("native_error", f"Vectorworks reported a capture but {real_path} does not exist.")
-    blocks, info = cap.content_blocks(real_path)
+    detail = C.boolean(a.get("detail", False), "detail")
+    edge = int(C.number(a["max_px"], "max_px")) if a.get("max_px") not in (None, "", 0, "0") else cap.MODEL_EDGE
+    blocks, info = cap.content_blocks(real_path, max(512, min(edge, cap.MAX_EDGE)))
     cap.prune()
-    structured = {"ok": True, "path": str(real_path), "resource": info.get("resource"),
-                  "width": data.get("width") or info.get("width"), "height": data.get("height") or info.get("height"),
+    full = [data.get("width") or info.get("width"), data.get("height") or info.get("height")]
+    structured = {"ok": True, "path": str(real_path),
+                  "image_size": [info["model_width"], info["model_height"]] if info.get("model_width") else full,
                   "restored": data.get("restored", inst.v2 and True)}
     if info.get("model_width"):
-        structured["image_scaled_to"] = [info["model_width"], info["model_height"]]
+        structured["file_size"] = full  # full resolution on disk (path)
     mapping = cap.image_mapping(real_path.name, data, info)
     if mapping:
         # "select what you see": vw_read(what="query", within_px=[[u1,v1],[u2,v2]]) uses this capture's mapping
-        structured["image_to_world"] = mapping
+        structured["image_to_world"] = {k: v for k, v in mapping.items() if k != "rule" or detail}
     if info.get("inline_error"):
         warnings.append(info["inline_error"])
-    if data.get("view_used"):
-        structured["view_used"] = data["view_used"]
-    for key in ("capture_target", "plan_default_applied", "fit_to_objects_applied", "isolation"):
-        if data.get(key) not in (None, {}):
-            structured[key] = ({k: v for k, v in data[key].items() if k in {"applied", "mode", "layers"}}
-                               if key == "isolation" and isinstance(data[key], dict) else data[key])
+    iso = data.get("isolation") if isinstance(data.get("isolation"), dict) else {}
+    if iso.get("applied") and iso.get("layers"):
+        structured["isolated_layers"] = iso["layers"]
+    if detail:
+        structured["resource"] = info.get("resource")
+        for key in ("view_used", "capture_target", "plan_default_applied", "fit_to_objects_applied", "isolation",
+                    "scale_boost"):
+            if data.get(key) not in (None, {}):
+                structured[key] = data[key]
     if data.get("restored") is False:
         structured["restore_mismatch"] = data.get("restore_mismatch") or []
         warnings.append("Vectorworks could not fully restore the user's view after the capture (see "

@@ -94,6 +94,8 @@ def run(name: str, model: str, prompt: str) -> dict:
     calls: list[str] = []
     errors: list[str] = []
     final = ""
+    usage = {"input": 0, "cached": 0, "output": 0}
+    result_bytes: dict[str, int] = {}
     for line in open(log, encoding="utf-8", errors="replace"):
         try:
             event = json.loads(line)
@@ -101,9 +103,16 @@ def run(name: str, model: str, prompt: str) -> dict:
             continue
         item = event.get("item") or {}
         kind = item.get("type")
+        if event.get("type") == "turn.completed":
+            u = event.get("usage") or {}
+            usage["input"] += int(u.get("input_tokens") or 0)
+            usage["cached"] += int(u.get("cached_input_tokens") or 0)
+            usage["output"] += int(u.get("output_tokens") or 0)
         if kind == "mcp_tool_call" and event.get("type") == "item.completed":
             calls.append(f"{item.get('tool')}:{item.get('status')}")
             result = item.get("result") or {}
+            size = len(json.dumps(result.get("content") or []))
+            result_bytes[item.get("tool") or "?"] = result_bytes.get(item.get("tool") or "?", 0) + size
             if item.get("status") != "completed" or result.get("is_error") or item.get("error"):
                 errors.append(json.dumps({k: item.get(k) for k in ("tool", "arguments", "error", "result")})[:900])
         elif kind == "command_execution" and event.get("type") == "item.completed":
@@ -111,7 +120,8 @@ def run(name: str, model: str, prompt: str) -> dict:
         elif kind == "agent_message":
             final = item.get("text", "")
     return {"name": name, "model": model, "exit": proc.returncode, "seconds": round(time.time() - started),
-            "tool_calls": calls, "errors": errors, "final": final[-3000:], "log": str(log)}
+            "tool_calls": calls, "errors": errors, "final": final[-3000:], "log": str(log),
+            "usage": usage, "result_bytes": result_bytes}
 
 
 def main(argv: list[str]) -> int:
@@ -120,11 +130,15 @@ def main(argv: list[str]) -> int:
             print(f"{key:14} {model}")
         return 0
     names = [a for a in argv if not a.startswith("-")] or list(SCENARIOS)
+    exports = pathlib.Path(os.environ.get("TEMP", ".")) / "vw-codex-e2e"
+    if exports.exists():  # fresh export folder so "file exists" prompts do not stop a scenario
+        exports.rename(exports.with_name(f"vw-codex-e2e-{time.strftime('%Y%m%d-%H%M%S')}"))
     results = [run(n, *SCENARIOS[n]) for n in names]
     (OUT / "summary.json").write_text(json.dumps(results, indent=1), encoding="utf-8")
     for r in results:
         print(f"== {r['name']} ({r['model']}) exit={r['exit']} {r['seconds']}s calls={len(r['tool_calls'])} "
-              f"errors={len(r['errors'])}")
+              f"errors={len(r['errors'])} tokens in={r['usage']['input']} (cached {r['usage']['cached']}) "
+              f"out={r['usage']['output']} result_bytes={sum(r['result_bytes'].values())}")
         print("   ", " ".join(r["tool_calls"]))
         for err in r["errors"]:
             print("   ERR", err)

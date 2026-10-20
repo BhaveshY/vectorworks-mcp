@@ -84,6 +84,10 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         if action == "import":
             raise validation("kind=layer supports create, set, delete", "action", "create")
         out["result"] = _clean(host.call(target, "layers", params, kind="write"))
+        layer_rec = out["result"].get("layer") if isinstance(out["result"], dict) else None
+        if isinstance(layer_rec, dict) and not C.boolean(a.get("detail", False), "detail"):
+            out["result"]["layer"] = {k: v for k, v in layer_rec.items()
+                                      if k in {"name", "kind", "scale", "elevation", "visible", "story"} and v is not None}
         return out
 
     if kind == "class":
@@ -249,9 +253,10 @@ def viewport_record(record: dict) -> dict:
         record["projection"] = {0: "orthogonal", 1: "perspective", 6: "plan"}.get(codes[1], codes[1])
     rcode = record.pop("render_code", None)
     record["render_mode"] = next((n for n, c in RENDER_CODES.items() if c == rcode), rcode)
-    record["center"] = [round(v, 3) for v in record.get("center") or []]
-    record["size"] = [round(v, 3) for v in record.get("size") or []]
-    return record
+    record["center"] = [round(v, 1) for v in record.get("center") or []]
+    record["size"] = [round(v, 1) for v in record.get("size") or []]
+    # defaults are noise for the model
+    return {k: v for k, v in record.items() if v not in ([], {}, None, "", False, 0) or k == "scale"}
 
 
 def _viewport(host, target, a: dict, action: str, scale: float, out: dict) -> dict:

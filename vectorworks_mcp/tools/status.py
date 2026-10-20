@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 from .. import __version__, config
 from .. import coerce as C
@@ -107,8 +108,13 @@ def handle(args: dict, ctx, warnings: list) -> dict:
             # Harmless startup dialogs: close them now so a status check right
             # after Vectorworks starts already reports ready (live 2026-10-11).
             try:
-                host.bridge.call(chosen, "dismiss_home", {"wait_ms": 3000}, kind="read", budget_s=8)
-                host.bridge.ping(chosen)
+                # The bridge lets the Home web view finish loading (2 s) before closing it, then settles (1 s).
+                host.bridge.call(chosen, "dismiss_home", {"wait_ms": 6000}, kind="read", budget_s=11)
+                for _ in range(15):
+                    host.bridge.ping(chosen)
+                    if chosen.status.get("ui_state") not in {"modal", "loading"}:
+                        break
+                    time.sleep(0.3)
                 out["dismissed_dialog"] = early.get("kind")
                 for row in rows:
                     if row.get("instance") == chosen.key:
@@ -120,6 +126,11 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         chosen_row = next((r for r in rows if r.get("instance") == chosen.key), {})
         busy = ui_state in {"modal", "tracking", "loading"} or chosen_row.get("ui_state") == "busy"
         dialog = chosen.status.get("modal_dialog")
+        if (isinstance(dialog, dict) and dialog.get("kind") in {"home", "update_available", "backup_prompt"}
+                and chosen.status.get("auto_dismiss_dialogs", True) is not False):
+            # Closed automatically by the next call: never a reason to stop (a weak model gave up on it, live).
+            out["note"] = "The Vectorworks start-up dialog is still closing; just continue with your next call."
+            dialog, busy = None, False
         if isinstance(dialog, dict):
             kind = dialog.get("kind") or "other"
             what = {"home": "The Vectorworks Home screen", "backup_prompt": "The autosave 'name and save this document' prompt",
@@ -165,7 +176,38 @@ def handle(args: dict, ctx, warnings: list) -> dict:
     if problems:
         out["problems"] = problems
         out["next_step"] = problems[0]["next_step"]
+        problems[0].pop("next_step", None)  # same text as the top-level next_step
+    if not (a.get("detail") and C.boolean(a.get("detail"), "detail")):
+        _compact(out)
     return out
+
+
+_ROW_DETAIL = {"protocol", "capability_revision", "build_id", "dismissed_dialogs", "pid", "source"}
+
+
+def _compact(out: dict) -> None:
+    """Default status = what a model needs to act; detail=true keeps the diagnostics."""
+    out["host"] = {"version": out.get("host", {}).get("version")}
+    for row in out.get("instances") or []:
+        for key in _ROW_DETAIL:
+            row.pop(key, None)
+        if row.get("script_engine") == "ok":
+            row.pop("script_engine")
+        if row.get("auto_dismiss_dialogs") is True:
+            row.pop("auto_dismiss_dialogs")
+    if len(out.get("instances") or []) == 1 and out.get("instance"):
+        out.pop("instance")
+    # the active document appeared up to four times (instance row, documents, active_document, pinned_document)
+    if out.get("documents") is not None:
+        for row in out.get("instances") or []:
+            row.pop("active_document", None)
+        if any(d.get("active") for d in out["documents"] if isinstance(d, dict)):
+            out.pop("active_document", None)
+    pinned = out.get("pinned_document") or {}
+    active_fp = next((d.get("fingerprint") for d in out.get("documents") or [] if isinstance(d, dict) and d.get("active")),
+                     (out.get("active_document") or {}).get("fingerprint"))
+    if pinned and pinned.get("fingerprint") == active_fp:
+        out.pop("pinned_document", None)
 
 
 def _job(bridge, inst, job_id: str) -> dict:

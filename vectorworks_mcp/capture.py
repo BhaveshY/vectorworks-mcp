@@ -17,6 +17,8 @@ from . import config
 log = logging.getLogger("vectorworks_mcp.capture")
 
 MAX_EDGE = 1568
+# Default long edge of the image the model receives (tokens grow with pixels); max_px raises it up to MAX_EDGE.
+MODEL_EDGE = 1280
 KEEP = 50
 INLINE_FALLBACK_LIMIT = 1_000_000
 
@@ -113,8 +115,8 @@ def model_image(path: Path, max_edge: int = MAX_EDGE) -> tuple[Optional[bytes], 
         return None, mime, {"inline_error": f"cannot downscale capture: {exc}"}
 
 
-def content_blocks(path: Path) -> tuple[list[dict], dict]:
-    data, mime, info = model_image(path)
+def content_blocks(path: Path, max_edge: int = MODEL_EDGE) -> tuple[list[dict], dict]:
+    data, mime, info = model_image(path, max_edge)
     blocks: list[dict] = []
     if data is not None:
         blocks.append({"type": "image", "data": base64.b64encode(data).decode("ascii"), "mimeType": mime})

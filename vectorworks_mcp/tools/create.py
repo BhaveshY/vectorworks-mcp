@@ -346,9 +346,6 @@ def handle(args: dict, ctx, warnings: list):
         _OPENINGS_DONE[key] = [r for r in receipts if r.get("operation_id") in done_ids]
         while len(_OPENINGS_DONE) > 64:
             _OPENINGS_DONE.pop(next(iter(_OPENINGS_DONE)))
-        warnings.append(f"{len(opening_items)} door(s)/window(s) were inserted into their walls by script (real wall "
-                        "breaks: they survive wall class changes, moves and resets), then sized natively: the "
-                        "walls, the insertion and the sizing are separate undo steps (see undo_steps).")
     if deferred:
         # Live (VW 2024, Column2): a new plug-in object initialises its record fields on its FIRST regeneration,
         # which runs only after the creating script returned, overwriting most values set in that script (but it
@@ -366,9 +363,11 @@ def handle(args: dict, ctx, warnings: list):
         checks = [{"uuid": r["uuid"], "expect": r["expect"]} for r in res.get("receipts") or [] if r.get("expect")]
         _tx.verify_pio(host, target, checks, warnings)
     out = _receipt(plan, receipts, created_ids, key, steps, call_layer, active_layer, native_layer)
-    if script_result.get("styled"):
-        out["styled"] = script_result["styled"] if len(script_result["styled"]) <= COMPACT_OVER else \
-            len(script_result["styled"])
+    picked = {s.get("id"): {k[:-7]: v for k, v in (s.get("set") or {}).items() if k.endswith("_picked")}
+              for s in script_result.get("styled") or [] if isinstance(s, dict)}
+    picked = {k: v for k, v in picked.items() if v}
+    if picked:  # only what the server chose for you (generic "gradient" / "dashed" ...)
+        out["picked"] = picked
     if script_result.get("imported_resources"):
         out["imported_resources"] = script_result["imported_resources"]
     moved = [r for r in script_result.get("post") or [] if r.get("op") == "layer"]
@@ -377,23 +376,20 @@ def handle(args: dict, ctx, warnings: list):
                                  "bridge cannot create on a given layer natively)")
     if spaces and (spaces_native_back or any(r.get("op") == "order" for r in script_result.get("post") or [])):
         # bridge 1.0.x: auto_order sends spaces (and slabs) behind walls inside the same transaction
-        out["spaces"] = "sent to the back of their layer (behind walls, doors and windows)"
-    if steps > native_steps and native_steps and (plan.script_objects or restyle or post_ops) and not opening_items:
-        warnings.append("Native objects and the script-made part (extrudes/columns/graphic styles/layer moves/space "
-                        "order) are separate undo steps (native apply_operations and run_script cannot share one "
-                        "undo event).")
+        pass  # spaces are drawn behind walls (documented default)
     if wall_joins:
-        out["wall_joins"] = wall_joins if len(wall_joins) <= COMPACT_OVER else \
-            {"count": len(wall_joins), "joined": sum(1 for j in wall_joins if j.get("joined", True))}
+        failed = [j for j in wall_joins if not j.get("joined", True)]
+        out["walls_joined"] = len(wall_joins) - len(failed)
+        if failed:
+            out["wall_joins_failed"] = failed
     if fp_counts:
         out["floor_plan"] = fp_counts
     if target.document:
         out["document"] = doc_brief(target.document)
     three_d = any(k in preview.THREE_D_KINDS for k in plan.kinds.values()) or bool(plan.script_objects)
-    out["next_step"] = ("Done: this receipt is authoritative (every listed object exists). Do not re-create or re-check "
-                        "each object; " + ("LOOK at the preview image before reporting success." if
+    out["next_step"] = ("Done; this receipt is authoritative (do not re-check each object). " + ("LOOK at the preview image." if
                                            preview.wanted(want_preview, out["count"], three_d) else
-                                           "use vw_capture() once if a visual check is needed."))
+                                           "vw_capture() once for a visual check."))
     if preview.wanted(want_preview, out["count"], three_d):
         top = [created_ids[i] for i in created_ids if i not in hosted_ids]
         return preview.attach(host, a.get("document"), out, warnings, uuids=top, three_d=three_d)
@@ -413,18 +409,12 @@ def _receipt(plan, receipts: list, created_ids: dict, key: str, steps: int, call
     layers_used = {i: actual.get(i) or plan.layers.get(i) or active_layer for i in created_ids if i not in hosted}
     distinct = sorted({l for l in layers_used.values() if l})
     if count <= COMPACT_OVER:
-        created = []
-        for r in receipts:
-            local = r.get("operation_id") or r.get("local_ref")
-            entry = {"id": local, "uuid": r.get("uuid"),
-                     "type": r.get("type") or _KIND_TYPES.get(plan.kinds.get(local, ""), plan.kinds.get(local))}
-            if r.get("parent_uuid"):
-                entry["wall"] = r["parent_uuid"]
-            if len(distinct) > 1 and local in layers_used:
-                entry["layer"] = layers_used[local]
-            created.append({k: v for k, v in entry.items() if v})
-        out["created"] = created
+        # your id (or o<n>) -> uuid, once; types as counts
         out["ids"] = created_ids
+        out["types"] = dict(Counter(_KIND_TYPES.get(plan.kinds.get(i, ""), plan.kinds.get(i)) or "object"
+                                      for i in created_ids))
+        if len(distinct) > 1:
+            out["layer_of"] = {i: layers_used[i] for i in created_ids if i in layers_used}
     else:
         # big plans: the uuids ONCE, in the order of the objects list (+ the ids the caller named)
         out["types"] = dict(Counter(plan.kinds.get(i) or "object" for i in created_ids))
@@ -433,12 +423,11 @@ def _receipt(plan, receipts: list, created_ids: dict, key: str, steps: int, call
         named = {i: n for n, i in enumerate(order) if not _auto_id(i)}
         if named:
             out["named"] = named
-        out["uuids_order"] = "objects list order; named = your id -> index in uuids"
+        out["uuids_order"] = "objects list order; named: id -> index"
     if len(distinct) == 1:
         out["layer"] = distinct[0]
     elif distinct:
         out["layers"] = dict(Counter(layers_used.values()))
     out["idempotency_key"] = key
-    out["undo"] = {1: "one undo step", 2: "two undo steps"}.get(steps, f"{steps} undo steps")
     out["undo_steps"] = steps
     return out
