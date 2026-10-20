@@ -11,7 +11,7 @@ LEN = {"type": ["number", "string"]}          # 3000 | "3m" | "12'6\""
 PT = {"type": ["array", "string", "object"]}   # [x,y] | "x,y" | {x,y}
 STRS = {"type": "array", "items": S}
 UNITS = {"type": "string", "enum": ["mm", "cm", "m", "in", "ft"]}
-DOC = {"type": "string", "description": "Target document: fingerprint, file name or path (default: the one you used last)"}
+DOC = {"type": "string", "description": "fingerprint, name or path (default: last used)"}
 IDEM = {"type": "string", "description": "Optional; derived automatically"}
 
 STANDARD_VIEWS = ["top_plan", "top", "front", "back", "left", "right", "bottom", "iso", "right_iso", "left_iso",

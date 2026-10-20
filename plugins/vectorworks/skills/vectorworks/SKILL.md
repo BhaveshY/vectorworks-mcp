@@ -326,8 +326,12 @@ Never scan everything. Narrow first, then act on uuids:
 
 ### I. Graphic attributes (line types, hatches, text, arrowheads)
 
-- Names: `vw_read(what="resources", type="hatch")` / `type="line_type"` / `type="text_style"` /
-  `type="gradient"`. Library names (`source: "library"`) are imported into the document on first use.
+- Names: no lookup needed for common wishes - `fill: "gradient"`, `"Cross Hatch"`, `"hatch:Brick"`,
+  `line_style: "dashed"` resolve to the closest real name and the receipt reports it under `picked`.
+  Exact lists: `vw_read(what="resources", type="hatch", search="brick")` (also line_type, text_style,
+  gradient). Library names are imported into the document on first use.
+- Results are compact by default; `detail=true` on reads/captures adds attributes, records and
+  diagnostics. Only ask for detail when you need a value that is missing.
 - Change existing objects (one `vw_edit`; read back, rolled back on any mismatch):
 
 ```text

@@ -209,6 +209,13 @@ _ANNOTATION_SYN = {"label": "text", "note": "text", "rectangle": "rect", "box": 
 def _annotations(raw, scale: float) -> list[dict]:
     from .. import builders as B
     out = []
+    raw = C.parse_json_maybe(raw)
+    if isinstance(raw, str):
+        raw = [raw]
+    if isinstance(raw, list):
+        # a plain string = a text note at the drawing origin, stacked downwards (a weak-model spelling, live)
+        raw = [{"type": "text", "text": s, "at": [0, -1000 * (n + 1)]} if isinstance(s, str) else s
+               for n, s in enumerate(raw)]
     for i, item in enumerate(C.obj_list(raw, "annotations", example=[{"type": "text", "at": [0, 0], "text": "A"}], maximum=200)):
         src = C.lower_keys(item)
         field = f"annotations[{i}]"

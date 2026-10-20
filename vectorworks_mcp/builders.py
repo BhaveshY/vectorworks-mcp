@@ -241,7 +241,12 @@ def style_props(src: dict, field: str, *, basic: bool = False, skip: tuple = ())
             elif value is True or str(value).strip().lower() == "solid":
                 out["fill"] = {"kind": "solid"}
             else:
-                out["fill"] = {"kind": kind_hint or "auto", "name": C.text(value, label, required=True, max_len=255)}
+                name = C.text(value, label, required=True, max_len=255)
+                prefix, sep, rest = name.partition(":")
+                if sep and prefix.strip().lower() in FILL_KEYS and rest.strip():
+                    # "hatch:Brick" / "gradient:Blue" (a common model spelling)
+                    kind_hint, name = FILL_KEYS[prefix.strip().lower()], rest.strip()
+                out["fill"] = {"kind": kind_hint or "auto", "name": name}
         elif canonical == "text_size":
             raw = str(value).strip().lower().removesuffix("pt").strip() if isinstance(value, str) else value
             size = C.number(raw, label)

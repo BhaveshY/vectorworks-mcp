@@ -25,6 +25,8 @@ from typing import Any, Callable, Optional
 from . import config
 from .errors import NATIVE_CODE_MAP, VWError
 
+_TIMING = os.environ.get("VW_MCP_TIMING") == "1"  # every bridge round trip on stderr (profiling)
+
 log = logging.getLogger("vectorworks_mcp.bridge")
 
 MAX_FRAME = 16 * 1024 * 1024
@@ -402,7 +404,15 @@ class BridgeClient:
             if timeout_ms is not None and inst.v2:
                 payload["timeout_ms"] = int(timeout_ms)
             try:
+                sent_at = time.perf_counter()
                 reply = conn.roundtrip(payload, timeout_s, fresh_after_s)
+                if _TIMING:
+                    timing = (reply.get("result") or {}).get("timing") if isinstance(reply.get("result"), dict) else None
+                    native = (timing or {}).get("handler_ms")
+                    sys.stderr.write(f"[wire] {action} {params.get('undo_label', '')} "
+                                     f"{(time.perf_counter() - sent_at) * 1000:.0f} ms"
+                                     f"{f' (native {native:.0f})' if isinstance(native, (int, float)) else ''}\n")
+                    sys.stderr.flush()
             except TransportError as exc:
                 if exc.refused:
                     self._unreachable_until[inst.port] = time.monotonic() + UNREACHABLE_CACHE_S
@@ -630,7 +640,9 @@ class BridgeClient:
     def wait_job(self, inst: Instance, job_id: str, *, progress=None, cancelled: Optional[threading.Event] = None,
                  action: str = "", total_budget: Optional[float] = None) -> Any:
         deadline = time.monotonic() + (total_budget or self.budgets.long_total)
-        delay = 0.5
+        # Most "long" jobs (PDF/DWG/IFC export, rendered captures) finish in 0.1-0.5 s: poll fast first
+        # (job_status runs on the bridge's socket thread, cheap), back off to 1 s for real long jobs.
+        delay = 0.05
         started = time.monotonic()
         last_state = "queued"
         while True:
@@ -651,7 +663,7 @@ class BridgeClient:
                 raise VWError("still_running", f"{action or 'The operation'} is still {last_state} in Vectorworks.",
                               details={"job_id": job_id, "state": last_state, "elapsed_s": round(time.monotonic() - started, 1)})
             time.sleep(delay)
-            delay = min(2.0, delay * 1.5)
+            delay = min(1.0, delay * 1.5)
 
     def job_status(self, inst: Instance, job_id: str) -> dict:
         if not inst.supports("job_status"):

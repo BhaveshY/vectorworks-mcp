@@ -61,8 +61,9 @@ def handle(args: dict, ctx, warnings: list):
         if a.get("margin_pct") not in (None, ""):
             params["margin_pct"] = C.number(a["margin_pct"], "margin_pct")
         params["capture_target"] = view  # bridge 1.0.x: explicit target (older bridges ignore it)
-        if a.get("max_px") not in (None, ""):
-            params["max_px"] = int(C.number(a["max_px"], "max_px"))
+        # The model gets a <= MODEL_EDGE image: ask the bridge for no more (its default 1600 boosts the layer scale
+        # more often, and every boost makes Vectorworks regenerate the layer twice - ~1 s busy afterwards, live).
+        params["max_px"] = int(C.number(a["max_px"], "max_px")) if a.get("max_px") not in (None, "") else cap.MODEL_EDGE
         # Undo-and-remove of the scale boost crashed Vectorworks right after doors/windows were created
         # (live 2026-10-14, reproducible); restore the layer scales explicitly instead.
         params["scale_boost_undo"] = str(a.get("scale_boost_undo") or "off")

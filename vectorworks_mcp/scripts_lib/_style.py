@@ -39,6 +39,36 @@ def find_resource(rtype, name, required=True):
                          RES_LABEL.get(rtype, "hatch").replace(" ", "_")))
 
 
+_GENERIC_WORDS = {"hatch", "hf", "gr", "fill", "pattern", "line", "type", "style", "gradient"}
+
+
+def resolve_name(rtype, name):
+    """The resource name to use for `name`: exact, else case-insensitive, else the shortest document/library name
+    that contains every significant word of `name` ("Cross Hatch" -> "Skipping Cross Gray HF"). Returns
+    (name, picked) - picked is True when a different name was chosen. Unknown -> (name, False)."""
+    _l, doc_names = _res_names(rtype, 0, "")
+    lib = RES_LIBRARY.get(rtype)
+    lib_names = _res_names(rtype, lib[0], lib[1])[1] if lib else []
+    names = doc_names + [n for n in lib_names if n not in doc_names]
+    if name in names:
+        return name, False
+    low = name.strip().lower()
+    for cand in names:
+        if cand.lower() == low:
+            return cand, False
+    words = [w for w in low.replace("-", " ").replace("_", " ").replace("/", " ").split()
+             if len(w) >= 3 and w not in _GENERIC_WORDS]
+    if not words:
+        return name, False
+    def split(c):
+        return c.lower().replace("-", " ").replace("_", " ").replace("/", " ").split()
+    hits = [c for c in names if all(w in split(c) for w in words)]          # whole words first
+    hits = hits or [c for c in names if all(w in c.lower() for w in words)]  # then substrings
+    if not hits:
+        return name, False
+    return sorted(hits, key=len)[0], True
+
+
 def did_you_mean(name, names, n=5):
     """Up to n close names: case-insensitive substring hits first, then difflib similarity."""
     import difflib
@@ -133,6 +163,11 @@ def _apply_line_style(h, st, done):
         if ls["kind"] == "name" and ls["name"].strip().lower().replace("-", "").replace("_", "").replace(" ", "") in GENERIC_LINE:
             ls = dict(ls, name=_generic_line_type(ls["name"]))
             done["line_style_picked"] = ls["name"]
+        if ls["kind"] == "name":
+            picked, changed = resolve_name(96, ls["name"])
+            if changed:
+                ls = dict(ls, name=picked)
+                done["line_style_picked"] = picked
         value = ls["value"] if ls["kind"] == "index" else -find_resource(96, ls["name"])
         vs.SetLSN(h, int(value))
         got = vs.GetLSN(h)
@@ -168,7 +203,20 @@ def _apply_fill(h, st, done):
                 done["fill_picked"] = names[0]
             if kind == "auto":
                 kind = next((k for k in ("hatch", "gradient", "image", "tile")
-                             if find_resource(FILL_KINDS[k], fill["name"], required=False)), "hatch")
+                             if find_resource(FILL_KINDS[k], fill["name"], required=False)), "")
+                if not kind:  # no exact name of any kind: closest hatch/gradient by words ("Cross Hatch")
+                    for k in ("hatch", "gradient"):
+                        picked, changed = resolve_name(FILL_KINDS[k], fill["name"])
+                        if changed:
+                            kind, fill = k, dict(fill, name=picked)
+                            done["fill_picked"] = picked
+                            break
+                    kind = kind or "hatch"
+            else:
+                picked, changed = resolve_name(FILL_KINDS[kind], fill["name"])
+                if changed:
+                    fill = dict(fill, name=picked)
+                    done["fill_picked"] = picked
             index = find_resource(FILL_KINDS[kind], fill["name"])
             if kind == "hatch":
                 if not vs.SetVectorFill(h, fill["name"]):

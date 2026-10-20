@@ -63,11 +63,15 @@ class ToolSpec:
 
     def wire(self, version: str) -> dict:
         tool = {"name": self.name, "description": self.description, "inputSchema": self.input_schema,
-                "annotations": dict(self.annotations, title=self.title)}
+                "annotations": dict(self.annotations)}
         if _at_least(version, "2025-06-18"):
             tool["title"] = self.title
-            if self.output_schema is not None:
+            # outputSchema is optional and adds ~2 KB to every tools/list (model context); opt in with
+            # VW_MCP_OUTPUT_SCHEMA=1 for clients that validate structuredContent.
+            if self.output_schema is not None and os.environ.get("VW_MCP_OUTPUT_SCHEMA") == "1":
                 tool["outputSchema"] = self.output_schema
+        else:
+            tool["annotations"]["title"] = self.title
         return tool
 
 
