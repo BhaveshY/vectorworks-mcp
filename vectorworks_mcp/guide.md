@@ -32,7 +32,7 @@ Lengths are millimetres unless you pass `units` (mm, cm, m, in, ft) or a string 
 
 **Graphic styles:** set keys (also creation keys): `fill` none|solid|hatch/gradient/image/tile name, `line_style` line type name, `font`, `text_size` pt, `text_style` "bold italic" or style name, `align`, `arrows` start|end|both|none. Names: `vw_read(what="resources", type="hatch", search="brick")` (no type: all kinds); library names import on first use. Generic or approximate names work (`"gradient"`, `"Cross Hatch"`, `"dashed"`, `"hatch:Brick"`): the closest real name is used and reported in `picked` - no lookup needed first.
 
-**Results are compact:** reads and receipts return what you need to act; add `detail=true` for all attributes/records/diagnostics.
+**Results are compact:** reads and receipts return what you need to act; add `detail=true` for attributes/records/diagnostics. Queries over 40 objects come as a table `{columns, rows}`; ask only for what you need (`type`, `layer`, `search`, `fields=[...]`).
 
 **Sheets & viewports:** `vw_organize(kind="viewport", action="create", sheet="A-101", layers=["GF"], scale="1:100", view="top_plan", at=[0,0], crop=[[x1,y1],[x2,y2]], classes={"A-Furn":"hide"}, title="Ground floor", annotations=[{"type":"dimension","start":[0,0],"end":[8000,0],"offset":-1000}])` (sheet made if missing; returns a sheet preview). `action="set"`, `"update"`, `"delete"` (`confirm=true`). Read: `vw_read(what="viewports", sheet="A-101")`.
 

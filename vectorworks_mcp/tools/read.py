@@ -180,6 +180,8 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         host.session.remember_query(target.document, uuids)
         if uuids:
             out["tip"] = "vw_edit(target='last_query') applies a change to all of these"
+        if not fields:
+            _as_table(out)
         return out
     if what == "object":
         return _object(host, target, a, fields, out, C.boolean(a.get("detail", False), "detail"))
@@ -427,6 +429,18 @@ def _query(host, target, a: dict, what: str, fields: list[str], limit: int, offs
 _FILTER_SCAN_LIMIT = 20_000
 
 
+def _pair_box(value: Any) -> Any:
+    """[x1, y1, x2, y2] (flat, also strings) or {x1,y1,x2,y2} -> [[x1, y1], [x2, y2]]; anything else unchanged."""
+    value = C.parse_json_maybe(value)
+    if isinstance(value, dict):
+        v = C.lower_keys(value)
+        if all(k in v for k in ("x1", "y1", "x2", "y2")):
+            return [[v["x1"], v["y1"]], [v["x2"], v["y2"]]]
+    if isinstance(value, list) and len(value) == 4 and not any(isinstance(x, (list, dict)) for x in value):
+        return [[value[0], value[1]], [value[2], value[3]]]
+    return value
+
+
 def _region(a: dict) -> Optional[tuple[float, float, float, float]]:
     """within=[[x1,y1],[x2,y2]] (a box) or near=[x,y] (+ radius, default 1000 mm) -> (xmin, ymin, xmax, ymax) in mm."""
     scale = C.scale_for(C.units_name(a.get("units")))
@@ -437,12 +451,12 @@ def _region(a: dict) -> Optional[tuple[float, float, float, float]]:
             raise VWError("not_found", "within_px needs a plan capture from this session (its image_to_world).",
                           field="capture", next_step="Call vw_capture() (plan view) first, then pass pixel corners "
                           "of the image you received; or use within=[[x1,y1],[x2,y2]] in mm.")
-        (u1, v1), (u2, v2) = C.points(a["within_px"], "within_px", 1.0, minimum=2, maximum=2)
+        (u1, v1), (u2, v2) = C.points(_pair_box(a["within_px"]), "within_px", 1.0, minimum=2, maximum=2)
         xs = [m["x0"] + u * m["mm_per_px"] for u in (u1, u2)]
         ys = [m["y0"] - v * m["mm_per_px"] for v in (v1, v2)]
         return min(xs), min(ys), max(xs), max(ys)
     if a.get("within") not in (None, ""):
-        p1, p2 = C.points(a["within"], "within", scale, minimum=2, maximum=2)
+        p1, p2 = C.points(_pair_box(a["within"]), "within", scale, minimum=2, maximum=2)
         return min(p1[0], p2[0]), min(p1[1], p2[1]), max(p1[0], p2[0]), max(p1[1], p2[1])
     if a.get("near") not in (None, ""):
         x, y = C.point(a["near"], "near", scale)[:2]
@@ -475,6 +489,23 @@ def _compact_row(item: Any, attrs: bool = False) -> Any:
         if got:
             row["attributes"] = got
     return row
+
+
+_TABLE_OVER = 40
+
+
+def _as_table(out: dict) -> None:
+    """Large query results as {"columns": [...], "rows": [[...]]}: every key once instead of in every row
+    (a weak model listed 180 spaces with detail: 51 KB, live)."""
+    rows = out.get("data")
+    if not isinstance(rows, list) or len(rows) <= _TABLE_OVER or not all(isinstance(r, dict) for r in rows):
+        return
+    columns: list[str] = []
+    for r in rows:
+        for k in r:
+            if k not in columns:
+                columns.append(k)
+    out["data"] = {"columns": columns, "rows": [[r.get(c) for c in columns] for r in rows]}
 
 
 def _item_box(item: dict) -> Optional[tuple[float, float, float, float]]:
