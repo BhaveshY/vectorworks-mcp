@@ -132,6 +132,27 @@ def _annotation(vp, item):
     return {"type": kind, "uuid": uuid_of(h)}
 
 
+def _drawing_label(vp):
+    """A title is the viewport's description, which Vectorworks only shows through a Drawing Label plug-in in the
+    annotations (live: a viewport title was invisible on the sheet). Placed under the drawn content."""
+    try:
+        (cx, cy), (w, hgt) = _box(vp)
+        ox = vs.GetObjectVariableReal(vp, OV_X)
+        oy = vs.GetObjectVariableReal(vp, OV_Y)
+        sc = vs.GetObjectVariableReal(vp, OV_SCALE) or 1.0
+        # sheet (document units) -> model mm, 8 mm (paper) below the viewport
+        mx = (cx - w / 2.0 - ox) * sc
+        my = (cy - hgt / 2.0 - oy - U(8)) * sc
+        h = vs.CreateCustomObjectN("Drawing Label", (mx + FRAME[0], my + FRAME[1]), 0, False)
+        if _nil(h) or not vs.AddVPAnnotationObject(vp, h):
+            raise ValueError("not added")
+        vs.ResetObject(h)
+        return {"type": "drawing_label", "uuid": uuid_of(h)}
+    except Exception as exc:  # cosmetic: never fail the viewport over the label
+        WARN.append("drawing label not added (%s); the title is stored on the viewport" % exc)
+        return {"type": "drawing_label", "skipped": True}
+
+
 def _record(vp):
     center, size = _box(vp)
     shown, gray = [], []
@@ -213,6 +234,8 @@ def _apply(vp, creating):
         if abs(abs(q2[0] - q1[0]) - want) > max(0.01 * want, 1e-6):
             raise ValueError("readback_mismatch: crop width %s, expected %s (document units)" % (abs(q2[0] - q1[0]), want))
     made = [_annotation(vp, item) for item in (A.get("annotations") or [])]
+    if creating and A.get("title") and A.get("drawing_label", True):
+        made.append(_drawing_label(vp))
     if made:
         vs.ResetObject(vp)
     target = A.get("at")

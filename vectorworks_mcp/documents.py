@@ -70,6 +70,20 @@ class Session:
         self._lock = threading.Lock()
         self._plans: "OrderedDict[str, str]" = OrderedDict()
         self.descriptor_cache: dict[tuple, str] = {}
+        self._last_query: dict[str, list[str]] = {}  # document fingerprint/name -> uuids of the last query result
+
+    # ----- last query (vw_edit target="last_query") ---------------------
+    def remember_query(self, doc: Optional[dict], uuids: list[str]) -> None:
+        if not doc:
+            return
+        clean = [str(u).lower().removeprefix("uuid:") for u in uuids if u][:5000]
+        for key in (doc.get("fingerprint"), doc.get("name")):
+            if key:
+                self._last_query[str(key)] = clean
+
+    def last_query_uuids(self, document: Optional[str] = None) -> list[str]:
+        key = document or (self.pinned or {}).get("fingerprint")
+        return self._last_query.get(str(key), []) if key else []
 
     # ----- pinning -----------------------------------------------------
     def observe(self, inst: Instance, doc: Optional[dict]) -> None:

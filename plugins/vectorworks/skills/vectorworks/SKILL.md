@@ -270,7 +270,7 @@ Never scan everything. Narrow first, then act on uuids:
    uuids of exactly those objects. (x = x0 + u*mm_per_px, y = y0 - v*mm_per_px.)
 4. Detail only what you change: `vw_read(what="object", target=uuid)`
    (compact geometry; `detail=true` for records/parameters).
-5. Change in ONE `vw_edit(changes=[...])`, then capture the same area again to
+5. Change in ONE `vw_edit(changes=[...])` - for "all of those" use `target: "last_query"` (the objects your last vw_read query returned) instead of copying uuids, then capture the same area again to
    verify. Pin the document (`document="<name>"`) when several are open.
 
 ### D. Layers, classes, stories, saved views

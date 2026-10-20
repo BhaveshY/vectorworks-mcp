@@ -56,7 +56,8 @@ def handle(args: dict, ctx, warnings: list):
     params: dict = {"path": str(path), "file_path": str(path), "format": fmt}
     kind = "read"
     if inst.v2:
-        params.update({"restore": True, "update_viewports": False, "reset_plugin_objects": False})
+        # a sheet capture must draw its viewports (live: a new viewport showed as an empty page)
+        params.update({"restore": True, "update_viewports": view == "sheet", "reset_plugin_objects": False})
         params.update(view_codes(a))
         if a.get("margin_pct") not in (None, ""):
             params["margin_pct"] = C.number(a["margin_pct"], "margin_pct")

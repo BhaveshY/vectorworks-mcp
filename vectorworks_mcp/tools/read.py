@@ -175,7 +175,12 @@ def handle(args: dict, ctx, warnings: list) -> dict:
             b["top"], b["bottom"] = b["bottom"], b["top"]  # native reports y-down; top is the larger y in mm
         return out
     if what in {"query", "selection"}:
-        return _query(host, target, a, what, fields, limit, offset, out)
+        out = _query(host, target, a, what, fields, limit, offset, out)
+        uuids = [i.get("uuid") for i in out.get("data") or [] if isinstance(i, dict) and i.get("uuid")]
+        host.session.remember_query(target.document, uuids)
+        if uuids:
+            out["tip"] = "vw_edit(target='last_query') applies a change to all of these"
+        return out
     if what == "object":
         return _object(host, target, a, fields, out, C.boolean(a.get("detail", False), "detail"))
     if what == "view":
@@ -406,8 +411,11 @@ def _query(host, target, a: dict, what: str, fields: list[str], limit: int, offs
         raise VWError("protocol_error", "query_objects returned no items list")
     _add_room_names(host, target, items, fields)
     out["data"] = [_clean(i, fields) for i in items]
-    if not fields and not C.boolean(a.get("detail", False), "detail"):
-        out["data"] = [_compact_row(i) for i in out["data"]]
+    if not fields:
+        # detail=true adds the graphic attributes, not every native field (a weak model asked for detail on
+        # every read: 11-25 KB per call, live)
+        with_attrs = C.boolean(a.get("detail", False), "detail")
+        out["data"] = [_compact_row(i, with_attrs) for i in out["data"]]
     more = bool(data.get("has_more"))
     out["page"] = {"cursor": str(offset) if offset else "", "returned": len(items),
                    "next_cursor": str(offset + len(items)) if more else None}
@@ -447,7 +455,7 @@ _ROW_DROP = {"type_id", "native_type", "fillColor", "penColor", "lineWeight", "f
              "parent_uuid"}
 
 
-def _compact_row(item: Any) -> Any:
+def _compact_row(item: Any, attrs: bool = False) -> Any:
     """Default query row: identity, layer/class, the type's key values and a [[minx,miny],[maxx,maxy]] box.
     Graphic attributes and internal type ids come with detail=true (or fields=[...])."""
     if not isinstance(item, dict):
@@ -462,6 +470,10 @@ def _compact_row(item: Any) -> Any:
     box = _item_box(item)
     if box:
         row["bounds"] = [[round(box[0]), round(box[1])], [round(box[2]), round(box[3])]]
+    if attrs:
+        got = {_ATTR_KEYS[k]: item[k] for k in _ATTR_KEYS if item.get(k) not in (None, "")}
+        if got:
+            row["attributes"] = got
     return row
 
 

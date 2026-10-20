@@ -4,6 +4,8 @@ font/size/style/alignment, markers) through the vetted run_script edit engine)."
 
 from __future__ import annotations
 
+import re
+
 from .. import builders, routing
 from .. import names as namehelp
 from .. import coerce as C
@@ -63,6 +65,44 @@ def target_records(host, target, refs: list[str]) -> dict[str, dict]:
     return out
 
 
+_LAST_WORDS = {"last_query", "$last", "last", "last_result", "query"}
+_UUID_RE = re.compile(r"^(?:uuid:)?([0-9a-fA-F]{8})-[0-9a-fA-F-]{23}$")
+
+
+def _expand_last_query(host, document, changes: list[dict], warnings: list) -> list[dict]:
+    """target="last_query" = every object the previous vw_read query returned (no uuid copying). A uuid that is
+    not in that result but matches exactly one of its uuids on the first 8 AND last 12 characters is a copy typo
+    (live: a weak model wrote ...-162c-... for ...-1624-...): it is repaired with a warning."""
+    last = host.session.last_query_uuids(document)
+    if not last:
+        return changes
+    out = []
+    for change in changes:
+        c = dict(change)
+        target = c.get("target")
+        if isinstance(target, str) and target.strip().lower() in _LAST_WORDS:
+            c.pop("target")
+            c["targets"] = [f"uuid:{u}" for u in last]
+            warnings.append(f"target '{target}' = the {len(last)} object(s) of your last query.")
+        for key in ("target", "targets"):
+            refs = c.get(key)
+            many = isinstance(refs, list)
+            fixed = []
+            for ref in (refs if many else [refs]):
+                m = _UUID_RE.match(ref.strip()) if isinstance(ref, str) else None
+                u = ref.strip()[5:] if isinstance(ref, str) and ref.strip().lower().startswith("uuid:") else ref
+                if m and isinstance(u, str) and u.lower() not in last:
+                    near = [x for x in last if x[:8] == u[:8].lower() and x[-12:] == u[-12:].lower()]
+                    if len(near) == 1:
+                        warnings.append(f"{u} was not in your last query; used {near[0]} (same start/end).")
+                        ref = f"uuid:{near[0]}"
+                fixed.append(ref)
+            if refs is not None:
+                c[key] = fixed if many else fixed[0]
+        out.append(c)
+    return out
+
+
 def handle(args: dict, ctx, warnings: list):
     a = C.lower_keys(args)
     raw_changes = a.get("changes") or a.get("edits") or a.get("operations")
@@ -70,6 +110,7 @@ def handle(args: dict, ctx, warnings: list):
         raw_changes = [{k: v for k, v in a.items() if k not in {"units", "document", "dry_run", "idempotency_key",
                                                                  "preview"}}]
     changes = C.obj_list(raw_changes, "changes", example=EXAMPLE, maximum=2000)
+    changes = _expand_last_query(get_host(), a.get("document"), changes, warnings)
     units = C.units_name(a.get("units") or a.get("coordinate_units"))
     scale = C.scale_for(units)
     dry_run = C.boolean(a.get("dry_run", False), "dry_run")

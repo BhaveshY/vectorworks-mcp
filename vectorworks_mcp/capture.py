@@ -159,8 +159,9 @@ def image_mapping(name: str, native: dict, info: dict) -> Optional[dict]:
 
 def mapping_for(name: Optional[str]) -> Optional[dict]:
     """The image_to_world of a capture (default: the latest one this session)."""
-    name = (name or (_LAST[0] if _LAST else "")).rsplit("/", 1)[-1]
-    if not name or ".." in name or "\\" in name:
+    # a name, a vw://capture/... link or the full Windows path from the capture result (live: a model passed the path)
+    name = str(name or (_LAST[0] if _LAST else "")).replace("\\", "/").rsplit("/", 1)[-1]
+    if not name or ".." in name:
         return None
     if name in _MAPPINGS:
         return _MAPPINGS[name]
