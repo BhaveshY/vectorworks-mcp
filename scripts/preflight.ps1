@@ -73,10 +73,15 @@ foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
 }
 $allVers = @(@($userVers) + @($progVers) | Sort-Object -Unique -Descending)
 $targets = if ($VectorworksVersion) { @($VectorworksVersion) } else { @($allVers | Where-Object { $Supported -contains $_ }) }
-if ($allVers.Count -eq 0) {
+if ($VectorworksVersion -and $Supported -notcontains $VectorworksVersion) {
+    Add-Check "vectorworks" "fail" "Vectorworks $VectorworksVersion is not supported (supported: $($Supported -join ', '))" "Stop and tell the user: Vectorworks $VectorworksVersion needs a new native build against its SDK (scripts\build-native-bridge.ps1) and live testing."
+    $targets = @()
+} elseif ($allVers.Count -eq 0) {
     Add-Check "vectorworks" "fail" "no Vectorworks installation found (Program Files or %APPDATA%\Nemetschek\Vectorworks)" "Install Vectorworks 2024 or 2025 first. This connector cannot work without it."
 } elseif ($targets.Count -eq 0) {
     Add-Check "vectorworks" "fail" "found Vectorworks $($allVers -join ', '); supported: $($Supported -join ', ')" "Install Vectorworks 2024 or 2025, or stop: other versions need a new native build (scripts\build-native-bridge.ps1 with that SDK)."
+} elseif (@($targets | Where-Object { $allVers -notcontains $_ }).Count) {
+    Add-Check "vectorworks" "fail" "Vectorworks $($targets -join ', ') is not installed (found: $($allVers -join ', '))" "Install that version first, or omit -VectorworksVersion to use the installed one."
 } else {
     $notRun = @($targets | Where-Object { $userVers -notcontains $_ })
     $detail = "found Vectorworks $($allVers -join ', '); will install for $($targets -join ', ')"

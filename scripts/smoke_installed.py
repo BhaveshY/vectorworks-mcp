@@ -17,7 +17,8 @@ import subprocess
 import sys
 import time
 
-LAUNCHER = pathlib.Path(os.environ["USERPROFILE"]) / ".vectorworks-mcp" / "bin" / "vectorworks-mcp.cmd"
+LAUNCHER = pathlib.Path(os.environ.get("VW_MCP_LAUNCHER")
+                        or pathlib.Path(os.environ["USERPROFILE"]) / ".vectorworks-mcp" / "bin" / "vectorworks-mcp.cmd")
 
 
 class Session:

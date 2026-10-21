@@ -107,9 +107,10 @@ The installer is idempotent, so rerunning it after fixing something is safe.
 & "$env:USERPROFILE\.vectorworks-mcp\bin\vectorworksctl.cmd" doctor -Json
 ```
 
-The output is `{ok, failures, warnings, checks:[{name, status, detail, fix}]}`.
-With Vectorworks closed, `discovery` and `bridge_ping` are only `info` or
-`warn`. Any `fail` has a `fix`. Apply the safe fixes with `doctor -Fix`, then
+The output is `{ok, failures, warnings, checks:[{id, status, message, fix}]}`.
+`failures` and `warnings` are counts. `status` is one of `ok`, `info`, `warn`
+or `fail`. With Vectorworks closed, `discovery` and `bridge_ping` are not
+failures. Any `fail` has a `fix`. Apply the safe fixes with `doctor -Fix`, then
 run the doctor again.
 
 ## 5. Start Vectorworks and smoke-test
