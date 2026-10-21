@@ -163,6 +163,16 @@ def err_code(sc: dict) -> str:
     return (sc.get("error") or {}).get("code", "")
 
 
+def problem_next_step(sc: dict, code: str) -> str:
+    """vw_status lifts the FIRST problem's next_step to the top level (not repeated in the problem); later
+    problems keep their own. Returns the next_step that applies to problem `code` ('' if absent)."""
+    probs = sc.get("problems") or []
+    for i, p in enumerate(probs):
+        if p.get("code") == code:
+            return p.get("next_step") or (sc.get("next_step", "") if i == 0 else "")
+    return ""
+
+
 # --------------------------------------------------------------------------
 def phase_startup(python: str, state_dir: Path) -> None:
     print("\n== 1. startup, tools/list, protocol eras ==")
@@ -180,13 +190,23 @@ def phase_startup(python: str, state_dir: Path) -> None:
     raw = json.dumps(reply["result"], separators=(",", ":"))
     check("10 tools listed", len(tools) == 10, ", ".join(t["name"] for t in tools))
     check("tools/list size <= ~6k tokens", len(raw) / 4 <= 6500, f"{len(raw)} bytes ~{len(raw) // 4} tokens")
+    # outputSchema (~2 KB of model context) is opt-in via VW_MCP_OUTPUT_SCHEMA=1; the title is top-level only
+    # (2025-06-18+), never duplicated into annotations.
+    c = Client(python, base_env(state_dir, VW_MCP_PORT=str(free_port()), VW_MCP_OUTPUT_SCHEMA="1"), "schema")
+    c.initialize()
+    with_schema = {t["name"]: t for t in c.request("tools/list")["result"]["tools"]}
+    c.close()
     ro = {"vw_status", "vw_read", "vw_capture"}
     for t in tools:
         ann = t.get("annotations") or {}
         ok = ann.get("openWorldHint") is False and (ann.get("readOnlyHint") is True) == (t["name"] in ro)
-        ok = ok and t["inputSchema"].get("additionalProperties") is False and "outputSchema" in t
+        ok = ok and t["inputSchema"].get("additionalProperties") is False
+        ok = ok and "outputSchema" not in t and isinstance((with_schema.get(t["name"]) or {}).get("outputSchema"), dict)
+        ok = ok and bool(t.get("title")) and "title" not in ann
         ok = ok and len(t["description"]) <= 600 and "Example" in t["description"]
-        check(f"tool hygiene {t['name']}", ok, json.dumps(ann))
+        check(f"tool hygiene {t['name']}", ok,
+              json.dumps({"annotations": ann, "title": t.get("title"), "outputSchema": "outputSchema" in t,
+                          "outputSchema with VW_MCP_OUTPUT_SCHEMA=1": "outputSchema" in (with_schema.get(t["name"]) or {})}))
     destructive = {t["name"] for t in tools if t["annotations"].get("destructiveHint")}
     check("destructive tools", destructive == {"vw_edit", "vw_apply", "vw_organize", "vw_document", "vw_script"},
           str(sorted(destructive)))
@@ -272,7 +292,7 @@ def phase_absent(python: str, state_dir: Path) -> None:
           json.dumps(sc)[:200])
     res = c.request("resources/read", {"uri": "vw://guide"})
     text = res["result"]["contents"][0]["text"]
-    check("vw://guide served (<= 2k tokens)", len(text) / 4 < 2200, f"{len(text)} chars")
+    check("vw://guide served (<= 2.5k tokens)", "vw_create" in text and len(text) / 4 <= 2500, f"{len(text)} chars")
     prompts = c.request("prompts/list")["result"]["prompts"]
     check("4 prompts", {p["name"] for p in prompts} == {"draw-floor-plan", "inspect-drawing", "export-sheets", "fix-connection"})
     got = c.request("prompts/get", {"name": "draw-floor-plan", "arguments": {"brief": "2 rooms"}})
@@ -288,7 +308,10 @@ def phase_mock(python: str, state_dir: Path) -> None:
         c = Client(python, base_env(state_dir), "mock")
         c.initialize()
         sc, _ = c.call("vw_status")
-        check("discovery via instances/*.json; ready", sc.get("ready") is True and sc.get("instance"), json.dumps(sc)[:300])
+        # compact status: a single instance is the instances[] row (no separate top-level "instance" key)
+        rows = sc.get("instances") or []
+        check("discovery via instances/*.json; ready", sc.get("ready") is True and len(rows) == 1
+              and rows[0].get("port") == port and rows[0].get("instance") and "problems" not in sc, json.dumps(sc)[:300])
         sc, _ = c.call("vw_create", {"objects": [
             {"type": "wall", "id": "w1", "start": [0, 0], "end": ["6m", 0], "thickness": "200mm", "height": 2700},
             {"type": "wall", "id": "w2", "start": [6000, 0], "end": [6000, 4000]},
@@ -299,11 +322,14 @@ def phase_mock(python: str, state_dir: Path) -> None:
             {"type": "circle", "center": [500, 500], "diameter": 400},
             {"type": "polyline", "points": [[0, 0], [100, 100], [200, 0]]}]})
         ids = sc.get("ids") or {}
-        door_row = next((r for r in sc.get("created") or [] if r.get("type") == "door"), {})
+        types = sc.get("types") or {}
+        # compact receipt: ids + type counts + walls_joined + undo_steps (no per-opening rows / undo warnings);
+        # the host walls are verified by the query below
         check("vw_create walls + door/window ($w1) + unit strings: walls native, openings by script into the wall, "
               "sizes native (3 undo steps, said so)",
-              sc.get("ok") and len(ids) == 8 and sc.get("undo_steps") == 3 and door_row.get("wall") == ids.get("w1")
-              and any("wall break" in w for w in sc.get("warnings") or []), json.dumps(sc)[:600])
+              sc.get("ok") and len(ids) == 8 and sc.get("undo_steps") == 3 and sc.get("walls_joined") == 1
+              and types.get("wall") == 2 and types.get("door") == 1 and types.get("window") == 1
+              and "created" not in sc, json.dumps(sc)[:600])
         q, _ = c.call("vw_read", {"what": "query", "type": "door"})
         qw, _ = c.call("vw_read", {"what": "query", "type": "window"})
         d0, w0 = (q.get("data") or [{}])[0], (qw.get("data") or [{}])[0]
@@ -423,7 +449,10 @@ def phase_mock(python: str, state_dir: Path) -> None:
             sc, _ = c.call("vw_read", args)
             check(f"vw_read {what}", sc.get("ok"), json.dumps(sc)[:200])
         sc, _ = c.call("vw_read", {"what": "resources", "resource_type": "hatches"})
-        check("resources via script (hatches)", sc.get("ok") and sc.get("via") == "script", json.dumps(sc)[:200])
+        # the internal "via" marker is pruned; the script listing is what splits document vs library names
+        check("resources via script (hatches)", sc.get("ok") and "via" not in sc
+              and {"Hatch A", "Aluminum HF"} <= set(sc.get("data") or []) and sc.get("in_document") == ["Hatch A", "Hatch B"],
+              json.dumps(sc)[:200])
         # vw_apply legacy grammar with forgiving input (op alias, numeric strings, flat params)
         sc, _ = c.call("vw_apply", {"operations": [
             {"op": "create", "id": "r9", "object_type": "rect", "x1": "0", "y1": "0", "x2": "10", "y2": "5"},
@@ -506,8 +535,8 @@ def phase_legacy_mock(python: str, state_dir: Path) -> None:
         check("pre-1.0 detected, upgrade recommended", "upgrade_recommended" in json.dumps(sc), json.dumps(sc)[:300])
         sc, _ = c.call("vw_create", {"objects": [{"type": "wall", "id": "w1", "start": [0, 0], "end": [5000, 0]},
                                                  {"type": "door", "wall": "$w1", "offset": 1000}]})
-        check("rev5: walls + hosted door in two steps (warned)", sc.get("ok") and sc.get("undo") == "two undo steps",
-              json.dumps(sc)[:300])
+        check("rev5: walls + hosted door in two steps (warned)", sc.get("ok") and sc.get("undo_steps") == 2
+              and any("two undo steps" in w for w in sc.get("warnings") or []), json.dumps(sc)[:600])
         sc, raw = c.call("vw_script", {"code": "result = 1"})
         check("rev5: vw_script -> upgrade_required with command", err_code(sc) == "upgrade_required" and
               "install" in sc["error"]["next_step"], json.dumps(sc)[:300])
@@ -612,8 +641,10 @@ def phase_edge(python: str, state_dir: Path) -> None:
         sc, _ = c.call("vw_status", {})
         probs = [p for p in sc.get("problems", []) if p.get("code") == "script_engine_unavailable"]
         check("vw_status surfaces script_engine poisoned with restart next_step",
-              bool(probs) and "save their work and restart Vectorworks" in probs[0].get("next_step", "")
-              and any(r.get("script_engine") == "poisoned" for r in sc.get("instances", [])), json.dumps(sc)[:500])
+              bool(probs) and "save their work and restart Vectorworks" in problem_next_step(sc, "script_engine_unavailable")
+              and sc.get("ready") is True  # native tools still work
+              and any(r.get("script_engine") == "poisoned" for r in sc.get("instances", [])),
+              json.dumps({k: sc.get(k) for k in ("ready", "problems", "next_step")})[:500])
         c.close()
     finally:
         mock.kill()
@@ -649,8 +680,12 @@ def phase_production(python: str, state_dir: Path) -> None:
         check("viewport create: sheet made, 1:100, top_plan, crop, class override, 3 annotations, one undo step",
               sc.get("ok") and res.get("sheet_created") == "A-101" and vp.get("scale") == 100 and vp.get("view") == "top_plan"
               and vp.get("crop") is True and "Dimension" in vp.get("hidden_classes", []) and vp.get("title") == "Ground floor"
-              and len(res.get("annotations_created") or []) == 3 and vp.get("layers") == ["Design Layer-1"]
-              and sc.get("undo") == "one undo step", json.dumps(sc)[:500])
+              and vp.get("layers") == ["Design Layer-1"]
+              # the 3 annotations + the title as a Drawing Label (the only way a title shows on the sheet);
+              # one undo step = one script transaction (rollback checked below), its "undo" marker is pruned
+              and [a.get("type") for a in res.get("annotations_created") or []] == ["text", "dimension", "line", "drawing_label"]
+              and all(a.get("uuid") for a in res["annotations_created"]) and not sc.get("warnings"),
+              json.dumps(sc)[:500])
         vp_uuid = vp.get("uuid")
         sc, _ = c.call("vw_read", {"what": "viewports", "target": "A-101"})
         check("vw_read viewports by sheet NAME", sc.get("ok") and len(sc.get("data") or []) == 1, json.dumps(sc)[:300])
@@ -676,9 +711,15 @@ def phase_production(python: str, state_dir: Path) -> None:
         sc, _ = c.call("vw_organize", {"kind": "viewport", "action": "set", "target": "x", "scale": "1:x"})
         check("viewport scale '1:x' -> validation_error", err_code(sc) == "validation_error", json.dumps(sc)[:200])
         # -- graphic attributes ---------------------------------------------------------------------------
+        # compact: plain names + in_document; detail=true gives {name, source} rows
         sc, _ = c.call("vw_read", {"what": "resources", "type": "hatch"})
-        names = {i.get("name"): i.get("source") for i in sc.get("data") or []}
-        check("resources type=hatch lists document + library names", sc.get("ok") and names.get("Hatch A") == "document"
+        data = sc.get("data") or []
+        check("resources type=hatch lists document + library names", sc.get("ok") and all(isinstance(n, str) for n in data)
+              and {"Hatch A", "Aluminum HF"} <= set(data) and "Hatch A" in (sc.get("in_document") or [])
+              and "Aluminum HF" not in (sc.get("in_document") or []), json.dumps(sc)[:300])
+        sc, _ = c.call("vw_read", {"what": "resources", "type": "hatch", "detail": True})
+        names = {i.get("name"): i.get("source") for i in sc.get("data") or [] if isinstance(i, dict)}
+        check("resources detail=true: source per name", sc.get("ok") and names.get("Hatch A") == "document"
               and names.get("Aluminum HF") == "library", json.dumps(sc)[:300])
         sc, _ = c.call("vw_edit", {"changes": [
             {"op": "set", "target": ids.get("r"), "properties": {"fill": "Aluminum HF", "line_style": "Clouds",
@@ -703,14 +744,18 @@ def phase_production(python: str, state_dir: Path) -> None:
              "elevation": 300, "fill": "Brick HF"},
             {"type": "column", "id": "c1", "at": [1000, 1000], "width": 400, "height": 3500},
             {"type": "wall", "id": "w", "start": [0, 0], "end": [8000, 0], "line_style": "Dash"}]})
+        # compact receipt: undo_steps is the count (no undo warnings); the wall style shows up as what was picked
+        # / imported, not as a styled[] echo
         check("vw_create extrude + column + wall style: all receipts, 3 undo steps (native, script, plug-in params) warned",
-              sc.get("ok") and {"m1", "c1", "w"} <= set(sc.get("ids") or {}) and sc.get("undo") == "3 undo steps"
-              and len(sc.get("styled") or []) == 1 and any("separate undo" in w for w in sc.get("warnings") or []),
+              sc.get("ok") and {"m1", "c1", "w"} <= set(sc.get("ids") or {}) and sc.get("undo_steps") == 3
+              and sc.get("types") == {"wall": 1, "extrude": 1, "column": 1}
+              and (sc.get("picked") or {}).get("w", {}).get("line_style") == "Dash"
+              and {"type": "hatch", "name": "Brick HF"} in (sc.get("imported_resources") or []),
               json.dumps(sc)[:500])
         sc, _ = c.call("vw_create", {"objects": [{"type": "massing", "origin": [0, 0], "width": 5000, "depth": 4000,
                                                   "height": 3000}]})
-        check("script-only create (extrude rect footprint) = one undo step", sc.get("ok") and sc.get("undo") == "one undo step"
-              and (sc.get("created") or [{}])[0].get("type") == "extrude", json.dumps(sc)[:300])
+        check("script-only create (extrude rect footprint) = one undo step", sc.get("ok") and sc.get("undo_steps") == 1
+              and sc.get("types") == {"extrude": 1}, json.dumps(sc)[:300])
         sc, _ = c.call("vw_create", {"objects": [{"type": "column", "at": [0, 0], "diameter": 300}], "dry_run": True})
         check("dry_run lists script objects", sc.get("ok") and (sc.get("script_objects") or [{}])[0].get("kind") == "column",
               json.dumps(sc)[:300])
@@ -736,8 +781,9 @@ def phase_production(python: str, state_dir: Path) -> None:
         check("extrude fill solid lands on the profile", sc.get("ok"), json.dumps(sc)[:300])
         sc, _ = c.call("vw_read", {"what": "parametric_schema", "target": "Column2"})
         params = {p.get("id"): p for p in (sc.get("data") or {}).get("parameters") or []}
-        check("parametric_schema Column2 (no native provider) via parametric record", sc.get("ok") and
-              sc.get("via") == "script" and params.get("OA Height", {}).get("type") == "length", json.dumps(sc)[:300])
+        check("parametric_schema Column2 (no native provider) via parametric record", sc.get("ok") and "via" not in sc
+              and (sc.get("data") or {}).get("plugin") == "Column2" and params.get("OA Height", {}).get("type") == "length",
+              json.dumps(sc)[:300])
         col = ((c.call("vw_create", {"objects": [{"type": "column", "id": "k", "at": [0, 0]}]})[0]).get("ids") or {}).get("k")
         sc, _ = c.call("vw_edit", {"changes": [{"op": "parametric", "target": col, "plugin": "Column2",
                                                 "parameters": {"OA Height": "9m", "Use Capital": True, "Shaft Width": 450}}]})
@@ -746,7 +792,7 @@ def phase_production(python: str, state_dir: Path) -> None:
         sc, _ = c.call("vw_create", {"objects": [{"type": "parametric", "plugin": "Column2", "at": [500, 0],
                                                   "parameters": {"OA Height": 2800}}]})
         check("vw_create parametric Column2 via parametric record", sc.get("ok") and
-              (sc.get("created") or [{}])[0].get("type") == "parametric", json.dumps(sc)[:300])
+              sc.get("types") == {"parametric": 1} and len(sc.get("ids") or {}) == 1, json.dumps(sc)[:300])
         c.close()
     finally:
         mock.kill()
@@ -767,9 +813,10 @@ def phase_weak_model(python: str, state_dir: Path) -> None:
                                                          "kind": "home"})
         st, _ = c.call("vw_status")
         probs = [p for p in st.get("problems", []) if p.get("code") == "modal_dialog"]
+        # auto-dismiss OFF: the Home screen really blocks (with auto-dismiss on it is only a note, never a blocker)
         check("vw_status: Home screen -> modal_dialog problem pointing to dismiss_home",
-              st.get("ready") is False and bool(probs) and "dismiss_home" in probs[0].get("next_step", ""),
-              json.dumps(st)[:400])
+              st.get("ready") is False and bool(probs) and "dismiss_home" in problem_next_step(st, "modal_dialog")
+              and "note" not in st, json.dumps({k: st.get(k) for k in ("ready", "problems", "next_step", "note")})[:400])
         sc, _ = c.call("vw_read", {"what": "layers"})
         check("busy with Home screen -> next_step names dismiss_home", err_code(sc) == "vectorworks_busy"
               and "dismiss_home" in (sc.get("error") or {}).get("next_step", ""), json.dumps(sc)[:300])
@@ -786,6 +833,12 @@ def phase_weak_model(python: str, state_dir: Path) -> None:
         sc, _ = c.call("vw_read", {"what": "layers"})
         check("other dialog -> busy, next_step asks the user to close it by title", err_code(sc) == "vectorworks_busy"
               and "Save changes?" in (sc.get("error") or {}).get("next_step", ""), json.dumps(sc)[:300])
+        mock_ctl(port, auto_dismiss=True, modal_dialog={"title": "Vectorworks Home", "class": "Chrome_WidgetWin_1",
+                                                        "kind": "home"})
+        st, _ = c.call("vw_status")
+        check("vw_status: Home screen with auto-dismiss on -> never a blocker (ready, no modal_dialog problem)",
+              st.get("ready") is True and not any(p.get("code") in {"modal_dialog", "vectorworks_busy"}
+                                                  for p in st.get("problems") or []), json.dumps(st)[:400])
         mock_ctl(port, modal_dialog=None)
         # canonical one-call room: walls + door/window into "$id" walls + space
         sc, _ = c.call("vw_create", {"units": "mm", "objects": [
@@ -797,11 +850,15 @@ def phase_weak_model(python: str, state_dir: Path) -> None:
             {"type": "window", "id": "win1", "wall": "$north", "offset": "2400mm", "width": "1200mm"},
             {"type": "space", "id": "office", "name": "Office", "points": [[0, 0], [6000, 0], [6000, 4000], [0, 4000]]}]})
         ids = sc.get("ids") or {}
-        joins = sc.get("wall_joins") or []
+        # compact receipt: the joins are a count (failures listed in wall_joins_failed), openings are ids only
         check("one-call room (door listed before its wall, bare wall id) -> 7 objects, 4 L joins",
-              sc.get("ok") and len(ids) == 7 and sum(1 for j in joins if j.get("kind") == "L") == 4, json.dumps(sc)[:500])
-        door_row = next((r for r in sc.get("created", []) if r.get("id") == "d1"), {})
-        check("receipt names the host wall of the door", door_row.get("wall") == ids.get("south"), json.dumps(door_row))
+              sc.get("ok") and len(ids) == 7 and sc.get("walls_joined") == 4 and "wall_joins_failed" not in sc
+              and sc.get("types") == {"wall": 4, "space": 1, "door": 1, "window": 1}, json.dumps(sc)[:500])
+        obj, _ = c.call("vw_read", {"what": "object", "target": ids.get("d1", "")})
+        door = obj.get("data") or {}
+        check("receipt id of the door resolves to a door hosted by the 'south' wall",
+              door.get("type") == "door" and ids.get("south") in (door.get("wall"), door.get("wall_uuid")),
+              json.dumps(obj)[:400])
         sc, _ = c.call("vw_read", {"what": "query", "type": "door"})
         rows = sc.get("data") or []
         check("vw_read(query, type=door) lists doors in walls with wall + width",
@@ -896,7 +953,11 @@ def phase_findings(python: str, state_dir: Path, features: list) -> None:
         native_layer = "op_layer" in features
         check(f"[{tag}] layer placement path: {'native per-op layer' if native_layer else 'script fallback in the same call'}",
               ("layer_fallback" in sc) != native_layer, json.dumps(sc)[:300])
-        check(f"[{tag}] space sent behind the walls", "spaces" in sc, json.dumps(sc)[:300])
+        # the receipt no longer says so (documented default): check the stacking order (query = back to front)
+        stack = [i.get("uuid") for i in q.get("data") or []]
+        walls = [ids.get(k) for k in ("s", "e", "n", "w")]
+        check(f"[{tag}] space sent behind the walls", ids.get("sp") in stack and all(w in stack for w in walls)
+              and stack.index(ids.get("sp")) < min(stack.index(w) for w in walls), json.dumps(q)[:300])
         sc_rect, _ = c.call("vw_create", {"objects": [{"type": "rect", "id": "r", "origin": [8000, 0], "width": 1000,
                                                        "height": 500, "name": "Box"},
                                                       {"type": "text", "id": "t", "at": [8000, 2000], "text": "Label"}]})
@@ -923,8 +984,11 @@ def phase_findings(python: str, state_dir: Path, features: list) -> None:
         check(f"[{tag}] Space name = displayed room label (read back)", sc.get("ok") and row.get("room_name") == "Kitchen",
               json.dumps(sc)[:300])
         q, _ = c.call("vw_read", {"what": "query", "type": "space"})
+        row = (q.get("data") or [{}])[0]
+        # compact rows: room_name only when it differs from the object name
         check(f"[{tag}] query reports room_name next to the object name",
-              (q.get("data") or [{}])[0].get("room_name") == "Kitchen", json.dumps(q)[:300])
+              (row.get("room_name") or row.get("name")) == "Kitchen" and row.get("room_name") != row.get("name"),
+              json.dumps(q)[:300])
         sc, _ = c.call("vw_edit", {"changes": [{"op": "parametric", "target": ids.get("d"), "parameters": {"swng": "Out"}}]})
         check(f"[{tag}] unknown parameter -> did-you-mean", err_code(sc) == "validation_error" and
               "did you mean" in json.dumps(sc), json.dumps(sc)[:300])
@@ -948,8 +1012,8 @@ def phase_findings(python: str, state_dir: Path, features: list) -> None:
               any(p.get("id") == "Elevation" for p in sc["data"]["parameters"]), json.dumps(sc)[:300])
         # -- search filters (#9, #18), sheet alias (#15), did-you-mean (#8) ------------------------------------
         sc, _ = c.call("vw_read", {"what": "resources", "type": "hatch", "search": "brick"})
-        check(f"[{tag}] resources search filters by name", sc.get("ok") and
-              [i["name"] for i in sc.get("data") or []] == ["Brick HF"], json.dumps(sc)[:300])
+        check(f"[{tag}] resources search filters by name", sc.get("ok") and sc.get("data") == ["Brick HF"],
+              json.dumps(sc)[:300])
         sc, _ = c.call("vw_read", {"what": "resources", "search": "dash"})
         check(f"[{tag}] resources search across kinds", sc.get("ok") and
               {i.get("type") for i in sc.get("data") or []} >= {"line_type"}, json.dumps(sc)[:300])
@@ -973,8 +1037,10 @@ def phase_findings(python: str, state_dir: Path, features: list) -> None:
         check(f"[{tag}] 250 objects: compact receipt (count + uuids once) <= 12 KB", sc.get("ok") and
               sc.get("count") == 250 and len(sc.get("uuids") or []) == 250 and "created" not in sc and
               "ids" not in sc and size <= 12_500, f"{size} B")
+        # the LOOK hint lives in next_step (the preview block only describes the image)
         check(f"[{tag}] >= 10 objects -> preview image in the same result + LOOK hint", image and
-              "LOOK" in json.dumps(sc.get("preview")), json.dumps(sc.get("preview"))[:200])
+              (sc.get("preview") or {}).get("view") == "top_plan" and "LOOK" in sc.get("next_step", ""),
+              json.dumps({k: sc.get(k) for k in ("preview", "next_step")})[:300])
         big = [{"type": "rect", "origin": [(i % 25) * 700, 40000 + (i // 25) * 700], "width": 500, "height": 500}
                for i in range(400)]
         sc, _ = c.call("vw_create", {"objects": big, "preview": False})

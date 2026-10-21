@@ -697,6 +697,8 @@ class FakeVS:
         return True, int(self._d.objects[wall].get("breaks", 0))
 
     def CreateCustomObjectN(self, name, p, rotation, show_pref):
+        if name == "Drawing Label":  # viewport titles (scripts_lib/viewport.py)
+            return self._new("parametric", plugin_name=name, x1=float(p[0]), y1=float(p[1]))["uuid"]
         if name != "Column2":
             return None
         obj = self._new("column", plugin_name=name, x1=float(p[0]), y1=float(p[1]), rotation=float(rotation))

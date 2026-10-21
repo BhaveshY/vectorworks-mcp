@@ -144,8 +144,11 @@ def _drawing_label(vp):
         mx = (cx - w / 2.0 - ox) * sc
         my = (cy - hgt / 2.0 - oy - U(8)) * sc
         h = vs.CreateCustomObjectN("Drawing Label", (mx + FRAME[0], my + FRAME[1]), 0, False)
-        if _nil(h) or not vs.AddVPAnnotationObject(vp, h):
-            raise ValueError("not added")
+        if _nil(h):
+            raise ValueError("the Drawing Label plug-in object could not be created")
+        if not vs.AddVPAnnotationObject(vp, h):
+            vs.DelObject(h)
+            raise ValueError("Vectorworks did not accept it as a viewport annotation")
         vs.ResetObject(h)
         return {"type": "drawing_label", "uuid": uuid_of(h)}
     except Exception as exc:  # cosmetic: never fail the viewport over the label
