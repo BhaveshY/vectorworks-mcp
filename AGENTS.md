@@ -1,5 +1,10 @@
 # Agent guide (repo map)
 
+**Asked to install Vectorworks MCP on this PC?** Follow
+[AGENT_INSTALL.md](AGENT_INSTALL.md) step by step. It covers the preflight
+requirement check, the install, the doctor, a smoke test and the report. Never
+close Vectorworks yourself.
+
 Vectorworks MCP 1.0: an MCP stdio server (Python, `vectorworks_mcp/`) that
 talks to a native Vectorworks SDK plug-in (`native_bridge/`) over loopback TCP.
 The binding spec is [docs/V1_CONTRACT.md](docs/V1_CONTRACT.md); record any
@@ -24,6 +29,10 @@ To *use* Vectorworks from an agent, read the skill
 | `scripts/register-clients.ps1` + `register_clients.py` | Codex TOML (surgical) / Claude Code registration, inspect, Codex log summary |
 | `scripts/doctor.ps1` + `doctor_probe.py` | `vectorworksctl doctor` (startup timing, bridge ping, duplicates, stale installs) |
 | `scripts/package-release.ps1` | portable release zip (+ wheels, + prebuilt plug-in) and plugin zip |
+| `native/<ver>/`, `native/PREBUILT.json` | tracked prebuilt plug-ins installed by default (refresh with `scripts/update-prebuilt.ps1`) |
+| `scripts/preflight.ps1` | read-only requirement check (`-Json`) for [AGENT_INSTALL.md](AGENT_INSTALL.md) |
+| `scripts/run-outside-msix.ps1` | runs install.ps1 via explorer.exe when the agent's shell is inside an MSIX app (Codex desktop) |
+| `scripts/smoke_installed.py` | live post-install smoke test through the installed launcher (untitled doc, discarded) |
 | `scripts/build-native-bridge.ps1` & co. | native build / prerequisites / smoke (stream N) |
 | `scripts/e2e_host.py` | host end-to-end test against the mock bridge (`--real`: read-only against Vectorworks) |
 | `native_bridge/live_acceptance_v2.py` | live native acceptance (creates and discards its own untitled documents) |

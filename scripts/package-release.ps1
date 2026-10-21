@@ -65,6 +65,8 @@ foreach ($ver in @("2024", "2025")) {
         }
     }
 }
+$pbJson = Join-Path $Repo "native\PREBUILT.json"
+if ($native.Count -gt 0 -and (Test-Path -LiteralPath $pbJson)) { Copy-Item -LiteralPath $pbJson -Destination (Join-Path $stage "native\PREBUILT.json") -Force }
 if ($native.Count -eq 0) { Write-Step "no prebuilt VectorworksMCPBridge.vlb found - the target PC needs -FullNative with Visual Studio + SDK" "warn" }
 
 if ($IncludeWheels) {

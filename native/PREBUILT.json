@@ -1,0 +1,18 @@
+{
+    "2024":  {
+                 "build_id":  "563780e-20261020T100954Z",
+                 "built_at":  "2026-10-20T10:09:54Z",
+                 "native_src_tree":  "1373a8a99ba377fd73662763927b132f0a877a12",
+                 "vlb_sha256":  "baa2e3a285a73bcacde86cc8576e4ade74a00b46c1edafe3e0c319b9a3bfea8f",
+                 "vwr_sha256":  "30423c502638f903440541b16773abd88b1171c132971633aeafba4eceed7ba1",
+                 "live_tested":  true
+             },
+    "2025":  {
+                 "build_id":  "f771607-20261021T085832Z",
+                 "built_at":  "2026-10-21T08:58:32Z",
+                 "native_src_tree":  "1373a8a99ba377fd73662763927b132f0a877a12",
+                 "vlb_sha256":  "d78ace5e9a1d697837117e4b4cde71b3e7c4e9de0e553777f0c40ed12863b228",
+                 "vwr_sha256":  "6640ad46cd9aba98a4dd14d8b8e399f7e97a9ae021d57022c0d0fdc07839664d",
+                 "live_tested":  false
+             }
+}

@@ -15,24 +15,31 @@ Codex / Claude Code --stdio--> vectorworks-mcp.cmd --> Python host (vectorworks_
 
 ## Install (one command)
 
-In a normal PowerShell window (not inside Codex), from this folder or an
-extracted release zip:
+**Installing with an AI agent?** Tell it: *"Install Vectorworks MCP from
+github.com/BhaveshY/vectorworks-mcp following AGENT_INSTALL.md"*. The
+[agent runbook](AGENT_INSTALL.md) covers the requirement check
+(`scripts\preflight.ps1`), the install, the doctor, a live smoke test and the
+report.
+
+By hand: check the requirements, then run the installer in a normal PowerShell
+window (not inside Codex), from this folder or an extracted release zip:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\preflight.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -WaitForVectorworksExit
 ```
 
-This installs the runtime to `%USERPROFILE%\.vectorworks-mcp`, registers the
-`vectorworks` MCP server with Codex and Claude Code, installs the skills, and
-installs the Vectorworks bridge plug-in if a prebuilt one is available and
-Vectorworks is closed. To build/install the plug-in as well (Vectorworks must be
-closed; the installer can wait):
+The installer:
 
-```powershell
-.\install.ps1 -FullNative -WaitForVectorworksExit
-```
+- puts the runtime in `%USERPROFILE%\.vectorworks-mcp`;
+- registers the `vectorworks` MCP server with Codex and Claude Code;
+- installs the skills;
+- installs the prebuilt Vectorworks bridge plug-in from `native\<version>\`.
+  Vectorworks must be closed for this step; the installer can wait. Use
+  `-FullNative` to build the plug-in yourself (needs Visual Studio and the SDK).
 
 Needs Python 3.12 from python.org (`winget install --id Python.Python.3.12 -e --scope user`).
+After installing, start Vectorworks and run `py -3.12 scripts\smoke_installed.py`.
 Details, other PCs and uninstall: [INSTALL.md](INSTALL.md).
 
 ## Connect

@@ -20,6 +20,10 @@ user profile (never into an app's private MSIX storage):
 
 ## 1. Fresh PC
 
+An AI agent doing the install follows [AGENT_INSTALL.md](AGENT_INSTALL.md).
+Check the requirements first, read-only:
+`powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\preflight.ps1 [-Json]`.
+
 1. Install Python 3.12 from python.org (Codex's bundled Python is never used):
    `winget install --id Python.Python.3.12 -e --scope user`
 2. Get the code: `git clone https://github.com/BhaveshY/vectorworks-mcp`
@@ -43,8 +47,11 @@ user profile (never into an app's private MSIX storage):
    .\install.ps1 -FullNative -WaitForVectorworksExit
    ```
 
-   Uses a prebuilt `native\<version>\VectorworksMCPBridge.vlb/.vwr` (release
-   zip, or `-NativeArtifactDir`), or builds it with
+   A plain `install.ps1` already installs the prebuilt
+   `native\<version>\VectorworksMCPBridge.vlb/.vwr`. These files are tracked in
+   git and listed in `native\PREBUILT.json` with their build id, hashes and
+   live-test status. They also ship in the release zip, or can come from
+   `-NativeArtifactDir`. `-FullNative` builds the plug-in instead with
    `scripts\build-native-bridge.ps1` when Visual Studio C++ tools and the
    Vectorworks SDK are present. The pre-1.0 `ObjectExample.vlb/.vwr` is backed
    up to `backups\plugins-<time>\` and removed.

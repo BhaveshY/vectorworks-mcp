@@ -329,10 +329,12 @@ if (-not (Plan "would set current.txt -> $runtimeId")) {
 # ----------------------------------------------------------------- native
 $native = [ordered]@{ status = "skipped"; installed = @() }
 function Find-NativeArtifact([string]$ver) {
+    # -FullNative prefers the fresh local build; otherwise the prebuilt native\<ver> (release zip or
+    # the copy tracked in git, see native\PREBUILT.json). A dev build output is never used implicitly.
     $cands = @()
     if ($NativeArtifactDir) { $cands += @((Join-Path $NativeArtifactDir $ver), $NativeArtifactDir) }
-    $cands += @((Join-Path $SourceRoot "native\$ver"), (Join-Path $SourceRoot "native"),
-        (Join-Path $SourceRoot "native_bridge\project\out\$ver\Release"))
+    if ($FullNative) { $cands += (Join-Path $SourceRoot "native_bridge\project\out\$ver\Release") }
+    $cands += @((Join-Path $SourceRoot "native\$ver"), (Join-Path $SourceRoot "native"))
     foreach ($c in $cands) {
         if ((Test-Path -LiteralPath (Join-Path $c "VectorworksMCPBridge.vlb")) -and (Test-Path -LiteralPath (Join-Path $c "VectorworksMCPBridge.vwr"))) { return (Get-FullPath $c) }
     }
@@ -346,10 +348,13 @@ function Test-VisualStudio {
 }
 
 $isCheckout = Test-Path -LiteralPath (Join-Path $SourceRoot ".git")
+$prebuiltPath = Join-Path $SourceRoot "native\PREBUILT.json"
+$prebuilt = $null
+if (Test-Path -LiteralPath $prebuiltPath) { try { $prebuilt = Get-Content -LiteralPath $prebuiltPath -Raw | ConvertFrom-Json } catch { Add-Warn "native\PREBUILT.json is unreadable" } }
 if ($SkipNative) {
     Write-Step "Native plug-in: skipped (-SkipNative)" "head"
-} elseif ($isCheckout -and -not $FullNative -and -not $NativeArtifactDir) {
-    # A checkout may hold a stale dev build; only release packages install their prebuilt plug-in by default.
+} elseif ($isCheckout -and -not $FullNative -and -not $NativeArtifactDir -and -not $prebuilt) {
+    # A checkout without native\PREBUILT.json may hold a stale dev build only.
     Write-Step "Native plug-in: not changed (git checkout - pass -FullNative to build/install VectorworksMCPBridge)" "head"
     $native.status = "not_requested"
 } else {
@@ -375,6 +380,14 @@ if ($SkipNative) {
             $msg = "no VectorworksMCPBridge.vlb/.vwr for Vectorworks $ver (use a release zip, -NativeArtifactDir, or -FullNative with Visual Studio)"
             if ($FullNative) { $payload.ok = $false; Write-Step $msg "fail" } else { Write-Step $msg "warn" }
             continue
+        }
+        $pb = if ($prebuilt) { $prebuilt.$ver } else { $null }
+        if ($pb -and (Test-SamePath $art (Join-Path $SourceRoot "native\$ver"))) {
+            if (-not $pb.live_tested) { Add-Warn "the prebuilt plug-in for Vectorworks $ver ($($pb.build_id)) has not been live-tested yet - run scripts\smoke_installed.py after starting Vectorworks" }
+            if ($isCheckout -and (Get-Command git.exe -ErrorAction SilentlyContinue)) {
+                $tree = (& git.exe -C $SourceRoot rev-parse HEAD:native_bridge/src 2>$null)
+                if ($tree -and "$tree".Trim() -ne $pb.native_src_tree) { Add-Warn "the prebuilt plug-in for Vectorworks $ver ($($pb.build_id)) is older than native_bridge\src in this checkout" }
+            }
         }
         $pdir = if ($PluginsDir) { Get-FullPath $PluginsDir } else { Join-Path $env:APPDATA "Nemetschek\Vectorworks\$ver\Plug-ins" }
         Assert-RealFilesystemPath $pdir "Vectorworks Plug-ins folder"
