@@ -1,8 +1,30 @@
 # Agent install runbook (Vectorworks MCP on a new PC)
 
 You are an AI agent (Codex, Claude Code, ...) asked to install Vectorworks MCP on
-this Windows PC. Follow these steps in order. Run every command in PowerShell.
-Every script prints JSON with `-Json`. Read the JSON, don't guess.
+this Windows PC. If the user only gave you a link to this file, that link is
+the whole task. Don't ask what to do; start at step 1 and work through to
+step 7 on your own. Stop only where a step tells you to ask the user.
+
+- Run every command in PowerShell.
+- Every script prints JSON with `-Json`. Read the JSON; don't guess.
+- If you can't read this file locally yet, step 1 clones the repository. Keep
+  reading it from `<clone>\AGENT_INSTALL.md`.
+
+**Defaults** (use them unless the user said otherwise):
+
+| What | Default |
+|---|---|
+| Folder | `%USERPROFILE%\Documents\vectorworks-mcp` |
+| Client | Codex only (the installer's default) |
+| Claude Code | Add `-Client claude-code` if the user works in Claude Code instead; `-Client all` registers both. |
+| Vectorworks version | Every installed supported version (2024, 2025) |
+
+**Talk to the user only when:**
+
+- you need permissions (asked once, at the start);
+- Vectorworks has to be closed or started;
+- a step says **stop**;
+- you deliver the final report.
 
 ## Rules (always)
 
@@ -21,7 +43,8 @@ Every script prints JSON with `-Json`. Read the JSON, don't guess.
   prompts), you need permission to write to `%USERPROFILE%\.vectorworks-mcp`,
   `%APPDATA%\Nemetschek\Vectorworks\<ver>\Plug-ins`, `~/.codex` and
   `~/.claude.json`, plus network access to github.com and pypi.org. Ask for
-  that once, up front.
+  that once, up front. In Codex, ask the user to switch this chat to full
+  access, or request escalation for each of these commands.
 
 ## 1. Get the code
 
