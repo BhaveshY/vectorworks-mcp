@@ -85,6 +85,11 @@ if (-not $runtimeId) { Add-Check "runtime" "fail" "current.txt missing - no acti
 elseif (-not (Test-Path -LiteralPath $venvPy)) { Add-Check "runtime" "fail" "runtime $runtimeId has no venv ($venvPy)" $installCmd }
 elseif (-not (Test-Path -LiteralPath (Join-Path $runtimeDir "app\vectorworks_mcp\__main__.py"))) { Add-Check "runtime" "fail" "runtime $runtimeId has no server code" $installCmd }
 else { Add-Check "runtime" "ok" "runtime $runtimeId ($runtimeDir)" }
+$oldRuntimes = @()
+if ($runtimeId -and (Test-Path -LiteralPath (Join-Path $Root "runtime"))) {
+    $oldRuntimes = @(Get-ChildItem -LiteralPath (Join-Path $Root "runtime") -Directory | Where-Object { $_.Name -ne $runtimeId } | ForEach-Object { $_.FullName })
+}
+if ($oldRuntimes.Count) { Add-Check "old_runtimes" "info" "$($oldRuntimes.Count) older runtime(s): $(($oldRuntimes | ForEach-Object { Split-Path -Leaf $_ }) -join ', ')" "vectorworksctl doctor -Fix   (moves them to $Root\backups; one still in use by an open Codex/Claude stays)" }
 
 if (-not $receipt) { Add-Check "receipt" "fail" "install-receipt.json missing or unreadable" $installCmd }
 else {
@@ -214,6 +219,12 @@ else {
             }
             "claude-code-plugin-cache" { Add-Check "stale_plugin" "info" "Claude Code plugin cache vectorworks $($s.version): $($s.path)" "claude plugin update vectorworks (or /plugin in Claude Code)" }
             "old-git-clone" { Add-Check "stale_clone" "warn" "old clone used by 0.x resolvers: $($s.path)" "vectorworksctl doctor -Fix   (moves it to $Root\backups)" }
+            { $_ -in @("codex-old-server", "claude-old-server") } {
+                $cli = if ($s.kind -eq "codex-old-server") { "codex mcp remove $($s.name)" } else { "claude mcp remove -s user $($s.name)" }
+                $where = if ($s.kind -eq "codex-old-server") { "Codex [mcp_servers.$($s.name)]" } else { "Claude Code user server '$($s.name)'" }
+                if ($s.ours) { Add-Check "stale_server" "warn" "earlier Vectorworks MCP registration: $where -> $($s.command) $(@($s.args) -join ' ')" "vectorworksctl doctor -Fix   (backs up the config, then: $cli)" }
+                else { Add-Check "stale_server" "info" "other server mentioning Vectorworks: $where -> $($s.command) $(@($s.args) -join ' ') (not removed automatically)" "if the user confirms it is an old Vectorworks MCP: $cli" }
+            }
             default { Add-Check "stale_runtime" "warn" "$($s.kind): $($s.path) ($(@($s.versions) -join ', '))" "vectorworksctl doctor -Fix   (moves it to $Root\backups)" }
         }
     }
@@ -316,7 +327,7 @@ if (-not $SkipLogs -and $py -and (Test-Path -LiteralPath $CodexHome)) {
 $fixed = @()
 if ($Fix) {
     if ($needReg -and (Test-Path -LiteralPath $launcher)) {
-        $a = @{ Client = "all"; Root = $Root; Launcher = $launcher }
+        $a = @{ Client = $regClient; Root = $Root; Launcher = $launcher }
         if ($customCodex) { $a.CodexHome = $CodexHome }
         & (Join-Path $PSScriptRoot "register-clients.ps1") @a
         $fixed += "re-registered clients"
@@ -332,6 +343,27 @@ if ($Fix) {
                 try { Move-Item -LiteralPath $s.path -Destination $dest; $fixed += "moved $($s.path) -> $dest" }
                 catch { $fixed += "could not move $($s.path): $($_.Exception.Message)" }
             }
+            if ($s.kind -in @("codex-old-server", "claude-old-server") -and $s.ours) {
+                # Back up the client config, then remove the entry with the client's own CLI.
+                $isCodex = $s.kind -eq "codex-old-server"
+                $cfgFile = if ($isCodex) { Join-Path $CodexHome "config.toml" } else { $ClaudeConfig }
+                $exe = Get-Command $(if ($isCodex) { "codex" } else { "claude" }) -ErrorAction SilentlyContinue | Select-Object -First 1
+                if (-not $exe) { $fixed += "could not remove $($s.kind) '$($s.name)': $(if ($isCodex) { 'codex' } else { 'claude' }) CLI not found"; continue }
+                $bk = Join-Path $Root "backups\stale-$stamp"
+                New-Item -ItemType Directory -Path $bk -Force | Out-Null
+                Copy-Item -LiteralPath $cfgFile -Destination (Join-Path $bk ((Split-Path -Leaf $cfgFile) + ".before-remove-$($s.name)")) -Force
+                $rmArgs = if ($isCodex) { @("mcp", "remove", $s.name) } else { @("mcp", "remove", "-s", "user", $s.name) }
+                $prevHome = $env:CODEX_HOME
+                if ($isCodex) { $env:CODEX_HOME = $CodexHome }
+                try { $r = Invoke-Native -FilePath $exe.Source -Arguments $rmArgs -TimeoutSec 60 } finally { $env:CODEX_HOME = $prevHome }
+                $fixed += $(if ($r.ExitCode -eq 0) { "removed $($s.kind) '$($s.name)' (config backup in $bk)" } else { "could not remove $($s.kind) '$($s.name)': $($r.StdErr.Trim())" })
+            }
+        }
+        foreach ($o in $oldRuntimes) {
+            $dest = Join-Path $Root "backups\stale-$stamp\runtime\$(Split-Path -Leaf $o)"
+            New-Item -ItemType Directory -Path (Split-Path -Parent $dest) -Force | Out-Null
+            try { Move-Item -LiteralPath $o -Destination $dest -ErrorAction Stop; $fixed += "moved old runtime $o -> $dest" }
+            catch { $fixed += "old runtime $o is still in use (restart Codex/Claude and rerun doctor -Fix)" }
         }
     }
     foreach ($f in $fixed) { if (-not $Json) { Write-Host "  fixed: $f" -ForegroundColor Cyan } }

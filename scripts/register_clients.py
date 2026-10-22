@@ -631,6 +631,30 @@ def cmd_inspect(args) -> int:
         if p.is_dir():
             report["stale"].append({"kind": "msix-localcache-runtime" if "Packages" in str(p) else "old-localappdata-runtime",
                                     "path": str(p), "versions": sorted(d.name for d in p.iterdir() if d.is_dir())})
+    # Earlier registrations under another name (e.g. 0.x "vectorworks-mcp", "vectorworks_legacy").
+    codex_servers: dict = {}
+    if cfg.exists() and tomllib is not None:
+        try:
+            codex_servers = tomllib.loads(cfg.read_text(encoding="utf-8-sig")).get("mcp_servers") or {}
+        except (OSError, tomllib.TOMLDecodeError):
+            pass
+    claude_servers: dict = {}
+    try:
+        claude_servers = json.loads(Path(args.claude_config).read_text(encoding="utf-8-sig")).get("mcpServers") or {}
+    except (OSError, ValueError):
+        pass
+    for kind, servers in (("codex-old-server", codex_servers), ("claude-old-server", claude_servers)):
+        for name, srv in servers.items():
+            if name == SERVER or not isinstance(srv, dict):
+                continue
+            blob = " ".join([name, str(srv.get("command") or ""), " ".join(str(a) for a in srv.get("args") or [])])
+            low = blob.lower()
+            if not re.search(r"vectorworks|vw[-_]?mcp", low):
+                continue
+            # "ours": clearly an earlier Vectorworks MCP (safe for doctor -Fix to remove); else report only.
+            ours = bool(re.search(r"vectorworks[-_ ]?mcp|vw[-_]?mcp", low)) or ("vectorworks" in low and "server.py" in low)
+            report["stale"].append({"kind": kind, "name": name, "command": srv.get("command"),
+                                    "args": srv.get("args", []), "ours": ours})
     return out(report)
 
 

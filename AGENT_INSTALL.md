@@ -24,6 +24,7 @@ step 7 on your own. Stop only where a step tells you to ask the user.
 - you need permissions (asked once, at the start);
 - Vectorworks has to be closed or started;
 - a step says **stop**;
+- a cleanup item needs their OK (see "Remove old versions");
 - you deliver the final report.
 
 ## Rules (always)
@@ -133,8 +134,51 @@ The installer is idempotent, so rerunning it after fixing something is safe.
 The output is `{ok, failures, warnings, checks:[{id, status, message, fix}]}`.
 `failures` and `warnings` are counts. `status` is one of `ok`, `info`, `warn`
 or `fail`. With Vectorworks closed, `discovery` and `bridge_ping` are not
-failures. Any `fail` has a `fix`. Apply the safe fixes with `doctor -Fix`, then
-run the doctor again.
+failures. Any `fail` has a `fix`.
+
+### Remove old versions
+
+Always do this, even on a PC that never had the MCP before. Run the doctor
+with `-Fix`:
+
+```powershell
+& "$env:USERPROFILE\.vectorworks-mcp\bin\vectorworksctl.cmd" doctor -Fix -Json
+```
+
+`fixed` in the output lists what was done. Nothing is deleted. Folders and
+config backups go to `%USERPROFILE%\.vectorworks-mcp\backups\stale-<time>\`.
+`-Fix` handles:
+
+- **Older runtimes** under `.vectorworks-mcp\runtime\` (`old_runtimes`). One
+  still used by an open Codex/Claude stays until the user restarts that client.
+  Rerun `-Fix` after the restart.
+- **Earlier registrations under another name** (`stale_server`, warn), such as
+  a 0.x `[mcp_servers.vectorworks-mcp]` in Codex or `vw_legacy` in Claude Code.
+  The config is backed up first, then the entry is removed with
+  `codex mcp remove <name>` or `claude mcp remove -s user <name>`.
+- **Old copies** in known places (`stale_clone`, `stale_runtime`):
+  `~\repos\vectorworks-mcp`, `%LOCALAPPDATA%\VectorworksMCP`, and MSIX
+  LocalCache copies made inside the Codex app.
+- Client registrations that point anywhere other than the installed launcher.
+
+The installer has already done the rest:
+
+- removed the pre-1.0 `ObjectExample.vlb/.vwr` bridge from the Vectorworks
+  Plug-ins folder (backed up);
+- disabled other Codex plugins that start a second `vectorworks` server.
+
+`-Fix` doesn't change some things on its own. Handle them like this:
+
+| check | do |
+|---|---|
+| `stale_server` (info) | It mentions Vectorworks but may not be ours. Show it to the user; run its `fix` only if they confirm it is an old Vectorworks MCP. |
+| `claude_plugin` | Run its `fix` (`claude plugin disable <name>`). |
+| `stale_cowork` | Tell the user to restart the Claude desktop app so it syncs the current plugin. |
+| `claude_project` | A project overrides the server. Show it to the user and run its `fix` only with their OK. |
+
+Don't remove anything else: no other folders, and no other MCP servers.
+Finally, run `doctor -Json` again. It should show `failures: 0` and no `old_*`
+or warn-level `stale_*` checks.
 
 ## 5. Start Vectorworks and smoke-test
 
@@ -178,6 +222,7 @@ Vectorworks MCP install - <PC name>, <date>
 Vectorworks: <versions>, plug-in build <build_id> (live-tested: yes/no)
 Python: <version>   Clients registered: <codex / claude-code>
 Install: ok | failed (<reason>)    Doctor: <failures>/<warnings>
+Removed old versions: <doctor -Fix "fixed" lines, or "none found">
 Smoke test: <passed>/<total>  (<failed check names>)
 Warnings: <installer + doctor warnings>
 User actions still needed: <e.g. restart Codex>
