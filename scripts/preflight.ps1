@@ -101,7 +101,7 @@ foreach ($ver in $targets) {
     $dir = Join-Path $Repo "native\$ver"
     $have = (Test-Path -LiteralPath (Join-Path $dir "VectorworksMCPBridge.vlb")) -and (Test-Path -LiteralPath (Join-Path $dir "VectorworksMCPBridge.vwr"))
     if (-not $have) {
-        Add-Check "plugin_$ver" "fail" "no prebuilt plug-in in native\$ver" "Use a full clone or release zip of github.com/BhaveshY/vectorworks-mcp (native\$ver\ is tracked), or build it: install.ps1 -FullNative (needs Visual Studio C++ tools + the Vectorworks $ver SDK in third_party\)."
+        Add-Check "plugin_$ver" "fail" "no prebuilt plug-in in native\$ver" "Clone github.com/BhaveshY/vectorworks-mcp again or git pull (native\$ver\ is tracked), or build it: install.ps1 -FullNative (needs Visual Studio C++ tools + the Vectorworks $ver SDK in third_party\)."
         continue
     }
     $e = if ($pb) { $pb.$ver } else { $null }
@@ -146,7 +146,7 @@ try {
     Add-Check "network" "pass" "pypi.org reachable (dependencies are installed with pip --require-hashes)"
 } catch {
     if ($wheels) { Add-Check "network" "pass" "pypi.org not reachable, but wheels\ is present (offline install)" }
-    else { Add-Check "network" "fail" "pypi.org is not reachable: $($_.Exception.Message)" "Allow HTTPS to pypi.org / files.pythonhosted.org (proxy: set HTTPS_PROXY), or use a release zip built with package-release.ps1 -IncludeWheels and install with -Offline." }
+    else { Add-Check "network" "fail" "pypi.org is not reachable: $($_.Exception.Message)" "Allow HTTPS to pypi.org / files.pythonhosted.org (proxy: set HTTPS_PROXY), or (no internet at all) use an offline zip from package-release.ps1 -IncludeWheels and install with -Offline." }
 }
 
 # ---------------------------------------------------------------- existing

@@ -432,7 +432,7 @@ runs VectorScript instead.
 | `multiple_instances` | several Vectorworks running | `vw_status(instance=...)` to pin one, or pass `document=`. |
 | `still_running` | the operation continues inside Vectorworks (`job_id`) | Poll `vw_status(job_id=...)` every 2-5 s. Never resend. |
 | `unknown_commit_state` | the write may or may not have happened | Do NOT resend. `vw_status(idempotency_key=...)` once; if still unknown, inspect with `vw_read` / `vw_capture`, then decide. |
-| `upgrade_required` | the Vectorworks bridge plug-in is older than the host | Tell the user: close Vectorworks, run `install.ps1 -FullNative` (exact command in `next_step`). Other tools keep working. |
+| `upgrade_required` | the Vectorworks bridge plug-in is older than the host | Tell the user: close Vectorworks, run `install.ps1` (exact command in `next_step`). Other tools keep working. |
 | `validation_error` | wrong arguments; nothing was sent | Fix `error.field` using `error.example` - and every item of `error.details.issues` when present - in ONE corrected call. For doors/windows switch to `vw_create`. |
 | `native_rejected` | Vectorworks refused and rolled back | Fix the item named in the message; send a corrected call. |
 | `no_active_document` / `document_not_found` | no document open / no match | Ask the user, `vw_read(what="documents")`, or `vw_document(action="new"/"open")`. |
@@ -454,7 +454,8 @@ runs VectorScript instead.
   window inside the Vectorworks MCP folder,
   `powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1`
   and restarts Codex / Claude Code. The bridge plug-in needs Vectorworks closed:
-  `.\install.ps1 -FullNative -WaitForVectorworksExit`.
+  `.\install.ps1 -WaitForVectorworksExit`. Agents installing it follow
+  `AGENT_INSTALL.md` in that folder.
 - Health report: `%USERPROFILE%\.vectorworks-mcp\bin\vectorworksctl.cmd doctor`.
 - Never edit client config files, kill Vectorworks or reinstall anything
   yourself unless the user asks you to.

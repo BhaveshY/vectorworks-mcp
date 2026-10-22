@@ -118,8 +118,9 @@ def _repair_command(receipt: dict | None) -> str:
             + _quote(str(Path(source, "install.ps1")))
         )
     return (
-        "Download the Vectorworks MCP release zip (or clone https://github.com/BhaveshY/vectorworks-mcp), "
-        "extract it, then run: powershell -NoProfile -ExecutionPolicy Bypass -File .\\install.ps1"
+        "Clone https://github.com/BhaveshY/vectorworks-mcp, then run in that folder: "
+        "powershell -NoProfile -ExecutionPolicy Bypass -File .\\install.ps1 -WaitForVectorworksExit "
+        "(AI agents: follow AGENT_INSTALL.md in that folder)"
     )
 
 

@@ -3,7 +3,7 @@
   Install, repair or uninstall Vectorworks MCP 1.0 for the current Windows user.
 
 .DESCRIPTION
-  One command, idempotent, works from a git checkout or an extracted release zip:
+  One command, idempotent, works from a git clone of https://github.com/BhaveshY/vectorworks-mcp:
 
     powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 
@@ -14,7 +14,7 @@
                venv python.exe; repair-mode server when the runtime is missing).
   3. Token     %USERPROFILE%\.vectorworks-mcp\auth-token (kept if present; private ACL).
   4. Native    VectorworksMCPBridge.vlb/.vwr -> %APPDATA%\Nemetschek\Vectorworks\<ver>\Plug-ins
-               (prebuilt from a release, or built with -FullNative); old ObjectExample.vlb/.vwr
+               (prebuilt native\<ver>\ tracked in git, or built with -FullNative); old ObjectExample.vlb/.vwr
                backed up and removed. Never while Vectorworks runs (use -WaitForVectorworksExit).
   5. Clients   scripts\register-clients.ps1: Codex [mcp_servers.vectorworks] + Claude Code
                user-scope server, both pointing at the launcher; skills-only plugins.
@@ -24,7 +24,7 @@
 .EXAMPLE
   .\install.ps1                                   # runtime + clients (+ prebuilt native if Vectorworks is closed)
 .EXAMPLE
-  .\install.ps1 -FullNative -WaitForVectorworksExit
+  .\install.ps1 -WaitForVectorworksExit           # waits until the user closed Vectorworks
 .EXAMPLE
   .\install.ps1 -Root C:\temp\vw -Client none -SkipNative -DryRun
 .EXAMPLE
@@ -61,7 +61,7 @@ $InstallerVersion = "1.0.0"
 
 # ------------------------------------------------------------- bootstrap
 # Run via `& ([scriptblock]::Create((irm <raw url>/install.ps1)))` there is no
-# source folder: download the release zip and re-run the installer from it.
+# source folder: download the main-branch zip and re-run the installer from it.
 $SourceRoot = $PSScriptRoot
 if (-not $SourceRoot -or -not (Test-Path -LiteralPath (Join-Path $SourceRoot "vectorworks_mcp\__init__.py"))) {
     if ($Uninstall) {
@@ -244,7 +244,7 @@ if (-not $reuse) {
         $pipArgs = @("-I", "-m", "pip", "install", "--disable-pip-version-check", "--no-input", "--require-hashes", "-r", (Join-Path $AppDir "requirements.lock"))
         $wheels = if ($WheelsDir) { $WheelsDir } elseif (Test-Path -LiteralPath (Join-Path $SourceRoot "wheels")) { Join-Path $SourceRoot "wheels" } else { "" }
         if ($wheels) { $pipArgs += @("--find-links", $wheels); if ($Offline -or -not $WheelsDir) { $pipArgs += "--no-index" } }
-        elseif ($Offline) { throw "-Offline needs a wheels folder (release zip built with package-release.ps1 -IncludeWheels, or -WheelsDir)." }
+        elseif ($Offline) { throw "-Offline needs a wheels folder (offline zip built with package-release.ps1 -IncludeWheels, or -WheelsDir)." }
         Write-Step "installing locked dependencies (pip --require-hashes$(if ($wheels) { ", wheels: $wheels" }))..."
         $r = Invoke-Native -FilePath $VenvPy -Arguments $pipArgs -TimeoutSec 1200
         if ($r.ExitCode -ne 0) {
@@ -272,7 +272,7 @@ if ($sameAsSource -and $receipt -and $receipt.source_dir -and (Test-Path -Litera
 if ((Get-FullPath $cmdSource).StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -or (Test-SamePath $cmdSource $AppDir)) {
     $installCommand = "close Vectorworks, then run: `"$Bin\vectorworksctl.cmd`" repair"
 } else {
-    $installCommand = "close Vectorworks, then run: powershell -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $cmdSource 'install.ps1')`" -FullNative -WaitForVectorworksExit"
+    $installCommand = "close Vectorworks, then run: powershell -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $cmdSource 'install.ps1')`" -WaitForVectorworksExit"
 }
 $launcherText = (Get-Content -LiteralPath (Join-Path $tplDir "vectorworks-mcp.cmd.template") -Raw).Replace("@@BASE_PYTHON@@", $base.executable).Replace("@@INSTALL_COMMAND@@", $installCommand.Replace('%', '%%'))
 $ctlText = Get-Content -LiteralPath (Join-Path $tplDir "vectorworksctl.cmd.template") -Raw
@@ -329,8 +329,8 @@ if (-not (Plan "would set current.txt -> $runtimeId")) {
 # ----------------------------------------------------------------- native
 $native = [ordered]@{ status = "skipped"; installed = @() }
 function Find-NativeArtifact([string]$ver) {
-    # -FullNative prefers the fresh local build; otherwise the prebuilt native\<ver> (release zip or
-    # the copy tracked in git, see native\PREBUILT.json). A dev build output is never used implicitly.
+    # -FullNative prefers the fresh local build; otherwise the prebuilt native\<ver> tracked in git
+    # (see native\PREBUILT.json). A dev build output is never used implicitly.
     $cands = @()
     if ($NativeArtifactDir) { $cands += @((Join-Path $NativeArtifactDir $ver), $NativeArtifactDir) }
     if ($FullNative) { $cands += (Join-Path $SourceRoot "native_bridge\project\out\$ver\Release") }
@@ -377,7 +377,7 @@ if ($SkipNative) {
         }
         if (-not $art) {
             $native.status = "no_artifact"
-            $msg = "no VectorworksMCPBridge.vlb/.vwr for Vectorworks $ver (use a release zip, -NativeArtifactDir, or -FullNative with Visual Studio)"
+            $msg = "no VectorworksMCPBridge.vlb/.vwr for Vectorworks $ver (no prebuilt for this version: pull the latest main, or build it with -FullNative + Visual Studio + the SDK)"
             if ($FullNative) { $payload.ok = $false; Write-Step $msg "fail" } else { Write-Step $msg "warn" }
             continue
         }
@@ -411,7 +411,7 @@ if ($SkipNative) {
             }
             if ((Get-VectorworksProcesses) -and -not $ignoreRunning) {
                 $native.status = "pending_vectorworks_running"
-                Add-Warn "Vectorworks is running: the bridge plug-in for $ver was NOT installed. Close Vectorworks and rerun: install.ps1 -FullNative (or add -WaitForVectorworksExit)"
+                Add-Warn "Vectorworks is running: the bridge plug-in for $ver was NOT installed. Close Vectorworks and rerun: install.ps1 -WaitForVectorworksExit"
                 continue
             }
         }
@@ -514,7 +514,7 @@ if (-not $Json) {
     Write-Host "  Launcher:  $Launcher"
     Write-Host "  Doctor:    $Bin\vectorworksctl.cmd doctor"
     Write-Host "  Restart Codex / Claude Code so they pick up the vectorworks server."
-    if ($native.status -eq "pending_vectorworks_running") { Write-Host "  Native plug-in pending: close Vectorworks and rerun with -FullNative." -ForegroundColor Yellow }
+    if ($native.status -eq "pending_vectorworks_running") { Write-Host "  Native plug-in pending: close Vectorworks and rerun install.ps1." -ForegroundColor Yellow }
     if ($tokenCreated) { Write-Host "  A new auth token was created: restart Vectorworks." -ForegroundColor Yellow }
 }
 if ($Json) { $payload | ConvertTo-Json -Depth 10 }

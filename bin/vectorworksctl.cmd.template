@@ -37,5 +37,5 @@ if not exist "%VW_APP%\install.ps1" goto missing
 exit /b %ERRORLEVEL%
 
 :missing
->&2 echo vectorworksctl: no installed runtime under %VW_ROOT% (current.txt="%VW_VER%"). Run install.ps1 from a Vectorworks MCP checkout or release zip.
+>&2 echo vectorworksctl: no installed runtime under %VW_ROOT% (current.txt="%VW_VER%"). Run install.ps1 from a clone of https://github.com/BhaveshY/vectorworks-mcp.
 exit /b 3

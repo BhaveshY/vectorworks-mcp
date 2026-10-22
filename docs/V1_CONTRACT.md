@@ -360,9 +360,9 @@ The 0.7 server is preserved verbatim as `legacy/server_v07.py`, reachable only w
   is disabled so exactly one server is active. Claude Code: the installer also runs `claude plugin marketplace add
   <root>\marketplace` + `claude plugin install vectorworks@vectorworks-mcp`. The org-synced Claude desktop (Cowork)
   plugin cannot be changed locally; doctor reports it and `package-release.ps1` builds the replacement zip.
-- **I, §3 native install default:** from a release package the prebuilt plug-in is installed by default (Vectorworks
-  closed); from a git checkout only with `-FullNative` (a checkout may hold a stale dev build). Artifacts are looked up
-  in `-NativeArtifactDir`, `native\<ver>\` (release zip) and `native_bridge\project\out\<ver>\Release\`. The old
+- **I, §3 native install default:** the prebuilt plug-in tracked in git (`native\<ver>\`, `native\PREBUILT.json`)
+  is installed by default (Vectorworks closed), also from a git clone. Artifacts are looked up in `-NativeArtifactDir`,
+  then (`-FullNative` only) `native_bridge\project\out\<ver>\Release\`, then `native\<ver>\`; a dev build is never used implicitly. The old
   `ObjectExample.vlb/.vwr` is removed only when it references `.vectorworks-mcp` / `VW_MCP_AUTH_TOKEN` (i.e. it is the
   0.x bridge, not the SDK sample).
 - **I, §3 skills:** one skill `vectorworks` (`plugins/vectorworks/skills/vectorworks/` with `SKILL.md`,

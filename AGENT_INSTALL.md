@@ -64,7 +64,7 @@ Fix every `fail` using its `fix`, then run preflight again until `ready` is `tru
 | `vectorworks_tested` (warn) | Vectorworks 2025 is built but not yet live-tested. Continue; the smoke test in step 5 decides. Include its result in your report. |
 | `plugin_<ver>` | The download is incomplete. Repeat step 1. |
 | `msix` (warn) | Your shell runs inside a packaged app (the Codex desktop app). Use the MSIX command in step 3. |
-| `network` | Ask the user about proxy/firewall access to pypi.org. Alternatively, use a release zip built with `scripts\package-release.ps1 -IncludeWheels` and install with `-Offline`. |
+| `network` | Ask the user about proxy/firewall access to pypi.org. Without any internet access, use an offline zip built elsewhere with `scripts\package-release.ps1 -IncludeWheels` and install with `-Offline`. |
 | `execution_policy` | Group Policy blocks PowerShell scripts. **Stop** and tell the user that IT has to allow it. |
 | `clients` (warn) | Neither Codex nor Claude Code was found. Install anyway; registration can be repeated later with `scripts\register-clients.ps1 -Client all`. |
 

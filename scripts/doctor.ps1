@@ -61,7 +61,7 @@ function Add-Check([string]$Id, [string]$Status, [string]$Message, [string]$FixC
 }
 
 $installCmd = "powershell -NoProfile -ExecutionPolicy Bypass -File <Vectorworks MCP folder>\install.ps1"
-$nativeCmd = "close Vectorworks, then: $installCmd -FullNative"
+$nativeCmd = "close Vectorworks, then: $installCmd"
 if (-not $Json) { Write-Host "Vectorworks MCP doctor  (root: $Root)" }
 
 # ------------------------------------------------------------------ runtime
@@ -70,7 +70,7 @@ $receipt = $null
 if (Test-Path -LiteralPath $receiptPath) { try { $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json } catch { } }
 if ($receipt -and $receipt.source_dir -and (Test-Path -LiteralPath (Join-Path $receipt.source_dir "install.ps1"))) {
     $installCmd = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $receipt.source_dir 'install.ps1')`""
-    $nativeCmd = "close Vectorworks, then: $installCmd -FullNative"
+    $nativeCmd = "close Vectorworks, then: $installCmd"
 }
 $runtimeId = $null
 if (Test-Path -LiteralPath (Join-Path $Root "current.txt")) { $runtimeId = (Get-Content -LiteralPath (Join-Path $Root "current.txt") -TotalCount 1).Trim() }
@@ -282,7 +282,7 @@ if (-not $SkipBridge -and $py) {
             if ($p.success) {
                 $rev = $p.capability_revision
                 $st = if ($rev -and [int]$rev -ge 6) { "ok" } else { "warn" }
-                Add-Check "bridge_ping" $st "port $($p.port): $($p.ms) ms, rev $rev, bridge $($p.bridge_version), ui_state $($p.ui_state), doc '$($p.active_document)'" $(if ($st -eq "warn") { "bridge is pre-1.0 (capability_revision < 6): close Vectorworks and run install.ps1 -FullNative" } else { "" })
+                Add-Check "bridge_ping" $st "port $($p.port): $($p.ms) ms, rev $rev, bridge $($p.bridge_version), ui_state $($p.ui_state), doc '$($p.active_document)'" $(if ($st -eq "warn") { "bridge is pre-1.0 (capability_revision < 6): close Vectorworks and run install.ps1" } else { "" })
             } elseif ("$($p.error) $($p.error_code)" -match '(?i)auth') {
                 Add-Check "bridge_ping" "warn" "port $($p.port): the bridge rejected this install's auth-token ($Root\auth-token)" "restart Vectorworks so the bridge reads the current token (it reads %USERPROFILE%\.vectorworks-mcp\auth-token at start-up)"
             } elseif ($running.Count) {

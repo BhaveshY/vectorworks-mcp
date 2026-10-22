@@ -27,7 +27,7 @@ Check the requirements first, read-only:
 1. Install Python 3.12 from python.org (Codex's bundled Python is never used):
    `winget install --id Python.Python.3.12 -e --scope user`
 2. Get the code: `git clone https://github.com/BhaveshY/vectorworks-mcp`
-   or extract a release zip (see 2).
+   (update later with `git pull`).
 3. Open a **normal** PowerShell window (not a terminal inside the Codex app -
    the installer refuses to write the plug-in from an MSIX-packaged process)
    and run from the folder:
@@ -40,18 +40,18 @@ Check the requirements first, read-only:
      reused, changed ones are installed side by side when a client still uses
      the old one.
    - Dependencies are installed once from `requirements.lock` with
-     `pip --require-hashes` (internet needed unless the zip contains `wheels\`).
-4. Native bridge plug-in (Vectorworks must be closed):
+     `pip --require-hashes` (internet needed; offline: see 2).
+4. Native bridge plug-in (Vectorworks must be closed; the installer can wait):
 
    ```powershell
-   .\install.ps1 -FullNative -WaitForVectorworksExit
+   .\install.ps1 -WaitForVectorworksExit
    ```
 
-   A plain `install.ps1` already installs the prebuilt
+   This installs the prebuilt
    `native\<version>\VectorworksMCPBridge.vlb/.vwr`. These files are tracked in
    git and listed in `native\PREBUILT.json` with their build id, hashes and
-   live-test status. They also ship in the release zip, or can come from
-   `-NativeArtifactDir`. `-FullNative` builds the plug-in instead with
+   live-test status (`-NativeArtifactDir` overrides them). Maintainers:
+   `-FullNative` builds the plug-in instead with
    `scripts\build-native-bridge.ps1` when Visual Studio C++ tools and the
    Vectorworks SDK are present. The pre-1.0 `ObjectExample.vlb/.vwr` is backed
    up to `backups\plugins-<time>\` and removed.
@@ -66,20 +66,15 @@ Useful switches: `-Client codex|claude-code|all|none`, `-SkipNative`,
 (print the plan, change nothing), `-Json`. Test/sandbox overrides:
 `-Root <dir> -CodexHome <dir> -ClaudeConfig <file> -PluginsDir <dir>`.
 
-## 2. Another PC (portable zip)
+## 2. Another PC
 
-On a PC that has the code (and ideally a built plug-in):
+Clone the repository there and run section 1 (an AI agent follows
+[AGENT_INSTALL.md](AGENT_INSTALL.md)). The clone carries everything,
+including the prebuilt plug-ins.
 
-```powershell
-.\scripts\package-release.ps1 -IncludeWheels
-```
-
-This writes `dist\vectorworks-mcp-<version>-win64.zip` (runtime source,
-installer, prebuilt `native\<ver>\` plug-in if one was built, and with
-`-IncludeWheels` all dependency wheels for offline install) and
-`dist\vectorworks-plugin-<version>.zip` (skills-only plugin for upload to a
-Claude organisation / Cowork). Copy the first zip to the other PC, extract,
-then run step 1.3 there (`-Offline` forces wheel-only installs).
+Only for a PC without internet access: `.\scripts\package-release.ps1 -IncludeWheels`
+writes `dist\vectorworks-mcp-<version>-win64.zip` with all dependency wheels;
+extract it there and run `install.ps1 -Offline`.
 
 ## 3. What the installer changes in client configs
 

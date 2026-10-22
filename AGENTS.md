@@ -28,7 +28,7 @@ To *use* Vectorworks from an agent, read the skill
 | `scripts/install-common.ps1` | shared PowerShell helpers (paths, MSIX detection, ACL, hashing, native exec) |
 | `scripts/register-clients.ps1` + `register_clients.py` | Codex TOML (surgical) / Claude Code registration, inspect, Codex log summary |
 | `scripts/doctor.ps1` + `doctor_probe.py` | `vectorworksctl doctor` (startup timing, bridge ping, duplicates, stale installs) |
-| `scripts/package-release.ps1` | portable release zip (+ wheels, + prebuilt plug-in) and plugin zip |
+| `scripts/package-release.ps1` | offline zip (+ wheels) for PCs without internet, and the skills-only plugin zip |
 | `native/<ver>/`, `native/PREBUILT.json` | tracked prebuilt plug-ins installed by default (refresh with `scripts/update-prebuilt.ps1`) |
 | `scripts/preflight.ps1` | read-only requirement check (`-Json`) for [AGENT_INSTALL.md](AGENT_INSTALL.md) |
 | `scripts/run-outside-msix.ps1` | runs install.ps1 via explorer.exe when the agent's shell is inside an MSIX app (Codex desktop) |

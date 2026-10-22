@@ -22,7 +22,7 @@ github.com/BhaveshY/vectorworks-mcp following AGENT_INSTALL.md"*. The
 report.
 
 By hand: check the requirements, then run the installer in a normal PowerShell
-window (not inside Codex), from this folder or an extracted release zip:
+window (not inside Codex), from this folder:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\preflight.ps1
@@ -88,7 +88,7 @@ Tools: `vw_status`, `vw_read`, `vw_capture`, `vw_create`, `vw_edit`, `vw_apply`,
 | Client shows "connector unavailable" / no `vw_*` tools | Run `install.ps1`, restart the client. `doctor` must show one registration per client and MCP startup < 800 ms. |
 | `vw_status` says `setup_required` (repair mode) | Run the `repair_command` it prints. |
 | `bridge_unreachable` | Start Vectorworks; check the plug-in with `doctor` (native check). |
-| `upgrade_required` | Close Vectorworks, run `install.ps1 -FullNative`. |
+| `upgrade_required` | `git pull`, close Vectorworks, run `install.ps1`. |
 | `vectorworks_busy` | Close the open dialog / finish the drag in Vectorworks. The Home screen and the "new version available" notice are closed automatically. |
 | Vectorworks asks for the licence server at every start ("Login Settings") | Press Login, or tick "Don't show at startup" in that dialog so unattended starts work. |
 | Old 0.x tool names appear, or two Vectorworks servers | A stale plugin or old registration is active; `doctor` names it and the cleanup command. |
