@@ -153,7 +153,7 @@ config backups go to `%USERPROFILE%\.vectorworks-mcp\backups\stale-<time>\`.
   still used by an open Codex/Claude stays until the user restarts that client.
   Rerun `-Fix` after the restart.
 - **Earlier registrations under another name** (`stale_server`, warn), such as
-  a 0.x `[mcp_servers.vectorworks-mcp]` in Codex or `vw_legacy` in Claude Code.
+  a 0.x `[mcp_servers.vectorworks-mcp]` in Codex or `vectorworks-old` in Claude Code.
   The config is backed up first, then the entry is removed with
   `codex mcp remove <name>` or `claude mcp remove -s user <name>`.
 - **Old copies** in known places (`stale_clone`, `stale_runtime`):
