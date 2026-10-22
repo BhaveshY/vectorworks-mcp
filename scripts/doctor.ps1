@@ -145,7 +145,10 @@ function Invoke-Py([string]$Script, [string[]]$PyArgs, [int]$Timeout = 120) {
 
 # ----------------------------------------------------------------- clients
 $insp = Invoke-Py "register_clients.py" @("inspect", "--codex-home", $CodexHome, "--claude-config", $ClaudeConfig, "--launcher", $launcher)
-$regFix = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $PSScriptRoot 'register-clients.ps1')`" -Client all"
+# Clients chosen at install (receipt.client; receipts before it existed registered all).
+$regClient = if ($receipt -and $receipt.PSObject.Properties["client"] -and $receipt.client) { [string]$receipt.client } else { "all" }
+$claudeScope = $regClient -in @("all", "claude-code")
+$regFix = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $PSScriptRoot 'register-clients.ps1')`" -Client $regClient"
 $needReg = $false
 if (-not $insp) { Add-Check "clients" "warn" "could not inspect client configs (no Python 3.11+ found)" }
 else {
@@ -182,7 +185,8 @@ else {
     $syncedMajor = 0
     if ($synced) { [int]::TryParse(([string]$synced.version -split "\.")[0], [ref]$syncedMajor) | Out-Null }
     $viaPlugin = $synced -and $syncedMajor -ge 1
-    if (-not $cl.exists -and -not $viaPlugin) { Add-Check "claude" "info" "Claude Code not configured ($($cl.config))" }
+    if (-not $claudeScope -and -not $viaPlugin -and -not $cl.user) { Add-Check "claude" "info" "Claude Code: not registered (installed for $regClient; add it with install.ps1 -Client all)" }
+    elseif (-not $cl.exists -and -not $viaPlugin) { Add-Check "claude" "info" "Claude Code not configured ($($cl.config))" }
     elseif ($viaPlugin) {
         if ($cl.user) { Add-Check "claude" "warn" "synced plugin vectorworks $($synced.version) AND a user-scope vectorworks server: two servers" $regFix; $needReg = $true }
         else { Add-Check "claude" "ok" "synced plugin vectorworks $($synced.version) -> launcher (server + skill)" }
@@ -192,7 +196,7 @@ else {
     else { Add-Check "claude" "ok" "user-scope vectorworks -> launcher" }
     if ($viaPlugin) {
         if ($cl.skills_plugin_enabled) { Add-Check "claude_skills" "warn" "local skills plugin vectorworks@vectorworks-mcp duplicates the synced plugin's skill" $regFix; $needReg = $true }
-    } elseif ($cl.exists -and $cl.PSObject.Properties["skills_plugin_enabled"]) {
+    } elseif (($claudeScope -or $cl.user) -and $cl.exists -and $cl.PSObject.Properties["skills_plugin_enabled"]) {
         if ($cl.skills_plugin_enabled) { Add-Check "claude_skills" "ok" "skills plugin vectorworks@vectorworks-mcp enabled" }
         else { Add-Check "claude_skills" "warn" "skills plugin vectorworks@vectorworks-mcp not enabled in Claude Code" $regFix }
         foreach ($o in @($cl.other_vectorworks_plugins)) { Add-Check "claude_plugin" "warn" "other enabled vectorworks plugin: $o (0.x skills/server)" "claude plugin disable $o" }

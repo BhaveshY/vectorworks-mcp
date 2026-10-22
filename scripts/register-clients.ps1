@@ -22,7 +22,7 @@
 [CmdletBinding()]
 param(
     [ValidateSet("all", "codex", "claude-code", "none")]
-    [string]$Client = "all",
+    [string]$Client = "codex",
     [string]$Launcher = "",
     [string]$Root = "",
     [string]$CodexHome = "",

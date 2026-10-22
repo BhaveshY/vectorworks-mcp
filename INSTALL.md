@@ -61,7 +61,7 @@ Check the requirements first, read-only:
    %USERPROFILE%\.vectorworks-mcp\bin\vectorworksctl.cmd doctor
    ```
 
-Useful switches: `-Client codex|claude-code|all|none`, `-SkipNative`,
+Useful switches: `-Client codex|claude-code|all|none` (default `codex`), `-SkipNative`,
 `-VectorworksVersion 2025`, `-Force` (rebuild the venv), `-DryRun`
 (print the plan, change nothing), `-Json`. Test/sandbox overrides:
 `-Root <dir> -CodexHome <dir> -ClaudeConfig <file> -PluginsDir <dir>`.
@@ -118,7 +118,7 @@ extract it there and run `install.ps1 -Offline`.
 Register again without reinstalling:
 
 ```powershell
-.\scripts\register-clients.ps1 -Client all
+.\scripts\register-clients.ps1 -Client codex   # or all / claude-code
 ```
 
 ## 4. Uninstall

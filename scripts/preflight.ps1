@@ -133,11 +133,10 @@ $claude = Get-Command claude.exe, claude.cmd, claude -ErrorAction SilentlyContin
 $claudeJson = Get-DefaultClaudeConfig
 $haveCodex = [bool]$codex -or (Test-Path -LiteralPath $codexHome)
 $haveClaude = [bool]$claude -or (Test-Path -LiteralPath $claudeJson)
-$names = @()
-if ($haveCodex) { $names += "Codex ($(if ($codex) { $codex.Source } else { $codexHome }))" }
-if ($haveClaude) { $names += "Claude Code ($(if ($claude) { $claude.Source } else { $claudeJson }))" }
-if ($names.Count) { Add-Check "clients" "pass" ("will register: " + ($names -join "; ")) }
-else { Add-Check "clients" "warn" "neither Codex nor Claude Code was found; the server installs but no client is registered" "Install Codex or Claude Code, then rerun: scripts\register-clients.ps1 -Client all" }
+$claudeNote = if ($haveClaude) { "; Claude Code is also installed (not registered by default; add -Client all to register it too)" } else { "" }
+if ($haveCodex) { Add-Check "clients" "pass" ("will register Codex ($(if ($codex) { $codex.Source } else { $codexHome }))" + $claudeNote) }
+elseif ($haveClaude) { Add-Check "clients" "warn" "Codex (the default client) was not found; Claude Code is installed" "Install with -Client claude-code to use Claude Code, or install Codex first." }
+else { Add-Check "clients" "warn" "Codex was not found; the server installs but no client is registered" "Install Codex, then rerun: scripts\register-clients.ps1 -Client codex" }
 
 # ----------------------------------------------------------------- network
 $wheels = Test-Path -LiteralPath (Join-Path $Repo "wheels")

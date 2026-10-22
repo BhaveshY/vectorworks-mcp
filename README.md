@@ -32,7 +32,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -WaitForVector
 The installer:
 
 - puts the runtime in `%USERPROFILE%\.vectorworks-mcp`;
-- registers the `vectorworks` MCP server with Codex and Claude Code;
+- registers the `vectorworks` MCP server with Codex (add `-Client all` to
+  register Claude Code too);
 - installs the skills;
 - installs the prebuilt Vectorworks bridge plug-in from `native\<version>\`.
   Vectorworks must be closed for this step; the installer can wait. Use

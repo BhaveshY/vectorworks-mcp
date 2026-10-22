@@ -16,8 +16,8 @@
   4. Native    VectorworksMCPBridge.vlb/.vwr -> %APPDATA%\Nemetschek\Vectorworks\<ver>\Plug-ins
                (prebuilt native\<ver>\ tracked in git, or built with -FullNative); old ObjectExample.vlb/.vwr
                backed up and removed. Never while Vectorworks runs (use -WaitForVectorworksExit).
-  5. Clients   scripts\register-clients.ps1: Codex [mcp_servers.vectorworks] + Claude Code
-               user-scope server, both pointing at the launcher; skills-only plugins.
+  5. Clients   scripts\register-clients.ps1: Codex [mcp_servers.vectorworks] (default) and, with
+               -Client all, the Claude Code user-scope server; skills-only plugins.
   6. Receipt   install-receipt.json (version, hashes, native hash, client changes) and
                current.txt. -Uninstall is driven by the receipt.
 
@@ -33,8 +33,9 @@
 [CmdletBinding()]
 param(
     [string]$Root = "",
+    # Codex is the default client; -Client all also registers Claude Code.
     [ValidateSet("all", "codex", "claude-code", "none")]
-    [string]$Client = "all",
+    [string]$Client = "codex",
     [string]$CodexHome = "",
     [string]$ClaudeConfig = "",
     [string]$PluginsDir = "",
@@ -115,6 +116,8 @@ Write-Step "Vectorworks MCP installer $InstallerVersion  (source: $SourceRoot, r
 
 $receipt = $null
 if (Test-Path -LiteralPath $ReceiptPath) { try { $receipt = Get-Content -LiteralPath $ReceiptPath -Raw | ConvertFrom-Json } catch { Add-Warn "install-receipt.json is unreadable; treating as a fresh install" } }
+# Repair/upgrade without -Client keeps the clients chosen at install time.
+if (-not $PSBoundParameters.ContainsKey("Client") -and $receipt -and $receipt.PSObject.Properties["client"] -and $receipt.client) { $Client = [string]$receipt.client }
 
 # ======================================================================
 # Uninstall
@@ -475,6 +478,7 @@ if (-not $DryRun) {
         app_files = $appHashes
         auth_token = [ordered]@{ path = $tokenPath; created_now = $tokenCreated }
         native = $native
+        client = $Client
         clients = $clientsResult
         previous_runtime_ids = $prevIds
     }

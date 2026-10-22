@@ -66,7 +66,7 @@ Fix every `fail` using its `fix`, then run preflight again until `ready` is `tru
 | `msix` (warn) | Your shell runs inside a packaged app (the Codex desktop app). Use the MSIX command in step 3. |
 | `network` | Ask the user about proxy/firewall access to pypi.org. Without any internet access, use an offline zip built elsewhere with `scripts\package-release.ps1 -IncludeWheels` and install with `-Offline`. |
 | `execution_policy` | Group Policy blocks PowerShell scripts. **Stop** and tell the user that IT has to allow it. |
-| `clients` (warn) | Neither Codex nor Claude Code was found. Install anyway; registration can be repeated later with `scripts\register-clients.ps1 -Client all`. |
+| `clients` (warn) | Codex (the default client) was not found. If the user works in Claude Code instead, add `-Client claude-code` to the install command (`-Client all` registers both). Otherwise install anyway and register later with `scripts\register-clients.ps1 -Client codex`. |
 
 ## 3. Install
 
