@@ -192,6 +192,22 @@ def main():
         wall = call("vw_create", {"objects":[{"type":"wall","id":"regression_wall","start":[30000,-8000],"end":[32000,-8000],"height":2800}],"preview":False})["ids"]["regression_wall"]
         call("vw_edit", {"changes":[{"op":"reshape","target":wall,"start":[30000,-8000],"end":[33000,-8000]}],"preview":False})
         check("existing wall endpoint reshape still works", geometry(wall)["data"][0]["points"] == [[30000,-8000],[33000,-8000]])
+        # A band below the zero level moves lower levels down; ±0.00 stays the reference.
+        made = call("vw_create", {"objects":[
+            {"type":"line","id":"origin_floor","start":[40000,-20000],"end":[45000,-20000]},
+            {"type":"text","id":"origin_gf","at":[45500,-20000],"text":"GF +0.00","size":8},
+            {"type":"text","id":"origin_ug","at":[45500,-23000],"text":"UG -3.00","size":8}],"preview":False})["ids"]
+        origin_root = call("vw_edit", {"changes":[{"op":"group","targets":list(made.values()),"name":"Origin acceptance"}],"preview":False})["receipts"][0]["uuid"]
+        origin_before = geometry(origin_root)
+        label = lambda uid, e: {"target":uid,"elevation":e,"origin":-20000,"datum":100000,"decimal_separator":",",
+                                "zero_sign":"±","template":"{level} = {absolute} m NN"}
+        call("vw_edit", {"changes":[{"op":"section_heights","target":origin_root,"expected_geometry":{origin_root:origin_before["revision"]},
+             "bands":[{"bottom":-23000,"top":-20000,"delta":500}],
+             "labels":[label(made["origin_gf"],-20000),label(made["origin_ug"],-23000)]}],"preview":False})
+        moved = {r["uuid"]:r for r in geometry(origin_root)["data"]}
+        check("zero level stays ±0,00 when the storey below grows", moved[made["origin_gf"]]["text"] == "±0,00 = 80,00 m NN")
+        check("lower level reads -3,50 relative to the zero level", moved[made["origin_ug"]]["text"] == "-3,50 = 76,50 m NN")
+        check("zero level drawing moves with the band", abs(moved[made["origin_floor"]]["points"][0][1]+19500) < .01)
         call("vw_capture", {"view":"objects","objects":[root],"max_px":1600})
         saved = call("vw_document", {"action":"save_as","path":str(output / "Patrick-section-after.vwx")})
         doc = saved["document"]["fingerprint"]
