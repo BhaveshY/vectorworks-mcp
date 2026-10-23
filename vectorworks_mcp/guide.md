@@ -10,7 +10,8 @@ group members, complete vertices, chain source dimensions, text and revision.
 `labels`, `stairs`, `rigid`, `fixed_points`, `preserve_text`. One transaction;
 stale revisions fail. Slab thickness and equal stair risers are retained. 2D
 symbols and bound markers move intact. Bind/preserve every text. Label `origin`
-and `decimal_separator` support shifted/localized levels. BIM uses model tools.
+(old Y of ±0.00, kept as reference), `decimal_separator` and `zero_sign` ("±")
+support shifted/localized levels. BIM uses model tools.
 `reshape`: polygon/polyline `points` or line/wall/dimension `start`/`end`.
 Details, limits and live tests: `docs/SECTION_EDITING.md` in the source.
 | Tool | Use for |

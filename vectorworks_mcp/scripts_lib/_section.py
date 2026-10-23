@@ -268,8 +268,15 @@ def section_edit(item, handles, done):
                     raise ValueError("validation: label and rigid binding elevations disagree")
                 elevation = section_y(l["elevation"], item["bands"])
                 points[0][1] = state["points"][0][1] + elevation - l["elevation"]
-                level = format((elevation-l.get("origin", 0)) / 1000.0, "+.%df" % l["precision"])
-                absolute = format((elevation + l["datum"]) / 1000.0, ".%df" % l["precision"])
+                # The zero level is the reference: a band below it moves lower levels
+                # down relative to it, while it keeps its relative and absolute height.
+                origin = l.get("origin", 0)
+                relative = elevation - section_y(origin, item["bands"])
+                value = round(relative / 1000.0, l["precision"]) + 0.0  # + 0.0 drops a negative zero
+                level = format(value, "+.%df" % l["precision"])
+                if value == 0:
+                    level = l.get("zero_sign", "+") + level[1:]
+                absolute = format((relative + origin + l["datum"]) / 1000.0, ".%df" % l["precision"])
                 sep = l.get("decimal_separator", ".")
                 text = l["template"].replace("{level}", level.replace(".", sep)).replace("{absolute}", absolute.replace(".", sep))
             elif uid not in preserved:
@@ -344,5 +351,13 @@ def reshape_geometry(item, handles, done):
         parent = vs.GetParent(h)
         if vs.GetTypeN(parent) == 11 and section_chain(vs.GetParent(parent)):
             vs.ResetObject(vs.GetParent(parent))
+            # Chain reset can regenerate child data; verify the source again afterwards.
+            got = section_state(h)
+            if got["uuid"] != state["uuid"] or got["type_id"] != state["type_id"] or got["parent_uuid"] != state["parent_uuid"] or len(got.get("points", [])) != len(points) or any(
+                    abs(a-b) > .01 for p,q in zip(got.get("points", []), points) for a,b in zip(p,q)):
+                raise ValueError("readback_mismatch: chain regeneration changed the reshaped source dimension")
+            for key in ("offset", "dimension_class", "show_value", "primary"):
+                if key in state and got.get(key) != state[key]:
+                    raise ValueError("readback_mismatch: chain regeneration changed " + key)
         done.append({"op": "reshape", "uuid": state["uuid"], "vertices": len(points), "verified": True,
                      "dimension_text": got.get("dimension_text")})

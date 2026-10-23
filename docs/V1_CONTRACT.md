@@ -299,6 +299,11 @@ The 0.7 server is preserved verbatim as `legacy/server_v07.py`, reachable only w
   relocation; other definitions/instances remain unchanged. `rigid` bindings
   preserve annotation shape; label `origin` and `decimal_separator` support
   shifted-coordinate drawings and localized levels. Ten tools are retained.
+  Fix: label `origin` is mapped through the bands, so ±0.00 stays the reference
+  when a band below it changes (it previously read +0.50 after a 500 mm basement
+  change); optional `zero_sign` ("+"/"±"); a negative zero prints as zero.
+  `reshape` re-verifies a chain source dimension after the chain reset.
+  `gen-vs-signatures.py --check` skips when the SDK stubs are absent (CI/clones).
 (Record here: stream, section, what changed, why.)
 
 - **H, §2 (framework, "FastMCP 4.0.10 app"):** the default host does not import FastMCP/mcp/pydantic. Importing them

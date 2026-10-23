@@ -56,15 +56,18 @@ vw_edit(document="<document>", changes=[{
 Add every level text and stair flight; the example abbreviates these lists.
 Other texts must appear in `preserve_text`: content stays unchanged, position
 follows the band map. A label moves by the change at its old `elevation`, keeping
-its offset. `{level}` and `{absolute}` are formatted in metres; absolute is the
-mapped elevation plus `datum`. With a shifted drawing origin, adjust the datum.
-Replacing label content preserves object identity, but not inline rich text
-runs; use simple level labels.
+its offset. `{level}` and `{absolute}` are formatted in metres; `datum` is the
+absolute height of drawing Y=0 before the edit. Replacing label content
+preserves object identity, but not inline rich text runs; use simple level labels.
 
-For drawings away from Y=0, set a label's `origin` to the drawing Y of its zero
-level. `{level}` is `(mapped elevation - origin)/1000`; `{absolute}` remains
-`(mapped elevation + datum)/1000`. `decimal_separator=","` formats only those
-numeric substitutions with commas, retaining punctuation in the template.
+`origin` (default 0) is the drawing Y of the ±0.00 level before the edit. The
+zero level is the reference: it keeps its relative and absolute height, so a
+band below it moves lower levels down instead of moving ±0.00 up.
+`{level}` is `(mapped elevation - mapped origin)/1000` and `{absolute}` is
+`{level}` plus `(origin + datum)/1000`; when no band lies below the origin this
+equals `(mapped elevation + datum)/1000`. `decimal_separator=","` formats only
+those numeric substitutions with commas, retaining punctuation in the template.
+`zero_sign="±"` writes the zero level as `±0.00` (default `+0.00`).
 
 `rigid=[{"target":"<level-marker-uuid>","elevation":3880}]` moves the entire
 target/group by the displacement of the named elevation. Use it for annotation

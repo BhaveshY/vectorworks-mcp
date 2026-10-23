@@ -159,6 +159,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--check", action="store_true", help="exit 1 if the checked-in JSON differs")
     args = parser.parse_args()
+    if args.check and not all(any(p.is_file() for p in paths) for paths in STUBS.values()):
+        # third_party/ is not in git (SDK licence), so clones and CI cannot regenerate the
+        # JSON; comparing a partial rebuild would always report it as stale.
+        print("skip: SDK vs.py stubs not present (third_party/); freshness is checked where the SDK is installed")
+        return 0
     data = build()
     text = json.dumps(data, separators=(",", ":"), ensure_ascii=False, sort_keys=False) + "\n"
     if args.check:

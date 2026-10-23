@@ -56,6 +56,13 @@ class SectionContract(unittest.TestCase):
         self.change['labels'][0]['decimal_separator']=';'
         with self.assertRaises(VWError): self.compile()
 
+    def test_zero_sign(self):
+        self.assertEqual(self.compile().script_ops[0]['labels'][0]['zero_sign'],'+')
+        self.change['labels'][0]['zero_sign']='±'
+        self.assertEqual(self.compile().script_ops[0]['labels'][0]['zero_sign'],'±')
+        self.change['labels'][0]['zero_sign']='0'
+        with self.assertRaises(VWError): self.compile()
+
 
 if __name__ == "__main__":
     unittest.main()

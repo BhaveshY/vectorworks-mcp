@@ -28,12 +28,15 @@ def compile_section(src, field, scale):
              "datum": C.length(label.get("datum", 0), field + ".labels.datum", scale),
              "origin": C.length(label.get("origin", 0), field + ".labels.origin", scale),
              "decimal_separator": C.text(label.get("decimal_separator", "."), field + ".labels.decimal_separator"),
+             "zero_sign": C.text(label.get("zero_sign", "+"), field + ".labels.zero_sign"),
              "template": C.text(label.get("template", "{level}"), field + ".labels.template"),
              "precision": C.integer(label.get("precision", 2), field + ".labels.precision")}
         if not 0 <= l["precision"] <= 6 or not all(math.isfinite(l[k]) for k in ("elevation", "datum", "origin")):
             raise validation("Label precision must be 0..6 and elevations finite", field + ".labels", [])
         if l["decimal_separator"] not in (".", ","):
             raise validation("Label decimal_separator must be '.' or ','", field + ".labels.decimal_separator", ",")
+        if l["zero_sign"] not in ("+", "±"):
+            raise validation("Label zero_sign must be '+' or '±'", field + ".labels.zero_sign", "±")
         if "{level}" not in l["template"] and "{absolute}" not in l["template"]:
             raise validation("Label template needs {level} and/or {absolute} (formatted in metres)", field + ".labels.template", "{level} = {absolute} m NN")
         labels.append(l)
