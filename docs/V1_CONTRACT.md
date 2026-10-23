@@ -294,6 +294,11 @@ The 0.7 server is preserved verbatim as `legacy/server_v07.py`, reachable only w
   regeneration. Limits and unsupported cases: `docs/SECTION_EDITING.md`.
   Dimension selectors 13/14 are SDK-internal and guarded by type/readback;
   Vectorworks 2024 is live-tested, 2025 remains unverified for this addition.
+  Follow-up: geometry traversal includes NNA_ChainDim's persistent source group
+  (not its regenerated display copies). 2D symbols support rigid instance
+  relocation; other definitions/instances remain unchanged. `rigid` bindings
+  preserve annotation shape; label `origin` and `decimal_separator` support
+  shifted-coordinate drawings and localized levels. Ten tools are retained.
 (Record here: stream, section, what changed, why.)
 
 - **H, §2 (framework, "FastMCP 4.0.10 app"):** the default host does not import FastMCP/mcp/pydantic. Importing them

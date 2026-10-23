@@ -117,7 +117,8 @@ Arguments: `changes` (required), `units`, `preview` (image of the changed object
 | `rotate` | `angle` (degrees), `center` |
 | `scale` | `factor` |
 | `mirror` | `axis` "x" / "y", `center` |
-| `reshape` | walls / lines: `start`, `end` |
+| `reshape` | walls / lines / native linear dimensions: `start`, `end`; polygon/polyline: complete `points` |
+| `section_heights` | `bands`, `expected_geometry`, `labels`, `stairs`, `rigid`, `fixed_points`, `preserve_text`; drawn 2D geometry, native chain sources and rigid 2D symbols; see `docs/SECTION_EDITING.md` |
 | `duplicate` | `by`, `count` (1-100) |
 | `delete` | target only |
 | `parametric` | `parameters` (`plugin` optional: taken from the target); friendly names (`width`, `sill_height`, `open_angle`, `swing`, ...) map to the real ids; unknown ids -> "did you mean" |

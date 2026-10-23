@@ -2,8 +2,8 @@
 
 The existing ten tools now cover nested 2D section geometry through the native
 bridge's script transaction engine. No new DLL is required. This workflow edits
-drawn sections: lines, rectangles, straight polygons/polylines, linear dimensions
-and text inside groups. It does not regenerate BIM section viewports or redesign
+drawn sections: lines, rectangles, straight polygons/polylines, linear dimensions,
+native chain dimensions, 2D symbol instances and text inside groups. It does not regenerate BIM section viewports or redesign
 a parametric Stair object; use the existing model/parametric tools for those.
 
 ## Read and bind the geometry
@@ -61,6 +61,30 @@ mapped elevation plus `datum`. With a shifted drawing origin, adjust the datum.
 Replacing label content preserves object identity, but not inline rich text
 runs; use simple level labels.
 
+For drawings away from Y=0, set a label's `origin` to the drawing Y of its zero
+level. `{level}` is `(mapped elevation - origin)/1000`; `{absolute}` remains
+`(mapped elevation + datum)/1000`. `decimal_separator=","` formats only those
+numeric substitutions with commas, retaining punctuation in the template.
+
+`rigid=[{"target":"<level-marker-uuid>","elevation":3880}]` moves the entire
+target/group by the displacement of the named elevation. Use it for annotation
+triangles that must not stretch. Overlapping rigid scopes and overlaps with
+`stairs` or `fixed_points` are rejected. Text still requires explicit binding or
+preservation; a text label's elevation must agree with its rigid binding.
+
+2D symbols translate without editing their shared definition, rotation or scale.
+The default requires uniform displacement across the instance's bounds and
+insertion point (for example, solar panels above the roof). If a symbol crosses
+a height band, bind it explicitly with `rigid` to a known floor elevation.
+Hybrid and 3D symbols are rejected; this operation does not deform definitions.
+
+`NNA_ChainDim` is the supported chain dimension plug-in. Geometry reads return
+its persistent source group and native dimension segments, excluding regenerated
+display copies. Edit the returned source segments or the whole chain. Direct
+display segments are rejected: changes to them disappear on regeneration.
+The chain is reset after source edits. Verify in a subsequent read/capture,
+because Vectorworks completes display regeneration after the script returns.
+
 `stairs` binds a line, straight polygon/polyline, or group of these between old
 landing elevations. The flight transforms uniformly between the new landings,
 retaining equal riser spacing, tread count and X coordinates. This is drafting,
@@ -70,9 +94,12 @@ starts at 710 mm: that anchor stays fixed while the roof rises from 18,900 to
 21,900 mm, so the actual dimension becomes 21,190 mm.
 
 Dimensions change their witness anchors and Vectorworks recomputes their value;
-offset and standard remain. Section edits reject hidden-value/non-linear
+offset and standard remain. Reapplying the unchanged primary dimension settings
+registers a full undo swap before raw endpoint writes; otherwise standalone
+dimension anchors can survive a failed transaction. The live tests verify this
+with an injected failure and a separate read. Section edits reject hidden-value/non-linear
 dimensions, curved polylines, holes, locked objects, transformed working planes,
-symbols, PIOs and viewports before mutation. Ordinary XY geometry is required.
+hybrid/3D symbols, other PIOs and viewports before mutation. Ordinary XY geometry is required.
 Vertex count/topology remain unchanged; bands are for floor-aligned geometry.
 
 `dry_run=true` validates/compiles without reading the drawing; execution performs
@@ -103,6 +130,11 @@ and compares geometry again. It leaves the saved test file open. `--installed`
 uses the installed launcher instead. Reports and call logs include timings.
 No user document is changed and Vectorworks is never restarted.
 
-The fixture follows Patrick's screenshots; his original VWX was not supplied.
-Acceptance on his file remains separate. Live verification currently covers
-Vectorworks 2024; 2025 is not live-verified for these new geometry operations.
+The fixture follows a screenshot-based example. For an authorized real working
+copy, `scripts/e2e_section_file.py --plan <private-plan.json> --output <new-dir>`
+applies explicit object bindings, checks native measured dimensions, unchanged
+guards/shared symbols, separate-call chain display regeneration, replay rejection,
+and saved/reopened geometry. Add `--installed` to exercise the installed launcher.
+The plan may enable `rollback_probe` to inject a failure after edits and verify
+restoration before the real transaction. No private drawings or plans are bundled.
+Live verification covers Vectorworks 2024; 2025 remains unverified for these additions.

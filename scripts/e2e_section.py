@@ -166,6 +166,15 @@ def main():
         failed = call("vw_edit", {"changes":[{"op":"reshape","target":ids["long_poly"],"points":bad_points},
                                                {"op":"reshape","target":ids["slab0"],"points":[[0,0],[1,1]]}]}, allow_error=True)
         check("failure after mutation rolls back all geometry", not failed["ok"] and geometry(root)["revision"] == after["revision"])
+        # Standalone dimensions need a full undo swap before raw endpoint
+        # selectors are written; grouped geometry alone did not reveal this.
+        standalone = call("vw_create", {"objects":[{"type":"dimension","id":"standalone_dim",
+                         "start":[30000,0],"end":[30000,3500],"offset":-500}],"preview":False})["ids"]["standalone_dim"]
+        standalone_before = geometry(standalone)
+        failed = call("vw_edit", {"changes":[{"op":"reshape","target":standalone,"start":[30000,0],"end":[30000,4000]},
+                                               {"op":"reshape","target":ids["slab0"],"points":[[0,0],[1,1]]}]},allow_error=True)
+        check("standalone dimension anchors/value/style roll back after a later failure",
+              not failed["ok"] and geometry(standalone)["revision"] == standalone_before["revision"])
         unsupported = call("vw_create", {"objects":[{"type":"circle","id":"unsupported","at":[30000,-5000],"radius":100}],"preview":False})["ids"]["unsupported"]
         unsupported_before = geometry(unsupported)
         failed = call("vw_edit", {"changes":[{"op":"section_heights", "targets":[root,unsupported],

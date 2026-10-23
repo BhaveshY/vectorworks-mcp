@@ -4,16 +4,15 @@
 
 ## Tools
 
-**Drawn sections:** `vw_read(what="geometry", target="<group uuid>", detail=true)`
-reads recursive members, complete vertices, dimension anchors, text and a
-revision. `vw_edit` op `section_heights` takes clear-height `bands`,
-`expected_geometry` (root -> revision), `labels`, `stairs`, `fixed_points`, and
-`preserve_text`. Slab packages translate intact; bound stairs retain equal
-risers. Every text needs a label binding or explicit preservation. The section
-call is one transaction; stale revisions and unsupported members are rejected.
-This edits drawn 2D sections; BIM/PIO/viewport geometry uses model tools.
-`reshape` accepts polygon/polyline `points`, or line/wall/dimension `start`/`end`.
-Complete arguments and live test: `docs/SECTION_EDITING.md` in the source.
+**Drawn sections:** `vw_read(what="geometry", target="<uuid>", detail=true)` reads
+group members, complete vertices, chain source dimensions, text and revision.
+`vw_edit` op `section_heights`: `bands`, `expected_geometry` (root -> revision),
+`labels`, `stairs`, `rigid`, `fixed_points`, `preserve_text`. One transaction;
+stale revisions fail. Slab thickness and equal stair risers are retained. 2D
+symbols and bound markers move intact. Bind/preserve every text. Label `origin`
+and `decimal_separator` support shifted/localized levels. BIM uses model tools.
+`reshape`: polygon/polyline `points` or line/wall/dimension `start`/`end`.
+Details, limits and live tests: `docs/SECTION_EDITING.md` in the source.
 | Tool | Use for |
 |---|---|
 | `vw_status` | health, documents, `job_id` progress, `idempotency_key` "was it applied?" |

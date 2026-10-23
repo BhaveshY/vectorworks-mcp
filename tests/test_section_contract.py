@@ -46,6 +46,16 @@ class SectionContract(unittest.TestCase):
         with self.assertRaises(VWError):
             self.compile({"op":"reshape","target":"name:Polygon","points":[[0,0],[float("nan"),0]]})
 
+    def test_shifted_origin_localized_labels_and_rigid_units(self):
+        self.change['labels'][0].update(origin=-60.86,decimal_separator=',')
+        self.change['rigid']=[{'target':'name:Marker','elevation':-56.98}]
+        item=self.compile().script_ops[0]
+        self.assertEqual(item['labels'][0]['origin'],-60860)
+        self.assertEqual(item['labels'][0]['decimal_separator'],',')
+        self.assertEqual(item['rigid'][0]['elevation'],-56980)
+        self.change['labels'][0]['decimal_separator']=';'
+        with self.assertRaises(VWError): self.compile()
+
 
 if __name__ == "__main__":
     unittest.main()

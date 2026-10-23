@@ -123,14 +123,14 @@ TOOLS: list[dict] = [
         "title": "Edit objects",
         "description": (
             "Edit existing objects by uuid/name/selection. ops: set properties; move by; rotate angle; scale factor; "
-            "mirror; reshape start,end or points; section_heights bands,expected_geometry,labels,stairs,fixed_points "
+            "mirror; reshape start,end or points; section_heights bands,expected_geometry,labels,stairs,rigid,fixed_points "
             "(grouped 2D sections, one transaction); duplicate; delete; parametric parameters; class; layer; order; "
             "group; ungroup; record; select; deselect. geometry reads provide revision hashes for section preconditions. "
             "preview=true returns an image. Example: changes=[{\"op\":\"set\",\"target\":\"<uuid>\",\"width\":1000}]."),
         "input": obj({
             "changes": {"type": "array", "items": {"type": "object", "properties": {
                 "op": {"type": "string", "enum": EDIT_OPS}, "target": S, "targets": STRS, "properties": {"type": "object"},
-                "points": {"type": "array", "items": PT}, "bands": {"type": "array", "items": {"type": "object"}}, "labels": {"type": "array", "items": {"type": "object"}}, "expected_geometry": {"type": "object"}, "fixed_points": {"type": "array", "items": {"type": "object"}}, "stairs": {"type": "array", "items": {"type": "object"}}, "preserve_text": STRS, "by": PT, "angle": N, "center": PT, "factor": N, "axis": S, "start": PT, "end": PT, "count": I,
+                "points": {"type": "array", "items": PT}, "bands": {"type": "array", "items": {"type": "object"}}, "labels": {"type": "array", "items": {"type": "object"}}, "expected_geometry": {"type": "object"}, "fixed_points": {"type": "array", "items": {"type": "object"}}, "stairs": {"type": "array", "items": {"type": "object"}}, "rigid": {"type": "array", "items": {"type": "object"}}, "preserve_text": STRS, "by": PT, "angle": N, "center": PT, "factor": N, "axis": S, "start": PT, "end": PT, "count": I,
                 "plugin": S, "parameters": {"type": "object"}, "class": S, "layer": S, "record": S,
                 "fields": {"type": "object"}, "criteria": S, "position": S}, "required": ["op"]}},
             "units": UNITS, "preview": B, "dry_run": B, "document": DOC, "idempotency_key": IDEM}, ("changes",)),
