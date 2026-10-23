@@ -43,6 +43,33 @@ Needs Python 3.12 from python.org (`winget install --id Python.Python.3.12 -e --
 After installing, start Vectorworks and run `py -3.12 scripts\smoke_installed.py`.
 Details, other PCs and uninstall: [INSTALL.md](INSTALL.md).
 
+## Section height editing
+
+Grouped 2D architectural sections can now be read and adjusted through the
+existing tools: clear floor heights, slab/roof packages, stair flights, real
+dimensions, level text and adjacent elevations. See the
+[section editing guide](docs/SECTION_EDITING.md) for supported geometry,
+arguments, limitations and the repeatable live test.
+
+To update an existing checkout, run `git pull --ff-only origin main`, then the
+preflight and installer commands above. Restart Codex / Claude Code to load the
+updated host and tool schemas. This feature uses the existing native bridge;
+the preflight identifies whether that bridge also needs updating. New users can
+follow [AGENT_INSTALL.md](AGENT_INSTALL.md).
+
+After installation, with Vectorworks running and idle, test the installed MCP:
+
+```powershell
+py -3.12 scripts\e2e_section.py --installed --output "$env:TEMP\vectorworks-section-test-$(Get-Date -Format yyyyMMdd-HHmmss)"
+```
+
+This creates and retains its own test drawing, before/after images and a JSON
+report. It does not modify your existing drawings. Vectorworks 2024 acceptance:
+63/63 live checks, including rollback and save/reopen; 243/243 host checks.
+The live fixture reproduces the supplied section-height scenario, not a test
+of every project file. BIM section regeneration and Vectorworks 2025 acceptance
+remain outside this verification.
+
 ## Connect
 
 Restart Codex / Claude Code after installing.

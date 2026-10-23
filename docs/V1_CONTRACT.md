@@ -283,6 +283,17 @@ The 0.7 server is preserved verbatim as `legacy/server_v07.py`, reachable only w
 ---
 
 ## Deviations
+
+- **H, 2026-10-23 section editing:** ten tools retained. `vw_read what=geometry`
+  adds bounded recursive group geometry and revision hashes. `vw_edit reshape`
+  uses the vetted script engine for polygon/polyline vertices and line/wall/
+  dimension endpoints; the native raw `reshape` remains line/wall only.
+  `vw_edit op=section_heights` applies explicit clear-height bands, stair landing
+  bindings, level text and fixed witness points in one script transaction with
+  stale/replay rejection and readback. This is drawn 2D geometry, not BIM section
+  regeneration. Limits and unsupported cases: `docs/SECTION_EDITING.md`.
+  Dimension selectors 13/14 are SDK-internal and guarded by type/readback;
+  Vectorworks 2024 is live-tested, 2025 remains unverified for this addition.
 (Record here: stream, section, what changed, why.)
 
 - **H, §2 (framework, "FastMCP 4.0.10 app"):** the default host does not import FastMCP/mcp/pydantic. Importing them

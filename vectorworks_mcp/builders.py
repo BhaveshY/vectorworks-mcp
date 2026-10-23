@@ -83,7 +83,7 @@ def _semantic(key: Any) -> str:
 def is_uuid(value: Any) -> bool:
     return isinstance(value, str) and bool(_UUID_RE.match(value.strip()))
 
-EDIT_OPS = ["set", "move", "rotate", "scale", "mirror", "reshape", "duplicate", "delete", "parametric", "class",
+EDIT_OPS = ["section_heights", "set", "move", "rotate", "scale", "mirror", "reshape", "duplicate", "delete", "parametric", "class",
             "layer", "order", "group", "ungroup", "record", "select", "deselect"]
 ORDER_POSITIONS = {"front": "front", "back": "back", "forward": "forward", "backward": "backward", "top": "front",
                    "bottom": "back", "to_front": "front", "to_back": "back", "bring_to_front": "front",
@@ -106,7 +106,7 @@ PROPERTY_SYNONYMS = {"name": "name", "class": "class", "class_name": "class", "f
                      "pen": "penColor", "stroke": "penColor", "line_color": "penColor", "fill_pattern": "fillPattern",
                      "fillpattern": "fillPattern", "line_weight": "lineWeight", "lineweight": "lineWeight",
                      "pen_weight": "lineWeight", "opacity": "opacity"}
-SCRIPT_EDIT_OPS = {"mirror", "layer", "order", "group", "ungroup", "record", "style", "pio", "wall", "text", "space_name"}
+SCRIPT_EDIT_OPS = {"mirror", "layer", "order", "group", "ungroup", "record", "style", "pio", "wall", "text", "space_name", "reshape", "section_heights"}
 
 # Graphic attributes the native set_properties lacks; applied + read back by the `_style` snippet helper.
 STYLE_SYNONYMS = {
@@ -1239,11 +1239,20 @@ def compile_edit(changes: list[dict], scale: float, *, schemas: dict[str, dict],
                     raise validation(f"{field} needs axis 'x'/'y' (+center) or axis_start/axis_end points", f"{field}.axis", "y")
             script_item.update({"axis_start": a, "axis_end": b, "copy": C.boolean(_get(src, "copy", default=False), f"{field}.copy")})
         elif op == "reshape":
-            a = _pt(src, ("start", "from", "p1"), ("start_x", "start_y"), f"{field}.start", scale)
-            b = _pt(src, ("end", "to", "p2"), ("end_x", "end_y"), f"{field}.end", scale)
-            script_item.update({"start": a, "end": b})
-            native = [{"type": "reshape", "params": {"target": t, "start_x": a[0], "start_y": a[1], "end_x": b[0], "end_y": b[1]}}
-                      for t in targets]
+            if src.get("points") is not None:
+                script_item["points"] = C.points(src["points"], f"{field}.points", scale, maximum=10000)
+            else:
+                a = _pt(src, ("start", "from", "p1"), ("start_x", "start_y"), f"{field}.start", scale)
+                b = _pt(src, ("end", "to", "p2"), ("end_x", "end_y"), f"{field}.end", scale)
+                script_item.update({"start": a, "end": b})
+            pts = script_item.get("points") or [a, b]
+            if not all(math.isfinite(v) for p in pts for v in p):
+                raise validation("reshape coordinates must be finite", field, {})
+        elif op == "section_heights":
+            from .section import compile_section
+            if len(changes) != 1:
+                raise validation("section_heights must be the only change (one atomic section transaction)", field, {})
+            script_item.update(compile_section(src, field, scale))
         elif op == "duplicate":
             delta = _get(src, "by", "delta", "offset")
             d = C.point(delta, f"{field}.by", scale) if delta is not None else [

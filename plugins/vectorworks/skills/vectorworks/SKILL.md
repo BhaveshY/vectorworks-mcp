@@ -400,6 +400,25 @@ vw_capture(view="objects", objects=["<uuid>"], standard_view="iso", render_mode=
   object's uuid) and `vw_edit` op `parametric` work through the parametric record; values the plug-in recomputes
   after regenerating are listed in `not_kept` / warnings - follow that warning.
 
+### L. Drawn section height changes
+
+Read `vw_read(what="geometry", target="<group uuid>", detail=true)` for all
+nested members and complete vertices; follow `page.next_cursor`. Its `revision`
+is required by `vw_edit` op `section_heights` as `expected_geometry={root:revision}`.
+Supply old clear-height `bands=[{bottom,top,delta}]`; slab packages between bands
+translate intact. Bind every level text in `labels=[{target,elevation,datum,template}]`
+(metre placeholders `{level}` / `{absolute}`); acknowledge other text using
+`preserve_text`. Bind drawn stair flights as `stairs=[{target,bottom,top}]` for
+equal risers. `fixed_points=[{target,vertex}]` pins 1-based vertices, such as an
+overall dimension's site datum. Use this operation alone in a call and inspect
+the preview. After uncertainty, read back; never refresh a revision merely to
+replay the same delta. Full recipe: `docs/SECTION_EDITING.md` in the source.
+
+Individual `reshape` edits accept full polygon/polyline `points`, or `start`/`end`
+for lines, walls and linear dimensions. Section deformation supports ordinary
+XY 2D geometry in groups, rejecting BIM/PIO/viewport members, curved polylines,
+holes and locked objects before mutation. Use model tools for derived sections.
+
 ### H. Escape hatch: `vw_script`
 
 Use only when no tool above covers the task. One call = one undo step; any

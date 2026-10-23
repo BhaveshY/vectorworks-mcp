@@ -160,6 +160,18 @@ def handle(args: dict, ctx, warnings: list):
                                           "set_properties" for e in op["params"]["edits"]}, warnings)
     out: dict = {"ok": True, "applied": 0, "receipts": []}
     inst = target.inst
+    if not host.can_script(inst):
+        # Retain line/wall endpoint edits on pre-1.0 bridges. New vertex and
+        # dimension editing needs run_script; the native handler rejects other types.
+        remaining = []
+        for item in plan.script_ops:
+            if item["op"] == "reshape" and "points" not in item:
+                start, end = item["start"], item["end"]
+                plan.ops.extend({"type": "reshape", "params": {"target": ref, "start_x": start[0],
+                                "start_y": start[1], "end_x": end[0], "end_y": end[1]}} for ref in item["targets"])
+            else:
+                remaining.append(item)
+        plan.script_ops = remaining
     steps = 0
     max_ops = _tx.max_operations(host, inst)
     if plan.ops:

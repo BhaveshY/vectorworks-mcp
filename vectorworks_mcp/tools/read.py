@@ -185,6 +185,16 @@ def handle(args: dict, ctx, warnings: list) -> dict:
         return out
     if what == "object":
         return _object(host, target, a, fields, out, C.boolean(a.get("detail", False), "detail"))
+    if what == "geometry":
+        data = host.script(target, "section_read", {"target": norm_ref(a.get("target"), "target"),
+                           "offset": offset, "limit": limit, "detail": C.boolean(a.get("detail", False), "detail")},
+                           label="Read grouped geometry", kind="read", transaction=False)
+        out["data"] = data["items"]
+        out["revision"] = data["revision"]
+        out["page"] = {"total": data["total"], "offset": offset, "has_more": offset + len(data["items"]) < data["total"]}
+        if out["page"]["has_more"]:
+            out["page"]["next_cursor"] = str(offset + len(data["items"]))
+        return out
     if what == "view":
         out["data"] = _clean(host.call(target, "get_view", {}), [])
         return out

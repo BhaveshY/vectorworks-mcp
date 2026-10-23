@@ -61,7 +61,11 @@ def _set_wall_height(h, want_mm):
 def run_op(item, done):
     op = item["op"]
     handles = [resolve(t) for t in item.get("targets", [])]
-    if op == "mirror":
+    if op == "section_heights":
+        section_edit(item, handles, done)
+    elif op == "reshape":
+        reshape_geometry(item, handles, done)
+    elif op == "mirror":
         a, b = item["axis_start"], item["axis_end"]
         for h in handles:
             # vs.MirrorN(h, dup: BOOLEAN, p1: POINT, p2: POINT, preserveMatrix: BOOLEAN) -> HANDLE

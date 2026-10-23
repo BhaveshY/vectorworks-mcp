@@ -3,6 +3,17 @@
 **First call:** `vw_status()` — shows whether Vectorworks is reachable, the open documents, busy state and any setup problem with its fix. Call it again after any connection error; never loop.
 
 ## Tools
+
+**Drawn sections:** `vw_read(what="geometry", target="<group uuid>", detail=true)`
+reads recursive members, complete vertices, dimension anchors, text and a
+revision. `vw_edit` op `section_heights` takes clear-height `bands`,
+`expected_geometry` (root -> revision), `labels`, `stairs`, `fixed_points`, and
+`preserve_text`. Slab packages translate intact; bound stairs retain equal
+risers. Every text needs a label binding or explicit preservation. The section
+call is one transaction; stale revisions and unsupported members are rejected.
+This edits drawn 2D sections; BIM/PIO/viewport geometry uses model tools.
+`reshape` accepts polygon/polyline `points`, or line/wall/dimension `start`/`end`.
+Complete arguments and live test: `docs/SECTION_EDITING.md` in the source.
 | Tool | Use for |
 |---|---|
 | `vw_status` | health, documents, `job_id` progress, `idempotency_key` "was it applied?" |

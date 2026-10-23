@@ -47,10 +47,10 @@ def check(name: str, condition: bool, detail: str = "") -> bool:
 
 
 class Client:
-    def __init__(self, python: str, env: dict, label: str) -> None:
+    def __init__(self, python: str, env: dict, label: str, command: list[str] | None = None) -> None:
         self.label = label
         self.started = time.perf_counter()
-        self.proc = subprocess.Popen([python, "-X", "utf8", "-u", "-m", "vectorworks_mcp"], cwd=str(ROOT), env=env,
+        self.proc = subprocess.Popen(command or [python, "-X", "utf8", "-u", "-m", "vectorworks_mcp"], cwd=str(ROOT), env=env,
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.messages: "queue.Queue[dict]" = queue.Queue()
         self.notifications: list[dict] = []

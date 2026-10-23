@@ -18,12 +18,12 @@ STANDARD_VIEWS = ["top_plan", "top", "front", "back", "left", "right", "bottom",
                   "right_rear_iso", "left_rear_iso"]
 RENDER_MODES = ["wireframe", "opengl", "shaded", "hidden_line", "dashed_hidden_line", "final_shaded", "sketch",
                 "fast_renderworks", "final_renderworks"]
-READ_WHAT = ["document", "documents", "layers", "classes", "summary", "query", "object", "selection", "view",
+READ_WHAT = ["geometry", "document", "documents", "layers", "classes", "summary", "query", "object", "selection", "view",
              "saved_views", "sheets", "viewports", "annotations", "symbols", "worksheets", "worksheet", "resources",
              "records", "parametric_schema", "capabilities", "plan_quality"]
 CREATE_TYPES = ["line", "rect", "oval", "circle", "arc", "polygon", "polyline", "wall", "slab", "roof", "space", "text",
                 "dimension", "symbol", "door", "window", "parametric", "room", "extrude", "column"]
-EDIT_OPS = ["set", "move", "rotate", "scale", "mirror", "reshape", "duplicate", "delete", "parametric", "class", "layer",
+EDIT_OPS = ["section_heights", "set", "move", "rotate", "scale", "mirror", "reshape", "duplicate", "delete", "parametric", "class", "layer",
             "order", "group", "ungroup", "record", "select", "deselect"]
 
 
@@ -64,7 +64,7 @@ TOOLS: list[dict] = [
         "name": "vw_read",
         "title": "Read drawing data",
         "description": (
-            "Read-only. what=summary (counts)|query (type wall/door/space/..., layer, class, criteria, search=name/text, "
+            "Read-only. geometry+target recursively reads grouped 2D geometry; detail=true returns all vertices.  what=summary (counts)|query (type wall/door/space/..., layer, class, criteria, search=name/text, "
             "within=[[x1,y1],[x2,y2]] | near=[x,y]+radius | within_px=pixel box of the last capture; cursor pages)|object "
             "(target; detail=true)|document(s)|layers|classes|selection|view|saved_views|sheets|viewports|annotations|"
             "symbols|worksheet(s)|resources (type=hatch|line_type|...; search=)|records|parametric_schema|capabilities|"
@@ -122,16 +122,15 @@ TOOLS: list[dict] = [
         "name": "vw_edit",
         "title": "Edit objects",
         "description": (
-            "Change objects. changes=[{op, target(s), ...}]; target = uuid, name or \"selection\". ops: set (flat or properti"
-            "es: name (Space: room label), class, fill_color, fill, line_style, font, text_size; door/window width/height/s"
-            "ill/swing; wall thickness/height; text) | move by | rotate angle | scale factor | mirror | reshape start,end |"
-            " duplicate by,count | delete | parametric parameters (plugin from target) | class | layer | order position=fro"
-            "nt|back|forward|backward | group | ungroup | record | select | deselect. preview=true: image. Example: changes"
-            "=[{\"op\":\"set\",\"target\":\"<uuid>\",\"width\":1000}]."),
+            "Edit existing objects by uuid/name/selection. ops: set properties; move by; rotate angle; scale factor; "
+            "mirror; reshape start,end or points; section_heights bands,expected_geometry,labels,stairs,fixed_points "
+            "(grouped 2D sections, one transaction); duplicate; delete; parametric parameters; class; layer; order; "
+            "group; ungroup; record; select; deselect. geometry reads provide revision hashes for section preconditions. "
+            "preview=true returns an image. Example: changes=[{\"op\":\"set\",\"target\":\"<uuid>\",\"width\":1000}]."),
         "input": obj({
             "changes": {"type": "array", "items": {"type": "object", "properties": {
                 "op": {"type": "string", "enum": EDIT_OPS}, "target": S, "targets": STRS, "properties": {"type": "object"},
-                "by": PT, "angle": N, "center": PT, "factor": N, "axis": S, "start": PT, "end": PT, "count": I,
+                "points": {"type": "array", "items": PT}, "bands": {"type": "array", "items": {"type": "object"}}, "labels": {"type": "array", "items": {"type": "object"}}, "expected_geometry": {"type": "object"}, "fixed_points": {"type": "array", "items": {"type": "object"}}, "stairs": {"type": "array", "items": {"type": "object"}}, "preserve_text": STRS, "by": PT, "angle": N, "center": PT, "factor": N, "axis": S, "start": PT, "end": PT, "count": I,
                 "plugin": S, "parameters": {"type": "object"}, "class": S, "layer": S, "record": S,
                 "fields": {"type": "object"}, "criteria": S, "position": S}, "required": ["op"]}},
             "units": UNITS, "preview": B, "dry_run": B, "document": DOC, "idempotency_key": IDEM}, ("changes",)),

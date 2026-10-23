@@ -20,7 +20,9 @@ from typing import Any
 _DIR = Path(__file__).resolve().parent
 
 SNIPPETS = {
-    "edit_engine": "mirror, move to layer, stacking order, group, ungroup, record fields, wall thickness/height/style, "
+    "section_read": "recursive grouped 2D geometry with parent UUIDs, complete vertices, dimension values and text",
+    "edit_engine": "section height bands/level labels/equal-riser stair flights, polygon/dimension reshape, "
+                   "mirror, move to layer, stacking order, group, ungroup, record fields, wall thickness/height/style, "
                    "text content, Space room name, graphic styles (line type, hatch/gradient fill, font/size/style/"
                    "alignment, markers)",
     "viewport": "sheet viewports: create / set / update / delete (layers, scale, view, render, crop, classes, "
@@ -53,7 +55,8 @@ RESOURCE_SYNONYMS = {"hatch": "hatches", "line_type": "line_types", "linetype": 
                      "texture": "textures", "symbol": "symbols", "worksheet": "worksheets", "record": "records",
                      "viewport_style": "viewport_styles", "fill": "hatches", "fills": "hatches"}
 # Snippets that need shared helper files (prepended after the prelude).
-INCLUDES = {"edit_engine": ["_style", "_pio", "_geometry", "_ops"], "massing": ["_style", "_pio", "_geometry", "_ops"],
+INCLUDES = {"edit_engine": ["_style", "_pio", "_geometry", "_section", "_ops"], "massing": ["_style", "_pio", "_geometry", "_ops"],
+            "section_read": ["_geometry", "_section"],
             "viewport": ["_style"], "resource_list": ["_style"], "pio_schema": ["_pio"], "object_detail": ["_geometry"]}
 
 
